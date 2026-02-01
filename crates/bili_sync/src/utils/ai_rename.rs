@@ -994,6 +994,9 @@ pub async fn batch_rename_history_files(
     let mut audio_sort_index = 1;
 
     for (video, pages) in &videos {
+        // 仅当该视频只有 1 个分页时，才允许后续进行“子文件夹重命名”
+        //（多P视频文件夹内通常有多段文件，重命名文件夹容易导致路径错乱）
+        let is_single_page_video = pages.len() == 1;
         for page_model in pages {
             // 检查 page.path 是否存在
             let page_path = match &page_model.path {
@@ -1072,7 +1075,7 @@ pub async fn batch_rename_history_files(
                 page_id: page_model.id,
                 video_id: video.id,
                 bvid: video.bvid.clone(),
-                single_page: video.single_page.unwrap_or(true),
+                single_page: is_single_page_video,
                 flat_folder,
             };
 
@@ -1240,8 +1243,9 @@ async fn apply_rename(
         warn!("[{}] 更新NFO内容失败: {}", source_key, e);
     }
 
-    // 重命名子文件夹（单P视频 且 非平铺目录模式）
-    let should_rename_folder = !file.flat_folder && file.single_page;
+    // 重命名子文件夹（仅单P视频 且 非平铺目录模式）
+    // 合集/多P 场景下重命名文件夹容易导致路径错乱，因此这里直接跳过。
+    let should_rename_folder = !file.flat_folder && file.single_page && file.ctx.source_type != "collection";
 
     let final_path = if should_rename_folder {
         if let Some(old_dir) = new_path.parent() {

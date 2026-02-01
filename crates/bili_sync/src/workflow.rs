@@ -1654,7 +1654,7 @@ async fn apply_ai_rename(
     source_key: &str,
     file: &crate::utils::ai_rename::FileToRename,
     new_stem: &str,
-    cfg: &crate::config::Config,
+    _cfg: &crate::config::Config,
 ) -> Result<bool> {
     use crate::utils::ai_rename;
     use bili_sync_entity::page;
@@ -1732,10 +1732,7 @@ async fn apply_ai_rename(
     // 重命名子文件夹（单P视频）
     let should_rename_folder = !video_source.flat_folder()
         && file.single_page
-        && !matches!(
-            video_source,
-            VideoSourceEnum::Collection(_) if cfg.collection_folder_mode.as_ref() == "unified"
-        );
+        && !matches!(video_source, VideoSourceEnum::Collection(_));
 
     let final_path = if should_rename_folder {
         if let Some(old_dir) = new_path.parent() {
