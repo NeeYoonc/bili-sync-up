@@ -129,6 +129,10 @@ fn default_bangumi_name() -> Cow<'static, str> {
     Cow::Borrowed("S{{season_pad}}E{{pid_pad}}")
 }
 
+fn default_collection_unified_name() -> Cow<'static, str> {
+    Cow::Borrowed("S01E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}")
+}
+
 fn default_folder_structure() -> Cow<'static, str> {
     Cow::Borrowed("Season {{season_pad}}")
 }
@@ -167,6 +171,8 @@ pub struct Config {
     pub bangumi_folder_name: Cow<'static, str>,
     #[serde(default = "default_collection_folder_mode")]
     pub collection_folder_mode: Cow<'static, str>,
+    #[serde(default = "default_collection_unified_name")]
+    pub collection_unified_name: Cow<'static, str>,
     #[serde(default = "default_interval")]
     pub interval: u64,
     #[serde(default = "default_upper_path")]
@@ -586,6 +592,7 @@ impl Clone for Config {
             folder_structure: self.folder_structure.clone(),
             bangumi_folder_name: self.bangumi_folder_name.clone(),
             collection_folder_mode: self.collection_folder_mode.clone(),
+            collection_unified_name: self.collection_unified_name.clone(),
             interval: self.interval,
             upper_path: self.upper_path.clone(),
             nfo_time_type: self.nfo_time_type.clone(),
@@ -628,6 +635,7 @@ impl Default for Config {
             folder_structure: Cow::Borrowed("Season {{season_pad}}"),
             bangumi_folder_name: Cow::Borrowed("{{series_title}}"),
             collection_folder_mode: Cow::Borrowed("unified"),
+            collection_unified_name: default_collection_unified_name(),
             interval: 1200,
             upper_path: CONFIG_DIR.join("upper_face"),
             nfo_time_type: NFOTimeType::FavTime,

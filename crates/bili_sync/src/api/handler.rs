@@ -5923,6 +5923,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         folder_structure: config.folder_structure.to_string(),
         bangumi_folder_name: config.bangumi_folder_name.to_string(),
         collection_folder_mode: config.collection_folder_mode.to_string(),
+        collection_unified_name: config.collection_unified_name.to_string(),
         time_format: config.time_format.clone(),
         interval: config.interval,
         nfo_time_type: nfo_time_type.to_string(),
@@ -6078,6 +6079,7 @@ pub async fn update_config(
             folder_structure: params.folder_structure.clone(),
             bangumi_folder_name: params.bangumi_folder_name.clone(),
             collection_folder_mode: params.collection_folder_mode.clone(),
+            collection_unified_name: params.collection_unified_name.clone(),
             time_format: params.time_format.clone(),
             interval: params.interval,
             nfo_time_type: params.nfo_time_type.clone(),
@@ -6172,6 +6174,61 @@ pub async fn update_config_internal(
 ) -> Result<crate::api::response::UpdateConfigResponse, ApiError> {
     use std::borrow::Cow;
 
+    fn has_path_separator_outside_handlebars(template: &str) -> bool {
+        let mut i = 0usize;
+        let mut in_tag = false;
+        let mut tag_end_len = 0usize;
+
+        while i < template.len() {
+            let bytes = template.as_bytes();
+
+            if !in_tag {
+                // 进入 Handlebars 标签（{{ / {{{ / {{{{）
+                if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                    let mut start_len = 2usize;
+                    while i + start_len < bytes.len() && bytes[i + start_len] == b'{' && start_len < 4 {
+                        start_len += 1;
+                    }
+                    in_tag = true;
+                    tag_end_len = start_len;
+                    i += start_len;
+                    continue;
+                }
+
+                // 标签外：任意 / 或 \\ 都视为路径分隔符
+                if bytes[i] == b'/' || bytes[i] == b'\\' {
+                    return true;
+                }
+
+                let ch = template[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+                continue;
+            }
+
+            // Handlebars 标签内：寻找结束符（}} / }}} / }}}}）
+            if bytes[i] == b'}' && tag_end_len > 0 {
+                let mut ok = true;
+                for k in 0..tag_end_len {
+                    if i + k >= bytes.len() || bytes[i + k] != b'}' {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    i += tag_end_len;
+                    in_tag = false;
+                    tag_end_len = 0;
+                    continue;
+                }
+            }
+
+            let ch = template[i..].chars().next().unwrap();
+            i += ch.len_utf8();
+        }
+
+        false
+    }
+
     // 获取当前配置的副本
     let mut config = crate::config::reload_config();
     let mut updated_fields = Vec::new();
@@ -6186,6 +6243,7 @@ pub async fn update_config_internal(
     let original_bangumi_name = config.bangumi_name.clone();
     let original_folder_structure = config.folder_structure.clone();
     let original_collection_folder_mode = config.collection_folder_mode.clone();
+    let original_collection_unified_name = config.collection_unified_name.clone();
 
     // 更新配置字段
     if let Some(video_name) = params.video_name {
@@ -6232,6 +6290,17 @@ pub async fn update_config_internal(
                     )
                 }
             }
+        }
+    }
+
+    if let Some(collection_unified_name) = params.collection_unified_name {
+        let trimmed = collection_unified_name.trim();
+        if has_path_separator_outside_handlebars(trimmed) {
+            return Err(anyhow!("合集统一模式命名模板不应包含路径分隔符 / 或 \\").into());
+        }
+        if !trimmed.is_empty() && trimmed != original_collection_unified_name.as_ref() {
+            config.collection_unified_name = Cow::Owned(trimmed.to_string());
+            updated_fields.push("collection_unified_name");
         }
     }
 
@@ -7025,6 +7094,14 @@ pub async fn update_config_internal(
                         .update_config_item(
                             "collection_folder_mode",
                             serde_json::to_value(&config.collection_folder_mode)?,
+                        )
+                        .await
+                }
+                "collection_unified_name" => {
+                    manager
+                        .update_config_item(
+                            "collection_unified_name",
+                            serde_json::to_value(&config.collection_unified_name)?,
                         )
                         .await
                 }

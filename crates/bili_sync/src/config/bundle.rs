@@ -37,6 +37,94 @@ impl ConfigBundle {
         use handlebars::handlebars_helper;
         use tracing::debug;
 
+        fn escape_template_separators(template: &str) -> String {
+            // 仅替换“模板文本”中的路径分隔符，避免破坏 Handlebars 语法（例如 {{/if}}）。
+            // 规则：
+            // - Handlebars 标签内（{{ ... }} / {{{ ... }}} / {{{{ ... }}}}）不做替换
+            // - 标签外：
+            //   - // => __UNIX_SEP__
+            //   - \\\\ => __WIN_SEP__
+            //   - /  => __UNIX_SEP__
+            //   - \\ => __WIN_SEP__
+            let mut out = String::with_capacity(template.len());
+            let mut i = 0usize;
+            let mut in_tag = false;
+            let mut tag_end_len = 0usize;
+
+            while i < template.len() {
+                let bytes = template.as_bytes();
+
+                if !in_tag {
+                    // 进入 Handlebars 标签
+                    if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                        // 支持 {{ / {{{ / {{{{ 三种
+                        let mut start_len = 2usize;
+                        while i + start_len < bytes.len() && bytes[i + start_len] == b'{' && start_len < 4 {
+                            start_len += 1;
+                        }
+                        out.push_str(&template[i..i + start_len]);
+                        i += start_len;
+                        in_tag = true;
+                        tag_end_len = start_len;
+                        continue;
+                    }
+
+                    // 标签外：处理路径分隔符
+                    if bytes[i] == b'/' {
+                        if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                            out.push_str("__UNIX_SEP__");
+                            i += 2;
+                        } else {
+                            out.push_str("__UNIX_SEP__");
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if bytes[i] == b'\\' {
+                        if i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                            out.push_str("__WIN_SEP__");
+                            i += 2;
+                        } else {
+                            out.push_str("__WIN_SEP__");
+                            i += 1;
+                        }
+                        continue;
+                    }
+
+                    // 其它字符：按 UTF-8 字符复制
+                    let ch = template[i..].chars().next().unwrap();
+                    out.push(ch);
+                    i += ch.len_utf8();
+                    continue;
+                }
+
+                // Handlebars 标签内：寻找结束符
+                if bytes[i] == b'}' && tag_end_len > 0 {
+                    let mut ok = true;
+                    for k in 0..tag_end_len {
+                        if i + k >= bytes.len() || bytes[i + k] != b'}' {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        out.push_str(&template[i..i + tag_end_len]);
+                        i += tag_end_len;
+                        in_tag = false;
+                        tag_end_len = 0;
+                        continue;
+                    }
+                }
+
+                // 标签内其它字符
+                let ch = template[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+
+            out
+        }
+
         debug!("开始构建Handlebars模板引擎...");
         let mut handlebars = Handlebars::new();
 
@@ -62,22 +150,18 @@ impl ConfigBundle {
         let page_name = Box::leak(config.page_name.to_string().into_boxed_str());
         let multi_page_name = Box::leak(config.multi_page_name.to_string().into_boxed_str());
         let bangumi_name = Box::leak(config.bangumi_name.to_string().into_boxed_str());
+        let collection_unified_name = Box::leak(config.collection_unified_name.to_string().into_boxed_str());
         let folder_structure = Box::leak(config.folder_structure.to_string().into_boxed_str());
         let bangumi_folder_name = Box::leak(config.bangumi_folder_name.to_string().into_boxed_str());
 
-        // 区分Unix风格和Windows风格的路径分隔符
-        let safe_video_name = video_name.replace('/', "__UNIX_SEP__").replace('\\', "__WIN_SEP__");
-        let safe_page_name = page_name.replace('/', "__UNIX_SEP__").replace('\\', "__WIN_SEP__");
-        let safe_multi_page_name = multi_page_name
-            .replace('/', "__UNIX_SEP__")
-            .replace('\\', "__WIN_SEP__");
-        let safe_bangumi_name = bangumi_name.replace('/', "__UNIX_SEP__").replace('\\', "__WIN_SEP__");
-        let safe_folder_structure = folder_structure
-            .replace('/', "__UNIX_SEP__")
-            .replace('\\', "__WIN_SEP__");
-        let safe_bangumi_folder_name = bangumi_folder_name
-            .replace('/', "__UNIX_SEP__")
-            .replace('\\', "__WIN_SEP__");
+        // 区分Unix风格和Windows风格的路径分隔符（仅替换标签外文本，避免破坏 {{/if}} 等语法）
+        let safe_video_name = escape_template_separators(video_name);
+        let safe_page_name = escape_template_separators(page_name);
+        let safe_multi_page_name = escape_template_separators(multi_page_name);
+        let safe_bangumi_name = escape_template_separators(bangumi_name);
+        let safe_collection_unified_name = escape_template_separators(collection_unified_name);
+        let safe_folder_structure = escape_template_separators(folder_structure);
+        let safe_bangumi_folder_name = escape_template_separators(bangumi_folder_name);
 
         // 注册模板并记录日志
         handlebars.register_template_string("video", &safe_video_name)?;
@@ -95,6 +179,12 @@ impl ConfigBundle {
         handlebars.register_template_string("bangumi", &safe_bangumi_name)?;
         debug!("模板 'bangumi' 已注册: '{}' -> '{}'", bangumi_name, safe_bangumi_name);
 
+        handlebars.register_template_string("collection_unified", &safe_collection_unified_name)?;
+        debug!(
+            "模板 'collection_unified' 已注册: '{}' -> '{}'",
+            collection_unified_name, safe_collection_unified_name
+        );
+
         handlebars.register_template_string("folder_structure", &safe_folder_structure)?;
         debug!(
             "模板 'folder_structure' 已注册: '{}' -> '{}'",
@@ -107,7 +197,7 @@ impl ConfigBundle {
             bangumi_folder_name, safe_bangumi_folder_name
         );
 
-        debug!("Handlebars模板引擎构建完成，共注册 {} 个模板", 6);
+        debug!("Handlebars模板引擎构建完成，共注册 {} 个模板", 7);
         Ok(handlebars)
     }
 
@@ -227,6 +317,11 @@ impl ConfigBundle {
     /// 渲染多P视频分页名称模板的便捷方法
     pub fn render_multi_page_template(&self, data: &serde_json::Value) -> Result<String> {
         self.render_template_safe("multi_page", data)
+    }
+
+    /// 渲染合集统一模式分页名称模板的便捷方法
+    pub fn render_collection_unified_template(&self, data: &serde_json::Value) -> Result<String> {
+        self.render_template_safe("collection_unified", data)
     }
 
     /// 渲染番剧名称模板的便捷方法

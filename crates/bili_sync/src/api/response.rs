@@ -307,6 +307,7 @@ pub struct ConfigResponse {
     pub folder_structure: String,
     pub bangumi_folder_name: String,
     pub collection_folder_mode: String,
+    pub collection_unified_name: String,
     pub time_format: String,
     pub interval: u64,
     pub nfo_time_type: String,

@@ -30,7 +30,7 @@ use crate::config::ARGS;
 use crate::error::{DownloadAbortError, ExecutionStatus, ProcessPageError};
 use crate::task::{DeleteVideoTask, VIDEO_DELETE_TASK_QUEUE};
 use crate::unified_downloader::UnifiedDownloader;
-use crate::utils::format_arg::{page_format_args, video_format_args};
+use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
     create_pages, create_videos, filter_unfilled_videos, filter_unhandled_video_pages,
     get_failed_videos_in_current_cycle, update_pages_model, update_videos_model,
@@ -3745,18 +3745,28 @@ pub async fn download_page(
         // 合集视频的特殊处理
         let config = crate::config::reload_config();
         if config.collection_folder_mode.as_ref() == "unified" {
-            // 统一模式：使用S01E01格式命名
+            // 统一模式：使用可配置的合集统一命名模板（默认保持 S01E..）
             match get_collection_video_episode_number(connection, collection_source.id, &video_model.bvid).await {
                 Ok(episode_number) => {
-                    let clean_name = crate::utils::filenamify::filenamify(&video_model.name);
-                    // 检查是否为多P视频
-                    let is_single_page = video_model.single_page.unwrap_or(true);
-                    if !is_single_page {
-                        // 多P视频：在集数后添加分P标识
-                        format!("S01E{:02}P{:02} - {}", episode_number, page_model.pid, clean_name)
-                    } else {
-                        // 单P视频：保持原有格式
-                        format!("S01E{:02} - {}", episode_number, clean_name)
+                    let args =
+                        collection_unified_page_format_args(video_model, &page_model, episode_number);
+                    match crate::config::with_config(|bundle| {
+                        bundle.render_collection_unified_template(&args)
+                    }) {
+                        Ok(rendered) => rendered,
+                        Err(e) => {
+                            warn!("合集统一模式命名模板渲染失败，将回退到默认命名: {}", e);
+                            let clean_name = crate::utils::filenamify::filenamify(&video_model.name);
+                            let is_single_page = video_model.single_page.unwrap_or(true);
+                            if !is_single_page {
+                                format!(
+                                    "S01E{:02}P{:02} - {}",
+                                    episode_number, page_model.pid, clean_name
+                                )
+                            } else {
+                                format!("S01E{:02} - {}", episode_number, clean_name)
+                            }
+                        }
                     }
                 }
                 Err(_) => {

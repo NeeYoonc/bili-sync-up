@@ -178,6 +178,8 @@ pub struct UpdateConfigRequest {
     pub bangumi_folder_name: Option<String>,
     // 合集文件夹模式
     pub collection_folder_mode: Option<String>,
+    // 合集统一模式命名模板（仅 unified 模式生效）
+    pub collection_unified_name: Option<String>,
     // 时间格式
     pub time_format: Option<String>,
     // 扫描间隔（秒）

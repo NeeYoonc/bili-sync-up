@@ -315,6 +315,26 @@ pub fn page_format_args(
     }
 }
 
+/// 合集统一模式分页命名模板参数
+///
+/// 仅用于“合集文件夹模式=统一模式（unified）”下的文件命名。
+pub fn collection_unified_page_format_args(
+    video_model: &bili_sync_entity::video::Model,
+    page_model: &bili_sync_entity::page::Model,
+    episode_number: i32,
+) -> serde_json::Value {
+    let mut args = page_format_args(video_model, page_model);
+    let is_single_page = video_model.single_page.unwrap_or(true);
+
+    if let Some(obj) = args.as_object_mut() {
+        obj.insert("episode".to_string(), json!(episode_number));
+        obj.insert("episode_pad".to_string(), json!(format!("{:02}", episode_number)));
+        obj.insert("is_multi_page".to_string(), json!(!is_single_page));
+    }
+
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

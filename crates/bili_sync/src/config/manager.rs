@@ -63,6 +63,7 @@ fn describe_config_key(key: &str) -> &'static str {
         "folder_structure" => "目录结构模板",
         "bangumi_folder_name" => "番剧文件夹命名模板",
         "collection_folder_mode" => "合集文件夹模式",
+        "collection_unified_name" => "合集统一模式命名模板",
         "interval" => "扫描间隔（秒）",
         "upper_path" => "UP主头像缓存路径",
         "nfo_time_type" => "NFO时间类型（收藏/发布时间）",

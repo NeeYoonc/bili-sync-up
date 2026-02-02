@@ -131,6 +131,7 @@
 	let folderStructure = 'Season {{season_pad}}';
 	let bangumiFolderName = '{{title}}';
 	let collectionFolderMode = 'unified';
+	let collectionUnifiedName = 'S01E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}';
 	let timeFormat = '%Y-%m-%d';
 	let interval = 1200;
 	let nfoTimeType = 'favtime';
@@ -270,6 +271,8 @@
 	let pageNameValid = true;
 	let multiPageNameError = '';
 	let multiPageNameValid = true;
+	let collectionUnifiedNameError = '';
+	let collectionUnifiedNameValid = true;
 	let bindAddressError = '';
 	let bindAddressValid = true;
 
@@ -294,8 +297,9 @@
 			{ name: '{{long_title}}', desc: '分页长标题（非番剧可用）' },
 			{ name: '{{pid}}', desc: '分页页号' },
 			{ name: '{{pid_pad}}', desc: '补零的分页页号（如001、002）' },
-			{ name: '{{episode}}', desc: '剧集号（仅重命名可用）' },
-			{ name: '{{episode_pad}}', desc: '补零的剧集号（仅重命名可用）' },
+			{ name: '{{episode}}', desc: '剧集号（番剧/重命名/合集统一模式可用）' },
+			{ name: '{{episode_pad}}', desc: '补零的剧集号（番剧/重命名/合集统一模式可用）' },
+			{ name: '{{is_multi_page}}', desc: '是否多P视频（合集统一模式可用）' },
 			{ name: '{{season}}', desc: '季度号（番剧/多P视频可用）' },
 			{ name: '{{season_pad}}', desc: '补零的季度号（番剧/多P视频可用）' },
 			{ name: '{{series_title}}', desc: '番剧系列标题（仅番剧可用）' },
@@ -447,6 +451,7 @@
 		folderStructure = config.folder_structure || '';
 		bangumiFolderName = config.bangumi_folder_name || '{{title}}';
 		collectionFolderMode = config.collection_folder_mode || 'separate';
+		collectionUnifiedName = config.collection_unified_name || collectionUnifiedName;
 		timeFormat = config.time_format || '';
 		interval = config.interval || 1200;
 		nfoTimeType = config.nfo_time_type || 'favtime';
@@ -559,9 +564,42 @@
 		return value.includes('/') || value.includes('\\');
 	}
 
+	// 仅检查 Handlebars 标签外的路径分隔符（避免把 {{/if}} 误判为路径）
+	function hasPathSeparatorOutsideHandlebars(value: string) {
+		let inTag = false;
+		let tagEndLen = 0;
+
+		for (let i = 0; i < value.length; i++) {
+			if (!inTag && value[i] === '{' && value[i + 1] === '{') {
+				let startLen = 2;
+				while (i + startLen < value.length && value[i + startLen] === '{' && startLen < 4) {
+					startLen++;
+				}
+				inTag = true;
+				tagEndLen = startLen;
+				i += startLen - 1;
+				continue;
+			}
+
+			if (inTag) {
+				const end = '}'.repeat(tagEndLen);
+				if (tagEndLen > 0 && value.startsWith(end, i)) {
+					inTag = false;
+					tagEndLen = 0;
+					i += end.length - 1;
+				}
+				continue;
+			}
+
+			if (value[i] === '/' || value[i] === '\\') return true;
+		}
+
+		return false;
+	}
+
 	// 验证单P视频文件名模板
 	function validatePageName(value: string) {
-		if (value.includes('/') || value.includes('\\')) {
+		if (hasPathSeparatorOutsideHandlebars(value)) {
 			pageNameError = '单P视频文件名模板不应包含路径分隔符 / 或 \\';
 			pageNameValid = false;
 			return false;
@@ -573,13 +611,31 @@
 
 	// 验证多P视频文件名模板
 	function validateMultiPageName(value: string) {
-		if (value.includes('/') || value.includes('\\')) {
+		if (hasPathSeparatorOutsideHandlebars(value)) {
 			multiPageNameError = '多P视频文件名模板不应包含路径分隔符 / 或 \\';
 			multiPageNameValid = false;
 			return false;
 		}
 		multiPageNameError = '';
 		multiPageNameValid = true;
+		return true;
+	}
+
+	// 验证合集统一模式命名模板（仅 unified 模式生效）
+	function validateCollectionUnifiedName(value: string) {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			collectionUnifiedNameError = '合集统一模式命名模板不能为空';
+			collectionUnifiedNameValid = false;
+			return false;
+		}
+		if (hasPathSeparatorOutsideHandlebars(trimmed)) {
+			collectionUnifiedNameError = '合集统一模式命名模板不应包含路径分隔符 / 或 \\\\';
+			collectionUnifiedNameValid = false;
+			return false;
+		}
+		collectionUnifiedNameError = '';
+		collectionUnifiedNameValid = true;
 		return true;
 	}
 
@@ -666,6 +722,9 @@
 		if (multiPageName) {
 			validateMultiPageName(multiPageName);
 		}
+		if (collectionUnifiedName) {
+			validateCollectionUnifiedName(collectionUnifiedName);
+		}
 		videoNameHasPath = hasPathSeparator(videoName);
 		multiPageNameHasPath = hasPathSeparator(multiPageName);
 	}
@@ -682,6 +741,11 @@
 			return;
 		}
 
+		if (!validateCollectionUnifiedName(collectionUnifiedName)) {
+			toast.error('配置验证失败', { description: collectionUnifiedNameError });
+			return;
+		}
+
 		if (!validateBindAddress(bindAddress)) {
 			toast.error('配置验证失败', { description: bindAddressError });
 			return;
@@ -695,6 +759,7 @@
 			folder_structure: folderStructure,
 			bangumi_folder_name: bangumiFolderName,
 			collection_folder_mode: collectionFolderMode,
+			collection_unified_name: collectionUnifiedName,
 			time_format: timeFormat,
 			interval: interval,
 			nfo_time_type: nfoTimeType,
@@ -1387,6 +1452,26 @@
 					<Label for="time-format">时间格式</Label>
 					<Input id="time-format" bind:value={timeFormat} placeholder="%Y-%m-%d" />
 					<p class="text-muted-foreground text-sm">控制时间变量的显示格式</p>
+				</div>
+
+				<div class="space-y-2 {isMobile ? '' : 'md:col-span-2'}">
+					<Label for="collection-unified-name">合集统一模式命名模板</Label>
+					<Input
+						id="collection-unified-name"
+						bind:value={collectionUnifiedName}
+						placeholder={`S01E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}`}
+						class={collectionUnifiedNameValid ? '' : 'border-red-500 focus:border-red-500'}
+						oninput={(e) =>
+							validateCollectionUnifiedName((e.target as HTMLInputElement)?.value || '')}
+					/>
+					{#if collectionUnifiedNameError}
+						<p class="text-xs text-red-500 dark:text-red-400">{collectionUnifiedNameError}</p>
+					{/if}
+					<p class="text-muted-foreground text-xs">
+						仅在“合集文件夹模式=统一模式”生效，默认保持 S01E.. 命名。<strong
+							>不允许使用路径分隔符 / 或 \\</strong
+						>。
+					</p>
 				</div>
 			</div>
 

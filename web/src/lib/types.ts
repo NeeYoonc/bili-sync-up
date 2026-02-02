@@ -241,6 +241,7 @@ export interface ConfigResponse {
 	folder_structure: string;
 	bangumi_folder_name?: string;
 	collection_folder_mode?: string;
+	collection_unified_name?: string;
 	time_format: string;
 	interval: number;
 	nfo_time_type: string;
@@ -361,6 +362,7 @@ export interface UpdateConfigRequest {
 	folder_structure?: string;
 	bangumi_folder_name?: string;
 	collection_folder_mode?: string;
+	collection_unified_name?: string;
 	time_format?: string;
 	interval?: number;
 	nfo_time_type?: string;
