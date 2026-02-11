@@ -357,6 +357,7 @@ class ApiClient {
 			ai_rename_enable_multi_page?: boolean;
 			ai_rename_enable_collection?: boolean;
 			ai_rename_enable_bangumi?: boolean;
+			ai_rename_rename_parent_dir?: boolean;
 		}
 	): Promise<
 		ApiResponse<{
@@ -374,6 +375,7 @@ class ApiClient {
 			ai_rename_enable_multi_page: boolean;
 			ai_rename_enable_collection: boolean;
 			ai_rename_enable_bangumi: boolean;
+			ai_rename_rename_parent_dir: boolean;
 			use_dynamic_api: boolean;
 			message: string;
 		}>
@@ -393,6 +395,7 @@ class ApiClient {
 			ai_rename_enable_multi_page: boolean;
 			ai_rename_enable_collection: boolean;
 			ai_rename_enable_bangumi: boolean;
+			ai_rename_rename_parent_dir: boolean;
 			use_dynamic_api: boolean;
 			message: string;
 		}>(`/video-sources/${sourceType}/${id}/download-options`, options);
@@ -515,7 +518,8 @@ class ApiClient {
 		audioPrompt?: string,
 		enableMultiPage?: boolean,
 		enableCollection?: boolean,
-		enableBangumi?: boolean
+		enableBangumi?: boolean,
+		renameParentDir?: boolean
 	): Promise<
 		ApiResponse<{
 			success: boolean;
@@ -536,7 +540,8 @@ class ApiClient {
 			audio_prompt: audioPrompt || '',
 			enable_multi_page: enableMultiPage,
 			enable_collection: enableCollection,
-			enable_bangumi: enableBangumi
+			enable_bangumi: enableBangumi,
+			rename_parent_dir: renameParentDir
 		});
 	}
 
@@ -1048,6 +1053,7 @@ export const api = {
 			ai_rename_enable_multi_page?: boolean;
 			ai_rename_enable_collection?: boolean;
 			ai_rename_enable_bangumi?: boolean;
+			ai_rename_rename_parent_dir?: boolean;
 		}
 	) => apiClient.updateVideoSourceDownloadOptions(sourceType, id, options),
 
@@ -1113,7 +1119,8 @@ export const api = {
 		audioPrompt?: string,
 		enableMultiPage?: boolean,
 		enableCollection?: boolean,
-		enableBangumi?: boolean
+		enableBangumi?: boolean,
+		renameParentDir?: boolean
 	) =>
 		apiClient.aiRenameHistory(
 			sourceType,
@@ -1122,7 +1129,8 @@ export const api = {
 			audioPrompt,
 			enableMultiPage,
 			enableCollection,
-			enableBangumi
+			enableBangumi,
+			renameParentDir
 		),
 
 	/**

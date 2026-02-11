@@ -67,6 +67,7 @@
 	let aiRenameEnableMultiPage = false;
 	let aiRenameEnableCollection = false;
 	let aiRenameEnableBangumi = false;
+	let aiRenameRenameParentDir = false;
 
 	// 添加手动输入标志
 	let isManualInput = false;
@@ -622,7 +623,8 @@
 			// AI重命名高级选项（仅当开启高级选项时传递）
 			ai_rename_enable_multi_page: showAiRenameAdvanced ? aiRenameEnableMultiPage : undefined,
 			ai_rename_enable_collection: showAiRenameAdvanced ? aiRenameEnableCollection : undefined,
-			ai_rename_enable_bangumi: showAiRenameAdvanced ? aiRenameEnableBangumi : undefined
+			ai_rename_enable_bangumi: showAiRenameAdvanced ? aiRenameEnableBangumi : undefined,
+			ai_rename_rename_parent_dir: showAiRenameAdvanced ? aiRenameRenameParentDir : undefined
 		};
 
 		if (sourceType === 'collection') {
@@ -768,6 +770,7 @@
 			aiRenameEnableMultiPage = false;
 			aiRenameEnableCollection = false;
 			aiRenameEnableBangumi = false;
+			aiRenameRenameParentDir = false;
 			// 跳转到视频源管理页面
 			goto('/video-sources');
 		} else {
@@ -2934,6 +2937,16 @@
 														/>
 														<span class="text-[10px] text-gray-700 dark:text-gray-300"
 															>对番剧启用AI重命名</span
+														>
+													</label>
+													<label class="flex items-center space-x-2">
+														<input
+															type="checkbox"
+															bind:checked={aiRenameRenameParentDir}
+															class="h-3 w-3 rounded border-gray-300"
+														/>
+														<span class="text-[10px] text-gray-700 dark:text-gray-300"
+															>重命名上级目录</span
 														>
 													</label>
 													<!-- 风险警告 -->

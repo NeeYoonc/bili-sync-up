@@ -46,6 +46,7 @@ pub struct BangumiSource {
     pub ai_rename_enable_multi_page: bool,
     pub ai_rename_enable_collection: bool,
     pub ai_rename_enable_bangumi: bool,
+    pub ai_rename_rename_parent_dir: bool,
 }
 
 impl BangumiSource {
@@ -561,6 +562,10 @@ impl VideoSource for BangumiSource {
 
     fn ai_rename_enable_bangumi(&self) -> bool {
         self.ai_rename_enable_bangumi
+    }
+
+    fn ai_rename_rename_parent_dir(&self) -> bool {
+        self.ai_rename_rename_parent_dir
     }
 
     fn source_key(&self) -> String {

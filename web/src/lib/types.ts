@@ -67,6 +67,7 @@ export interface VideoSource {
 	ai_rename_enable_multi_page: boolean; // 对多P视频启用AI重命名
 	ai_rename_enable_collection: boolean; // 对合集视频启用AI重命名
 	ai_rename_enable_bangumi: boolean; // 对番剧启用AI重命名
+	ai_rename_rename_parent_dir: boolean; // AI重命名时重命名上级目录
 }
 
 // 视频来源响应类型
@@ -210,6 +211,7 @@ export interface AddVideoSourceRequest {
 	ai_rename_enable_multi_page?: boolean; // 对多P视频启用AI重命名
 	ai_rename_enable_collection?: boolean; // 对合集视频启用AI重命名
 	ai_rename_enable_bangumi?: boolean; // 对番剧启用AI重命名
+	ai_rename_rename_parent_dir?: boolean; // AI重命名时重命名上级目录
 }
 
 // 添加视频源响应类型
@@ -351,6 +353,7 @@ export interface AiRenameConfig {
 	timeout_seconds: number;
 	video_prompt_hint: string;
 	audio_prompt_hint: string;
+	rename_parent_dir: boolean;
 }
 
 // 更新配置请求类型
@@ -452,6 +455,7 @@ export interface UpdateConfigRequest {
 	ai_rename_timeout_seconds?: number;
 	ai_rename_video_prompt_hint?: string;
 	ai_rename_audio_prompt_hint?: string;
+	ai_rename_rename_parent_dir?: boolean;
 	// 服务器绑定地址
 	bind_address?: string;
 }

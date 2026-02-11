@@ -31,6 +31,7 @@ pub struct Model {
     pub ai_rename_enable_multi_page: bool,
     pub ai_rename_enable_collection: bool,
     pub ai_rename_enable_bangumi: bool,
+    pub ai_rename_rename_parent_dir: bool,
     pub use_dynamic_api: bool,
     pub dynamic_api_full_synced: bool,
     pub last_scan_at: Option<String>,

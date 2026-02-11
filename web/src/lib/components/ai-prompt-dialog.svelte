@@ -14,11 +14,12 @@
 	export let sourceId = 0;
 	export let initialVideoPrompt = '';
 	export let initialAudioPrompt = '';
-	export let initialAiRename = false;
-	// 高级选项初始值
-	export let initialEnableMultiPage = false;
-	export let initialEnableCollection = false;
-	export let initialEnableBangumi = false;
+export let initialAiRename = false;
+// 高级选项初始值
+export let initialEnableMultiPage = false;
+export let initialEnableCollection = false;
+export let initialEnableBangumi = false;
+export let initialRenameParentDir = false;
 
 	const dispatch = createEventDispatcher<{
 		save: {
@@ -28,6 +29,7 @@
 			enableMultiPage: boolean;
 			enableCollection: boolean;
 			enableBangumi: boolean;
+			renameParentDir: boolean;
 		};
 		cancel: void;
 	}>();
@@ -39,23 +41,26 @@
 	let isClearing = false;
 
 	// 高级选项
-	let showAdvancedOptions = false;
-	let enableMultiPage = false;
-	let enableCollection = false;
-	let enableBangumi = false;
+let showAdvancedOptions = false;
+let enableMultiPage = false;
+let enableCollection = false;
+let enableBangumi = false;
+let renameParentDir = false;
 
 	// 重置状态
 	function resetState() {
 		videoPrompt = initialVideoPrompt;
 		audioPrompt = initialAudioPrompt;
-		aiRename = initialAiRename;
-		enableMultiPage = initialEnableMultiPage;
-		enableCollection = initialEnableCollection;
-		enableBangumi = initialEnableBangumi;
-		showAdvancedOptions = initialEnableMultiPage || initialEnableCollection || initialEnableBangumi;
-		isSaving = false;
-		isClearing = false;
-	}
+	aiRename = initialAiRename;
+	enableMultiPage = initialEnableMultiPage;
+	enableCollection = initialEnableCollection;
+	enableBangumi = initialEnableBangumi;
+	renameParentDir = initialRenameParentDir;
+	showAdvancedOptions =
+		initialEnableMultiPage || initialEnableCollection || initialEnableBangumi || initialRenameParentDir;
+	isSaving = false;
+	isClearing = false;
+}
 
 	// 当对话框打开时重置状态
 	$: if (isOpen) {
@@ -102,7 +107,8 @@
 				ai_rename_audio_prompt: audioPrompt.trim(),
 				ai_rename_enable_multi_page: enableMultiPage,
 				ai_rename_enable_collection: enableCollection,
-				ai_rename_enable_bangumi: enableBangumi
+				ai_rename_enable_bangumi: enableBangumi,
+				ai_rename_rename_parent_dir: renameParentDir
 			});
 
 			if (result.data.success) {
@@ -113,7 +119,8 @@
 					aiRename,
 					enableMultiPage,
 					enableCollection,
-					enableBangumi
+					enableBangumi,
+					renameParentDir
 				});
 				isOpen = false;
 			} else {
@@ -259,6 +266,17 @@
 								/>
 								<Label for="enable-bangumi-prompt" class="text-sm leading-none font-medium">
 									对番剧启用AI重命名
+								</Label>
+							</div>
+							<div class="flex items-center space-x-2">
+								<input
+									type="checkbox"
+									id="rename-parent-dir-prompt"
+									bind:checked={renameParentDir}
+									class="border-input h-4 w-4 rounded border"
+								/>
+								<Label for="rename-parent-dir-prompt" class="text-sm leading-none font-medium">
+									重命名上级目录
 								</Label>
 							</div>
 							<!-- 风险警告 -->

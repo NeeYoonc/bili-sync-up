@@ -261,6 +261,10 @@ impl VideoSource for submission::Model {
         self.ai_rename_enable_bangumi
     }
 
+    fn ai_rename_rename_parent_dir(&self) -> bool {
+        self.ai_rename_rename_parent_dir
+    }
+
     fn source_key(&self) -> String {
         format!("submission_{}", self.id)
     }

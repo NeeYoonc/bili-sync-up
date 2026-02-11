@@ -11,12 +11,13 @@
 	export let sourceName = '';
 	export let sourceType = '';
 	export let sourceId = 0;
-	export let initialVideoPrompt = '';
-	export let initialAudioPrompt = '';
-	// 高级选项初始值（从视频源加载）
-	export let initialEnableMultiPage = false;
-	export let initialEnableCollection = false;
-	export let initialEnableBangumi = false;
+export let initialVideoPrompt = '';
+export let initialAudioPrompt = '';
+// 高级选项初始值（从视频源加载）
+export let initialEnableMultiPage = false;
+export let initialEnableCollection = false;
+export let initialEnableBangumi = false;
+export let initialRenameParentDir = false;
 
 	const dispatch = createEventDispatcher<{
 		complete: { renamed: number; skipped: number; failed: number };
@@ -27,21 +28,24 @@
 	let audioPrompt = '';
 
 	// 高级选项
-	let showAdvancedOptions = false;
-	let enableMultiPage = false;
-	let enableCollection = false;
-	let enableBangumi = false;
+let showAdvancedOptions = false;
+let enableMultiPage = false;
+let enableCollection = false;
+let enableBangumi = false;
+let renameParentDir = false;
 
 	// 重置状态
 	function resetState() {
 		videoPrompt = initialVideoPrompt;
 		audioPrompt = initialAudioPrompt;
-		enableMultiPage = initialEnableMultiPage;
-		enableCollection = initialEnableCollection;
-		enableBangumi = initialEnableBangumi;
-		// 如果有任何高级选项被启用，自动展开高级选项面板
-		showAdvancedOptions = initialEnableMultiPage || initialEnableCollection || initialEnableBangumi;
-	}
+	enableMultiPage = initialEnableMultiPage;
+	enableCollection = initialEnableCollection;
+	enableBangumi = initialEnableBangumi;
+	renameParentDir = initialRenameParentDir;
+	// 如果有任何高级选项被启用，自动展开高级选项面板
+	showAdvancedOptions =
+		initialEnableMultiPage || initialEnableCollection || initialEnableBangumi || initialRenameParentDir;
+}
 
 	// 当对话框打开时重置状态
 	$: if (isOpen) {
@@ -82,11 +86,12 @@
 				sourceType,
 				sourceId,
 				videoPrompt.trim(),
-				audioPrompt.trim(),
-				enableMultiPage,
-				enableCollection,
-				enableBangumi
-			);
+			audioPrompt.trim(),
+			enableMultiPage,
+			enableCollection,
+			enableBangumi,
+			renameParentDir
+		);
 
 			if (result.data.success) {
 				// 重命名成功后，同步更新该源的 AI 重命名设置（包括提示词、开关和高级选项）
@@ -97,7 +102,8 @@
 						ai_rename_audio_prompt: audioPrompt.trim(),
 						ai_rename_enable_multi_page: enableMultiPage,
 						ai_rename_enable_collection: enableCollection,
-						ai_rename_enable_bangumi: enableBangumi
+						ai_rename_enable_bangumi: enableBangumi,
+						ai_rename_rename_parent_dir: renameParentDir
 					});
 				} catch (updateError) {
 					console.warn('更新AI重命名设置失败:', updateError);
@@ -242,6 +248,17 @@
 							/>
 							<Label for="enable-bangumi" class="text-sm leading-none font-medium">
 								对番剧启用AI重命名
+							</Label>
+						</div>
+						<div class="flex items-center space-x-2">
+							<input
+								type="checkbox"
+								id="rename-parent-dir"
+								bind:checked={renameParentDir}
+								class="border-input h-4 w-4 rounded border"
+							/>
+							<Label for="rename-parent-dir" class="text-sm leading-none font-medium">
+								重命名上级目录
 							</Label>
 						</div>
 						<!-- 风险警告 -->

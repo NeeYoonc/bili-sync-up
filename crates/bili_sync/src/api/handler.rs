@@ -815,6 +815,7 @@ pub async fn get_video_sources(
                 ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
                 ai_rename_enable_collection: model.ai_rename_enable_collection,
                 ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
                 use_dynamic_api: None,
             }
         })
@@ -866,6 +867,7 @@ pub async fn get_video_sources(
                 ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
                 ai_rename_enable_collection: model.ai_rename_enable_collection,
                 ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
                 use_dynamic_api: None,
             }
         })
@@ -917,6 +919,7 @@ pub async fn get_video_sources(
                 ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
                 ai_rename_enable_collection: model.ai_rename_enable_collection,
                 ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
                 use_dynamic_api: Some(model.use_dynamic_api),
             }
         })
@@ -968,6 +971,7 @@ pub async fn get_video_sources(
                 ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
                 ai_rename_enable_collection: model.ai_rename_enable_collection,
                 ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
                 use_dynamic_api: None,
             }
         })
@@ -1038,6 +1042,7 @@ pub async fn get_video_sources(
                 ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
                 ai_rename_enable_collection: model.ai_rename_enable_collection,
                 ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
                 use_dynamic_api: None,
             }
         })
@@ -2644,6 +2649,7 @@ pub async fn add_video_source_internal(
                 ai_rename_enable_multi_page: sea_orm::Set(params.ai_rename_enable_multi_page.unwrap_or(false)),
                 ai_rename_enable_collection: sea_orm::Set(params.ai_rename_enable_collection.unwrap_or(false)),
                 ai_rename_enable_bangumi: sea_orm::Set(params.ai_rename_enable_bangumi.unwrap_or(false)),
+                ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
             };
 
             let insert_result = collection::Entity::insert(collection).exec(&txn).await?;
@@ -2713,6 +2719,7 @@ pub async fn add_video_source_internal(
                 ai_rename_enable_multi_page: sea_orm::Set(params.ai_rename_enable_multi_page.unwrap_or(false)),
                 ai_rename_enable_collection: sea_orm::Set(params.ai_rename_enable_collection.unwrap_or(false)),
                 ai_rename_enable_bangumi: sea_orm::Set(params.ai_rename_enable_bangumi.unwrap_or(false)),
+                ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
             };
 
             let insert_result = favorite::Entity::insert(favorite).exec(&txn).await?;
@@ -2788,6 +2795,7 @@ pub async fn add_video_source_internal(
                 ai_rename_enable_multi_page: sea_orm::Set(params.ai_rename_enable_multi_page.unwrap_or(false)),
                 ai_rename_enable_collection: sea_orm::Set(params.ai_rename_enable_collection.unwrap_or(false)),
                 ai_rename_enable_bangumi: sea_orm::Set(params.ai_rename_enable_bangumi.unwrap_or(false)),
+                ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
                 flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
                 use_dynamic_api: sea_orm::Set(params.use_dynamic_api.unwrap_or(false)),
@@ -3099,6 +3107,7 @@ pub async fn add_video_source_internal(
                     ai_rename_enable_multi_page: sea_orm::Set(params.ai_rename_enable_multi_page.unwrap_or(false)),
                     ai_rename_enable_collection: sea_orm::Set(params.ai_rename_enable_collection.unwrap_or(false)),
                     ai_rename_enable_bangumi: sea_orm::Set(params.ai_rename_enable_bangumi.unwrap_or(false)),
+                    ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
                     ..Default::default()
                 };
 
@@ -3175,6 +3184,7 @@ pub async fn add_video_source_internal(
                 ai_rename_enable_multi_page: sea_orm::Set(params.ai_rename_enable_multi_page.unwrap_or(false)),
                 ai_rename_enable_collection: sea_orm::Set(params.ai_rename_enable_collection.unwrap_or(false)),
                 ai_rename_enable_bangumi: sea_orm::Set(params.ai_rename_enable_bangumi.unwrap_or(false)),
+                ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
                 flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
             };
@@ -4858,6 +4868,9 @@ pub async fn update_video_source_download_options_internal(
             let ai_rename_enable_bangumi = params
                 .ai_rename_enable_bangumi
                 .unwrap_or(collection.ai_rename_enable_bangumi);
+            let ai_rename_rename_parent_dir = params
+                .ai_rename_rename_parent_dir
+                .unwrap_or(collection.ai_rename_rename_parent_dir);
 
             collection::Entity::update(collection::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
@@ -4872,6 +4885,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page: sea_orm::Set(ai_rename_enable_multi_page),
                 ai_rename_enable_collection: sea_orm::Set(ai_rename_enable_collection),
                 ai_rename_enable_bangumi: sea_orm::Set(ai_rename_enable_bangumi),
+                ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
                 ..Default::default()
             })
             .exec(&txn)
@@ -4892,6 +4906,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page,
                 ai_rename_enable_collection,
                 ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir,
                 use_dynamic_api: false,
                 message: format!("合集 {} 的下载选项已更新", collection.name),
             }
@@ -4925,6 +4940,9 @@ pub async fn update_video_source_download_options_internal(
             let ai_rename_enable_bangumi = params
                 .ai_rename_enable_bangumi
                 .unwrap_or(favorite.ai_rename_enable_bangumi);
+            let ai_rename_rename_parent_dir = params
+                .ai_rename_rename_parent_dir
+                .unwrap_or(favorite.ai_rename_rename_parent_dir);
 
             favorite::Entity::update(favorite::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
@@ -4939,6 +4957,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page: sea_orm::Set(ai_rename_enable_multi_page),
                 ai_rename_enable_collection: sea_orm::Set(ai_rename_enable_collection),
                 ai_rename_enable_bangumi: sea_orm::Set(ai_rename_enable_bangumi),
+                ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
                 ..Default::default()
             })
             .exec(&txn)
@@ -4959,6 +4978,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page,
                 ai_rename_enable_collection,
                 ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir,
                 use_dynamic_api: false,
                 message: format!("收藏夹 {} 的下载选项已更新", favorite.name),
             }
@@ -4992,6 +5012,9 @@ pub async fn update_video_source_download_options_internal(
             let ai_rename_enable_bangumi = params
                 .ai_rename_enable_bangumi
                 .unwrap_or(submission.ai_rename_enable_bangumi);
+            let ai_rename_rename_parent_dir = params
+                .ai_rename_rename_parent_dir
+                .unwrap_or(submission.ai_rename_rename_parent_dir);
             let use_dynamic_api = params.use_dynamic_api.unwrap_or(submission.use_dynamic_api);
             let mut dynamic_api_full_synced = submission.dynamic_api_full_synced;
             let mut latest_row_at_override: Option<String> = None;
@@ -5018,6 +5041,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page: sea_orm::Set(ai_rename_enable_multi_page),
                 ai_rename_enable_collection: sea_orm::Set(ai_rename_enable_collection),
                 ai_rename_enable_bangumi: sea_orm::Set(ai_rename_enable_bangumi),
+                ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
                 use_dynamic_api: sea_orm::Set(use_dynamic_api),
                 dynamic_api_full_synced: sea_orm::Set(dynamic_api_full_synced),
                 ..Default::default()
@@ -5044,6 +5068,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page,
                 ai_rename_enable_collection,
                 ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir,
                 use_dynamic_api,
                 message: format!("UP主投稿 {} 的下载选项已更新", submission.upper_name),
             }
@@ -5077,6 +5102,9 @@ pub async fn update_video_source_download_options_internal(
             let ai_rename_enable_bangumi = params
                 .ai_rename_enable_bangumi
                 .unwrap_or(watch_later.ai_rename_enable_bangumi);
+            let ai_rename_rename_parent_dir = params
+                .ai_rename_rename_parent_dir
+                .unwrap_or(watch_later.ai_rename_rename_parent_dir);
 
             watch_later::Entity::update(watch_later::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
@@ -5091,6 +5119,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page: sea_orm::Set(ai_rename_enable_multi_page),
                 ai_rename_enable_collection: sea_orm::Set(ai_rename_enable_collection),
                 ai_rename_enable_bangumi: sea_orm::Set(ai_rename_enable_bangumi),
+                ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
                 ..Default::default()
             })
             .exec(&txn)
@@ -5111,6 +5140,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page,
                 ai_rename_enable_collection,
                 ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir,
                 use_dynamic_api: false,
                 message: "稍后观看的下载选项已更新".to_string(),
             }
@@ -5144,6 +5174,9 @@ pub async fn update_video_source_download_options_internal(
             let ai_rename_enable_bangumi = params
                 .ai_rename_enable_bangumi
                 .unwrap_or(video_source.ai_rename_enable_bangumi);
+            let ai_rename_rename_parent_dir = params
+                .ai_rename_rename_parent_dir
+                .unwrap_or(video_source.ai_rename_rename_parent_dir);
 
             video_source::Entity::update(video_source::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
@@ -5158,6 +5191,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page: sea_orm::Set(ai_rename_enable_multi_page),
                 ai_rename_enable_collection: sea_orm::Set(ai_rename_enable_collection),
                 ai_rename_enable_bangumi: sea_orm::Set(ai_rename_enable_bangumi),
+                ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
                 ..Default::default()
             })
             .exec(&txn)
@@ -5178,6 +5212,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_multi_page,
                 ai_rename_enable_collection,
                 ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir,
                 use_dynamic_api: false,
                 message: format!("番剧 {} 的下载选项已更新", video_source.name),
             }
@@ -6046,6 +6081,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
             timeout_seconds: config.ai_rename.timeout_seconds,
             video_prompt_hint: config.ai_rename.video_prompt_hint.clone(),
             audio_prompt_hint: config.ai_rename.audio_prompt_hint.clone(),
+            rename_parent_dir: config.ai_rename.rename_parent_dir,
         },
         // 服务器绑定地址
         bind_address: config.bind_address.clone(),
@@ -6144,6 +6180,7 @@ pub async fn update_config(
             bangumi_use_season_structure: params.bangumi_use_season_structure,
             // UP主头像保存路径
             upper_path: params.upper_path.clone(),
+            ai_rename_rename_parent_dir: params.ai_rename_rename_parent_dir,
             task_id: task_id.clone(),
         };
 
@@ -7030,6 +7067,12 @@ pub async fn update_config_internal(
     if let Some(enable_bangumi) = params.ai_rename_enable_bangumi {
         if config.ai_rename.enable_bangumi != enable_bangumi {
             config.ai_rename.enable_bangumi = enable_bangumi;
+            updated_fields.push("ai_rename");
+        }
+    }
+    if let Some(rename_parent_dir) = params.ai_rename_rename_parent_dir {
+        if config.ai_rename.rename_parent_dir != rename_parent_dir {
+            config.ai_rename.rename_parent_dir = rename_parent_dir;
             updated_fields.push("ai_rename");
         }
     }
@@ -13592,7 +13635,7 @@ pub async fn ai_rename_history(
     let source_key = format!("{}_{}", source_type, id);
 
     // 根据 source_type 获取视频源配置和视频列表
-    let (video_prompt, audio_prompt, videos, flat_folder) = match source_type.as_str() {
+    let (video_prompt, audio_prompt, videos, flat_folder, source_rename_parent_dir) = match source_type.as_str() {
         "collection" => {
             let source = collection::Entity::find_by_id(id)
                 .one(db.as_ref())
@@ -13607,6 +13650,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
                 source.flat_folder,
+                source.ai_rename_rename_parent_dir,
             )
         }
         "favorite" => {
@@ -13622,6 +13666,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
                 source.flat_folder,
+                source.ai_rename_rename_parent_dir,
             )
         }
         "submission" => {
@@ -13637,6 +13682,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
                 source.flat_folder,
+                source.ai_rename_rename_parent_dir,
             )
         }
         "watch_later" => {
@@ -13652,6 +13698,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
                 source.flat_folder,
+                source.ai_rename_rename_parent_dir,
             )
         }
         "bangumi" => {
@@ -13667,6 +13714,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
                 source.flat_folder,
+                source.ai_rename_rename_parent_dir,
             )
         }
         _ => {
@@ -13703,6 +13751,7 @@ pub async fn ai_rename_history(
     if let Some(enable_bangumi) = req.enable_bangumi {
         ai_config.enable_bangumi = enable_bangumi;
     }
+    ai_config.rename_parent_dir = req.rename_parent_dir.unwrap_or(source_rename_parent_dir);
 
     if videos.is_empty() {
         return Ok(ApiResponse::ok(crate::api::response::BatchRenameResponse {

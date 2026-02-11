@@ -196,6 +196,11 @@ pub trait VideoSource {
         false // 默认实现：不对番剧启用
     }
 
+    /// 获取是否允许AI重命名时同步重命名上级目录（默认为 false）
+    fn ai_rename_rename_parent_dir(&self) -> bool {
+        false
+    }
+
     /// 获取视频源的唯一键（用于AI重命名缓存）
     /// 格式: "{source_type}_{id}"，例如 "collection_123"
     fn source_key(&self) -> String;
@@ -344,6 +349,7 @@ pub async fn bangumi_from<'a>(
             ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
             ai_rename_enable_collection: model.ai_rename_enable_collection,
             ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
+            ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
         }
     } else {
         // 如果数据库中不存在，使用默认值并发出警告
@@ -383,6 +389,7 @@ pub async fn bangumi_from<'a>(
             ai_rename_enable_multi_page: false,
             ai_rename_enable_collection: false,
             ai_rename_enable_bangumi: false,
+            ai_rename_rename_parent_dir: false,
         }
     };
 

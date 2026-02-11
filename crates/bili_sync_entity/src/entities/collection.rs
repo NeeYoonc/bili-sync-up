@@ -33,6 +33,7 @@ pub struct Model {
     pub ai_rename_enable_multi_page: bool,
     pub ai_rename_enable_collection: bool,
     pub ai_rename_enable_bangumi: bool,
+    pub ai_rename_rename_parent_dir: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

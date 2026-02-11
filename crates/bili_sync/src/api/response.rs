@@ -135,6 +135,7 @@ pub struct UpdateVideoSourceDownloadOptionsResponse {
     pub ai_rename_enable_multi_page: bool,
     pub ai_rename_enable_collection: bool,
     pub ai_rename_enable_bangumi: bool,
+    pub ai_rename_rename_parent_dir: bool,
     pub use_dynamic_api: bool,
     pub message: String,
 }
@@ -219,6 +220,7 @@ pub struct VideoSource {
     pub ai_rename_enable_multi_page: bool, // 对多P视频启用AI重命名
     pub ai_rename_enable_collection: bool, // 对合集视频启用AI重命名
     pub ai_rename_enable_bangumi: bool,    // 对番剧启用AI重命名
+    pub ai_rename_rename_parent_dir: bool, // AI重命名时重命名上级目录
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_dynamic_api: Option<bool>, // 投稿源：是否使用动态API
 }
@@ -849,6 +851,7 @@ pub struct AiRenameConfigResponse {
     pub timeout_seconds: u64,
     pub video_prompt_hint: String,
     pub audio_prompt_hint: String,
+    pub rename_parent_dir: bool,
 }
 
 // 测试风控验证响应
@@ -941,6 +944,9 @@ pub struct BatchRenameRequest {
     /// 对番剧启用AI重命名（可选，为None则使用全局配置）
     #[serde(default)]
     pub enable_bangumi: Option<bool>,
+    /// AI重命名时是否重命名上级目录（可选，为None则使用全局配置）
+    #[serde(default)]
+    pub rename_parent_dir: Option<bool>,
 }
 
 // AI批量重命名响应

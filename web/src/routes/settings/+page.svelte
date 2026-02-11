@@ -260,6 +260,7 @@
 	let aiRenameTimeoutSeconds = 30;
 	let aiRenameVideoPromptHint = '';
 	let aiRenameAudioPromptHint = '';
+	let aiRenameRenameParentDir = false;
 	let aiRenameSaving = false;
 	let aiRenameClearingCache = false;
 
@@ -557,6 +558,7 @@
 		aiRenameTimeoutSeconds = config.ai_rename?.timeout_seconds ?? 30;
 		aiRenameVideoPromptHint = config.ai_rename?.video_prompt_hint || '';
 		aiRenameAudioPromptHint = config.ai_rename?.audio_prompt_hint || '';
+		aiRenameRenameParentDir = config.ai_rename?.rename_parent_dir ?? false;
 	}
 
 	// 检查模板是否包含路径
@@ -1024,7 +1026,8 @@
 			ai_rename_model: aiRenameModel,
 			ai_rename_timeout_seconds: aiRenameTimeoutSeconds,
 			ai_rename_video_prompt_hint: aiRenameVideoPromptHint || undefined,
-			ai_rename_audio_prompt_hint: aiRenameAudioPromptHint || undefined
+			ai_rename_audio_prompt_hint: aiRenameAudioPromptHint || undefined,
+			ai_rename_rename_parent_dir: aiRenameRenameParentDir
 		};
 
 		const response = await runRequest(() => api.updateConfig(config), {
@@ -3459,6 +3462,20 @@
 				<p class="text-muted-foreground text-sm">
 					启用后，还需要在视频源管理页面为单个视频源开启AI重命名功能才会生效
 				</p>
+				<div class="flex items-center space-x-2">
+					<input
+						type="checkbox"
+						id="ai-rename-rename-parent-dir"
+						bind:checked={aiRenameRenameParentDir}
+						class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+					/>
+					<Label
+						for="ai-rename-rename-parent-dir"
+						class="text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+					>
+						允许重命名上级目录（默认关闭）
+					</Label>
+				</div>
 
 				<!-- API提供商 -->
 				<div class="space-y-2">

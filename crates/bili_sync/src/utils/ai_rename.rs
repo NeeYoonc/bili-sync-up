@@ -374,6 +374,9 @@ pub struct AiRenameConfig {
     /// 是否启用番剧AI重命名（默认关闭）
     #[serde(default)]
     pub enable_bangumi: bool,
+    /// 是否允许重命名上级目录（默认关闭）
+    #[serde(default)]
+    pub rename_parent_dir: bool,
 }
 
 impl Default for AiRenameConfig {
@@ -399,6 +402,7 @@ impl Default for AiRenameConfig {
             enable_multi_page: false,
             enable_collection: false,
             enable_bangumi: false,
+            rename_parent_dir: false,
         }
     }
 }
@@ -1120,7 +1124,7 @@ pub async fn batch_rename_history_files(
         match ai_generate_filenames_batch(config, source_key, batch, video_prompt_hint).await {
             Ok(new_names) => {
                 for (file, new_stem) in batch.iter().zip(new_names.iter()) {
-                    apply_rename(connection, source_key, file, new_stem, &mut result).await;
+                    apply_rename(connection, source_key, file, new_stem, config, &mut result).await;
                 }
             }
             Err(e) => {
@@ -1143,7 +1147,7 @@ pub async fn batch_rename_history_files(
         match ai_generate_filenames_batch(config, source_key, batch, audio_prompt_hint).await {
             Ok(new_names) => {
                 for (file, new_stem) in batch.iter().zip(new_names.iter()) {
-                    apply_rename(connection, source_key, file, new_stem, &mut result).await;
+                    apply_rename(connection, source_key, file, new_stem, config, &mut result).await;
                 }
             }
             Err(e) => {
@@ -1167,6 +1171,7 @@ async fn apply_rename(
     source_key: &str,
     file: &FileToRename,
     new_stem: &str,
+    config: &AiRenameConfig,
     result: &mut BatchRenameResult,
 ) {
     use bili_sync_entity::{page, video};
@@ -1245,7 +1250,8 @@ async fn apply_rename(
 
     // 重命名子文件夹（仅单P视频 且 非平铺目录模式）
     // 合集/多P 场景下重命名文件夹容易导致路径错乱，因此这里直接跳过。
-    let should_rename_folder = !file.flat_folder && file.single_page && file.ctx.source_type != "collection";
+    let should_rename_folder =
+        config.rename_parent_dir && !file.flat_folder && file.single_page && file.ctx.source_type != "collection";
 
     let final_path = if should_rename_folder {
         if let Some(old_dir) = new_path.parent() {
