@@ -16,9 +16,9 @@ mod m20250525_000003_add_selected_seasons;
 mod m20250531_000001_fix_fid_type;
 mod m20250601_000001_fix_compatibility;
 mod m20250612_090826_add_enabled;
-mod m20250613_043257_add_config;
 mod m20250613_000001_add_performance_indexes;
 mod m20250613_000002_add_enabled_field;
+mod m20250613_043257_add_config;
 mod m20250616_000001_create_config_tables;
 mod m20250624_000001_add_deleted_field;
 mod m20250624_000002_add_scan_deleted_videos_field;
@@ -53,6 +53,7 @@ mod m20260125_000002_add_use_dynamic_api;
 mod m20260125_000003_add_dynamic_api_full_synced;
 mod m20260127_000001_add_submission_scan_state;
 mod m20260202_000001_add_ai_rename_parent_dir;
+mod m20260203_000001_create_collection_season_mapping;
 
 pub struct Migrator;
 
@@ -113,6 +114,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260125_000003_add_dynamic_api_full_synced::Migration),
             Box::new(m20260127_000001_add_submission_scan_state::Migration),
             Box::new(m20260202_000001_add_ai_rename_parent_dir::Migration),
+            Box::new(m20260203_000001_create_collection_season_mapping::Migration),
         ]
     }
 }

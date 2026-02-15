@@ -130,7 +130,7 @@ fn default_bangumi_name() -> Cow<'static, str> {
 }
 
 fn default_collection_unified_name() -> Cow<'static, str> {
-    Cow::Borrowed("S01E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}")
+    Cow::Borrowed("S{{season_pad}}E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}")
 }
 
 fn default_folder_structure() -> Cow<'static, str> {

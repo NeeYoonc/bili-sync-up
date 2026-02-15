@@ -1,4 +1,4 @@
-﻿use sea_orm::FromQueryResult;
+use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -979,4 +979,3 @@ pub struct ConfigMigrationReportResponse {
     pub unmapped_keys: Vec<String>,
     pub notes: Vec<String>,
 }
-

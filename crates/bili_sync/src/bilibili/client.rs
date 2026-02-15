@@ -162,7 +162,6 @@ impl Client {
 
         req
     }
-
 }
 
 // clippy 建议实现 Default trait

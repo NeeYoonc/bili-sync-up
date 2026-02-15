@@ -18,23 +18,21 @@ use crate::utils::scan_id_tracker::{
     get_last_scanned_ids, group_sources_by_new_old, update_last_scanned_ids, LastScannedIds, MaxIdRecorder, SourceType,
     VideoSourceWithId,
 };
+use crate::utils::time_format::{now_naive, now_standard_string, parse_time_string, STANDARD_TIME_FORMAT};
 use crate::workflow::process_video_source;
 use bili_sync_entity::entities;
-use crate::utils::time_format::{now_naive, now_standard_string, parse_time_string, STANDARD_TIME_FORMAT};
 
 fn submission_scan_strategy_enabled(config: &Config) -> bool {
     config.submission_scan_strategy.batch_size > 0 || config.submission_scan_strategy.adaptive_enabled
 }
 
 fn parse_time_or_min(time_str: Option<&str>) -> NaiveDateTime {
-    time_str
-        .and_then(parse_time_string)
-        .unwrap_or_else(|| {
-            NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
-                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-            )
-        })
+    time_str.and_then(parse_time_string).unwrap_or_else(|| {
+        NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        )
+    })
 }
 
 fn calc_submission_next_delay_secs(base_interval_secs: u64, streak: i32, max_hours: u64) -> u64 {
@@ -507,8 +505,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             };
 
             // 将视频源按新旧分组
-            let (new_sources, mut old_sources) =
-                group_sources_by_new_old(enabled_sources.clone(), &last_scanned_ids);
+            let (new_sources, mut old_sources) = group_sources_by_new_old(enabled_sources.clone(), &last_scanned_ids);
 
             // 兜底：如果由于扫描进度记录导致本轮“没有任何可扫描源”，自动重置 last_processed_* 并改为扫描全部源。
             // 典型场景：用户在“新源优先扫描”阶段暂停/恢复，多次切换后 last_processed_* 被推进到较大的 ID，
@@ -738,8 +735,13 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
 
                         if submission_scan_strategy_enabled(&config) && source.source_type == SourceType::Submission {
                             let is_risk_control = classified_error.error_type == crate::error::ErrorType::RiskControl;
-                            if let Err(err) =
-                                update_submission_scan_state_error(&optimized_connection, source.id, is_risk_control, &config).await
+                            if let Err(err) = update_submission_scan_state_error(
+                                &optimized_connection,
+                                source.id,
+                                is_risk_control,
+                                &config,
+                            )
+                            .await
                             {
                                 warn!("更新投稿源扫描状态失败 (ID: {}): {}", source.id, err);
                             }

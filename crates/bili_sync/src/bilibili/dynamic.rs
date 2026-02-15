@@ -21,7 +21,10 @@ impl<'a> Dynamic<'a> {
 
     async fn get_dynamics(&self, offset: Option<&str>) -> Result<Value> {
         self.client
-            .request(Method::GET, "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space")
+            .request(
+                Method::GET,
+                "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space",
+            )
             .await
             .query(&encoded_query(
                 vec![
@@ -39,7 +42,10 @@ impl<'a> Dynamic<'a> {
             .validate()
     }
 
-    pub fn into_video_stream(self, cancellation_token: CancellationToken) -> impl Stream<Item = Result<VideoInfo>> + 'a {
+    pub fn into_video_stream(
+        self,
+        cancellation_token: CancellationToken,
+    ) -> impl Stream<Item = Result<VideoInfo>> + 'a {
         try_stream! {
             let mut offset: Option<String> = None;
             loop {

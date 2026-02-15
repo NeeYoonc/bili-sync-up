@@ -88,9 +88,7 @@ fn track_frontend_build_output() {
     }
 
     if !any_exists {
-        println!(
-            "cargo:warning=未找到前端构建产物(web/build)。如需更新管理页，请先执行: cd web && npm run build"
-        );
+        println!("cargo:warning=未找到前端构建产物(web/build)。如需更新管理页，请先执行: cd web && npm run build");
     }
 }
 

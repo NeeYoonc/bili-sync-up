@@ -199,11 +199,7 @@ async fn table_exists<C: ConnectionTrait>(db: &C, table_name: &str) -> Result<bo
     use sea_orm::Statement;
 
     let sql = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1";
-    let stmt = Statement::from_sql_and_values(
-        sea_orm::DatabaseBackend::Sqlite,
-        sql,
-        vec![table_name.into()],
-    );
+    let stmt = Statement::from_sql_and_values(sea_orm::DatabaseBackend::Sqlite, sql, vec![table_name.into()]);
     let result = db.query_one(stmt).await?;
     Ok(result.is_some())
 }

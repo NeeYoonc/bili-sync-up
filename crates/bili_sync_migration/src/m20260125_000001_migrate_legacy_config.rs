@@ -30,8 +30,8 @@ impl MigrationTrait for Migration {
         };
 
         for (key, value) in map {
-            let value_json = serde_json::to_string(&value)
-                .map_err(|e| DbErr::Custom(format!("序列化旧配置失败: {}", e)))?;
+            let value_json =
+                serde_json::to_string(&value).map_err(|e| DbErr::Custom(format!("序列化旧配置失败: {}", e)))?;
             upsert_config_item(db, &key, &value_json).await?;
         }
 
@@ -57,8 +57,7 @@ async fn load_legacy_config_json<C: ConnectionTrait>(db: &C) -> Result<Option<Va
     };
 
     let data: String = row.try_get("", "data")?;
-    let value: Value = serde_json::from_str(&data)
-        .map_err(|e| DbErr::Custom(format!("解析旧配置失败: {}", e)))?;
+    let value: Value = serde_json::from_str(&data).map_err(|e| DbErr::Custom(format!("解析旧配置失败: {}", e)))?;
     Ok(Some(value))
 }
 

@@ -1170,8 +1170,12 @@ impl NFO<'_> {
                         (season.name.to_string(), season.original_title.to_string())
                     }
                 } else {
-                    // 非番剧使用完整名称
-                    (season.name.to_string(), season.original_title.to_string())
+                    // 非番剧合集使用标准季度标题，避免媒体库把季当成单个视频
+                    if let Some(ref set_name) = season.set {
+                        (format!("第{}季", season.season_number.max(1)), set_name.clone())
+                    } else {
+                        (season.name.to_string(), season.original_title.to_string())
+                    }
                 };
 
                 writer
@@ -1927,9 +1931,14 @@ impl<'a> TVShow<'a> {
         video: &'a video::Model,
         collection_name: Option<&'a str>,
         collection_cover: Option<&'a str>,
+        collection_description: Option<&'a str>,
+        season_number: i32,
+        total_seasons: Option<i32>,
+        total_episodes: Option<i32>,
     ) -> Self {
         // 首先获取基础的TVShow
         let mut tvshow = TVShow::from(video);
+        let safe_season = season_number.max(1);
 
         // 如果提供了合集信息，优先使用合集名称和封面
         if let Some(name) = collection_name {
@@ -1940,6 +1949,24 @@ impl<'a> TVShow<'a> {
 
         if let Some(cover) = collection_cover {
             tvshow.cover_url = cover;
+            tvshow.fanart_url = Some(cover);
+        }
+
+        if let Some(description) = collection_description {
+            let description = description.trim();
+            if !description.is_empty() {
+                tvshow.intro = description;
+            }
+        }
+
+        // 合集级NFO避免使用首个视频标签，减少媒体库错误归类
+        tvshow.tags = None;
+        tvshow.tagline = None;
+
+        tvshow.total_seasons = Some(total_seasons.unwrap_or(safe_season).max(1));
+        tvshow.total_episodes = total_episodes.map(|v| v.max(1));
+        if let Some(name) = collection_name {
+            tvshow.set = Some(name.to_string());
         }
 
         tvshow
@@ -2260,6 +2287,33 @@ impl<'a> From<&'a video::Model> for Season<'a> {
 }
 
 impl<'a> Season<'a> {
+    pub fn from_video_with_collection(
+        video: &'a video::Model,
+        collection_name: Option<&'a str>,
+        collection_cover: Option<&'a str>,
+        season_number: i32,
+        season_total_episodes: Option<i32>,
+    ) -> Self {
+        let mut season = Season::from(video);
+        let safe_season = season_number.max(1);
+
+        if let Some(name) = collection_name {
+            season.name = name;
+            season.original_title = name;
+            season.sorttitle = Some(format!("{} 第{:02}季", name, safe_season));
+            season.set = Some(name.to_string());
+        }
+
+        if let Some(cover) = collection_cover {
+            season.cover_url = cover;
+            season.fanart_url = Some(cover);
+        }
+
+        season.season_number = safe_season;
+        season.total_episodes = season_total_episodes.map(|v| v.max(1));
+        season
+    }
+
     /// 从API获取的SeasonInfo创建带有完整元数据的Season
     pub fn from_season_info(video: &'a video::Model, season_info: &'a crate::workflow::SeasonInfo) -> Self {
         // 使用动态配置而非静态CONFIG

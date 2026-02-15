@@ -1,5 +1,5 @@
-use sea_orm_migration::prelude::*;
 use sea_orm::Statement;
+use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -67,8 +67,5 @@ async fn submission_has_dynamic_api_full_synced(manager: &SchemaManager<'_>) -> 
         .get_connection()
         .query_one(Statement::from_string(backend, sql.to_string()))
         .await?;
-    Ok(result
-        .and_then(|row| row.try_get_by_index(0).ok())
-        .unwrap_or(0)
-        >= 1)
+    Ok(result.and_then(|row| row.try_get_by_index(0).ok()).unwrap_or(0) >= 1)
 }

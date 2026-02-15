@@ -623,16 +623,16 @@
 		return true;
 	}
 
-	// 验证合集统一模式命名模板（仅 unified 模式生效）
+	// 验证合集统一命名模板（统一模式/同UP合集分季生效）
 	function validateCollectionUnifiedName(value: string) {
 		const trimmed = value.trim();
 		if (!trimmed) {
-			collectionUnifiedNameError = '合集统一模式命名模板不能为空';
+			collectionUnifiedNameError = '合集统一命名模板不能为空';
 			collectionUnifiedNameValid = false;
 			return false;
 		}
 		if (hasPathSeparatorOutsideHandlebars(trimmed)) {
-			collectionUnifiedNameError = '合集统一模式命名模板不应包含路径分隔符 / 或 \\\\';
+			collectionUnifiedNameError = '合集统一命名模板不应包含路径分隔符 / 或 \\\\';
 			collectionUnifiedNameValid = false;
 			return false;
 		}
@@ -1444,10 +1444,12 @@
 					>
 						<option value="separate">分离模式</option>
 						<option value="unified" selected>统一模式</option>
+						<option value="up_seasonal">同UP合集分季</option>
 					</select>
 					<p class="text-muted-foreground text-sm">
 						分离模式·：每个视频独立文件夹<br />
-						统一模式：所有视频在合集文件夹下
+						统一模式：所有视频在合集文件夹下<br />
+						同UP合集分季：同一个UP的多个合集归并到统一根目录，并按 Season 01/02 分季
 					</p>
 				</div>
 
@@ -1458,7 +1460,7 @@
 				</div>
 
 				<div class="space-y-2 {isMobile ? '' : 'md:col-span-2'}">
-					<Label for="collection-unified-name">合集统一模式命名模板</Label>
+					<Label for="collection-unified-name">合集统一命名模板</Label>
 					<Input
 						id="collection-unified-name"
 						bind:value={collectionUnifiedName}
@@ -1471,7 +1473,7 @@
 						<p class="text-xs text-red-500 dark:text-red-400">{collectionUnifiedNameError}</p>
 					{/if}
 					<p class="text-muted-foreground text-xs">
-						仅在“合集文件夹模式=统一模式”生效，默认保持 S01E.. 命名。<strong
+						仅在“合集文件夹模式=统一模式/同UP合集分季”生效，默认保持 S01E.. 命名。<strong
 							>不允许使用路径分隔符 / 或 \\</strong
 						>。
 					</p>

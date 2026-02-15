@@ -1,4 +1,4 @@
-﻿use serde::Deserialize;
+use serde::Deserialize;
 use utoipa::IntoParams;
 use utoipa::ToSchema;
 
@@ -456,4 +456,3 @@ pub struct ValidateRegexRequest {
 pub struct ConfigMigrationRequest {
     pub dry_run: Option<bool>,
 }
-

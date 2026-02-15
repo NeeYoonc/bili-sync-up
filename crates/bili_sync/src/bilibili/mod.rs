@@ -59,6 +59,28 @@ pub struct StaffInfo {
     // 忽略其他字段，如vip、official等
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UgcSeasonEpisodePage {
+    #[serde(default)]
+    pub num: Option<i32>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UgcSeasonEpisode {
+    #[serde(default)]
+    pub bvid: Option<String>,
+    #[serde(default)]
+    pub page: Option<UgcSeasonEpisodePage>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UgcSeasonInfo {
+    #[serde(default)]
+    pub id: Option<serde_json::Value>,
+    #[serde(default)]
+    pub episodes: Vec<UgcSeasonEpisode>,
+}
+
 pub(crate) trait Validate {
     type Output;
 
@@ -109,6 +131,9 @@ pub enum VideoInfo {
         /// 用户是否有权限观看充电专享视频
         #[serde(default)]
         is_upower_play: Option<bool>,
+        /// UGC 合集信息（投稿视频中的合集/系列）
+        #[serde(default)]
+        ugc_season: Option<UgcSeasonInfo>,
     },
     /// 从收藏夹接口获取的视频信息
     Favorite {
@@ -170,6 +195,9 @@ pub enum VideoInfo {
         cover: String,
         #[serde(rename = "created", with = "ts_seconds")]
         ctime: DateTime<Utc>,
+        /// 投稿列表接口中的合集/系列ID（存在时用于UP源合集识别）
+        #[serde(default)]
+        season_id: Option<serde_json::Value>,
     },
     // 从动态接口获取的视频信息
     Dynamic {

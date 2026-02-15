@@ -1038,7 +1038,11 @@ impl Aria2Downloader {
             let instances = self.aria2_instances.lock().await;
             instances.iter().filter(|i| i.get_load() > 0).count()
         };
-        let base_threads = if active_instances <= 1 { total_threads } else { base_threads_default };
+        let base_threads = if active_instances <= 1 {
+            total_threads
+        } else {
+            base_threads_default
+        };
 
         // 尝试获取文件大小，并根据大小智能调整线程数
         let threads = if let Some(file_size_bytes) = self.try_get_file_size(urls[0]).await {

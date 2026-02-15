@@ -283,9 +283,7 @@ pub async fn init_config_with_database(db: sea_orm::DatabaseConnection) -> Resul
             if status.pending {
                 info!(
                     "检测到配置迁移待处理: 当前版本={}, 最新版本={}, legacy_detected={}",
-                    status.current_version,
-                    status.latest_version,
-                    status.legacy_detected
+                    status.current_version, status.latest_version, status.legacy_detected
                 );
             }
         }

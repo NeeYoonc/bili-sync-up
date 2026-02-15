@@ -104,9 +104,5 @@ async fn submission_has_column(manager: &SchemaManager<'_>, column: &str) -> Res
         .get_connection()
         .query_one(Statement::from_string(backend, sql))
         .await?;
-    Ok(result
-        .and_then(|row| row.try_get_by_index(0).ok())
-        .unwrap_or(0)
-        >= 1)
+    Ok(result.and_then(|row| row.try_get_by_index(0).ok()).unwrap_or(0) >= 1)
 }
-

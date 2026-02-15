@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,11 +32,11 @@ use crate::api::request::{
 };
 use crate::api::response::{
     AddVideoSourceResponse, BangumiSeasonInfo, BangumiSourceListResponse, BangumiSourceOption,
-    BetaImageUpdateStatusResponse, ConfigChangeInfo, ConfigHistoryResponse, ConfigItemResponse, ConfigReloadResponse,
-    ConfigMigrationReportResponse, ConfigMigrationStatusResponse, ConfigResponse, ConfigValidationResponse,
-    DashBoardResponse, DeleteVideoResponse, DeleteVideoSourceResponse, HotReloadStatusResponse,
-    InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse, QRUserInfo,
-    ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse, SetupAuthTokenResponse,
+    BetaImageUpdateStatusResponse, ConfigChangeInfo, ConfigHistoryResponse, ConfigItemResponse,
+    ConfigMigrationReportResponse, ConfigMigrationStatusResponse, ConfigReloadResponse, ConfigResponse,
+    ConfigValidationResponse, DashBoardResponse, DeleteVideoResponse, DeleteVideoSourceResponse,
+    HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse,
+    QRUserInfo, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse, SetupAuthTokenResponse,
     SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse, UpdateVideoStatusResponse, VideoInfo,
     VideoResponse, VideoSource, VideoSourcesResponse, VideosResponse,
 };
@@ -1177,9 +1177,7 @@ pub async fn get_videos(
     }
 
     if min_height.is_some() || max_height.is_some() {
-        let mut page_query = page::Entity::find()
-            .select_only()
-            .column(page::Column::VideoId);
+        let mut page_query = page::Entity::find().select_only().column(page::Column::VideoId);
 
         if let Some(min_height_value) = min_height {
             page_query = page_query.filter(page::Column::Height.gte(min_height_value));
@@ -1660,9 +1658,7 @@ pub async fn reset_all_videos(
 
     // 分辨率筛选：通过 page.height 反查 video_id，再与 video_query 求交集
     if min_height.is_some() || max_height.is_some() {
-        let mut page_query = page::Entity::find()
-            .select_only()
-            .column(page::Column::VideoId);
+        let mut page_query = page::Entity::find().select_only().column(page::Column::VideoId);
 
         if let Some(min_height_value) = min_height {
             page_query = page_query.filter(page::Column::Height.gte(min_height_value));
@@ -1930,9 +1926,7 @@ pub async fn reset_specific_tasks(
 
     // 分辨率筛选：通过 page.height 反查 video_id，再与 video_query 求交集
     if min_height.is_some() || max_height.is_some() {
-        let mut page_query = page::Entity::find()
-            .select_only()
-            .column(page::Column::VideoId);
+        let mut page_query = page::Entity::find().select_only().column(page::Column::VideoId);
 
         if let Some(min_height_value) = min_height {
             page_query = page_query.filter(page::Column::Height.gte(min_height_value));
@@ -6317,13 +6311,26 @@ pub async fn update_config_internal(
         {
             // 验证合集文件夹模式的有效性
             match collection_folder_mode.as_str() {
-                "separate" | "unified" => {
+                "separate" | "unified" | "up_seasonal" => {
                     config.collection_folder_mode = Cow::Owned(collection_folder_mode);
                     updated_fields.push("collection_folder_mode");
+
+                    // 同UP合集分季模式依赖Season目录结构，自动开启避免配置冲突
+                    if config.collection_folder_mode.as_ref() == "up_seasonal"
+                        && !config.collection_use_season_structure
+                    {
+                        config.collection_use_season_structure = true;
+                        if !updated_fields.contains(&"collection_use_season_structure") {
+                            updated_fields.push("collection_use_season_structure");
+                        }
+                    }
                 }
                 _ => {
                     return Err(
-                        anyhow!("无效的合集文件夹模式，只支持 'separate'（分离模式）或 'unified'（统一模式）").into(),
+                        anyhow!(
+                            "无效的合集文件夹模式，只支持 'separate'（分离模式）、'unified'（统一模式）或 'up_seasonal'（同UP合集分季）"
+                        )
+                        .into(),
                     )
                 }
             }
@@ -10389,7 +10396,31 @@ pub async fn get_task_control_status() -> Result<ApiResponse<crate::api::respons
         (status = 500, description = "内部错误")
     )
 )]
-pub async fn refresh_scanning_endpoint() -> Result<ApiResponse<crate::api::response::TaskControlResponse>, ApiError> {
+pub async fn refresh_scanning_endpoint(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<crate::api::response::TaskControlResponse>, ApiError> {
+    // 任务刷新属于用户的“立即执行”操作，应绕过投稿源的自适应下一次扫描时间限制。
+    // 这里仅清空 next_scan_at，不改 no_update_streak，避免破坏自适应统计。
+    match submission::Entity::update_many()
+        .col_expr(submission::Column::NextScanAt, Expr::value(Option::<String>::None))
+        .filter(submission::Column::Enabled.eq(true))
+        .exec(db.as_ref())
+        .await
+    {
+        Ok(res) => {
+            if res.rows_affected > 0 {
+                info!(
+                    "任务刷新：已清空 {} 个投稿源的 next_scan_at，立即允许扫描",
+                    res.rows_affected
+                );
+            }
+        }
+        Err(e) => {
+            // 不阻断刷新流程，避免用户侧“点了刷新却无响应”
+            warn!("任务刷新时清空投稿源 next_scan_at 失败: {}", e);
+        }
+    }
+
     // 若暂停中，则先恢复；无论是否暂停，都触发一次立即扫描
     if crate::task::TASK_CONTROLLER.is_paused() {
         crate::task::resume_scanning();

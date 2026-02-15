@@ -4,6 +4,22 @@ use sea_orm::IntoActiveModel;
 
 use crate::bilibili::{PageInfo, VideoInfo};
 
+fn normalize_submission_season_id(raw: &Option<serde_json::Value>) -> Option<String> {
+    raw.as_ref().and_then(|value| {
+        value
+            .as_i64()
+            .filter(|id| *id > 0)
+            .map(|id| id.to_string())
+            .or_else(|| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty() && *text != "0")
+                    .map(ToOwned::to_owned)
+            })
+    })
+}
+
 impl VideoInfo {
     /// 在检测视频更新时，通过该方法将 VideoInfo 转换为简单的 ActiveModel，此处仅填充一些简单信息，后续会使用详情覆盖
     pub fn into_simple_model(self) -> bili_sync_entity::video::ActiveModel {
@@ -122,6 +138,7 @@ impl VideoInfo {
                 intro,
                 cover,
                 ctime,
+                season_id,
             } => bili_sync_entity::video::ActiveModel {
                 bvid: Set(bvid),
                 name: Set(title),
@@ -135,6 +152,7 @@ impl VideoInfo {
                     .naive_local()), // 使用ctime作为pubtime
                 category: Set(2), // 投稿视频的内容类型肯定是视频
                 valid: Set(true),
+                season_id: Set(normalize_submission_season_id(&season_id)),
                 cid: Set(None), // 后续通过get_view_info填充
                 ..default
             },
@@ -249,44 +267,84 @@ impl VideoInfo {
                 state,
                 show_title,
                 staff,
+                ugc_season,
                 ..
-            } => bili_sync_entity::video::ActiveModel {
-                bvid: Set(bvid),
-                // 如果原始model的name字段包含"第"并且看起来像番剧的show_title格式，则保留原来的name
-                // 否则优先使用show_title，如果show_title为空则使用title
-                name: if base_model.name.contains("第")
-                    && (base_model.name.contains("话") || base_model.name.contains("集"))
-                {
-                    NotSet
+            } => {
+                // 投稿里的 UGC 合集（ugc_season）用于后续目录分季与命名。
+                let (ugc_season_id, ugc_episode_number) = if let Some(ugc) = ugc_season.as_ref() {
+                    let season_id = ugc.id.as_ref().and_then(|raw_id| {
+                        raw_id
+                            .as_i64()
+                            .or_else(|| raw_id.as_str().and_then(|s| s.parse::<i64>().ok()))
+                            .filter(|id| *id > 0)
+                            .map(|id| id.to_string())
+                    });
+
+                    // 优先按 bvid 在 episodes 中的位置计算序号，失败时回退到 page.num
+                    let episode_by_bvid = ugc
+                        .episodes
+                        .iter()
+                        .position(|ep| ep.bvid.as_deref() == Some(bvid.as_str()))
+                        .and_then(|idx| i32::try_from(idx + 1).ok());
+                    let episode_by_page_num = ugc
+                        .episodes
+                        .iter()
+                        .find_map(|ep| ep.page.as_ref().and_then(|p| p.num))
+                        .filter(|n| *n > 0);
+                    let episode_number = episode_by_bvid.or(episode_by_page_num);
+
+                    (season_id, episode_number)
                 } else {
-                    Set(show_title.unwrap_or(title))
-                },
-                category: Set(2),
-                intro: Set(intro),
-                cover: Set(cover),
-                ctime: Set(ctime
-                    .with_timezone(&crate::utils::time_format::beijing_timezone())
-                    .naive_local()),
-                pubtime: Set(pubtime
-                    .with_timezone(&crate::utils::time_format::beijing_timezone())
-                    .naive_local()),
-                favtime: if base_model.favtime != NaiveDateTime::default() {
-                    NotSet // 之前设置了 favtime，不覆盖
-                } else {
-                    Set(pubtime
+                    (None, None)
+                };
+
+                bili_sync_entity::video::ActiveModel {
+                    bvid: Set(bvid),
+                    // 如果原始model的name字段包含"第"并且看起来像番剧的show_title格式，则保留原来的name
+                    // 否则优先使用show_title，如果show_title为空则使用title
+                    name: if base_model.name.contains("第")
+                        && (base_model.name.contains("话") || base_model.name.contains("集"))
+                    {
+                        NotSet
+                    } else {
+                        Set(show_title.unwrap_or(title))
+                    },
+                    category: Set(2),
+                    intro: Set(intro),
+                    cover: Set(cover),
+                    ctime: Set(ctime
                         .with_timezone(&crate::utils::time_format::beijing_timezone())
-                        .naive_local()) // 未设置过 favtime，使用 pubtime 填充
-                },
-                download_status: Set(0),
-                valid: Set(state == 0),
-                upper_id: Set(upper.mid),
-                upper_name: Set(upper.name),
-                upper_face: Set(upper.face),
-                // 保存staff信息到数据库
-                staff_info: Set(staff.map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null))),
-                // cid字段将在workflow.rs中从pages中提取并设置
-                ..base_model.into_active_model()
-            },
+                        .naive_local()),
+                    pubtime: Set(pubtime
+                        .with_timezone(&crate::utils::time_format::beijing_timezone())
+                        .naive_local()),
+                    favtime: if base_model.favtime != NaiveDateTime::default() {
+                        NotSet // 之前设置了 favtime，不覆盖
+                    } else {
+                        Set(pubtime
+                            .with_timezone(&crate::utils::time_format::beijing_timezone())
+                            .naive_local()) // 未设置过 favtime，使用 pubtime 填充
+                    },
+                    download_status: Set(0),
+                    valid: Set(state == 0),
+                    upper_id: Set(upper.mid),
+                    upper_name: Set(upper.name),
+                    upper_face: Set(upper.face),
+                    // 保存staff信息到数据库
+                    staff_info: Set(staff.map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null))),
+                    // 投稿合集标识与集序（仅在ugc_season存在时更新）
+                    season_id: match ugc_season_id {
+                        Some(v) => Set(Some(v)),
+                        None => NotSet,
+                    },
+                    episode_number: match ugc_episode_number {
+                        Some(v) => Set(Some(v)),
+                        None => NotSet,
+                    },
+                    // cid字段将在workflow.rs中从pages中提取并设置
+                    ..base_model.into_active_model()
+                }
+            }
             _ => unreachable!(),
         }
     }
