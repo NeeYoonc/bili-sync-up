@@ -2554,6 +2554,64 @@ pub async fn download_video_pages(
                 up_collection_root_name
             );
             video_source_base_path.join(&up_dir_name).join(&up_collection_root_name)
+        } else if matches!(video_source, VideoSourceEnum::Submission(_))
+            && !final_video_model.single_page.unwrap_or(true)
+            && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"
+        {
+            // 多P投稿也并入“同UP合集根目录”，保持目录风格一致：
+            // 源路径/UP主名/UP主名合集/<多P视频目录>/Season 01/...
+            let safe_upper_name = crate::utils::filenamify::filenamify(final_video_model.upper_name.trim());
+            let up_dir_name = if safe_upper_name.is_empty() {
+                format!("UP_{}", final_video_model.upper_id)
+            } else {
+                safe_upper_name.clone()
+            };
+            let up_collection_root_name = if safe_upper_name.is_empty() {
+                format!("UP_{}合集", final_video_model.upper_id)
+            } else if safe_upper_name.ends_with("合集") {
+                safe_upper_name
+            } else {
+                format!("{}合集", safe_upper_name)
+            };
+            let up_collection_root = video_source_base_path.join(&up_dir_name).join(&up_collection_root_name);
+
+            // 渲染多P视频目录名；若模板包含路径分隔符，仅取最后一级，避免重复嵌套UP目录。
+            let rendered_folder_name = crate::config::with_config(|bundle| {
+                bundle.render_video_template(&video_format_args(&final_video_model))
+            })
+            .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?;
+            let base_folder_name = rendered_folder_name
+                .replace('\\', "/")
+                .split('/')
+                .filter(|seg| !seg.trim().is_empty())
+                .next_back()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| rendered_folder_name.clone());
+
+            let video_template = crate::config::with_config(|bundle| bundle.config.video_name.as_ref().to_string());
+            let needs_deduplication = video_template.contains("title")
+                || (video_template.contains("name") && !video_template.contains("upper_name"));
+
+            let multi_page_root = if needs_deduplication {
+                let unique_folder_name = generate_unique_folder_name(
+                    &up_collection_root,
+                    &base_folder_name,
+                    &final_video_model,
+                    &final_video_model.pubtime.format("%Y-%m-%d").to_string(),
+                );
+                up_collection_root.join(unique_folder_name)
+            } else {
+                up_collection_root.join(base_folder_name)
+            };
+
+            debug!(
+                "多P投稿并入同UP合集目录 - UP主: '{}' ({}), 根目录: '{}', 多P目录: '{}'",
+                final_video_model.upper_name,
+                final_video_model.upper_id,
+                up_collection_root.display(),
+                multi_page_root.display()
+            );
+            multi_page_root
         } else {
             // 其他类型的视频源使用原来的逻辑
             let base_folder_name = crate::config::with_config(|bundle| {
