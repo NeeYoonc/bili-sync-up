@@ -17,18 +17,21 @@
 		Trash2,
 		Clock,
 		CheckCircle,
-		AlertCircle
+		AlertCircle,
+		X
 	} from '@lucide/svelte';
 	import api from '$lib/api';
 	import type { QueueStatusResponse } from '$lib/types';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import { runRequest } from '$lib/utils/request.js';
 	import { formatTimestamp } from '$lib/utils/timezone';
+	import { toast } from 'svelte-sonner';
 
 	let queueStatus: QueueStatusResponse | null = null;
 	let loading = true;
 	let error: string | null = null;
 	let refreshInterval: ReturnType<typeof setInterval> | null = null;
+	let cancellingTaskIds: Record<string, boolean> = {};
 
 	// 设置面包屑
 	setBreadcrumb([
@@ -73,6 +76,7 @@
 	function getTaskTypeName(taskType: string): string {
 		const typeMap: Record<string, string> = {
 			delete_video_source: '删除视频源',
+			delete_video: '删除视频',
 			add_video_source: '添加视频源',
 			update_config: '更新配置',
 			reload_config: '重载配置'
@@ -85,11 +89,36 @@
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		const iconMap: Record<string, any> = {
 			delete_video_source: Trash2,
+			delete_video: Trash2,
 			add_video_source: Plus,
 			update_config: Settings,
 			reload_config: RefreshCw
 		};
 		return iconMap[taskType] || ListTodo;
+	}
+
+	function isCancelling(taskId: string): boolean {
+		return !!cancellingTaskIds[taskId];
+	}
+
+	async function handleCancelTask(taskId: string) {
+		if (!taskId || isCancelling(taskId)) return;
+
+		cancellingTaskIds = { ...cancellingTaskIds, [taskId]: true };
+		try {
+			const response = await runRequest(() => api.cancelQueueTask(taskId), {
+				context: '取消任务失败'
+			});
+			if (!response) return;
+
+			toast.success('任务已取消', {
+				description: response.data.message
+			});
+			await fetchQueueStatus();
+		} finally {
+			const { [taskId]: _removed, ...rest } = cancellingTaskIds;
+			cancellingTaskIds = rest;
+		}
 	}
 
 	// 获取队列状态颜色
@@ -283,8 +312,19 @@
 												<p class="text-muted-foreground text-xs">ID: {task.task_id}</p>
 											</div>
 										</div>
-										<div class="text-right">
+										<div class="flex items-center gap-2">
 											<p class="text-muted-foreground text-xs">{formatTime(task.created_at)}</p>
+											<Button
+												variant="outline"
+												size="sm"
+												class="h-7 px-2 text-xs"
+												data-glossary-term="取消任务"
+												disabled={isCancelling(task.task_id)}
+												onclick={() => handleCancelTask(task.task_id)}
+											>
+												<X class="mr-1 h-3.5 w-3.5" />
+												{isCancelling(task.task_id) ? '取消中' : '取消'}
+											</Button>
 										</div>
 									</div>
 								{/each}
@@ -327,8 +367,19 @@
 												<p class="text-muted-foreground text-xs">ID: {task.task_id}</p>
 											</div>
 										</div>
-										<div class="text-right">
+										<div class="flex items-center gap-2">
 											<p class="text-muted-foreground text-xs">{formatTime(task.created_at)}</p>
+											<Button
+												variant="outline"
+												size="sm"
+												class="h-7 px-2 text-xs"
+												data-glossary-term="取消任务"
+												disabled={isCancelling(task.task_id)}
+												onclick={() => handleCancelTask(task.task_id)}
+											>
+												<X class="mr-1 h-3.5 w-3.5" />
+												{isCancelling(task.task_id) ? '取消中' : '取消'}
+											</Button>
 										</div>
 									</div>
 								{/each}
@@ -380,10 +431,21 @@
 															<p class="text-muted-foreground text-xs">ID: {task.task_id}</p>
 														</div>
 													</div>
-													<div class="text-right">
+													<div class="flex items-center gap-2">
 														<p class="text-muted-foreground text-xs">
 															{formatTime(task.created_at)}
 														</p>
+														<Button
+															variant="outline"
+															size="sm"
+															class="h-7 px-2 text-xs"
+															data-glossary-term="取消任务"
+															disabled={isCancelling(task.task_id)}
+															onclick={() => handleCancelTask(task.task_id)}
+														>
+															<X class="mr-1 h-3.5 w-3.5" />
+															{isCancelling(task.task_id) ? '取消中' : '取消'}
+														</Button>
 													</div>
 												</div>
 											{/each}
@@ -412,10 +474,21 @@
 															<p class="text-muted-foreground text-xs">ID: {task.task_id}</p>
 														</div>
 													</div>
-													<div class="text-right">
+													<div class="flex items-center gap-2">
 														<p class="text-muted-foreground text-xs">
 															{formatTime(task.created_at)}
 														</p>
+														<Button
+															variant="outline"
+															size="sm"
+															class="h-7 px-2 text-xs"
+															data-glossary-term="取消任务"
+															disabled={isCancelling(task.task_id)}
+															onclick={() => handleCancelTask(task.task_id)}
+														>
+															<X class="mr-1 h-3.5 w-3.5" />
+															{isCancelling(task.task_id) ? '取消中' : '取消'}
+														</Button>
 													</div>
 												</div>
 											{/each}

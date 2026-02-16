@@ -655,7 +655,7 @@ mod cleanup_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -9326,6 +9326,14 @@ pub struct ConfigQueueInfo {
     pub reload_tasks: Vec<QueueTaskInfo>,
 }
 
+/// 取消队列任务响应结构体
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CancelQueueTaskResponse {
+    pub success: bool,
+    pub task_id: String,
+    pub message: String,
+}
+
 /// 获取队列状态
 #[utoipa::path(
     get,
@@ -9342,62 +9350,70 @@ pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiE
     let is_scanning = TASK_CONTROLLER.is_scanning();
 
     // 获取删除队列状态
-    let delete_queue_length = DELETE_TASK_QUEUE.queue_length().await;
+    let delete_raw_tasks = DELETE_TASK_QUEUE.list_tasks().await;
+    let delete_queue_length = delete_raw_tasks.len();
     let delete_is_processing = DELETE_TASK_QUEUE.is_processing();
-
-    // 这里只获取队列长度，不获取具体任务内容以保护敏感信息
-    let delete_tasks = (0..delete_queue_length)
-        .map(|i| QueueTaskInfo {
-            task_id: format!("delete_{}", i + 1),
+    let delete_tasks = delete_raw_tasks
+        .into_iter()
+        .map(|task| QueueTaskInfo {
+            task_id: task.task_id,
             task_type: "delete_video_source".to_string(),
-            description: "删除视频源任务".to_string(),
+            description: format!("删除视频源 {}:{}", task.source_type, task.source_id),
             created_at: now_standard_string(),
         })
         .collect();
 
     // 获取视频删除队列状态
-    let video_delete_queue_length = VIDEO_DELETE_TASK_QUEUE.queue_length().await;
+    let video_delete_raw_tasks = VIDEO_DELETE_TASK_QUEUE.list_tasks().await;
+    let video_delete_queue_length = video_delete_raw_tasks.len();
     let video_delete_is_processing = VIDEO_DELETE_TASK_QUEUE.is_processing();
 
-    let video_delete_tasks = (0..video_delete_queue_length)
-        .map(|i| QueueTaskInfo {
-            task_id: format!("video_delete_{}", i + 1),
+    let video_delete_tasks = video_delete_raw_tasks
+        .into_iter()
+        .map(|task| QueueTaskInfo {
+            task_id: task.task_id,
             task_type: "delete_video".to_string(),
-            description: "删除视频任务".to_string(),
+            description: format!("删除视频 ID={}", task.video_id),
             created_at: now_standard_string(),
         })
         .collect();
 
     // 获取添加队列状态
-    let add_queue_length = ADD_TASK_QUEUE.queue_length().await;
+    let add_raw_tasks = ADD_TASK_QUEUE.list_tasks().await;
+    let add_queue_length = add_raw_tasks.len();
     let add_is_processing = ADD_TASK_QUEUE.is_processing();
 
-    let add_tasks = (0..add_queue_length)
-        .map(|i| QueueTaskInfo {
-            task_id: format!("add_{}", i + 1),
+    let add_tasks = add_raw_tasks
+        .into_iter()
+        .map(|task| QueueTaskInfo {
+            task_id: task.task_id,
             task_type: "add_video_source".to_string(),
-            description: "添加视频源任务".to_string(),
+            description: format!("添加视频源 {}", task.name),
             created_at: now_standard_string(),
         })
         .collect();
 
     // 获取配置队列状态
-    let config_update_length = CONFIG_TASK_QUEUE.update_queue_length().await;
-    let config_reload_length = CONFIG_TASK_QUEUE.reload_queue_length().await;
+    let config_update_raw_tasks = CONFIG_TASK_QUEUE.list_update_tasks().await;
+    let config_reload_raw_tasks = CONFIG_TASK_QUEUE.list_reload_tasks().await;
+    let config_update_length = config_update_raw_tasks.len();
+    let config_reload_length = config_reload_raw_tasks.len();
     let config_is_processing = CONFIG_TASK_QUEUE.is_processing();
 
-    let config_update_tasks = (0..config_update_length)
-        .map(|i| QueueTaskInfo {
-            task_id: format!("config_update_{}", i + 1),
+    let config_update_tasks = config_update_raw_tasks
+        .into_iter()
+        .map(|task| QueueTaskInfo {
+            task_id: task.task_id,
             task_type: "update_config".to_string(),
             description: "更新配置任务".to_string(),
             created_at: now_standard_string(),
         })
         .collect();
 
-    let config_reload_tasks = (0..config_reload_length)
-        .map(|i| QueueTaskInfo {
-            task_id: format!("config_reload_{}", i + 1),
+    let config_reload_tasks = config_reload_raw_tasks
+        .into_iter()
+        .map(|task| QueueTaskInfo {
+            task_id: task.task_id,
             task_type: "reload_config".to_string(),
             description: "重载配置任务".to_string(),
             created_at: now_standard_string(),
@@ -9431,6 +9447,40 @@ pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiE
     };
 
     Ok(ApiResponse::ok(response))
+}
+
+/// 取消队列中的待处理任务
+#[utoipa::path(
+    delete,
+    path = "/api/queue/tasks/{task_id}",
+    params(
+        ("task_id" = String, Path, description = "任务ID")
+    ),
+    responses(
+        (status = 200, description = "取消任务成功", body = CancelQueueTaskResponse),
+        (status = 400, description = "任务不存在或已进入处理", body = String),
+        (status = 500, description = "服务器内部错误", body = String)
+    )
+)]
+pub async fn cancel_queue_task(
+    Path(task_id): Path<String>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<CancelQueueTaskResponse>, ApiError> {
+    let task_id = task_id.trim().to_string();
+    if task_id.is_empty() {
+        return Err(InnerApiError::BadRequest("任务ID不能为空".to_string()).into());
+    }
+
+    let cancelled = crate::task::cancel_pending_task(&task_id, &db).await?;
+    if !cancelled {
+        return Err(InnerApiError::BadRequest("任务不存在、已取消或已进入处理中".to_string()).into());
+    }
+
+    Ok(ApiResponse::ok(CancelQueueTaskResponse {
+        success: true,
+        task_id: task_id.clone(),
+        message: format!("任务 {} 已取消", task_id),
+    }))
 }
 
 /// 代理B站图片请求，解决防盗链问题

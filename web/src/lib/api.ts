@@ -23,6 +23,7 @@ import type {
 	UserFollowing,
 	UserCollectionInfo,
 	QueueStatusResponse,
+	CancelQueueTaskResponse,
 	UpdateVideoSourceEnabledResponse,
 	ResetVideoSourcePathRequest,
 	ResetVideoSourcePathResponse,
@@ -646,6 +647,14 @@ class ApiClient {
 	}
 
 	/**
+	 * 取消队列中的待处理任务
+	 * @param taskId 任务ID
+	 */
+	async cancelQueueTask(taskId: string): Promise<ApiResponse<CancelQueueTaskResponse>> {
+		return this.delete<CancelQueueTaskResponse>(`/queue/tasks/${encodeURIComponent(taskId)}`);
+	}
+
+	/**
 	 * 更新视频状态
 	 * @param id 视频ID
 	 * @param request 状态更新请求
@@ -1015,6 +1024,11 @@ export const api = {
 	 * 获取队列状态
 	 */
 	getQueueStatus: () => apiClient.getQueueStatus(),
+
+	/**
+	 * 取消队列中的待处理任务
+	 */
+	cancelQueueTask: (taskId: string) => apiClient.cancelQueueTask(taskId),
 
 	/**
 	 * 更新视频状态

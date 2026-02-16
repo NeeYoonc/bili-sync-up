@@ -60,6 +60,10 @@ const GLOSSARY_ENTRIES: GlossaryEntry[] = [
 		description: '关闭当前弹窗或取消本次操作，不会保存未提交修改。'
 	},
 	{
+		terms: ['取消任务', '取消中'],
+		description: '取消任务队列中“等待处理”的任务；若任务已进入处理中则无法取消。'
+	},
+	{
 		terms: ['添加', '添加视频源'],
 		description: '新增一个视频源订阅，后续扫描任务会纳入该源。'
 	},

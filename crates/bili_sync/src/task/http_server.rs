@@ -21,6 +21,7 @@ use crate::api::handler::{
     clear_ai_rename_cache,
     clear_ai_rename_cache_for_source,
     clear_credential,
+    cancel_queue_task,
     delete_video,
     delete_video_source,
     download_log_file,
@@ -247,6 +248,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/logs/files", get(get_log_files))
         .route("/api/logs/download", get(download_log_file))
         .route("/api/queue-status", get(get_queue_status))
+        .route("/api/queue/tasks/{task_id}", delete(cancel_queue_task))
         .route("/api/proxy/image", get(proxy_image))
         .route("/api/task-control/status", get(get_task_control_status))
         .route("/api/task-control/pause", post(pause_scanning_endpoint))

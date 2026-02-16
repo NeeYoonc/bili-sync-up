@@ -637,8 +637,15 @@ export interface ConfigQueueInfo {
 export interface QueueStatusResponse {
 	is_scanning: boolean;
 	delete_queue: QueueInfo;
+	video_delete_queue: QueueInfo;
 	add_queue: QueueInfo;
 	config_queue: ConfigQueueInfo;
+}
+
+export interface CancelQueueTaskResponse {
+	success: boolean;
+	task_id: string;
+	message: string;
 }
 
 // 状态更新相关类型

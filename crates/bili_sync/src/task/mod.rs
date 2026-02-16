@@ -243,6 +243,38 @@ impl DeleteTaskQueue {
         queue.len()
     }
 
+    /// 获取当前内存队列任务快照
+    pub async fn list_tasks(&self) -> Vec<DeleteVideoSourceTask> {
+        let queue = self.queue.lock().await;
+        queue.iter().cloned().collect()
+    }
+
+    /// 取消待处理任务（仅支持还在内存等待队列中的任务）
+    pub async fn cancel_task(&self, task_id: &str, connection: &DatabaseConnection) -> Result<bool> {
+        let removed_task = {
+            let mut queue = self.queue.lock().await;
+            if let Some(index) = queue.iter().position(|task| task.task_id == task_id) {
+                queue.remove(index)
+            } else {
+                None
+            }
+        };
+
+        let Some(task) = removed_task else {
+            return Ok(false);
+        };
+
+        let task_data = serde_json::to_string(&task)?;
+        TaskQueueEntity::delete_many()
+            .filter(task_queue::Column::TaskType.eq(TaskType::DeleteVideoSource))
+            .filter(task_queue::Column::TaskData.eq(task_data))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .exec(connection)
+            .await?;
+
+        Ok(true)
+    }
+
     /// 检查是否正在处理删除任务
     pub fn is_processing(&self) -> bool {
         self.is_processing.load(Ordering::SeqCst)
@@ -472,6 +504,38 @@ impl VideoDeleteTaskQueue {
     pub async fn queue_length(&self) -> usize {
         let queue = self.queue.lock().await;
         queue.len()
+    }
+
+    /// 获取当前内存队列任务快照
+    pub async fn list_tasks(&self) -> Vec<DeleteVideoTask> {
+        let queue = self.queue.lock().await;
+        queue.iter().cloned().collect()
+    }
+
+    /// 取消待处理任务（仅支持还在内存等待队列中的任务）
+    pub async fn cancel_task(&self, task_id: &str, connection: &DatabaseConnection) -> Result<bool> {
+        let removed_task = {
+            let mut queue = self.queue.lock().await;
+            if let Some(index) = queue.iter().position(|task| task.task_id == task_id) {
+                queue.remove(index)
+            } else {
+                None
+            }
+        };
+
+        let Some(task) = removed_task else {
+            return Ok(false);
+        };
+
+        let task_data = serde_json::to_string(&task)?;
+        TaskQueueEntity::delete_many()
+            .filter(task_queue::Column::TaskType.eq(TaskType::DeleteVideo))
+            .filter(task_queue::Column::TaskData.eq(task_data))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .exec(connection)
+            .await?;
+
+        Ok(true)
     }
 
     /// 获取所有待删除的视频ID
@@ -983,6 +1047,38 @@ impl AddTaskQueue {
         queue.len()
     }
 
+    /// 获取当前内存队列任务快照
+    pub async fn list_tasks(&self) -> Vec<AddVideoSourceTask> {
+        let queue = self.queue.lock().await;
+        queue.iter().cloned().collect()
+    }
+
+    /// 取消待处理任务（仅支持还在内存等待队列中的任务）
+    pub async fn cancel_task(&self, task_id: &str, connection: &DatabaseConnection) -> Result<bool> {
+        let removed_task = {
+            let mut queue = self.queue.lock().await;
+            if let Some(index) = queue.iter().position(|task| task.task_id == task_id) {
+                queue.remove(index)
+            } else {
+                None
+            }
+        };
+
+        let Some(task) = removed_task else {
+            return Ok(false);
+        };
+
+        let task_data = serde_json::to_string(&task)?;
+        TaskQueueEntity::delete_many()
+            .filter(task_queue::Column::TaskType.eq(TaskType::AddVideoSource))
+            .filter(task_queue::Column::TaskData.eq(task_data))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .exec(connection)
+            .await?;
+
+        Ok(true)
+    }
+
     /// 检查是否正在处理添加任务
     pub fn is_processing(&self) -> bool {
         self.is_processing.load(Ordering::SeqCst)
@@ -1283,6 +1379,63 @@ impl ConfigTaskQueue {
     pub async fn reload_queue_length(&self) -> usize {
         let queue = self.reload_queue.lock().await;
         queue.len()
+    }
+
+    /// 获取更新配置任务快照
+    pub async fn list_update_tasks(&self) -> Vec<UpdateConfigTask> {
+        let queue = self.update_queue.lock().await;
+        queue.iter().cloned().collect()
+    }
+
+    /// 获取重载配置任务快照
+    pub async fn list_reload_tasks(&self) -> Vec<ReloadConfigTask> {
+        let queue = self.reload_queue.lock().await;
+        queue.iter().cloned().collect()
+    }
+
+    /// 取消待处理配置任务（仅支持还在内存等待队列中的任务）
+    pub async fn cancel_task(&self, task_id: &str, connection: &DatabaseConnection) -> Result<bool> {
+        let removed_update_task = {
+            let mut queue = self.update_queue.lock().await;
+            if let Some(index) = queue.iter().position(|task| task.task_id == task_id) {
+                queue.remove(index)
+            } else {
+                None
+            }
+        };
+
+        if let Some(task) = removed_update_task {
+            let task_data = serde_json::to_string(&task)?;
+            TaskQueueEntity::delete_many()
+                .filter(task_queue::Column::TaskType.eq(TaskType::UpdateConfig))
+                .filter(task_queue::Column::TaskData.eq(task_data))
+                .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+                .exec(connection)
+                .await?;
+            return Ok(true);
+        }
+
+        let removed_reload_task = {
+            let mut queue = self.reload_queue.lock().await;
+            if let Some(index) = queue.iter().position(|task| task.task_id == task_id) {
+                queue.remove(index)
+            } else {
+                None
+            }
+        };
+
+        if let Some(task) = removed_reload_task {
+            let task_data = serde_json::to_string(&task)?;
+            TaskQueueEntity::delete_many()
+                .filter(task_queue::Column::TaskType.eq(TaskType::ReloadConfig))
+                .filter(task_queue::Column::TaskData.eq(task_data))
+                .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+                .exec(connection)
+                .await?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     /// 检查是否正在处理配置任务
@@ -1830,6 +1983,27 @@ pub async fn enqueue_video_delete_task(task: DeleteVideoTask, connection: &Datab
 /// 处理所有视频删除任务的便捷函数
 pub async fn process_video_delete_tasks(db: Arc<DatabaseConnection>) -> Result<u32, anyhow::Error> {
     VIDEO_DELETE_TASK_QUEUE.process_all_tasks(db).await
+}
+
+/// 取消指定任务（仅支持待处理且仍在内存等待队列中的任务）
+pub async fn cancel_pending_task(task_id: &str, connection: &DatabaseConnection) -> Result<bool, anyhow::Error> {
+    if DELETE_TASK_QUEUE.cancel_task(task_id, connection).await? {
+        return Ok(true);
+    }
+
+    if VIDEO_DELETE_TASK_QUEUE.cancel_task(task_id, connection).await? {
+        return Ok(true);
+    }
+
+    if ADD_TASK_QUEUE.cancel_task(task_id, connection).await? {
+        return Ok(true);
+    }
+
+    if CONFIG_TASK_QUEUE.cancel_task(task_id, connection).await? {
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 /// 从数据库恢复待处理的任务到内存队列中
