@@ -19,12 +19,14 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { APP_VERSION } from '$lib/generated/app-version';
 	import { formatTimestamp } from '$lib/utils/timezone';
+	import { installGlossaryTooltips } from '$lib/utils/glossary-tooltip';
 
 	let dataLoaded = false;
 	let isAuthenticated = false;
 	let betaImageUpdateStatus: BetaImageUpdateStatusResponse | null = null;
 	let showVersionTooltip = false;
 	let versionBadgeContainer: HTMLDivElement | null = null;
+	let cleanupGlossaryTooltips: (() => void) | null = null;
 
 	// 退出登录
 	function handleLogout() {
@@ -179,6 +181,7 @@
 	onMount(async () => {
 		// 初始化主题
 		initTheme();
+		cleanupGlossaryTooltips = installGlossaryTooltips(document);
 		// 注册Service Worker更新处理
 		registerSWUpdateHandler();
 		await checkAuthStatus();
@@ -195,6 +198,8 @@
 
 	onDestroy(() => {
 		document.removeEventListener('click', handleDocumentClick);
+		cleanupGlossaryTooltips?.();
+		cleanupGlossaryTooltips = null;
 	});
 </script>
 
