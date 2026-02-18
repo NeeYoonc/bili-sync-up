@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::sea_query::{Alias, ColumnDef, Table};
 use sea_orm::{ConnectionTrait, DbConn};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 /// 番剧缓存数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ pub async fn ensure_cache_columns(db: &DbConn) -> Result<()> {
     // 如果字段已存在，跳过
     if let Some(count) = result {
         if count >= 2 {
-            info!("番剧缓存字段已存在，跳过创建");
+            debug!("番剧缓存字段已存在，跳过创建");
             return Ok(());
         }
     }

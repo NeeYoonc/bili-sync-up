@@ -420,7 +420,7 @@ impl HardwareFingerprint {
                 if let Ok(fingerprint_data) = serde_json::from_value::<serde_json::Value>(existing_config) {
                     // 尝试从JSON恢复硬件指纹
                     if let Ok(fingerprint) = Self::from_json(&fingerprint_data) {
-                        info!("成功从数据库加载用户 {} 的硬件指纹", user_id);
+                        debug!("成功从数据库加载用户 {} 的硬件指纹", user_id);
                         return Ok(fingerprint);
                     } else {
                         warn!("用户 {} 的硬件指纹数据格式错误，将生成新的", user_id);
@@ -498,7 +498,7 @@ impl HardwareFingerprint {
         }
 
         // 首次初始化：为新用户加载或生成指纹并设置全局状态
-        info!("为用户 {} 初始化硬件指纹", user_id);
+        debug!("为用户 {} 初始化硬件指纹", user_id);
         let fingerprint = Self::load_or_create_for_user(user_id, db, false).await?;
 
         // 设置全局指纹（只在首次设置时生效）

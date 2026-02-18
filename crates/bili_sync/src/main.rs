@@ -204,12 +204,12 @@ async fn init_hardware_fingerprint_for_user(connection: &sea_orm::DatabaseConnec
     let config_bundle = CONFIG_BUNDLE.load();
     if let Some(credential) = config_bundle.config.credential.load_full() {
         if let Ok(user_id) = credential.dedeuserid.parse::<i64>() {
-            info!("检测到用户ID: {}, 初始化硬件指纹", user_id);
+            debug!("检测到用户ID: {}, 初始化硬件指纹", user_id);
 
             // 初始化该用户的硬件指纹
             HardwareFingerprint::init_global_for_user(user_id, connection).await?;
 
-            info!("用户 {} 的硬件指纹初始化完成", user_id);
+            debug!("用户 {} 的硬件指纹初始化完成", user_id);
         } else {
             debug!("无效的用户ID格式: {}，跳过硬件指纹初始化", credential.dedeuserid);
             return Err(anyhow::anyhow!("无效的用户ID格式，等待用户登录"));

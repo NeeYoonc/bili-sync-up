@@ -248,7 +248,7 @@ impl ConfigManager {
 
     /// 确保配置表存在，如果不存在则创建
     pub async fn ensure_tables_exist(&self) -> Result<()> {
-        info!("检查配置表是否存在...");
+        debug!("检查配置表是否存在...");
 
         // 创建config_items表
         let create_config_items = "
@@ -278,7 +278,7 @@ impl ConfigManager {
             .await
             .context("创建config_changes表失败")?;
 
-        info!("配置表检查完成");
+        debug!("配置表检查完成");
         Ok(())
     }
 

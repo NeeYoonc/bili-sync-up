@@ -108,7 +108,7 @@ async fn ensure_lowercase_bucket_directory(upper_root: &Path, legacy_bucket: &st
 
     match fs::rename(&from, &temp).await {
         Ok(_) => match fs::rename(&temp, &to).await {
-            Ok(_) => info!("已统一UP头像分桶目录大小写: {:?} -> {:?}", from, to),
+            Ok(_) => debug!("已统一UP头像分桶目录大小写: {:?} -> {:?}", from, to),
             Err(e) => {
                 warn!("重命名UP头像分桶目录到小写失败: {:?} -> {:?}, 错误: {}", temp, to, e);
                 let _ = fs::rename(&temp, &from).await;

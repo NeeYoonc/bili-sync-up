@@ -246,30 +246,30 @@ pub static TEMPLATE: Lazy<handlebars::Handlebars<'static>> = Lazy::new(|| {
 
 /// 加载最小配置包（不进行配置检查，避免重复警告）
 fn load_minimal_config_bundle() -> ConfigBundle {
-    info!("开始加载配置包..");
+    debug!("开始加载配置包..");
 
     // 创建默认配置但不进行检查
     let config = Config::default();
     let bundle = ConfigBundle::from_config(config).expect("创建配置包失败");
-    info!("配置包加载完毕");
+    debug!("配置包加载完毕");
     bundle
 }
 
 /// 加载初始配置包（已弃用，由数据库配置系统取代）
 #[allow(dead_code)]
 fn load_initial_config_bundle() -> ConfigBundle {
-    info!("开始加载配置包..");
+    debug!("开始加载配置包..");
 
     // 初始加载时，配置管理器可能还没有设置，所以先从TOML加载
     let config = load_config();
     let bundle = ConfigBundle::from_config(config).expect("创建配置包失败");
-    info!("配置包加载完毕");
+    debug!("配置包加载完毕");
     bundle
 }
 
 /// 异步初始化配置系统（在数据库连接建立后调用）
 pub async fn init_config_with_database(db: sea_orm::DatabaseConnection) -> Result<()> {
-    info!("开始初始化数据库配置系统");
+    debug!("开始初始化数据库配置系统");
 
     // 创建配置管理器
     let manager = crate::config::ConfigManager::new(db);
@@ -303,22 +303,22 @@ pub async fn init_config_with_database(db: sea_orm::DatabaseConnection) -> Resul
     CONFIG_BUNDLE.store(Arc::new(new_bundle));
 
     // 配置检查已简化，因为配置现在完全基于数据库
-    info!("检查配置..");
+    debug!("检查配置..");
     #[cfg(not(test))]
     {
         let config = reload_config();
         if config.check() {
-            info!("配置检查通过");
+            debug!("配置检查通过");
         } else {
             info!("您可以访问管理页 http://{}/ 添加视频源", config.bind_address);
         }
     }
     #[cfg(test)]
     {
-        info!("配置检查通过（测试模式）");
+        debug!("配置检查通过（测试模式）");
     }
 
-    info!("数据库配置系统初始化完成");
+    debug!("数据库配置系统初始化完成");
     Ok(())
 }
 

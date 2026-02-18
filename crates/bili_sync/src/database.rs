@@ -80,7 +80,7 @@ async fn database_connection() -> Result<DatabaseConnection> {
 async fn migrate_database() -> Result<()> {
     // 检查数据库文件是否存在，不存在则会在连接时自动创建
     let db_path = CONFIG_DIR.join("data.sqlite");
-    info!("数据库文件路径: {}", db_path.display());
+    debug!("数据库文件路径: {}", db_path.display());
     if !db_path.exists() {
         debug!("数据库文件不存在，将创建新的数据库");
     } else {
@@ -109,7 +109,6 @@ async fn migrate_database() -> Result<()> {
 /// 确保 page 表有 ai_renamed 字段
 async fn ensure_ai_renamed_column(connection: &DatabaseConnection) -> Result<()> {
     use sea_orm::ConnectionTrait;
-    use tracing::info;
 
     let backend = connection.get_database_backend();
 
@@ -147,7 +146,6 @@ async fn ensure_ai_renamed_column(connection: &DatabaseConnection) -> Result<()>
 /// 预热数据库，将关键数据加载到内存映射中
 async fn preheat_database(connection: &DatabaseConnection) -> Result<()> {
     use sea_orm::ConnectionTrait;
-    use tracing::info;
 
     // 预热关键表，触发内存映射加载
     let tables = vec![
@@ -182,7 +180,7 @@ async fn preheat_database(connection: &DatabaseConnection) -> Result<()> {
         .execute_unprepared("SELECT * FROM page WHERE id > 0 LIMIT 1")
         .await;
 
-    info!("数据库预热完成，关键数据已加载到内存映射");
+    debug!("数据库预热完成，关键数据已加载到内存映射");
     Ok(())
 }
 
