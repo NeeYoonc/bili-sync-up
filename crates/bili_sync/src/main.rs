@@ -46,6 +46,11 @@ async fn main() -> Result<()> {
         warn!("数据库配置系统初始化失败: {}, 继续使用TOML配置", e);
     }
 
+    // 启动时自动统一 upper_face 分桶目录大小写（A-Z -> a-z），避免媒体库头像匹配异常
+    if let Err(e) = crate::workflow::migrate_upper_face_buckets_on_startup().await {
+        warn!("启动时执行 upper_face 分桶迁移失败: {}", e);
+    }
+
     // 初始化基于用户的硬件指纹系统
     if let Err(e) = init_hardware_fingerprint_for_user(&connection).await {
         debug!("硬件指纹初始化跳过: {}", e);

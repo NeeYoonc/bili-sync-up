@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use bili_sync_entity::*;
@@ -59,6 +59,238 @@ fn is_bili_request_failed_404(err: &anyhow::Error) -> bool {
             .downcast_ref::<BiliError>()
             .is_some_and(|e| matches!(e, BiliError::RequestFailed(-404, _)))
     })
+}
+
+fn normalize_upper_face_bucket(name: &str) -> String {
+    name.chars().next().unwrap_or('_').to_string().to_lowercase()
+}
+
+async fn ensure_lowercase_bucket_directory(upper_root: &Path, legacy_bucket: &str, normalized_bucket: &str) {
+    if legacy_bucket == normalized_bucket {
+        return;
+    }
+
+    let mut has_legacy_entry = false;
+    let mut has_normalized_entry = false;
+
+    if let Ok(mut entries) = fs::read_dir(upper_root).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Ok(file_type) = entry.file_type().await {
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let entry_name = entry.file_name().to_string_lossy().to_string();
+                if entry_name == legacy_bucket {
+                    has_legacy_entry = true;
+                } else if entry_name == normalized_bucket {
+                    has_normalized_entry = true;
+                }
+            }
+        }
+    }
+
+    if !(has_legacy_entry && !has_normalized_entry) {
+        return;
+    }
+
+    let from = upper_root.join(legacy_bucket);
+    let to = upper_root.join(normalized_bucket);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let temp = upper_root.join(format!(
+        ".casefix_{}_{}_{}",
+        normalized_bucket,
+        std::process::id(),
+        ts
+    ));
+
+    match fs::rename(&from, &temp).await {
+        Ok(_) => match fs::rename(&temp, &to).await {
+            Ok(_) => info!("已统一UP头像分桶目录大小写: {:?} -> {:?}", from, to),
+            Err(e) => {
+                warn!("重命名UP头像分桶目录到小写失败: {:?} -> {:?}, 错误: {}", temp, to, e);
+                let _ = fs::rename(&temp, &from).await;
+            }
+        },
+        Err(e) => {
+            warn!("重命名UP头像分桶目录临时路径失败: {:?} -> {:?}, 错误: {}", from, temp, e);
+        }
+    }
+}
+
+async fn migrate_legacy_upper_face_bucket(upper_root: &Path, name: &str) {
+    let legacy_bucket = name.chars().next().unwrap_or('_').to_string();
+    let normalized_bucket = legacy_bucket.to_lowercase();
+    if legacy_bucket == normalized_bucket {
+        return;
+    }
+
+    ensure_lowercase_bucket_directory(upper_root, &legacy_bucket, &normalized_bucket).await;
+
+    let legacy_dir = upper_root.join(&legacy_bucket).join(name);
+    let normalized_dir = upper_root.join(&normalized_bucket).join(name);
+
+    if fs::metadata(&legacy_dir).await.is_err() {
+        return;
+    }
+
+    if let Err(e) = fs::create_dir_all(&normalized_dir).await {
+        warn!(
+            "创建小写头像目录失败: {:?} -> {:?}, 错误: {}",
+            legacy_dir, normalized_dir, e
+        );
+        return;
+    }
+
+    for file_name in ["folder.jpg", "person.nfo"] {
+        let old_file = legacy_dir.join(file_name);
+        let new_file = normalized_dir.join(file_name);
+        let old_exists = fs::metadata(&old_file).await.is_ok();
+        let new_exists = fs::metadata(&new_file).await.is_ok();
+        if old_exists && !new_exists {
+            match fs::copy(&old_file, &new_file).await {
+                Ok(_) => info!(
+                    "已兼容迁移旧头像文件到小写目录: {:?} -> {:?}",
+                    old_file, new_file
+                ),
+                Err(e) => warn!(
+                    "兼容迁移旧头像文件失败: {:?} -> {:?}, 错误: {}",
+                    old_file, new_file, e
+                ),
+            }
+        }
+    }
+}
+
+fn is_single_ascii_upper_bucket(name: &str) -> bool {
+    let mut chars = name.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => c.is_ascii_uppercase(),
+        _ => false,
+    }
+}
+
+async fn merge_upper_face_bucket_dirs(legacy_bucket_dir: &Path, normalized_bucket_dir: &Path) {
+    let mut moved_count = 0u32;
+    let mut copied_count = 0u32;
+
+    let mut entries = match fs::read_dir(legacy_bucket_dir).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("读取旧头像分桶目录失败: {:?}, 错误: {}", legacy_bucket_dir, e);
+            return;
+        }
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Ok(file_type) = entry.file_type().await else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let legacy_person_dir = legacy_bucket_dir.join(&dir_name);
+        let normalized_person_dir = normalized_bucket_dir.join(&dir_name);
+
+        if fs::metadata(&normalized_person_dir).await.is_err() {
+            if let Err(e) = fs::rename(&legacy_person_dir, &normalized_person_dir).await {
+                warn!(
+                    "迁移头像目录失败: {:?} -> {:?}, 错误: {}",
+                    legacy_person_dir, normalized_person_dir, e
+                );
+                if let Err(e) = fs::create_dir_all(&normalized_person_dir).await {
+                    warn!("创建头像目录失败: {:?}, 错误: {}", normalized_person_dir, e);
+                    continue;
+                }
+                for file_name in ["folder.jpg", "person.nfo"] {
+                    let old_file = legacy_person_dir.join(file_name);
+                    let new_file = normalized_person_dir.join(file_name);
+                    if fs::metadata(&old_file).await.is_ok() && fs::metadata(&new_file).await.is_err() {
+                        match fs::copy(&old_file, &new_file).await {
+                            Ok(_) => copied_count += 1,
+                            Err(copy_err) => warn!(
+                                "复制旧头像文件失败: {:?} -> {:?}, 错误: {}",
+                                old_file, new_file, copy_err
+                            ),
+                        }
+                    }
+                }
+            } else {
+                moved_count += 1;
+            }
+        } else {
+            for file_name in ["folder.jpg", "person.nfo"] {
+                let old_file = legacy_person_dir.join(file_name);
+                let new_file = normalized_person_dir.join(file_name);
+                if fs::metadata(&old_file).await.is_ok() && fs::metadata(&new_file).await.is_err() {
+                    match fs::copy(&old_file, &new_file).await {
+                        Ok(_) => copied_count += 1,
+                        Err(copy_err) => warn!(
+                            "复制旧头像文件失败: {:?} -> {:?}, 错误: {}",
+                            old_file, new_file, copy_err
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    if moved_count > 0 || copied_count > 0 {
+        info!(
+            "已合并头像分桶目录: {:?} -> {:?}, 移动目录 {} 个, 复制文件 {} 个",
+            legacy_bucket_dir, normalized_bucket_dir, moved_count, copied_count
+        );
+    }
+
+    // 尝试清理空的旧分桶目录
+    if let Ok(mut remaining) = fs::read_dir(legacy_bucket_dir).await {
+        if let Ok(None) = remaining.next_entry().await {
+            if let Err(e) = fs::remove_dir(legacy_bucket_dir).await {
+                debug!("清理旧头像分桶目录失败: {:?}, 错误: {}", legacy_bucket_dir, e);
+            } else {
+                info!("已清理空的旧头像分桶目录: {:?}", legacy_bucket_dir);
+            }
+        }
+    }
+}
+
+pub async fn migrate_upper_face_buckets_on_startup() -> Result<()> {
+    let config = crate::config::reload_config();
+    let upper_root = config.upper_path;
+
+    if fs::metadata(&upper_root).await.is_err() {
+        return Ok(());
+    }
+
+    let mut bucket_names = Vec::new();
+    let mut entries = fs::read_dir(&upper_root).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if !entry.file_type().await?.is_dir() {
+            continue;
+        }
+        bucket_names.push(entry.file_name().to_string_lossy().to_string());
+    }
+
+    for legacy_bucket in bucket_names {
+        if !is_single_ascii_upper_bucket(&legacy_bucket) {
+            continue;
+        }
+        let normalized_bucket = legacy_bucket.to_lowercase();
+        ensure_lowercase_bucket_directory(&upper_root, &legacy_bucket, &normalized_bucket).await;
+
+        let legacy_bucket_dir = upper_root.join(&legacy_bucket);
+        if fs::metadata(&legacy_bucket_dir).await.is_err() {
+            continue;
+        }
+        let normalized_bucket_dir = upper_root.join(&normalized_bucket);
+        fs::create_dir_all(&normalized_bucket_dir).await?;
+        merge_upper_face_bucket_dirs(&legacy_bucket_dir, &normalized_bucket_dir).await;
+    }
+
+    Ok(())
 }
 
 fn is_submission_ugc_collection_video(video_source: &VideoSourceEnum, video_model: &video::Model) -> bool {
@@ -2775,7 +3007,11 @@ pub async fn download_video_pages(
         || current_config.collection_folder_mode.as_ref() == "up_seasonal";
     // 使用UP主昵称作为文件夹名，并使用首字进行分类
     let upper_name = crate::utils::filenamify::filenamify(&final_video_model.upper_name);
-    let first_char = upper_name.chars().next().context("upper_name is empty")?.to_string();
+    if upper_name.is_empty() {
+        return Err(anyhow!("upper_name is empty"));
+    }
+    migrate_legacy_upper_face_bucket(&current_config.upper_path, &upper_name).await;
+    let first_char = normalize_upper_face_bucket(&upper_name);
     let base_upper_path = &current_config.upper_path.join(&first_char).join(&upper_name);
     let is_single_page = final_video_model.single_page.context("single_page is null")?;
 
@@ -5708,7 +5944,8 @@ pub async fn fetch_staff_faces(
 
         // 构建staff成员的头像路径（类似主UP主的路径结构）
         let staff_name = crate::utils::filenamify::filenamify(&staff.name);
-        let first_char = staff_name.chars().next().unwrap_or('_').to_string();
+        migrate_legacy_upper_face_bucket(&current_config.upper_path, &staff_name).await;
+        let first_char = normalize_upper_face_bucket(&staff_name);
         let staff_upper_path = current_config.upper_path.join(&first_char).join(&staff_name);
         let staff_face_path = staff_upper_path.join("folder.jpg");
 
