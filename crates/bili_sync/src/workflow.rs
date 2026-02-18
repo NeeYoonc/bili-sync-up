@@ -682,6 +682,33 @@ pub async fn refresh_video_source<'a>(
         }
     }
 
+    // 投稿源：在同UP分季模式下，按年季度归一化映射，避免历史数据中同季度被拆成多个Season。
+    if let VideoSourceEnum::Submission(submission_source) = video_source {
+        let config = crate::config::reload_config();
+        if config.collection_folder_mode.as_ref() == "up_seasonal" {
+            let safe_upper_name = crate::utils::filenamify::filenamify(submission_source.upper_name.trim());
+            let up_dir_name = if safe_upper_name.is_empty() {
+                format!("UP_{}", submission_source.upper_id)
+            } else {
+                safe_upper_name
+            };
+            let grouped_base_path = Path::new(&submission_source.path)
+                .join(&up_dir_name)
+                .to_string_lossy()
+                .to_string();
+
+            if let Err(err) =
+                normalize_collection_season_mapping_group(connection, submission_source.upper_id, &grouped_base_path)
+                    .await
+            {
+                warn!(
+                    "投稿源季度映射归一化失败（upper_id={}, base_path='{}'）: {}",
+                    submission_source.upper_id, grouped_base_path, err
+                );
+            }
+        }
+    }
+
     video_source.log_refresh_video_end(count);
     debug!("workflow返回: count={}, new_videos.len()={}", count, new_videos.len());
     Ok((count, new_videos))
@@ -2278,6 +2305,44 @@ pub async fn download_video_pages(
         }
     }
 
+    // up_seasonal 下，投稿源普通多P（非合集/系列）也需要稳定的“集序”来避免同目录重名覆盖
+    if matches!(video_source, VideoSourceEnum::Submission(_))
+        && !final_video_model.single_page.unwrap_or(true)
+        && !is_submission_ugc_collection_video(video_source, &final_video_model)
+        && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"
+        && final_video_model.episode_number.is_none()
+    {
+        match get_submission_multipage_episode_number(connection, &final_video_model).await {
+            Ok(episode_number) => {
+                final_video_model.episode_number = Some(episode_number);
+                if let Err(e) = video::Entity::update(video::ActiveModel {
+                    id: Set(final_video_model.id),
+                    episode_number: Set(Some(episode_number)),
+                    ..Default::default()
+                })
+                .exec(connection)
+                .await
+                {
+                    warn!(
+                        "回填投稿多P集序失败: video_id={}, bvid={}, err={}",
+                        final_video_model.id, final_video_model.bvid, e
+                    );
+                } else {
+                    debug!(
+                        "回填投稿多P集序成功: video_id={}, bvid={}, episode_number={}",
+                        final_video_model.id, final_video_model.bvid, episode_number
+                    );
+                }
+            }
+            Err(e) => {
+                debug!(
+                    "计算投稿多P集序失败，将继续使用默认值: video_id={}, bvid={}, err={}",
+                    final_video_model.id, final_video_model.bvid, e
+                );
+            }
+        }
+    }
+
     // 投稿源中的UGC合集视频（有season_id）也按合集逻辑处理（仅路径/命名相关）
     let is_submission_collection_video = is_submission_ugc_collection_video(video_source, &final_video_model);
 
@@ -2558,8 +2623,9 @@ pub async fn download_video_pages(
             && !final_video_model.single_page.unwrap_or(true)
             && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"
         {
-            // 多P投稿也并入“同UP合集根目录”，保持目录风格一致：
-            // 源路径/UP主名/UP主名合集/<多P视频目录>/Season 01/...
+            // 多P投稿在 up_seasonal 下与合集/系列使用一致目录结构：
+            // 源路径/UP主名/UP主名合集/Season XX/...
+            // 不再为每个多P视频额外创建独立目录。
             let safe_upper_name = crate::utils::filenamify::filenamify(final_video_model.upper_name.trim());
             let up_dir_name = if safe_upper_name.is_empty() {
                 format!("UP_{}", final_video_model.upper_id)
@@ -2575,43 +2641,13 @@ pub async fn download_video_pages(
             };
             let up_collection_root = video_source_base_path.join(&up_dir_name).join(&up_collection_root_name);
 
-            // 渲染多P视频目录名；若模板包含路径分隔符，仅取最后一级，避免重复嵌套UP目录。
-            let rendered_folder_name = crate::config::with_config(|bundle| {
-                bundle.render_video_template(&video_format_args(&final_video_model))
-            })
-            .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?;
-            let base_folder_name = rendered_folder_name
-                .replace('\\', "/")
-                .split('/')
-                .filter(|seg| !seg.trim().is_empty())
-                .next_back()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| rendered_folder_name.clone());
-
-            let video_template = crate::config::with_config(|bundle| bundle.config.video_name.as_ref().to_string());
-            let needs_deduplication = video_template.contains("title")
-                || (video_template.contains("name") && !video_template.contains("upper_name"));
-
-            let multi_page_root = if needs_deduplication {
-                let unique_folder_name = generate_unique_folder_name(
-                    &up_collection_root,
-                    &base_folder_name,
-                    &final_video_model,
-                    &final_video_model.pubtime.format("%Y-%m-%d").to_string(),
-                );
-                up_collection_root.join(unique_folder_name)
-            } else {
-                up_collection_root.join(base_folder_name)
-            };
-
             debug!(
-                "多P投稿并入同UP合集目录 - UP主: '{}' ({}), 根目录: '{}', 多P目录: '{}'",
+                "多P投稿并入同UP合集目录（无独立视频目录） - UP主: '{}' ({}), 根目录: '{}'",
                 final_video_model.upper_name,
                 final_video_model.upper_id,
-                up_collection_root.display(),
-                multi_page_root.display()
+                up_collection_root.display()
             );
-            multi_page_root
+            up_collection_root
         } else {
             // 其他类型的视频源使用原来的逻辑
             let base_folder_name = crate::config::with_config(|bundle| {
@@ -2704,6 +2740,24 @@ pub async fn download_video_pages(
                     }
                     _ => "Season 01".to_string(),
                 }
+            } else if matches!(video_source, VideoSourceEnum::Submission(_))
+                && !is_single_page
+                && config.collection_folder_mode.as_ref() == "up_seasonal"
+            {
+                match video_source {
+                    VideoSourceEnum::Submission(submission_source) => {
+                        match get_submission_multipage_season_number(connection, submission_source, &final_video_model)
+                            .await
+                        {
+                            Ok(season_number) => format!("Season {:02}", season_number.max(1)),
+                            Err(err) => {
+                                warn!("计算投稿多P季度失败，回退为 Season 01: {}", err);
+                                "Season 01".to_string()
+                            }
+                        }
+                    }
+                    _ => "Season 01".to_string(),
+                }
             } else {
                 "Season 01".to_string()
             };
@@ -2730,8 +2784,27 @@ pub async fn download_video_pages(
         // 多P视频启用Season结构时，使用视频根目录的文件夹名作为系列级封面的文件名
         let config = crate::config::reload_config();
         if config.multi_page_use_season_structure && season_folder.is_some() {
-            // 从base_path获取视频根目录的文件夹名称
-            if let Some(parent) = base_path.parent() {
+            let is_up_seasonal_submission_multipage = matches!(video_source, VideoSourceEnum::Submission(_))
+                && !is_submission_collection_video
+                && config.collection_folder_mode.as_ref() == "up_seasonal";
+
+            if is_up_seasonal_submission_multipage {
+                // 同UP分季模式下，普通多P投稿也使用 SeasonXX 级别的封面命名，
+                // 避免在根目录生成「UP合集-thumb/fanart」这类冗余文件。
+                if let Some(season_folder_name) = season_folder.as_ref() {
+                    if let Some(raw_no) = season_folder_name.strip_prefix("Season ") {
+                        if let Ok(no) = raw_no.trim().parse::<i32>() {
+                            format!("Season{:02}", no.max(1))
+                        } else {
+                            "Season01".to_string()
+                        }
+                    } else {
+                        "Season01".to_string()
+                    }
+                } else {
+                    "Season01".to_string()
+                }
+            } else if let Some(parent) = base_path.parent() {
                 if let Some(folder_name) = parent.file_name() {
                     folder_name.to_string_lossy().to_string()
                 } else {
@@ -2932,21 +3005,33 @@ pub async fn download_video_pages(
     };
 
     // 合集/多P Season结构下，若目录级元数据缺失，允许本轮任意分集补齐。
-    let should_backfill_collection_root_assets =
-        if !disable_tvshow_assets && season_folder.is_some() && is_collection && collection_use_season_structure {
-            let root_dir = base_path.parent().unwrap_or(&base_path);
-            !root_dir.join("tvshow.nfo").exists()
-                || !root_dir.join("poster.jpg").exists()
-                || !root_dir.join("folder.jpg").exists()
-        } else {
-            false
-        };
-    let should_backfill_collection_season_nfo =
-        if !disable_tvshow_assets && season_folder.is_some() && is_collection && collection_use_season_structure {
-            !base_path.join("season.nfo").exists()
-        } else {
-            false
-        };
+    let should_backfill_collection_root_assets = if !disable_tvshow_assets
+        && season_folder.is_some()
+        && ((is_collection && collection_use_season_structure)
+            || (matches!(video_source, VideoSourceEnum::Submission(_))
+                && !is_submission_collection_video
+                && !is_single_page
+                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"))
+    {
+        let root_dir = base_path.parent().unwrap_or(&base_path);
+        !root_dir.join("tvshow.nfo").exists()
+            || !root_dir.join("poster.jpg").exists()
+            || !root_dir.join("folder.jpg").exists()
+    } else {
+        false
+    };
+    let should_backfill_collection_season_nfo = if !disable_tvshow_assets
+        && season_folder.is_some()
+        && ((is_collection && collection_use_season_structure)
+            || (matches!(video_source, VideoSourceEnum::Submission(_))
+                && !is_submission_collection_video
+                && !is_single_page
+                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"))
+    {
+        !base_path.join("season.nfo").exists()
+    } else {
+        false
+    };
 
     // 先处理NFO生成（独立执行，避免tokio::join!类型问题）
     let nfo_result = if is_bangumi && season_info.is_some() {
@@ -2965,7 +3050,12 @@ pub async fn download_video_pages(
         let should_generate_nfo = if is_bangumi {
             // 番剧：只有在文件不存在时才生成，放在番剧文件夹根目录
             separate_status[2] && bangumi_folder_path.is_some() && should_download_bangumi_nfo
-        } else if is_collection {
+        } else if is_collection
+            || (matches!(video_source, VideoSourceEnum::Submission(_))
+                && !is_submission_collection_video
+                && !is_single_page
+                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal")
+        {
             // 合集：只有第一个视频时生成tvshow.nfo
             if !disable_tvshow_assets && separate_status[2] && collection_use_season_structure {
                 // 检查是否为第一个视频
@@ -2987,6 +3077,11 @@ pub async fn download_video_pages(
                             || should_backfill_collection_root_assets
                             || should_backfill_collection_season_nfo
                     }
+                    VideoSourceEnum::Submission(_) => {
+                        final_video_model.episode_number.unwrap_or(0) == 1
+                            || should_backfill_collection_root_assets
+                            || should_backfill_collection_season_nfo
+                    }
                     _ => false,
                 }
             } else {
@@ -2997,7 +3092,13 @@ pub async fn download_video_pages(
             separate_status[2] && !is_single_page && !disable_tvshow_assets
         };
 
-        if should_generate_nfo && is_collection {
+        if should_generate_nfo
+            && (is_collection
+                || (matches!(video_source, VideoSourceEnum::Submission(_))
+                    && !is_submission_collection_video
+                    && !is_single_page
+                    && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"))
+        {
             // 合集：使用带合集信息的NFO生成（第一个视频时）
             let nfo_fixed_root_name = {
                 let cfg = crate::config::reload_config();
@@ -3072,19 +3173,62 @@ pub async fn download_video_pages(
 
                     (name, cover, description)
                 }
+                VideoSourceEnum::Submission(_) => {
+                    let name = nfo_fixed_root_name.clone().or_else(|| {
+                        base_path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .map(|s| s.to_string_lossy().to_string())
+                            .filter(|s| !s.trim().is_empty())
+                    });
+                    (name, None, None)
+                }
                 _ => (None, None, None),
             };
 
-            let nfo_stats = match get_collection_nfo_stats(connection, video_source, &final_video_model).await {
-                Ok(stats) => stats,
-                Err(err) => {
-                    warn!("计算合集NFO统计信息失败，回退默认值: {}", err);
-                    CollectionNfoStats {
-                        total_seasons: 1,
-                        total_episodes: 1,
-                        season_total_episodes: 1,
+            let current_nfo_season_number = season_folder
+                .as_deref()
+                .and_then(extract_season_number_from_path)
+                .or_else(|| extract_season_number_from_path(&base_path.to_string_lossy()))
+                .unwrap_or(1)
+                .max(1);
+
+            let nfo_stats = match video_source {
+                VideoSourceEnum::Submission(submission_source)
+                    if !is_submission_collection_video
+                        && !is_single_page
+                        && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal" =>
+                {
+                    match get_submission_up_seasonal_nfo_stats(
+                        connection,
+                        submission_source,
+                        &final_video_model,
+                        current_nfo_season_number,
+                    )
+                    .await
+                    {
+                        Ok(stats) => stats,
+                        Err(err) => {
+                            warn!("计算投稿多P合集化NFO统计信息失败，回退默认值: {}", err);
+                            CollectionNfoStats {
+                                total_seasons: 1,
+                                total_episodes: 1,
+                                season_total_episodes: 1,
+                            }
+                        }
                     }
                 }
+                _ => match get_collection_nfo_stats(connection, video_source, &final_video_model).await {
+                    Ok(stats) => stats,
+                    Err(err) => {
+                        warn!("计算合集NFO统计信息失败，回退默认值: {}", err);
+                        CollectionNfoStats {
+                            total_seasons: 1,
+                            total_episodes: 1,
+                            season_total_episodes: 1,
+                        }
+                    }
+                },
             };
 
             generate_collection_video_nfo(
@@ -3122,12 +3266,7 @@ pub async fn download_video_pages(
                         base_path.join(format!("{}.nfo", video_base_name))
                     }
                 },
-                season_folder
-                    .as_deref()
-                    .and_then(extract_season_number_from_path)
-                    .or_else(|| extract_season_number_from_path(&base_path.to_string_lossy()))
-                    .unwrap_or(1)
-                    .max(1),
+                current_nfo_season_number,
                 Some(nfo_stats.total_seasons),
                 Some(nfo_stats.total_episodes),
                 Some(nfo_stats.season_total_episodes),
@@ -3176,6 +3315,11 @@ pub async fn download_video_pages(
                         // 普通视频nfo放在视频文件夹
                         base_path.join(format!("{}.nfo", video_base_name))
                     }
+                },
+                if !is_single_page {
+                    Some(pages.len() as i32)
+                } else {
+                    None
                 },
             )
             .await
@@ -4226,6 +4370,10 @@ pub async fn download_page(
         _ => false,
     };
     let is_submission_collection_video = is_submission_ugc_collection_video(video_source, video_model);
+    let is_submission_up_seasonal_multipage = matches!(video_source, VideoSourceEnum::Submission(_))
+        && !is_submission_collection_video
+        && !is_single_page
+        && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal";
     if matches!(video_source, VideoSourceEnum::Submission(_)) {
         debug!(
             "分页下载投稿合集判定: bvid={}, is_submission_collection_video={}, source_submission_id={:?}, season_id={:?}",
@@ -4235,14 +4383,16 @@ pub async fn download_page(
             video_model.season_id
         );
     }
-    let collection_season_number =
-        if matches!(video_source, VideoSourceEnum::Collection(_)) || is_submission_collection_video {
-            extract_season_number_from_path(&base_path.to_string_lossy())
-                .unwrap_or(1)
-                .max(1)
-        } else {
-            1
-        };
+    let collection_season_number = if matches!(video_source, VideoSourceEnum::Collection(_))
+        || is_submission_collection_video
+        || is_submission_up_seasonal_multipage
+    {
+        extract_season_number_from_path(&base_path.to_string_lossy())
+            .unwrap_or(1)
+            .max(1)
+    } else {
+        1
+    };
 
     // 根据视频源类型选择不同的模板渲染方式
     let base_name = if let VideoSourceEnum::Collection(collection_source) = video_source {
@@ -4396,6 +4546,30 @@ pub async fn download_page(
             })
             .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?
         }
+    } else if matches!(video_source, VideoSourceEnum::Submission(_))
+        && !is_submission_collection_video
+        && !is_single_page
+        && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"
+    {
+        // up_seasonal 下的普通多P投稿统一进入合集目录时，采用 SxxExxxPxx 命名避免重名覆盖
+        let season_number = extract_season_number_from_path(&base_path.to_string_lossy())
+            .unwrap_or(1)
+            .max(1);
+        let episode_number = video_model.episode_number.unwrap_or(1).max(1);
+        let page_number = page_model.pid.max(1);
+        let clean_video_name = crate::utils::filenamify::filenamify(video_model.name.trim());
+        let clean_page_name = crate::utils::filenamify::filenamify(page_model.name.trim());
+        if clean_page_name.is_empty() {
+            format!(
+                "S{:02}E{:03}P{:02} - {}",
+                season_number, episode_number, page_number, clean_video_name
+            )
+        } else {
+            format!(
+                "S{:02}E{:03}P{:02} - {} - {}",
+                season_number, episode_number, page_number, clean_video_name, clean_page_name
+            )
+        }
     } else if !is_single_page {
         // 对于多P视频（非番剧），使用最新配置中的multi_page_name模板
         let page_args = page_format_args(video_model, &page_model);
@@ -4541,7 +4715,10 @@ pub async fn download_page(
             &page_model,
             nfo_path,
             connection,
-            if matches!(video_source, VideoSourceEnum::Collection(_)) {
+            if matches!(video_source, VideoSourceEnum::Collection(_))
+                || is_submission_collection_video
+                || is_submission_up_seasonal_multipage
+            {
                 Some(collection_season_number)
             } else {
                 None
@@ -5293,7 +5470,7 @@ pub async fn generate_page_nfo(
     let nfo = match video_model.single_page {
         Some(single_page) => {
             if single_page {
-                if is_bangumi || video_model.collection_id.is_some() {
+                if is_bangumi || video_model.collection_id.is_some() || season_number_override.is_some() {
                     // 番剧单页或合集视频应使用Episode格式，符合Emby标准
                     use crate::utils::nfo::Episode;
                     let mut episode = Episode::from_video_and_page(video_model, page_model);
@@ -5308,6 +5485,20 @@ pub async fn generate_page_nfo(
                             {
                                 episode.episode_number = ep_no;
                             }
+                        }
+                    } else if video_model.collection_id.is_none()
+                        && video_model.source_submission_id.is_some()
+                        && video_model
+                            .season_id
+                            .as_deref()
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false)
+                        && video_model.episode_number.is_none()
+                    {
+                        if let Ok(ep_no) =
+                            get_submission_collection_video_episode_number(_connection, video_model).await
+                        {
+                            episode.episode_number = ep_no;
                         }
                     }
                     NFO::Episode(episode)
@@ -5628,11 +5819,17 @@ pub async fn generate_video_nfo(
     should_run: bool,
     video_model: &video::Model,
     nfo_path: PathBuf,
+    total_episodes: Option<i32>,
 ) -> Result<ExecutionStatus> {
     if !should_run {
         return Ok(ExecutionStatus::Skipped);
     }
-    generate_nfo(NFO::TVShow(video_model.into()), nfo_path).await?;
+    let mut tvshow: crate::utils::nfo::TVShow = video_model.into();
+    if let Some(total) = total_episodes {
+        tvshow.total_episodes = Some(total.max(1));
+        tvshow.total_seasons = Some(1);
+    }
+    generate_nfo(NFO::TVShow(tvshow), nfo_path).await?;
     Ok(ExecutionStatus::Succeeded)
 }
 
@@ -6697,6 +6894,203 @@ async fn get_submission_collection_video_episode_number(
     Ok(count.max(1))
 }
 
+async fn get_submission_multipage_episode_number(
+    connection: &DatabaseConnection,
+    video_model: &video::Model,
+) -> Result<i32> {
+    use sea_orm::*;
+
+    let source_submission_id = video_model
+        .source_submission_id
+        .context("投稿多P缺少source_submission_id")?;
+
+    let pubtime_text = video_model.pubtime.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let row = connection
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT COUNT(*)
+            FROM video
+            WHERE source_submission_id = ?
+              AND deleted = 0
+              AND (single_page = 0 OR single_page IS NULL)
+              AND (season_id IS NULL OR TRIM(season_id) = '')
+              AND (
+                    pubtime < ?
+                    OR (pubtime = ? AND id <= ?)
+                  )
+            "#,
+            vec![
+                source_submission_id.into(),
+                pubtime_text.clone().into(),
+                pubtime_text.into(),
+                video_model.id.into(),
+            ],
+        ))
+        .await?;
+
+    let count = row
+        .and_then(|r| r.try_get_by_index::<i64>(0).ok())
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(0);
+
+    Ok(count.max(1))
+}
+
+async fn get_submission_multipage_season_number(
+    connection: &DatabaseConnection,
+    submission_source: &bili_sync_entity::submission::Model,
+    video_model: &video::Model,
+) -> Result<i32> {
+    use sea_orm::*;
+
+    let source_submission_id = video_model
+        .source_submission_id
+        .context("投稿多P缺少source_submission_id")?;
+
+    let up_mid = submission_source.upper_id;
+    let up_dir_name = {
+        let safe_upper_name = crate::utils::filenamify::filenamify(video_model.upper_name.trim());
+        if safe_upper_name.is_empty() {
+            format!("UP_{}", up_mid)
+        } else {
+            safe_upper_name
+        }
+    };
+    let base_path = Path::new(&submission_source.path)
+        .join(&up_dir_name)
+        .to_string_lossy()
+        .to_string();
+
+    let reference_pubtime = video_model.pubtime;
+    let pub_year = reference_pubtime.year();
+    let pub_quarter = ((reference_pubtime.month0() / 3) + 1) as i32;
+    let mapping_key = format!(
+        "submission_multipage_{}_{}Q{}",
+        source_submission_id, pub_year, pub_quarter
+    );
+    let mapping_collection_id = derive_collection_mapping_key(&mapping_key);
+
+    normalize_collection_season_mapping_group(connection, up_mid, &base_path).await?;
+
+    // 1) 已有映射且关键字段一致则直接复用
+    let mapping_row = connection
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT season_id, up_mid, base_path, pub_year, pub_quarter
+            FROM collection_season_mapping
+            WHERE collection_id = ?
+            LIMIT 1
+            "#,
+            vec![mapping_collection_id.into()],
+        ))
+        .await?;
+
+    if let Some(row) = mapping_row {
+        let mapped_season_id = row
+            .try_get_by_index::<i64>(0)
+            .ok()
+            .and_then(|v| i32::try_from(v).ok())
+            .filter(|v| *v > 0);
+        let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
+        let mapped_base_path = row.try_get_by_index::<String>(2).ok();
+        let mapped_year = row.try_get_by_index::<i32>(3).ok();
+        let mapped_quarter = row.try_get_by_index::<i32>(4).ok();
+
+        if mapped_season_id.is_some()
+            && mapped_up_mid == Some(up_mid)
+            && mapped_base_path.as_deref() == Some(base_path.as_str())
+            && mapped_year == Some(pub_year)
+            && mapped_quarter == Some(pub_quarter)
+        {
+            return Ok(mapped_season_id.unwrap());
+        }
+    }
+
+    // 2) 同UP+同路径+同季度复用既有季号
+    let same_quarter_row = connection
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT season_id
+            FROM collection_season_mapping
+            WHERE up_mid = ? AND base_path = ? AND pub_year = ? AND pub_quarter = ?
+            ORDER BY id ASC
+            LIMIT 1
+            "#,
+            vec![
+                up_mid.into(),
+                base_path.clone().into(),
+                pub_year.into(),
+                pub_quarter.into(),
+            ],
+        ))
+        .await?;
+
+    let season_number = if let Some(row) = same_quarter_row {
+        row.try_get_by_index::<i64>(0)
+            .ok()
+            .and_then(|v| i32::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(1)
+    } else {
+        // 3) 否则分配下一个季号
+        let max_row = connection
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                r#"
+                SELECT COALESCE(MAX(season_id), 0)
+                FROM collection_season_mapping
+                WHERE up_mid = ? AND base_path = ?
+                "#,
+                vec![up_mid.into(), base_path.clone().into()],
+            ))
+            .await?;
+
+        let max_season = max_row
+            .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(0);
+        (max_season + 1).max(1)
+    };
+
+    let reference_pubtime_text = reference_pubtime.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // 4) 写回映射，保持稳定
+    connection
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            INSERT INTO collection_season_mapping (
+                collection_id, up_mid, base_path, pub_year, pub_quarter, season_id, reference_pubtime, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(collection_id) DO UPDATE SET
+                up_mid = excluded.up_mid,
+                base_path = excluded.base_path,
+                pub_year = excluded.pub_year,
+                pub_quarter = excluded.pub_quarter,
+                season_id = excluded.season_id,
+                reference_pubtime = excluded.reference_pubtime,
+                updated_at = CURRENT_TIMESTAMP
+            "#,
+            vec![
+                mapping_collection_id.into(),
+                up_mid.into(),
+                base_path.into(),
+                pub_year.into(),
+                pub_quarter.into(),
+                season_number.into(),
+                reference_pubtime_text.into(),
+            ],
+        ))
+        .await?;
+
+    Ok(season_number)
+}
+
 fn derive_collection_mapping_key(raw_collection_id: &str) -> i32 {
     if let Ok(id) = raw_collection_id.parse::<i32>() {
         if id > 0 {
@@ -6837,7 +7231,7 @@ async fn get_collection_nfo_stats(
                 let total_seasons = query_count_i32(
                     connection,
                     r#"
-                    SELECT COUNT(*)
+                    SELECT COUNT(DISTINCT season_id)
                     FROM collection_season_mapping
                     WHERE up_mid = ? AND base_path = ?
                     "#,
@@ -6954,7 +7348,7 @@ async fn get_collection_nfo_stats(
                 query_count_i32(
                     connection,
                     r#"
-                    SELECT COUNT(*)
+                    SELECT COUNT(DISTINCT season_id)
                     FROM collection_season_mapping
                     WHERE up_mid = ? AND base_path = ?
                     "#,
@@ -6988,6 +7382,144 @@ async fn get_collection_nfo_stats(
             season_total_episodes: 1,
         }),
     }
+}
+
+async fn get_submission_up_seasonal_nfo_stats(
+    connection: &DatabaseConnection,
+    submission_source: &submission::Model,
+    video_model: &video::Model,
+    current_season_number: i32,
+) -> Result<CollectionNfoStats> {
+    use sea_orm::*;
+
+    let up_dir_name = {
+        let safe_upper_name = crate::utils::filenamify::filenamify(video_model.upper_name.trim());
+        if safe_upper_name.is_empty() {
+            format!("UP_{}", submission_source.upper_id)
+        } else {
+            safe_upper_name
+        }
+    };
+    let grouped_base_path = Path::new(&submission_source.path)
+        .join(&up_dir_name)
+        .to_string_lossy()
+        .to_string();
+
+    let total_seasons = query_count_i32(
+        connection,
+        r#"
+        SELECT COUNT(DISTINCT season_id)
+        FROM collection_season_mapping
+        WHERE up_mid = ? AND base_path = ?
+        "#,
+        vec![submission_source.upper_id.into(), grouped_base_path.clone().into()],
+    )
+    .await?;
+
+    let mapping_rows = connection
+        .query_all(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT collection_id, season_id
+            FROM collection_season_mapping
+            WHERE up_mid = ? AND base_path = ?
+            "#,
+            vec![submission_source.upper_id.into(), grouped_base_path.clone().into()],
+        ))
+        .await?;
+
+    let mut season_map: HashMap<i32, i32> = HashMap::new();
+    for row in mapping_rows {
+        let key = row
+            .try_get_by_index::<i64>(0)
+            .ok()
+            .and_then(|v| i32::try_from(v).ok())
+            .filter(|v| *v > 0);
+        let season = row
+            .try_get_by_index::<i64>(1)
+            .ok()
+            .and_then(|v| i32::try_from(v).ok())
+            .filter(|v| *v > 0);
+        if let (Some(key), Some(season)) = (key, season) {
+            season_map.insert(key, season);
+        }
+    }
+
+    let rows = connection
+        .query_all(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT v.id, v.season_id, v.single_page, v.pubtime, COUNT(p.id)
+            FROM video v
+            LEFT JOIN page p ON p.video_id = v.id
+            WHERE v.source_submission_id = ?
+              AND v.deleted = 0
+              AND (
+                    (v.season_id IS NOT NULL AND TRIM(v.season_id) != '')
+                    OR (v.single_page = 0 OR v.single_page IS NULL)
+                  )
+            GROUP BY v.id, v.season_id, v.single_page, v.pubtime
+            "#,
+            vec![submission_source.id.into()],
+        ))
+        .await?;
+
+    let mut total_episodes = 0i32;
+    let mut season_total_episodes = 0i32;
+    let target_season = current_season_number.max(1);
+
+    for row in rows {
+        let season_id_text = row.try_get_by_index::<String>(1).ok();
+        let single_page = row
+            .try_get_by_index::<bool>(2)
+            .ok()
+            .or_else(|| row.try_get_by_index::<i64>(2).ok().map(|v| v != 0))
+            .unwrap_or(true);
+        let pubtime_text = row
+            .try_get_by_index::<String>(3)
+            .ok()
+            .unwrap_or_else(|| video_model.pubtime.format("%Y-%m-%d %H:%M:%S").to_string());
+        let page_count = row
+            .try_get_by_index::<i64>(4)
+            .ok()
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(0)
+            .max(1);
+
+        let mapped_season_number =
+            if let Some(season_id) = season_id_text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let key = derive_collection_mapping_key(season_id);
+                season_map.get(&key).copied()
+            } else if !single_page {
+                let pubtime = parse_time_string(&pubtime_text).unwrap_or(video_model.pubtime);
+                let quarter = ((pubtime.month0() / 3) + 1) as i32;
+                let key = derive_collection_mapping_key(&format!(
+                    "submission_multipage_{}_{}Q{}",
+                    submission_source.id,
+                    pubtime.year(),
+                    quarter
+                ));
+                season_map.get(&key).copied()
+            } else {
+                None
+            };
+
+        let Some(mapped_season_number) = mapped_season_number else {
+            continue;
+        };
+
+        let episode_count = if single_page { 1 } else { page_count };
+        total_episodes += episode_count;
+        if mapped_season_number == target_season {
+            season_total_episodes += episode_count;
+        }
+    }
+
+    Ok(CollectionNfoStats {
+        total_seasons: total_seasons.max(1),
+        total_episodes: total_episodes.max(1),
+        season_total_episodes: season_total_episodes.max(1),
+    })
 }
 
 /// 读取投稿UP主在「合集/系列」中的完整视频归属，用于回填缺失season_id。
@@ -7113,7 +7645,7 @@ async fn normalize_collection_season_mapping_group(
         .query_all(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             r#"
-            SELECT id, season_id
+            SELECT id, pub_year, pub_quarter, season_id
             FROM collection_season_mapping
             WHERE up_mid = ? AND base_path = ?
             ORDER BY pub_year ASC, pub_quarter ASC, reference_pubtime ASC, id ASC
@@ -7127,15 +7659,28 @@ async fn normalize_collection_season_mapping_group(
     }
 
     let mut changed = 0usize;
-    let mut expected: i32 = 1;
+    let mut expected_by_quarter: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut next_expected: i32 = 1;
 
     for row in rows {
         let id = row.try_get_by_index::<i64>(0).ok().filter(|v| *v > 0);
+        let year = row.try_get_by_index::<i32>(1).unwrap_or(0);
+        let quarter = row.try_get_by_index::<i32>(2).unwrap_or(0);
         let current = row
-            .try_get_by_index::<i64>(1)
+            .try_get_by_index::<i64>(3)
             .ok()
             .and_then(|v| i32::try_from(v).ok())
-            .unwrap_or(expected);
+            .unwrap_or(next_expected.max(1));
+
+        let key = (year, quarter);
+        let expected = if let Some(value) = expected_by_quarter.get(&key).copied() {
+            value
+        } else {
+            let value = next_expected.max(1);
+            expected_by_quarter.insert(key, value);
+            next_expected = value + 1;
+            value
+        };
 
         if let Some(id) = id {
             if current != expected {
@@ -7153,13 +7698,15 @@ async fn normalize_collection_season_mapping_group(
                 changed += 1;
             }
         }
-        expected += 1;
     }
 
     if changed > 0 {
         info!(
-            "已规范季度映射顺序: up_mid={}, base_path='{}', 修正 {} 条映射为从 Season 01 连续编号",
-            up_mid, base_path, changed
+            "已规范季度映射顺序: up_mid={}, base_path='{}', 修正 {} 条映射，当前共 {} 个季度",
+            up_mid,
+            base_path,
+            changed,
+            expected_by_quarter.len()
         );
     }
 
@@ -7193,7 +7740,22 @@ async fn get_submission_source_season_number(
         .join(&up_dir_name)
         .to_string_lossy()
         .to_string();
-    let reference_pubtime = video_model.pubtime;
+    let reference_pubtime = connection
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT MIN(pubtime)
+            FROM video
+            WHERE source_submission_id = ?
+              AND season_id = ?
+              AND deleted = 0
+            "#,
+            vec![submission_source.id.into(), season_id_str.to_string().into()],
+        ))
+        .await?
+        .and_then(|row| row.try_get_by_index::<String>(0).ok())
+        .and_then(|s| parse_time_string(&s))
+        .unwrap_or(video_model.pubtime);
     let pub_year = reference_pubtime.year();
     let pub_quarter = ((reference_pubtime.month0() / 3) + 1) as i32;
 
@@ -7221,14 +7783,10 @@ async fn get_submission_source_season_number(
             .filter(|v| *v > 0);
         let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
         let mapped_base_path = row.try_get_by_index::<String>(2).ok();
-        let mapped_year = row.try_get_by_index::<i32>(3).ok();
-        let mapped_quarter = row.try_get_by_index::<i32>(4).ok();
 
         if mapped_season_id.is_some()
             && mapped_up_mid == Some(up_mid)
             && mapped_base_path.as_deref() == Some(base_path.as_str())
-            && mapped_year == Some(pub_year)
-            && mapped_quarter == Some(pub_quarter)
         {
             return Ok(mapped_season_id.unwrap());
         }
@@ -7304,7 +7862,7 @@ async fn get_submission_source_season_number(
             vec![
                 mapping_collection_id.into(),
                 up_mid.into(),
-                base_path.into(),
+                base_path.clone().into(),
                 pub_year.into(),
                 pub_quarter.into(),
                 season_number.into(),
@@ -7313,7 +7871,26 @@ async fn get_submission_source_season_number(
         ))
         .await?;
 
-    Ok(season_number)
+    normalize_collection_season_mapping_group(connection, up_mid, &base_path).await?;
+
+    let final_season_number = connection
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT season_id
+            FROM collection_season_mapping
+            WHERE collection_id = ?
+            LIMIT 1
+            "#,
+            vec![mapping_collection_id.into()],
+        ))
+        .await?
+        .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+        .and_then(|v| i32::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(season_number.max(1));
+
+    Ok(final_season_number)
 }
 
 async fn get_collection_source_season_number(
@@ -7375,14 +7952,10 @@ async fn get_collection_source_season_number(
             .filter(|v| *v > 0);
         let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
         let mapped_base_path = row.try_get_by_index::<String>(2).ok();
-        let mapped_year = row.try_get_by_index::<i32>(3).ok();
-        let mapped_quarter = row.try_get_by_index::<i32>(4).ok();
 
         if mapped_season_id.is_some()
             && mapped_up_mid == Some(collection_source.m_id)
             && mapped_base_path.as_deref() == Some(grouped_base_path.as_str())
-            && mapped_year == Some(pub_year)
-            && mapped_quarter == Some(pub_quarter)
         {
             return Ok(mapped_season_id.unwrap());
         }
@@ -7458,7 +8031,7 @@ async fn get_collection_source_season_number(
             vec![
                 collection_source.id.into(),
                 collection_source.m_id.into(),
-                grouped_base_path.into(),
+                grouped_base_path.clone().into(),
                 pub_year.into(),
                 pub_quarter.into(),
                 season_id.into(),
@@ -7467,7 +8040,26 @@ async fn get_collection_source_season_number(
         ))
         .await?;
 
-    Ok(season_id)
+    normalize_collection_season_mapping_group(connection, collection_source.m_id, &grouped_base_path).await?;
+
+    let final_season_id = connection
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT season_id
+            FROM collection_season_mapping
+            WHERE collection_id = ?
+            LIMIT 1
+            "#,
+            vec![collection_source.id.into()],
+        ))
+        .await?
+        .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+        .and_then(|v| i32::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(season_id.max(1));
+
+    Ok(final_season_id)
 }
 
 async fn get_collection_video_episode_number(

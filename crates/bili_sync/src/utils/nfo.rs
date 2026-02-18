@@ -1009,18 +1009,24 @@ impl NFO<'_> {
                     .write_text_content_async(BytesText::new(&episode.episode_number.to_string()))
                     .await?;
 
-                // 唯一标识符
+                // 唯一标识符：
+                // - 多P场景使用 "BVID-pPID" 作为分集级唯一标识，避免同一BVID下多个分P冲突
+                // - 兜底回退到 pid
                 let unique_id =
                     if episode.bvid.starts_with("BV") && episode.bvid.len() > 10 && episode.bvid != "BV0000000000" {
-                        episode.bvid
+                        if !episode.pid.is_empty() && episode.pid != "0" {
+                            format!("{}-p{}", episode.bvid, episode.pid)
+                        } else {
+                            episode.bvid.to_string()
+                        }
                     } else {
-                        &episode.pid
+                        episode.pid.clone()
                     };
                 writer
                     .create_element("uniqueid")
                     .with_attribute(("type", "bilibili"))
                     .with_attribute(("default", "true"))
-                    .write_text_content_async(BytesText::new(unique_id))
+                    .write_text_content_async(BytesText::new(&unique_id))
                     .await?;
 
                 // 类型标签
