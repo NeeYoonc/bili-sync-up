@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use axum::extract::{Extension, Json, Path, Query};
 use chrono::{DateTime, Datelike, Utc};
+use html_escape::decode_html_entities;
 
 use crate::http::headers::{create_api_headers, create_image_headers};
 use crate::utils::time_format::{now_standard_string, to_standard_string};
@@ -5418,6 +5419,32 @@ fn is_plain_submission_search_keyword(pattern: &str) -> bool {
     !pattern.chars().any(|c| REGEX_META_CHARS.contains(&c))
 }
 
+fn strip_html_tags(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result
+}
+
+fn normalize_submission_search_text(input: &str) -> String {
+    let stripped = strip_html_tags(input);
+    let decoded = decode_html_entities(&stripped).to_string();
+
+    decoded
+        .replace(['－', '—', '–', '―', '‐', '﹣'], "-")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 async fn collect_submission_bvids_by_whitelist_keywords(
     upper_id: i64,
     whitelist_keywords: &[String],
@@ -5430,6 +5457,10 @@ async fn collect_submission_bvids_by_whitelist_keywords(
     for raw_keyword in whitelist_keywords {
         let keyword = raw_keyword.trim();
         if keyword.is_empty() {
+            continue;
+        }
+        let normalized_keyword = normalize_submission_search_text(keyword);
+        if normalized_keyword.is_empty() {
             continue;
         }
 
@@ -5454,6 +5485,14 @@ async fn collect_submission_bvids_by_whitelist_keywords(
 
             for video in videos {
                 let bvid = video.bvid.trim();
+                let normalized_title = normalize_submission_search_text(&video.title);
+                if !normalized_title.contains(&normalized_keyword) {
+                    debug!(
+                        "白名单关键词二次匹配未命中，跳过: up_id={}, keyword={}, title={}, bvid={}",
+                        upper_id, keyword, video.title, video.bvid
+                    );
+                    continue;
+                }
                 if !bvid.is_empty() {
                     bvid_set.insert(bvid.to_string());
                 }
@@ -13812,42 +13851,56 @@ pub async fn update_video_source_keyword_filters(
 
     if let Some((submission_record, whitelist_keywords, has_complex_regex)) = submission_whitelist_backfill_job {
         if whitelist_keywords.iter().any(|k| !k.trim().is_empty()) {
-            match backfill_submission_by_whitelist_keywords(db.as_ref(), &submission_record, &whitelist_keywords).await
-            {
-                Ok(stats) => {
-                    if has_complex_regex && stats.skipped_regex_keywords > 0 {
-                        result.message.push_str(&format!(
-                            "；复杂正则 {} 个已交由全量扫描处理",
-                            stats.skipped_regex_keywords
-                        ));
+            result
+                .message
+                .push_str("；白名单精准补抓已转为后台执行，可继续前端操作");
+
+            let db_for_backfill = Arc::clone(&db);
+            tokio::spawn(async move {
+                match backfill_submission_by_whitelist_keywords(
+                    db_for_backfill.as_ref(),
+                    &submission_record,
+                    &whitelist_keywords,
+                )
+                .await
+                {
+                    Ok(stats) => {
+                        if has_complex_regex && stats.skipped_regex_keywords > 0 {
+                            info!(
+                                "UP主 {} 白名单精准补抓完成：复杂正则 {} 个已交由全量扫描处理",
+                                submission_record.upper_name, stats.skipped_regex_keywords
+                            );
+                        }
+                        info!(
+                            "UP主 {} 白名单精准补抓完成：关键词 {} 个（可搜索 {} 个，正则/复杂模式 {} 个），命中视频 {} 个：新增入队 {} 个，恢复已删 {} 个，已存在 {} 个，非当前UP {} 个，失败 {} 个",
+                            submission_record.upper_name,
+                            stats.total_keywords,
+                            stats.searched_keywords,
+                            stats.skipped_regex_keywords,
+                            stats.matched_bvids,
+                            stats.backfill.queued_new,
+                            stats.backfill.restored_deleted,
+                            stats.backfill.already_exists,
+                            stats.backfill.skipped_non_owner,
+                            stats.backfill.failed
+                        );
                     }
-                    result.message.push_str(&format!(
-                        "；关键词 {} 个（可搜索 {} 个，正则/复杂模式 {} 个），命中视频 {} 个：新增入队 {} 个，恢复已删 {} 个，已存在 {} 个，非当前UP {} 个，失败 {} 个",
-                        stats.total_keywords,
-                        stats.searched_keywords,
-                        stats.skipped_regex_keywords,
-                        stats.matched_bvids,
-                        stats.backfill.queued_new,
-                        stats.backfill.restored_deleted,
-                        stats.backfill.already_exists,
-                        stats.backfill.skipped_non_owner,
-                        stats.backfill.failed
-                    ));
-                    info!(
-                        "UP主 {} 白名单精准补抓完成：命中 {} 个BV，新增入队 {} 个",
-                        submission_record.upper_name, stats.matched_bvids, stats.backfill.queued_new
-                    );
-                }
-                Err(err) => {
-                    warn!("UP主 {} 白名单精准补抓失败: {}", submission_record.upper_name, err);
-                    result.message.push_str(&format!("；白名单精准补抓失败（{}）", err));
-                    if has_complex_regex {
-                        result.message.push_str("；复杂正则仍会通过全量扫描重匹配");
-                    } else {
-                        result.message.push_str("；后续仅执行常规增量扫描");
+                    Err(err) => {
+                        warn!("UP主 {} 白名单精准补抓失败: {}", submission_record.upper_name, err);
+                        if has_complex_regex {
+                            warn!(
+                                "UP主 {} 白名单包含复杂正则，后续仍会通过全量扫描重匹配",
+                                submission_record.upper_name
+                            );
+                        } else {
+                            warn!(
+                                "UP主 {} 白名单补抓失败，后续仅执行常规增量扫描",
+                                submission_record.upper_name
+                            );
+                        }
                     }
                 }
-            }
+            });
         } else {
             result.message.push_str("；白名单已清空，不执行历史精准补抓");
         }

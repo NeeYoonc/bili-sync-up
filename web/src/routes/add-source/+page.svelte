@@ -4355,8 +4355,8 @@
 													class="hover:bg-muted relative rounded-lg border p-4 transition-all duration-300 hover:shadow-md {selectedSubmissionVideos.has(
 														video.bvid
 													)
-														? 'border-blue-300 bg-blue-50'
-														: 'border-gray-200'} {isMobile ? 'h-auto' : 'h-[100px]'}"
+														? 'border-blue-300 bg-blue-50 dark:border-blue-600 dark:bg-blue-950'
+														: 'border-gray-200 dark:border-gray-700'} {isMobile ? 'h-auto' : 'h-[100px]'}"
 												>
 													<div class="flex h-full gap-3">
 														<div class="relative flex-shrink-0">
@@ -4375,7 +4375,7 @@
 																class="absolute top-1 right-1 z-10 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 dark:text-blue-400"
 															/>
 															<h4
-																class="mb-1 line-clamp-2 flex-shrink-0 pr-6 text-sm font-medium text-gray-900"
+																class="text-foreground mb-1 line-clamp-2 flex-shrink-0 pr-6 text-sm font-medium"
 															>
 																{video.title}
 															</h4>

@@ -573,7 +573,10 @@
 										/>
 									</div>
 									<div class="mt-2">
-										<h4 class="line-clamp-2 text-xs leading-tight font-medium" title={video.title}>
+										<h4
+											class="text-foreground line-clamp-2 text-xs leading-tight font-medium"
+											title={video.title}
+										>
 											{video.title}
 										</h4>
 										<div class="text-muted-foreground mt-1 flex items-center gap-1 text-[10px]">
