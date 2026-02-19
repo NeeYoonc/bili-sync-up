@@ -313,6 +313,46 @@ async fn count_all_video_sources(
     Ok(total_count)
 }
 
+/// 统计所有“已启用”视频源数量（不区分是否因自适应策略被暂缓）
+async fn count_enabled_video_sources(
+    connection: &Arc<DatabaseConnection>,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let mut total_count = 0usize;
+
+    let collections_count = entities::collection::Entity::find()
+        .filter(entities::collection::Column::Enabled.eq(true))
+        .count(connection.as_ref())
+        .await?;
+    total_count += collections_count as usize;
+
+    let favorites_count = entities::favorite::Entity::find()
+        .filter(entities::favorite::Column::Enabled.eq(true))
+        .count(connection.as_ref())
+        .await?;
+    total_count += favorites_count as usize;
+
+    let submissions_count = entities::submission::Entity::find()
+        .filter(entities::submission::Column::Enabled.eq(true))
+        .count(connection.as_ref())
+        .await?;
+    total_count += submissions_count as usize;
+
+    let watch_later_count = entities::watch_later::Entity::find()
+        .filter(entities::watch_later::Column::Enabled.eq(true))
+        .count(connection.as_ref())
+        .await?;
+    total_count += watch_later_count as usize;
+
+    let bangumi_count = entities::video_source::Entity::find()
+        .filter(entities::video_source::Column::Type.eq(1))
+        .filter(entities::video_source::Column::Enabled.eq(true))
+        .count(connection.as_ref())
+        .await?;
+    total_count += bangumi_count as usize;
+
+    Ok(total_count)
+}
+
 /// 初始化所有视频源的辅助函数
 async fn init_all_sources(
     config: &Config,
@@ -414,21 +454,29 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             }
         };
 
-        let enabled_sources_count = enabled_sources.len();
-        let disabled_sources_count = total_sources_count.saturating_sub(enabled_sources_count);
+        let due_sources_count = enabled_sources.len();
+        let enabled_sources_total = match count_enabled_video_sources(&optimized_connection).await {
+            Ok(count) => count,
+            Err(e) => {
+                warn!("统计启用视频源数量失败: {}", e);
+                due_sources_count
+            }
+        };
+        let deferred_sources_count = enabled_sources_total.saturating_sub(due_sources_count);
+        let disabled_sources_count = total_sources_count.saturating_sub(enabled_sources_total);
 
-        if disabled_sources_count > 0 {
+        if deferred_sources_count > 0 || disabled_sources_count > 0 {
             info!(
-                "开始执行本轮视频下载任务，共 {} 个视频源（启用: {}，禁用: {}）",
-                total_sources_count, enabled_sources_count, disabled_sources_count
+                "开始执行本轮视频下载任务，共 {} 个视频源（启用: {}，暂缓: {}，禁用: {}）",
+                total_sources_count, due_sources_count, deferred_sources_count, disabled_sources_count
             );
         } else {
-            info!("开始执行本轮视频下载任务，共 {} 个启用的视频源", enabled_sources_count);
+            info!("开始执行本轮视频下载任务，共 {} 个启用的视频源", due_sources_count);
         }
 
         'inner: {
             // 如果没有启用的视频源，跳过扫描
-            if enabled_sources_count == 0 {
+            if due_sources_count == 0 {
                 debug!("没有启用的视频源，跳过本轮扫描");
                 break 'inner;
             }
