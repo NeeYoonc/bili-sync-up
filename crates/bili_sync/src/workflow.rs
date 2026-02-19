@@ -99,12 +99,7 @@ async fn ensure_lowercase_bucket_directory(upper_root: &Path, legacy_bucket: &st
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let temp = upper_root.join(format!(
-        ".casefix_{}_{}_{}",
-        normalized_bucket,
-        std::process::id(),
-        ts
-    ));
+    let temp = upper_root.join(format!(".casefix_{}_{}_{}", normalized_bucket, std::process::id(), ts));
 
     match fs::rename(&from, &temp).await {
         Ok(_) => match fs::rename(&temp, &to).await {
@@ -115,7 +110,10 @@ async fn ensure_lowercase_bucket_directory(upper_root: &Path, legacy_bucket: &st
             }
         },
         Err(e) => {
-            warn!("重命名UP头像分桶目录临时路径失败: {:?} -> {:?}, 错误: {}", from, temp, e);
+            warn!(
+                "重命名UP头像分桶目录临时路径失败: {:?} -> {:?}, 错误: {}",
+                from, temp, e
+            );
         }
     }
 }
@@ -151,14 +149,8 @@ async fn migrate_legacy_upper_face_bucket(upper_root: &Path, name: &str) {
         let new_exists = fs::metadata(&new_file).await.is_ok();
         if old_exists && !new_exists {
             match fs::copy(&old_file, &new_file).await {
-                Ok(_) => info!(
-                    "已兼容迁移旧头像文件到小写目录: {:?} -> {:?}",
-                    old_file, new_file
-                ),
-                Err(e) => warn!(
-                    "兼容迁移旧头像文件失败: {:?} -> {:?}, 错误: {}",
-                    old_file, new_file, e
-                ),
+                Ok(_) => info!("已兼容迁移旧头像文件到小写目录: {:?} -> {:?}", old_file, new_file),
+                Err(e) => warn!("兼容迁移旧头像文件失败: {:?} -> {:?}, 错误: {}", old_file, new_file, e),
             }
         }
     }

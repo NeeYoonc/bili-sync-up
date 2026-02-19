@@ -5243,27 +5243,47 @@ pub async fn update_submission_selected_videos(
         .await?
         .ok_or_else(|| anyhow!("未找到指定的UP主投稿"))?;
 
-    let selected_count = params.selected_videos.len();
+    let mut incoming_selected_videos = params.selected_videos.clone();
+    incoming_selected_videos.sort();
+    incoming_selected_videos.dedup();
+    let selected_count = incoming_selected_videos.len();
+
+    let mut current_selected_videos = submission_record
+        .selected_videos
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .unwrap_or_default();
+    current_selected_videos.sort();
+    current_selected_videos.dedup();
+    let selection_changed = incoming_selected_videos != current_selected_videos;
 
     // 将选中的视频列表序列化为JSON字符串存储
     let selected_videos_json = if selected_count > 0 {
-        Some(serde_json::to_string(&params.selected_videos).unwrap_or_default())
+        Some(serde_json::to_string(&incoming_selected_videos).unwrap_or_default())
     } else {
         None
     };
 
-    // 更新数据库
-    submission::Entity::update(submission::ActiveModel {
+    let mut update_model = submission::ActiveModel {
         id: sea_orm::ActiveValue::Unchanged(id),
         selected_videos: sea_orm::Set(selected_videos_json),
         ..Default::default()
-    })
-    .exec(&txn)
-    .await?;
+    };
+
+    if selection_changed {
+        // 历史投稿选择发生变化后，必须重置增量游标，否则仅增量扫描会错过旧视频
+        update_model.latest_row_at = sea_orm::Set("1970-01-01 00:00:00".to_string());
+        // 清空自适应扫描节流，让下一轮可立即重扫
+        update_model.next_scan_at = sea_orm::Set(None);
+        update_model.no_update_streak = sea_orm::Set(0);
+    }
+
+    // 更新数据库
+    submission::Entity::update(update_model).exec(&txn).await?;
 
     txn.commit().await?;
 
-    let message = if selected_count > 0 {
+    let mut message = if selected_count > 0 {
         format!(
             "UP主投稿 {} 的历史投稿选择已更新，选中 {} 个视频",
             submission_record.upper_name, selected_count
@@ -5274,6 +5294,10 @@ pub async fn update_submission_selected_videos(
             submission_record.upper_name
         )
     };
+
+    if selection_changed {
+        message.push_str("；已重置历史扫描游标，下轮扫描会重新匹配历史投稿");
+    }
 
     info!("{}", message);
 
@@ -13312,7 +13336,13 @@ pub async fn update_video_source_keyword_filters(
                 .await?
                 .ok_or_else(|| anyhow!("未找到指定的UP主投稿"))?;
 
-            submission::Entity::update(submission::ActiveModel {
+            let filters_changed = record.blacklist_keywords != blacklist_json
+                || record.whitelist_keywords != whitelist_json
+                || record.keyword_filters != keyword_filters_json
+                || record.keyword_filter_mode != keyword_filter_mode
+                || record.keyword_case_sensitive != case_sensitive;
+
+            let mut update_model = submission::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
                 blacklist_keywords: sea_orm::Set(blacklist_json),
                 whitelist_keywords: sea_orm::Set(whitelist_json),
@@ -13320,9 +13350,16 @@ pub async fn update_video_source_keyword_filters(
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode.clone()),
                 keyword_case_sensitive: sea_orm::Set(case_sensitive),
                 ..Default::default()
-            })
-            .exec(&txn)
-            .await?;
+            };
+
+            if filters_changed {
+                // 过滤规则变更后需要重新评估历史投稿，否则增量扫描不会回看旧视频
+                update_model.latest_row_at = sea_orm::Set("1970-01-01 00:00:00".to_string());
+                update_model.next_scan_at = sea_orm::Set(None);
+                update_model.no_update_streak = sea_orm::Set(0);
+            }
+
+            submission::Entity::update(update_model).exec(&txn).await?;
 
             crate::api::response::UpdateKeywordFiltersResponse {
                 success: true,
