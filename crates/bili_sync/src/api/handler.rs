@@ -16,7 +16,7 @@ use sea_orm::{
     QueryOrder, QuerySelect, Set, TransactionTrait, Unchanged,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
@@ -3317,7 +3317,6 @@ pub async fn update_video_source_enabled_internal(
 ) -> Result<crate::api::response::UpdateVideoSourceEnabledResponse, ApiError> {
     // 使用主数据库连接
     let txn = db.begin().await?;
-
     let result = match source_type.as_str() {
         "collection" => {
             let collection = collection::Entity::find_by_id(id)
@@ -5218,6 +5217,297 @@ pub async fn update_video_source_download_options_internal(
     Ok(result)
 }
 
+#[derive(Debug, Default)]
+struct SubmissionSelectedBackfillStats {
+    requested: usize,
+    queued_new: usize,
+    restored_deleted: usize,
+    already_exists: usize,
+    skipped_non_owner: usize,
+    failed: usize,
+}
+
+async fn fetch_submission_video_info_by_bvid(
+    bili_client: &crate::bilibili::BiliClient,
+    bvid: &str,
+) -> Result<(crate::bilibili::VideoInfo, i64)> {
+    let mut response = bili_client
+        .request(reqwest::Method::GET, "https://api.bilibili.com/x/web-interface/view")
+        .await
+        .query(&[("bvid", bvid)])
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+
+    let code = response["code"].as_i64().unwrap_or(-1);
+    if code != 0 {
+        let message = response["message"].as_str().unwrap_or("unknown error");
+        return Err(anyhow!(
+            "视频详情接口返回错误(code={}): bvid={}, message={}",
+            code,
+            bvid,
+            message
+        ));
+    }
+
+    let detail = serde_json::from_value::<crate::bilibili::VideoInfo>(response["data"].take())
+        .with_context(|| format!("解析视频详情失败: bvid={}", bvid))?;
+
+    match detail {
+        crate::bilibili::VideoInfo::Detail {
+            title,
+            bvid,
+            intro,
+            cover,
+            upper,
+            ctime,
+            ugc_season,
+            ..
+        } => Ok((
+            crate::bilibili::VideoInfo::Submission {
+                title,
+                bvid,
+                intro,
+                cover,
+                ctime,
+                season_id: ugc_season.and_then(|season| season.id),
+            },
+            upper.mid,
+        )),
+        _ => Err(anyhow!("视频详情结构异常，无法用于投稿回补: bvid={}", bvid)),
+    }
+}
+
+async fn backfill_submission_selected_videos(
+    db: &DatabaseConnection,
+    submission_record: &submission::Model,
+    selected_bvids: &[String],
+) -> Result<SubmissionSelectedBackfillStats> {
+    let mut stats = SubmissionSelectedBackfillStats::default();
+    if selected_bvids.is_empty() {
+        return Ok(stats);
+    }
+
+    let mut normalized_bvids: Vec<String> = selected_bvids
+        .iter()
+        .map(|bvid| bvid.trim().to_string())
+        .filter(|bvid| !bvid.is_empty())
+        .collect();
+    normalized_bvids.sort();
+    normalized_bvids.dedup();
+    stats.requested = normalized_bvids.len();
+
+    if normalized_bvids.is_empty() {
+        return Ok(stats);
+    }
+
+    let existing_models = video::Entity::find()
+        .filter(video::Column::SubmissionId.eq(submission_record.id))
+        .filter(video::Column::Bvid.is_in(normalized_bvids.clone()))
+        .all(db)
+        .await?;
+    let existing_map: HashMap<String, video::Model> = existing_models
+        .into_iter()
+        .map(|model| (model.bvid.clone(), model))
+        .collect();
+
+    let bili_client = crate::bilibili::BiliClient::new(String::new());
+    let source_enum = crate::adapter::VideoSourceEnum::Submission(submission_record.clone());
+    let mut videos_to_create: Vec<crate::bilibili::VideoInfo> = Vec::new();
+    let mut pending_insert_bvids: Vec<String> = Vec::new();
+
+    for bvid in normalized_bvids {
+        if let Some(existing_video) = existing_map.get(&bvid) {
+            if existing_video.deleted != 0 {
+                video::Entity::update(video::ActiveModel {
+                    id: Unchanged(existing_video.id),
+                    deleted: Set(0),
+                    download_status: Set(0),
+                    path: Set(String::new()),
+                    single_page: Set(None),
+                    auto_download: Set(true),
+                    cid: Set(None),
+                    ..Default::default()
+                })
+                .exec(db)
+                .await?;
+
+                page::Entity::delete_many()
+                    .filter(page::Column::VideoId.eq(existing_video.id))
+                    .exec(db)
+                    .await?;
+
+                stats.restored_deleted += 1;
+                info!(
+                    "历史投稿精准回补：恢复已删除视频 {} ({})，将重新进入详情与下载流程",
+                    existing_video.name, existing_video.bvid
+                );
+            } else {
+                if !existing_video.auto_download {
+                    video::Entity::update(video::ActiveModel {
+                        id: Unchanged(existing_video.id),
+                        auto_download: Set(true),
+                        ..Default::default()
+                    })
+                    .exec(db)
+                    .await?;
+                }
+                stats.already_exists += 1;
+            }
+            continue;
+        }
+
+        match fetch_submission_video_info_by_bvid(&bili_client, &bvid).await {
+            Ok((video_info, owner_mid)) => {
+                if owner_mid != submission_record.upper_id {
+                    stats.skipped_non_owner += 1;
+                    warn!(
+                        "历史投稿精准回补跳过：{} 不属于当前UP主 {}（owner_mid={}）",
+                        bvid, submission_record.upper_name, owner_mid
+                    );
+                    continue;
+                }
+                videos_to_create.push(video_info);
+                pending_insert_bvids.push(bvid.clone());
+            }
+            Err(err) => {
+                stats.failed += 1;
+                warn!("历史投稿精准回补失败：{} -> {}", bvid, err);
+            }
+        }
+    }
+
+    if !videos_to_create.is_empty() {
+        crate::utils::model::create_videos(videos_to_create, &source_enum, db).await?;
+        let queued_count = video::Entity::find()
+            .filter(video::Column::SubmissionId.eq(submission_record.id))
+            .filter(video::Column::Bvid.is_in(pending_insert_bvids.clone()))
+            .filter(video::Column::Deleted.eq(0))
+            .count(db)
+            .await? as usize;
+        stats.queued_new = queued_count;
+
+        let skipped_after_backfill = pending_insert_bvids.len().saturating_sub(queued_count);
+        if skipped_after_backfill > 0 {
+            warn!(
+                "历史投稿精准回补：{} 个视频未成功入队（可能被关键词过滤或选择条件限制）",
+                skipped_after_backfill
+            );
+        }
+    }
+
+    Ok(stats)
+}
+
+#[derive(Debug, Default)]
+struct SubmissionWhitelistBackfillStats {
+    total_keywords: usize,
+    searched_keywords: usize,
+    skipped_regex_keywords: usize,
+    matched_bvids: usize,
+    backfill: SubmissionSelectedBackfillStats,
+}
+
+fn is_plain_submission_search_keyword(pattern: &str) -> bool {
+    // B站搜索接口不支持正则；包含正则元字符时按“无法精准搜索”处理
+    const REGEX_META_CHARS: [char; 15] = [
+        '\\', '^', '$', '.', '|', '?', '*', '+', '(', ')', '[', ']', '{', '}', '#',
+    ];
+    !pattern.chars().any(|c| REGEX_META_CHARS.contains(&c))
+}
+
+async fn collect_submission_bvids_by_whitelist_keywords(
+    upper_id: i64,
+    whitelist_keywords: &[String],
+) -> Result<(Vec<String>, usize, usize)> {
+    let bili_client = crate::bilibili::BiliClient::new(String::new());
+    let mut bvid_set: HashSet<String> = HashSet::new();
+    let mut searched_keywords = 0usize;
+    let mut skipped_regex_keywords = 0usize;
+
+    for raw_keyword in whitelist_keywords {
+        let keyword = raw_keyword.trim();
+        if keyword.is_empty() {
+            continue;
+        }
+
+        if !is_plain_submission_search_keyword(keyword) {
+            skipped_regex_keywords += 1;
+            continue;
+        }
+
+        searched_keywords += 1;
+        let mut page = 1i32;
+        let page_size = 50i32;
+
+        loop {
+            let (videos, total) = bili_client
+                .search_user_submission_videos(upper_id, keyword, page, page_size)
+                .await
+                .with_context(|| format!("白名单关键词搜索失败: up_id={}, keyword={}", upper_id, keyword))?;
+
+            if videos.is_empty() {
+                break;
+            }
+
+            for video in videos {
+                let bvid = video.bvid.trim();
+                if !bvid.is_empty() {
+                    bvid_set.insert(bvid.to_string());
+                }
+            }
+
+            if (page as i64) * (page_size as i64) >= total {
+                break;
+            }
+
+            page += 1;
+            if page > 200 {
+                warn!(
+                    "白名单关键词搜索达到分页上限，提前停止: up_id={}, keyword={}",
+                    upper_id, keyword
+                );
+                break;
+            }
+        }
+    }
+
+    let mut bvids: Vec<String> = bvid_set.into_iter().collect();
+    bvids.sort();
+    Ok((bvids, searched_keywords, skipped_regex_keywords))
+}
+
+async fn backfill_submission_by_whitelist_keywords(
+    db: &DatabaseConnection,
+    submission_record: &submission::Model,
+    whitelist_keywords: &[String],
+) -> Result<SubmissionWhitelistBackfillStats> {
+    let mut stats = SubmissionWhitelistBackfillStats::default();
+    stats.total_keywords = whitelist_keywords
+        .iter()
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+        .count();
+
+    if stats.total_keywords == 0 {
+        return Ok(stats);
+    }
+
+    let (bvids, searched_keywords, skipped_regex_keywords) =
+        collect_submission_bvids_by_whitelist_keywords(submission_record.upper_id, whitelist_keywords).await?;
+    stats.searched_keywords = searched_keywords;
+    stats.skipped_regex_keywords = skipped_regex_keywords;
+    stats.matched_bvids = bvids.len();
+
+    if !bvids.is_empty() {
+        stats.backfill = backfill_submission_selected_videos(db, submission_record, &bvids).await?;
+    }
+
+    Ok(stats)
+}
+
 /// 更新投稿源选中视频列表
 #[utoipa::path(
     put,
@@ -5256,6 +5546,10 @@ pub async fn update_submission_selected_videos(
     current_selected_videos.sort();
     current_selected_videos.dedup();
     let selection_changed = incoming_selected_videos != current_selected_videos;
+    let incoming_set: HashSet<String> = incoming_selected_videos.iter().cloned().collect();
+    let current_set: HashSet<String> = current_selected_videos.iter().cloned().collect();
+    let mut newly_selected_videos: Vec<String> = incoming_set.difference(&current_set).cloned().collect();
+    newly_selected_videos.sort();
 
     // 将选中的视频列表序列化为JSON字符串存储
     let selected_videos_json = if selected_count > 0 {
@@ -5271,9 +5565,7 @@ pub async fn update_submission_selected_videos(
     };
 
     if selection_changed {
-        // 历史投稿选择发生变化后，必须重置增量游标，否则仅增量扫描会错过旧视频
-        update_model.latest_row_at = sea_orm::Set("1970-01-01 00:00:00".to_string());
-        // 清空自适应扫描节流，让下一轮可立即重扫
+        // 选择变化后清空自适应扫描节流，让下一轮可立即执行增量扫描
         update_model.next_scan_at = sea_orm::Set(None);
         update_model.no_update_streak = sea_orm::Set(0);
     }
@@ -5282,6 +5574,30 @@ pub async fn update_submission_selected_videos(
     submission::Entity::update(update_model).exec(&txn).await?;
 
     txn.commit().await?;
+
+    let mut backfill_stats = None;
+    let mut backfill_error = None;
+    if selection_changed && !newly_selected_videos.is_empty() {
+        // 回补必须使用“更新后的选择集”，否则新增 BV 可能被旧选择集误过滤
+        let mut updated_submission_record = submission_record.clone();
+        updated_submission_record.selected_videos = if selected_count > 0 {
+            Some(serde_json::to_string(&incoming_selected_videos).unwrap_or_default())
+        } else {
+            None
+        };
+
+        match backfill_submission_selected_videos(db.as_ref(), &updated_submission_record, &newly_selected_videos).await
+        {
+            Ok(stats) => backfill_stats = Some(stats),
+            Err(err) => {
+                warn!(
+                    "UP主投稿 {} 历史选择精准回补失败，将仅保留增量扫描: {}",
+                    submission_record.upper_name, err
+                );
+                backfill_error = Some(err.to_string());
+            }
+        }
+    }
 
     let mut message = if selected_count > 0 {
         format!(
@@ -5296,7 +5612,23 @@ pub async fn update_submission_selected_videos(
     };
 
     if selection_changed {
-        message.push_str("；已重置历史扫描游标，下轮扫描会重新匹配历史投稿");
+        message.push_str("；历史选择改为按BV精准回补，不再触发全量扫描");
+    }
+
+    if let Some(stats) = backfill_stats {
+        message.push_str(&format!(
+            "；本次新增选择 {} 个：新增入队 {} 个，恢复已删 {} 个，已存在 {} 个，非当前UP {} 个，失败 {} 个",
+            stats.requested,
+            stats.queued_new,
+            stats.restored_deleted,
+            stats.already_exists,
+            stats.skipped_non_owner,
+            stats.failed
+        ));
+    }
+
+    if let Some(err) = backfill_error {
+        message.push_str(&format!("；精准回补失败（{}），请稍后重试或手动重置该源", err));
     }
 
     info!("{}", message);
@@ -13241,6 +13573,7 @@ pub async fn update_video_source_keyword_filters(
     }
 
     let txn = db.begin().await?;
+    let mut submission_whitelist_backfill_job: Option<(submission::Model, Vec<String>, bool)> = None;
 
     // 处理黑名单
     let blacklist_count = params.blacklist_keywords.as_ref().map(|v| v.len()).unwrap_or(0);
@@ -13269,7 +13602,7 @@ pub async fn update_video_source_keyword_filters(
     // 处理大小写敏感设置
     let case_sensitive = params.case_sensitive.unwrap_or(true);
 
-    let result = match source_type.as_str() {
+    let mut result = match source_type.as_str() {
         "collection" => {
             let record = collection::Entity::find_by_id(id)
                 .one(&txn)
@@ -13336,6 +13669,18 @@ pub async fn update_video_source_keyword_filters(
                 .await?
                 .ok_or_else(|| anyhow!("未找到指定的UP主投稿"))?;
 
+            let whitelist_keywords_for_job = params.whitelist_keywords.clone().unwrap_or_default();
+            let complex_regex_count = whitelist_keywords_for_job
+                .iter()
+                .map(|k| k.trim())
+                .filter(|k| !k.is_empty() && !is_plain_submission_search_keyword(k))
+                .count();
+            let has_complex_regex = complex_regex_count > 0;
+            let whitelist_changed = record.whitelist_keywords != whitelist_json;
+            let is_initial_increment_cursor =
+                record.latest_row_at.is_empty() || record.latest_row_at == "1970-01-01 00:00:00";
+            let should_advance_cursor_after_precise_whitelist =
+                whitelist_changed && !has_complex_regex && is_initial_increment_cursor;
             let filters_changed = record.blacklist_keywords != blacklist_json
                 || record.whitelist_keywords != whitelist_json
                 || record.keyword_filters != keyword_filters_json
@@ -13353,13 +13698,43 @@ pub async fn update_video_source_keyword_filters(
             };
 
             if filters_changed {
-                // 过滤规则变更后需要重新评估历史投稿，否则增量扫描不会回看旧视频
-                update_model.latest_row_at = sea_orm::Set("1970-01-01 00:00:00".to_string());
+                // 过滤规则变更后清空自适应扫描节流，让下一轮可立即执行增量扫描
                 update_model.next_scan_at = sea_orm::Set(None);
                 update_model.no_update_streak = sea_orm::Set(0);
+
+                // 白名单包含复杂正则时，无法用搜索接口精准命中，必须回退到全量扫描重匹配
+                if whitelist_changed && has_complex_regex {
+                    update_model.latest_row_at = sea_orm::Set("1970-01-01 00:00:00".to_string());
+                } else if should_advance_cursor_after_precise_whitelist {
+                    // 首次扫描场景下，白名单已通过精准补抓处理历史视频，无需再走一次历史全量页
+                    update_model.latest_row_at = sea_orm::Set(crate::utils::time_format::now_standard_string());
+                }
             }
 
             submission::Entity::update(update_model).exec(&txn).await?;
+
+            if whitelist_changed {
+                submission_whitelist_backfill_job =
+                    Some((record.clone(), whitelist_keywords_for_job, has_complex_regex));
+            }
+
+            let mut message = format!(
+                "UP主投稿 {} 的关键词过滤器已更新，黑名单 {} 个，白名单 {} 个",
+                record.upper_name, blacklist_count, whitelist_count
+            );
+            if whitelist_changed {
+                if has_complex_regex {
+                    message.push_str(&format!(
+                        "；检测到复杂正则 {} 个，已触发全量扫描重匹配；其余可搜索关键词仍会精准补抓",
+                        complex_regex_count
+                    ));
+                } else {
+                    message.push_str("；将按白名单关键词精准补抓历史投稿（不触发全量扫描）");
+                    if should_advance_cursor_after_precise_whitelist {
+                        message.push_str("；已推进增量游标到当前时间，避免首次扫描回扫历史页");
+                    }
+                }
+            }
 
             crate::api::response::UpdateKeywordFiltersResponse {
                 success: true,
@@ -13367,10 +13742,7 @@ pub async fn update_video_source_keyword_filters(
                 source_type: "submission".to_string(),
                 blacklist_count,
                 whitelist_count,
-                message: format!(
-                    "UP主投稿 {} 的关键词过滤器已更新，黑名单 {} 个，白名单 {} 个",
-                    record.upper_name, blacklist_count, whitelist_count
-                ),
+                message,
             }
         }
         "watch_later" => {
@@ -13437,6 +13809,49 @@ pub async fn update_video_source_keyword_filters(
     };
 
     txn.commit().await?;
+
+    if let Some((submission_record, whitelist_keywords, has_complex_regex)) = submission_whitelist_backfill_job {
+        if whitelist_keywords.iter().any(|k| !k.trim().is_empty()) {
+            match backfill_submission_by_whitelist_keywords(db.as_ref(), &submission_record, &whitelist_keywords).await
+            {
+                Ok(stats) => {
+                    if has_complex_regex && stats.skipped_regex_keywords > 0 {
+                        result.message.push_str(&format!(
+                            "；复杂正则 {} 个已交由全量扫描处理",
+                            stats.skipped_regex_keywords
+                        ));
+                    }
+                    result.message.push_str(&format!(
+                        "；关键词 {} 个（可搜索 {} 个，正则/复杂模式 {} 个），命中视频 {} 个：新增入队 {} 个，恢复已删 {} 个，已存在 {} 个，非当前UP {} 个，失败 {} 个",
+                        stats.total_keywords,
+                        stats.searched_keywords,
+                        stats.skipped_regex_keywords,
+                        stats.matched_bvids,
+                        stats.backfill.queued_new,
+                        stats.backfill.restored_deleted,
+                        stats.backfill.already_exists,
+                        stats.backfill.skipped_non_owner,
+                        stats.backfill.failed
+                    ));
+                    info!(
+                        "UP主 {} 白名单精准补抓完成：命中 {} 个BV，新增入队 {} 个",
+                        submission_record.upper_name, stats.matched_bvids, stats.backfill.queued_new
+                    );
+                }
+                Err(err) => {
+                    warn!("UP主 {} 白名单精准补抓失败: {}", submission_record.upper_name, err);
+                    result.message.push_str(&format!("；白名单精准补抓失败（{}）", err));
+                    if has_complex_regex {
+                        result.message.push_str("；复杂正则仍会通过全量扫描重匹配");
+                    } else {
+                        result.message.push_str("；后续仅执行常规增量扫描");
+                    }
+                }
+            }
+        } else {
+            result.message.push_str("；白名单已清空，不执行历史精准补抓");
+        }
+    }
 
     info!("{}", result.message);
 

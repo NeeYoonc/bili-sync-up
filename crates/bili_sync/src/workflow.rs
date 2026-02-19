@@ -14,7 +14,7 @@ use sea_orm::entity::prelude::*;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{DatabaseBackend, Statement, TransactionTrait};
 use tokio::fs;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -23,7 +23,13 @@ use crate::utils::time_format::{now_naive, now_standard_string, parse_time_strin
 // 全局番剧季度标题缓存
 lazy_static::lazy_static! {
     pub static ref SEASON_TITLE_CACHE: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-    static ref SUBMISSION_COLLECTION_META_CACHE: Arc<Mutex<HashMap<i64, HashMap<String, SubmissionCollectionMeta>>>> =
+    static ref SUBMISSION_COLLECTION_META_CACHE: Arc<Mutex<HashMap<i64, SubmissionCollectionMetaCacheEntry>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    static ref SUBMISSION_COLLECTION_META_LOAD_LOCKS: Arc<Mutex<HashMap<i64, Arc<TokioMutex<()>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    static ref SUBMISSION_COLLECTION_MEMBERSHIP_CACHE: Arc<Mutex<HashMap<i64, SubmissionCollectionMembershipCacheEntry>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    static ref SUBMISSION_COLLECTION_MEMBERSHIP_LOAD_LOCKS: Arc<Mutex<HashMap<i64, Arc<TokioMutex<()>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 }
 
@@ -32,6 +38,52 @@ struct SubmissionCollectionMeta {
     name: String,
     cover: Option<String>,
     description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SubmissionCollectionMetaCacheEntry {
+    loaded_at: i64,
+    meta_map: HashMap<String, SubmissionCollectionMeta>,
+}
+
+#[derive(Debug, Clone)]
+struct SubmissionCollectionMembershipCacheEntry {
+    loaded_at: i64,
+    membership: HashMap<String, (String, i32)>,
+}
+
+const SUBMISSION_COLLECTION_META_CACHE_TTL_SECS: i64 = 30 * 60;
+const SUBMISSION_COLLECTION_MEMBERSHIP_CACHE_TTL_SECS: i64 = 30 * 60;
+
+fn current_unix_timestamp_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn is_cache_fresh(loaded_at: i64, ttl_secs: i64) -> bool {
+    loaded_at > 0 && current_unix_timestamp_secs().saturating_sub(loaded_at) <= ttl_secs
+}
+
+fn get_submission_meta_load_lock(upper_id: i64) -> Arc<TokioMutex<()>> {
+    let mut locks = SUBMISSION_COLLECTION_META_LOAD_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    locks
+        .entry(upper_id)
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
+        .clone()
+}
+
+fn get_submission_membership_load_lock(upper_id: i64) -> Arc<TokioMutex<()>> {
+    let mut locks = SUBMISSION_COLLECTION_MEMBERSHIP_LOAD_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    locks
+        .entry(upper_id)
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
+        .clone()
 }
 
 use crate::adapter::{video_source_from, Args, VideoSource, VideoSourceEnum};
@@ -952,27 +1004,49 @@ pub async fn fetch_video_details(
     }
     video_source.log_fetch_video_start();
 
-    // 投稿源兜底：当详情接口未返回ugc_season时，使用UP主 lists(合集/系列) 的归属关系回填。
+    let videos_model = filter_unfilled_videos(video_source.filter_expr(), connection).await?;
+
+    // 投稿源兜底：仅当待处理视频中确实存在缺失season_id时，才加载UP主 lists(合集/系列) 归属映射。
+    // 避免历史选择等场景下无必要地拉取全部归属，触发大量-352告警。
     // key=bvid, value=(collection_key, episode_number)
     let (submission_source_id, submission_collection_membership): (Option<i32>, Arc<HashMap<String, (String, i32)>>) =
         if let VideoSourceEnum::Submission(submission_source) = video_source {
-            match build_submission_collection_membership_map(bili_client, submission_source.upper_id, token.clone())
-                .await
-            {
-                Ok(map) => {
-                    if !map.is_empty() {
-                        info!(
-                            "投稿源「{}」已加载合集/系列归属映射 {} 条",
-                            submission_source.upper_name,
-                            map.len()
-                        );
+            let is_selected_mode = submission_source.selected_videos.is_some();
+            let need_membership_backfill = !is_selected_mode
+                && videos_model.iter().any(|model| {
+                    model.source_type != Some(1) // 非番剧
+                    && model
+                        .season_id
+                        .as_deref()
+                        .map(|season| season.trim().is_empty())
+                        .unwrap_or(true)
+                });
+
+            if need_membership_backfill {
+                match build_submission_collection_membership_map(bili_client, submission_source.upper_id, token.clone())
+                    .await
+                {
+                    Ok(map) => {
+                        if !map.is_empty() {
+                            info!(
+                                "投稿源「{}」已加载合集/系列归属映射 {} 条",
+                                submission_source.upper_name,
+                                map.len()
+                            );
+                        }
+                        (Some(submission_source.id), Arc::new(map))
                     }
-                    (Some(submission_source.id), Arc::new(map))
+                    Err(err) => {
+                        warn!("加载投稿合集/系列归属映射失败，将仅使用详情接口结果: {}", err);
+                        (Some(submission_source.id), Arc::new(HashMap::new()))
+                    }
                 }
-                Err(err) => {
-                    warn!("加载投稿合集/系列归属映射失败，将仅使用详情接口结果: {}", err);
-                    (Some(submission_source.id), Arc::new(HashMap::new()))
-                }
+            } else {
+                debug!(
+                    "投稿源「{}」跳过合集/系列归属映射加载（selected_mode={}, 待处理视频无归属缺口）",
+                    submission_source.upper_name, is_selected_mode
+                );
+                (Some(submission_source.id), Arc::new(HashMap::new()))
             }
         } else {
             (None, Arc::new(HashMap::new()))
@@ -991,8 +1065,6 @@ pub async fn fetch_video_details(
             }
         }
     }
-
-    let videos_model = filter_unfilled_videos(video_source.filter_expr(), connection).await?;
 
     // 分离出番剧和普通视频
     let (bangumi_videos, normal_videos): (Vec<_>, Vec<_>) =
@@ -7358,15 +7430,26 @@ async fn get_submission_collection_meta(
     }
 
     if let Ok(cache) = SUBMISSION_COLLECTION_META_CACHE.lock() {
-        if let Some(meta_map) = cache.get(&upper_id) {
-            if let Some(meta) = meta_map.get(season_id) {
-                return Some(meta.clone());
+        if let Some(entry) = cache.get(&upper_id) {
+            if is_cache_fresh(entry.loaded_at, SUBMISSION_COLLECTION_META_CACHE_TTL_SECS) {
+                return entry.meta_map.get(season_id).cloned();
             }
         }
     }
 
     if token.is_cancelled() {
         return None;
+    }
+
+    let load_lock = get_submission_meta_load_lock(upper_id);
+    let _load_guard = load_lock.lock().await;
+
+    if let Ok(cache) = SUBMISSION_COLLECTION_META_CACHE.lock() {
+        if let Some(entry) = cache.get(&upper_id) {
+            if is_cache_fresh(entry.loaded_at, SUBMISSION_COLLECTION_META_CACHE_TTL_SECS) {
+                return entry.meta_map.get(season_id).cloned();
+            }
+        }
     }
 
     let response = match bili_client.get_user_collections(upper_id, 1, 20).await {
@@ -7410,7 +7493,13 @@ async fn get_submission_collection_meta(
     }
 
     if let Ok(mut cache) = SUBMISSION_COLLECTION_META_CACHE.lock() {
-        cache.insert(upper_id, meta_map.clone());
+        cache.insert(
+            upper_id,
+            SubmissionCollectionMetaCacheEntry {
+                loaded_at: current_unix_timestamp_secs(),
+                meta_map: meta_map.clone(),
+            },
+        );
     }
 
     meta_map.get(season_id).cloned()
@@ -7760,6 +7849,25 @@ async fn build_submission_collection_membership_map(
     upper_id: i64,
     token: CancellationToken,
 ) -> Result<HashMap<String, (String, i32)>> {
+    if let Ok(cache) = SUBMISSION_COLLECTION_MEMBERSHIP_CACHE.lock() {
+        if let Some(entry) = cache.get(&upper_id) {
+            if is_cache_fresh(entry.loaded_at, SUBMISSION_COLLECTION_MEMBERSHIP_CACHE_TTL_SECS) {
+                return Ok(entry.membership.clone());
+            }
+        }
+    }
+
+    let load_lock = get_submission_membership_load_lock(upper_id);
+    let _load_guard = load_lock.lock().await;
+
+    if let Ok(cache) = SUBMISSION_COLLECTION_MEMBERSHIP_CACHE.lock() {
+        if let Some(entry) = cache.get(&upper_id) {
+            if is_cache_fresh(entry.loaded_at, SUBMISSION_COLLECTION_MEMBERSHIP_CACHE_TTL_SECS) {
+                return Ok(entry.membership.clone());
+            }
+        }
+    }
+
     let mut map: HashMap<String, (String, i32)> = HashMap::new();
     let collections = bili_client.get_user_collections(upper_id, 1, 20).await?;
 
@@ -7818,6 +7926,16 @@ async fn build_submission_collection_membership_map(
 
         // 轻微限速，降低连续请求触发风控的概率
         tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+
+    if let Ok(mut cache) = SUBMISSION_COLLECTION_MEMBERSHIP_CACHE.lock() {
+        cache.insert(
+            upper_id,
+            SubmissionCollectionMembershipCacheEntry {
+                loaded_at: current_unix_timestamp_secs(),
+                membership: map.clone(),
+            },
+        );
     }
 
     Ok(map)
