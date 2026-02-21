@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use axum::extract::{Extension, Json, Path, Query};
+use axum::http::{header::IF_NONE_MATCH, HeaderMap};
 use chrono::{DateTime, Datelike, Utc};
 use html_escape::decode_html_entities;
 
@@ -14,7 +15,7 @@ use bili_sync_migration::Expr;
 use reqwest;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, FromQueryResult, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, Unchanged,
+    QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait, Unchanged,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -55,6 +56,10 @@ mod built_info {
 static BETA_IMAGE_UPDATE_CACHE: Lazy<RwLock<Option<(DateTime<Utc>, BetaImageUpdateStatusResponse)>>> =
     Lazy::new(|| RwLock::new(None));
 const BETA_IMAGE_UPDATE_CACHE_TTL_SECONDS: i64 = 10 * 60;
+const IMAGE_PROXY_CACHE_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
+const IMAGE_PROXY_CACHE_CLEANUP_INTERVAL_SECONDS: i64 = 6 * 60 * 60;
+const IMAGE_PROXY_CACHE_CONTROL: &str = "public, max-age=86400, stale-while-revalidate=604800";
+static IMAGE_PROXY_CACHE_LAST_CLEANUP_AT: Lazy<RwLock<Option<DateTime<Utc>>>> = Lazy::new(|| RwLock::new(None));
 
 const CNB_REGISTRY_BASE: &str = "https://docker.cnb.cool";
 const CNB_REGISTRY_TOKEN_ENDPOINT: &str = "https://docker.cnb.cool/service/token";
@@ -9883,6 +9888,244 @@ pub async fn cancel_queue_task(
 }
 
 /// 代理B站图片请求，解决防盗链问题
+fn proxy_image_cache_key(url: &str) -> String {
+    format!("{:x}", md5::compute(url.as_bytes()))
+}
+
+fn summarize_image_url(url: &str) -> String {
+    let mut parts = url.splitn(2, '?');
+    let base = parts.next().unwrap_or_default();
+    let query_len = parts.next().map(|q| q.len()).unwrap_or(0);
+    if query_len > 0 {
+        format!("{base} (query_len={query_len})")
+    } else {
+        base.to_string()
+    }
+}
+
+fn proxy_image_etag(image_data: &[u8]) -> String {
+    format!("\"{:x}\"", md5::compute(image_data))
+}
+
+fn if_none_match_hit(headers: &HeaderMap, etag: &str) -> bool {
+    let Some(raw) = headers.get(IF_NONE_MATCH).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+
+    raw.split(',')
+        .map(|item| item.trim())
+        .any(|tag| tag == "*" || tag == etag)
+}
+
+async fn maybe_cleanup_proxy_image_cache(db: &DatabaseConnection, now: DateTime<Utc>) {
+    {
+        let mut last_cleanup = IMAGE_PROXY_CACHE_LAST_CLEANUP_AT.write().await;
+        if let Some(last) = *last_cleanup {
+            let since_last = (now - last).num_seconds();
+            if since_last < IMAGE_PROXY_CACHE_CLEANUP_INTERVAL_SECONDS {
+                debug!(
+                    "图片数据库缓存清理跳过: now={}, last={}, since_last={}s, interval={}s",
+                    now.timestamp(),
+                    last.timestamp(),
+                    since_last,
+                    IMAGE_PROXY_CACHE_CLEANUP_INTERVAL_SECONDS
+                );
+                return;
+            }
+        }
+        *last_cleanup = Some(now);
+    }
+
+    let cleanup_sql = r#"
+        DELETE FROM image_proxy_cache
+        WHERE expires_at_unix <= ?
+    "#;
+    let backend = db.get_database_backend();
+    let result = db
+        .execute(Statement::from_sql_and_values(
+            backend,
+            cleanup_sql,
+            vec![now.timestamp().into()],
+        ))
+        .await;
+
+    match result {
+        Ok(res) => {
+            let rows = res.rows_affected();
+            debug!("图片数据库缓存清理完成: cleaned_rows={}, now={}", rows, now.timestamp());
+        }
+        Err(e) => {
+            debug!("图片数据库缓存清理失败（不影响请求）: {}", e);
+        }
+    }
+}
+
+async fn load_proxy_image_cache(
+    db: &DatabaseConnection,
+    url: &str,
+    now: DateTime<Utc>,
+) -> Option<(String, Vec<u8>, String)> {
+    let cache_key = proxy_image_cache_key(url);
+    let select_sql = r#"
+        SELECT content_type, image_data, etag, expires_at_unix
+        FROM image_proxy_cache
+        WHERE cache_key = ?
+        LIMIT 1
+    "#;
+    let backend = db.get_database_backend();
+    debug!("图片缓存查询开始: key={}, url={}", cache_key, summarize_image_url(url));
+
+    let row = match db
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            select_sql,
+            vec![cache_key.clone().into()],
+        ))
+        .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            debug!(
+                "图片缓存查询失败（按未命中处理）: key={}, url={}, error={}",
+                cache_key,
+                summarize_image_url(url),
+                e
+            );
+            return None;
+        }
+    };
+
+    let Some(row) = row else {
+        debug!("图片缓存未命中: key={}, url={}", cache_key, summarize_image_url(url));
+        return None;
+    };
+
+    let content_type = match row.try_get_by_index::<String>(0) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("图片缓存解析失败(content_type): key={}, error={}", cache_key, e);
+            return None;
+        }
+    };
+    let image_data = match row.try_get_by_index::<Vec<u8>>(1) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("图片缓存解析失败(image_data): key={}, error={}", cache_key, e);
+            return None;
+        }
+    };
+    let etag = match row.try_get_by_index::<String>(2) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("图片缓存解析失败(etag): key={}, error={}", cache_key, e);
+            return None;
+        }
+    };
+    let expires_at_unix = match row.try_get_by_index::<i64>(3) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("图片缓存解析失败(expires_at_unix): key={}, error={}", cache_key, e);
+            return None;
+        }
+    };
+
+    if expires_at_unix <= now.timestamp() {
+        debug!(
+            "图片缓存已过期: key={}, url={}, expires_at={}, now={}",
+            cache_key,
+            summarize_image_url(url),
+            expires_at_unix,
+            now.timestamp()
+        );
+        let delete_sql = "DELETE FROM image_proxy_cache WHERE cache_key = ?";
+        if let Err(e) = db
+            .execute(Statement::from_sql_and_values(
+                backend,
+                delete_sql,
+                vec![cache_key.into()],
+            ))
+            .await
+        {
+            debug!("图片缓存过期删除失败（不影响继续回源）: error={}", e);
+        }
+        return None;
+    }
+
+    debug!(
+        "图片缓存命中: key={}, url={}, content_type={}, bytes={}, expires_at={}",
+        cache_key,
+        summarize_image_url(url),
+        content_type,
+        image_data.len(),
+        expires_at_unix
+    );
+
+    Some((content_type, image_data, etag))
+}
+
+async fn store_proxy_image_cache(
+    db: &DatabaseConnection,
+    url: &str,
+    content_type: &str,
+    image_data: &[u8],
+    etag: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let cache_key = proxy_image_cache_key(url);
+    let now_unix = now.timestamp();
+    let expires_at_unix = now_unix + IMAGE_PROXY_CACHE_TTL_SECONDS;
+    let upsert_sql = r#"
+        INSERT INTO image_proxy_cache (
+            cache_key,
+            url,
+            content_type,
+            image_data,
+            etag,
+            cached_at_unix,
+            expires_at_unix,
+            updated_at_unix
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(cache_key) DO UPDATE SET
+            url = excluded.url,
+            content_type = excluded.content_type,
+            image_data = excluded.image_data,
+            etag = excluded.etag,
+            cached_at_unix = excluded.cached_at_unix,
+            expires_at_unix = excluded.expires_at_unix,
+            updated_at_unix = excluded.updated_at_unix
+    "#;
+
+    let backend = db.get_database_backend();
+    db.execute(Statement::from_sql_and_values(
+        backend,
+        upsert_sql,
+        vec![
+            cache_key.clone().into(),
+            url.to_string().into(),
+            content_type.to_string().into(),
+            image_data.to_vec().into(),
+            etag.to_string().into(),
+            now_unix.into(),
+            expires_at_unix.into(),
+            now_unix.into(),
+        ],
+    ))
+    .await
+    .context("写入图片数据库缓存失败")?;
+
+    debug!(
+        "图片缓存写入成功: key={}, url={}, content_type={}, bytes={}, ttl_seconds={}, expires_at={}",
+        cache_key,
+        summarize_image_url(url),
+        content_type,
+        image_data.len(),
+        IMAGE_PROXY_CACHE_TTL_SECONDS,
+        expires_at_unix
+    );
+
+    Ok(())
+}
+
 #[utoipa::path(
     get,
     path = "/api/proxy/image",
@@ -9896,22 +10139,69 @@ pub async fn cancel_queue_task(
     )
 )]
 pub async fn proxy_image(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::response::Response, ApiError> {
-    let url = params.get("url").ok_or_else(|| anyhow!("缺少url参数"))?;
+    let url = params
+        .get("url")
+        .ok_or_else(|| anyhow!("缺少url参数"))?
+        .trim()
+        .to_string();
+    debug!(
+        "图片代理请求开始: url={}, if_none_match_present={}",
+        summarize_image_url(&url),
+        headers.get(IF_NONE_MATCH).is_some()
+    );
 
     // 验证URL是否来自B站
     if !url.contains("hdslb.com") && !url.contains("bilibili.com") {
+        debug!("图片代理拒绝非B站URL: {}", summarize_image_url(&url));
         return Err(anyhow!("只支持B站图片URL").into());
+    }
+
+    let now = Utc::now();
+    maybe_cleanup_proxy_image_cache(db.as_ref(), now).await;
+
+    if let Some((cached_content_type, image_data, cached_etag)) = load_proxy_image_cache(db.as_ref(), &url, now).await {
+        if if_none_match_hit(&headers, &cached_etag) {
+            debug!(
+                "图片代理返回304(缓存命中): url={}, etag={}",
+                summarize_image_url(&url),
+                cached_etag
+            );
+            return Ok(axum::response::Response::builder()
+                .status(304)
+                .header("ETag", cached_etag)
+                .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+                .header("X-Image-Cache", "HIT")
+                .body(axum::body::Body::empty())
+                .unwrap());
+        }
+
+        debug!(
+            "图片代理返回200(缓存命中): url={}, content_type={}, bytes={}",
+            summarize_image_url(&url),
+            cached_content_type,
+            image_data.len()
+        );
+        return Ok(axum::response::Response::builder()
+            .status(200)
+            .header("Content-Type", cached_content_type)
+            .header("ETag", cached_etag)
+            .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+            .header("X-Image-Cache", "HIT")
+            .body(axum::body::Body::from(image_data))
+            .unwrap());
     }
 
     // 创建HTTP客户端
     let client = reqwest::Client::new();
 
     // 请求图片，添加必要的请求头
-    tracing::debug!("发起图片下载请求: {}", url);
+    tracing::debug!("图片缓存未命中，开始回源下载: {}", summarize_image_url(&url));
 
-    let request = client.get(url).headers(create_image_headers());
+    let request = client.get(&url).headers(create_image_headers());
 
     // 图片下载请求头日志已在建造器时设置
 
@@ -9942,12 +10232,48 @@ pub async fn proxy_image(
 
     // 获取图片数据
     let image_data = response.bytes().await.map_err(|e| anyhow!("读取图片数据失败: {}", e))?;
+    let etag = proxy_image_etag(&image_data);
+    debug!(
+        "图片回源下载完成: url={}, content_type={}, bytes={}, etag={}",
+        summarize_image_url(&url),
+        content_type,
+        image_data.len(),
+        etag
+    );
+
+    if if_none_match_hit(&headers, &etag) {
+        debug!(
+            "图片代理返回304(回源后命中If-None-Match): url={}, etag={}",
+            summarize_image_url(&url),
+            etag
+        );
+        return Ok(axum::response::Response::builder()
+            .status(304)
+            .header("ETag", etag)
+            .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+            .header("X-Image-Cache", "MISS")
+            .body(axum::body::Body::empty())
+            .unwrap());
+    }
+
+    if let Err(e) = store_proxy_image_cache(db.as_ref(), &url, &content_type, &image_data, &etag, now).await {
+        debug!("写入图片缓存失败（不影响返回）: url={}, error={}", url, e);
+    }
+
+    debug!(
+        "图片代理返回200(回源): url={}, content_type={}, bytes={}",
+        summarize_image_url(&url),
+        content_type,
+        image_data.len()
+    );
 
     // 返回图片响应
     Ok(axum::response::Response::builder()
         .status(200)
         .header("Content-Type", content_type.as_str())
-        .header("Cache-Control", "public, max-age=3600") // 缓存1小时
+        .header("ETag", etag)
+        .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+        .header("X-Image-Cache", "MISS")
         .body(axum::body::Body::from(image_data))
         .unwrap())
 }
