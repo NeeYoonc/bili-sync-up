@@ -13,8 +13,8 @@ use bili_sync_entity::{collection, favorite, page, submission, video, video_sour
 use bili_sync_migration::Expr;
 use reqwest;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, TransactionTrait, Unchanged,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, FromQueryResult, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, Unchanged,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -5742,6 +5742,10 @@ async fn validate_path_reset_safety(
                 image: None,
                 download_status: 0,
                 created_at: now_standard_string(),
+                play_video_streams: None,
+                play_audio_streams: None,
+                play_subtitle_streams: None,
+                play_streams_updated_at: None,
                 ai_renamed: None,
             };
 
@@ -11034,12 +11038,164 @@ pub async fn get_video_bvid(
     }))
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct VideoPlayStreamCache {
+    video_streams: Vec<crate::api::response::VideoStreamInfo>,
+    audio_streams: Vec<crate::api::response::AudioStreamInfo>,
+    subtitle_streams: Vec<crate::api::response::SubtitleStreamInfo>,
+    updated_at: Option<String>,
+}
+
+fn summarize_stream_url(url: &str) -> String {
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        let host = parsed.host_str().unwrap_or("-");
+        let path = parsed.path();
+        let query_len = parsed.query().map(|q| q.len()).unwrap_or(0);
+        return format!("{}://{}{} (query_len={})", parsed.scheme(), host, path, query_len);
+    }
+    format!("invalid_or_relative_url(len={})", url.len())
+}
+
+async fn load_video_play_stream_cache(
+    db: &DatabaseConnection,
+    page_id: i32,
+) -> Result<Option<VideoPlayStreamCache>, anyhow::Error> {
+    let Some(page_model) = page::Entity::find_by_id(page_id)
+        .one(db)
+        .await
+        .context("查询分页缓存失败")?
+    else {
+        debug!("在线播放缓存未命中: page_id={}, reason=page_not_found", page_id);
+        return Ok(None);
+    };
+
+    let Some(video_streams_raw) = page_model.play_video_streams.as_ref() else {
+        debug!(
+            "在线播放缓存未命中: page_id={}, reason=play_video_streams_empty",
+            page_id
+        );
+        return Ok(None);
+    };
+
+    let video_streams: Vec<crate::api::response::VideoStreamInfo> =
+        serde_json::from_str(video_streams_raw).context("解析缓存视频流失败")?;
+    if video_streams.is_empty() {
+        debug!(
+            "在线播放缓存未命中: page_id={}, reason=video_streams_empty_after_parse",
+            page_id
+        );
+        return Ok(None);
+    }
+
+    let audio_streams: Vec<crate::api::response::AudioStreamInfo> = match page_model.play_audio_streams.as_ref() {
+        Some(raw) => match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(
+                    "在线播放缓存音频流解析失败，已忽略: page_id={}, raw_len={}, error={}",
+                    page_id,
+                    raw.len(),
+                    e
+                );
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+
+    let subtitle_streams: Vec<crate::api::response::SubtitleStreamInfo> =
+        match page_model.play_subtitle_streams.as_ref() {
+            Some(raw) => match serde_json::from_str(raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    debug!(
+                        "在线播放缓存字幕流解析失败，已忽略: page_id={}, raw_len={}, error={}",
+                        page_id,
+                        raw.len(),
+                        e
+                    );
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+
+    let first_video_url = video_streams
+        .first()
+        .map(|stream| summarize_stream_url(&stream.url))
+        .unwrap_or_else(|| "-".to_string());
+    debug!(
+        "在线播放缓存加载成功: page_id={}, updated_at={:?}, video_streams={}, audio_streams={}, subtitle_streams={}, first_video_url={}",
+        page_id,
+        page_model.play_streams_updated_at,
+        video_streams.len(),
+        audio_streams.len(),
+        subtitle_streams.len(),
+        first_video_url
+    );
+
+    Ok(Some(VideoPlayStreamCache {
+        video_streams,
+        audio_streams,
+        subtitle_streams,
+        updated_at: page_model.play_streams_updated_at,
+    }))
+}
+
+async fn save_video_play_stream_cache(
+    db: &DatabaseConnection,
+    page_id: i32,
+    cache: &VideoPlayStreamCache,
+) -> Result<(), anyhow::Error> {
+    let updated_at = now_standard_string();
+    let video_streams_raw = serde_json::to_string(&cache.video_streams).context("序列化视频流缓存失败")?;
+    let audio_streams_raw = serde_json::to_string(&cache.audio_streams).context("序列化音频流缓存失败")?;
+    let subtitle_streams_raw = serde_json::to_string(&cache.subtitle_streams).context("序列化字幕缓存失败")?;
+    let first_video_url = cache
+        .video_streams
+        .first()
+        .map(|stream| summarize_stream_url(&stream.url))
+        .unwrap_or_else(|| "-".to_string());
+    debug!(
+        "写入在线播放缓存: page_id={}, updated_at={}, video_streams={}, audio_streams={}, subtitle_streams={}, payload_len(video/audio/subtitle)={}/{}/{}, first_video_url={}",
+        page_id,
+        updated_at,
+        cache.video_streams.len(),
+        cache.audio_streams.len(),
+        cache.subtitle_streams.len(),
+        video_streams_raw.len(),
+        audio_streams_raw.len(),
+        subtitle_streams_raw.len(),
+        first_video_url
+    );
+
+    let update_model = page::ActiveModel {
+        id: Unchanged(page_id),
+        play_video_streams: Set(Some(video_streams_raw)),
+        play_audio_streams: Set(Some(audio_streams_raw)),
+        play_subtitle_streams: Set(Some(subtitle_streams_raw)),
+        play_streams_updated_at: Set(Some(updated_at)),
+        ..Default::default()
+    };
+
+    update_model.update(db).await.context("写入播放缓存失败")?;
+    debug!("写入在线播放缓存成功: page_id={}", page_id);
+    Ok(())
+}
+
 /// 获取视频播放信息（在线播放用）
+#[derive(Debug, Deserialize)]
+pub struct VideoPlayInfoQuery {
+    #[serde(default)]
+    pub refresh: bool,
+}
+
 #[utoipa::path(
     get,
     path = "/api/videos/{video_id}/play-info",
     params(
-        ("video_id" = String, Path, description = "视频ID或分页ID")
+        ("video_id" = String, Path, description = "视频ID或分页ID"),
+        ("refresh" = Option<bool>, Query, description = "是否强制刷新播放地址缓存")
     ),
     responses(
         (status = 200, description = "获取播放信息成功", body = crate::api::response::VideoPlayInfoResponse),
@@ -11049,10 +11205,14 @@ pub async fn get_video_bvid(
 )]
 pub async fn get_video_play_info(
     Path(video_id): Path<String>,
+    Query(play_query): Query<VideoPlayInfoQuery>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<crate::api::response::VideoPlayInfoResponse>, ApiError> {
     use crate::api::response::{AudioStreamInfo, SubtitleStreamInfo, VideoPlayInfoResponse, VideoStreamInfo};
     use crate::bilibili::{BestStream, BiliClient, PageInfo, Stream, Video};
+
+    let force_refresh = play_query.refresh;
+    debug!("收到在线播放请求: video_id={}, refresh={}", video_id, force_refresh);
 
     // 查找视频信息
     let video_info = find_video_info(&video_id, &db)
@@ -11060,31 +11220,15 @@ pub async fn get_video_play_info(
         .map_err(|e| ApiError::from(anyhow!("获取视频信息失败: {}", e)))?;
 
     debug!(
-        "获取视频播放信息: bvid={}, aid={}, cid={}, duration={}, source_type={:?}, ep_id={:?}",
-        video_info.bvid, video_info.aid, video_info.cid, video_info.duration, video_info.source_type, video_info.ep_id
+        "在线播放视频信息解析成功: page_id={}, bvid={}, aid={}, cid={}, duration={}, source_type={:?}, ep_id={:?}",
+        video_info.page_id,
+        video_info.bvid,
+        video_info.aid,
+        video_info.cid,
+        video_info.duration,
+        video_info.source_type,
+        video_info.ep_id
     );
-
-    // 创建B站客户端
-    let config = crate::config::reload_config();
-    let credential = config.credential.load();
-    let cookie_string = credential
-        .as_ref()
-        .map(|cred| {
-            format!(
-                "SESSDATA={};bili_jct={};buvid3={};DedeUserID={};ac_time_value={}",
-                cred.sessdata, cred.bili_jct, cred.buvid3, cred.dedeuserid, cred.ac_time_value
-            )
-        })
-        .unwrap_or_default();
-    let bili_client = BiliClient::new(cookie_string);
-
-    // 创建Video实例
-    let video = Video::new_with_aid(&bili_client, video_info.bvid.clone(), video_info.aid.clone());
-
-    // 使用用户配置的筛选选项（用于控制请求的画质范围，避免 qn=127 导致只返回高画质从而被本地过滤掉）
-    let filter_option = config.filter_option.clone();
-    let max_qn = filter_option.video_max_quality as u32;
-    let min_qn = filter_option.video_min_quality as u32;
 
     // 获取分页信息
     let page_info = PageInfo {
@@ -11151,6 +11295,87 @@ pub async fn get_video_play_info(
             bilibili_url: Some(bilibili_url.clone()),
         })
     };
+    let build_success_response = |video_streams: Vec<VideoStreamInfo>,
+                                  audio_streams: Vec<AudioStreamInfo>,
+                                  subtitle_streams: Vec<SubtitleStreamInfo>| {
+        let quality_desc = if !video_streams.is_empty() {
+            video_streams[0].quality_description.clone()
+        } else {
+            "未知".to_string()
+        };
+
+        VideoPlayInfoResponse {
+            success: true,
+            message: None,
+            video_streams,
+            audio_streams,
+            subtitle_streams,
+            video_title: video_title.clone(),
+            video_duration: Some(page_info.duration),
+            video_quality_description: quality_desc,
+            video_bvid: Some(video_info.bvid.clone()),
+            bilibili_url: Some(bilibili_url.clone()),
+        }
+    };
+
+    if !force_refresh {
+        match load_video_play_stream_cache(&db, video_info.page_id).await {
+            Ok(Some(cache)) => {
+                let first_video_url = cache
+                    .video_streams
+                    .first()
+                    .map(|stream| summarize_stream_url(&stream.url))
+                    .unwrap_or_else(|| "-".to_string());
+                debug!(
+                    "在线播放命中缓存: page_id={}, updated_at={:?}, video_streams={}, audio_streams={}, subtitle_streams={}, first_video_url={}",
+                    video_info.page_id,
+                    cache.updated_at,
+                    cache.video_streams.len(),
+                    cache.audio_streams.len(),
+                    cache.subtitle_streams.len(),
+                    first_video_url
+                );
+                return Ok(ApiResponse::ok(build_success_response(
+                    cache.video_streams,
+                    cache.audio_streams,
+                    cache.subtitle_streams,
+                )));
+            }
+            Ok(None) => {
+                debug!("在线播放缓存未命中: page_id={}", video_info.page_id);
+            }
+            Err(e) => {
+                warn!(
+                    "读取在线播放缓存失败，改为实时获取: page_id={}, error={}",
+                    video_info.page_id, e
+                );
+            }
+        }
+    } else {
+        debug!("在线播放强制刷新缓存: page_id={}", video_info.page_id);
+    }
+
+    // 创建B站客户端（仅在缓存未命中或强制刷新时执行）
+    let config = crate::config::reload_config();
+    let credential = config.credential.load();
+    let cookie_string = credential
+        .as_ref()
+        .map(|cred| {
+            format!(
+                "SESSDATA={};bili_jct={};buvid3={};DedeUserID={};ac_time_value={}",
+                cred.sessdata, cred.bili_jct, cred.buvid3, cred.dedeuserid, cred.ac_time_value
+            )
+        })
+        .unwrap_or_default();
+    let bili_client = BiliClient::new(cookie_string);
+
+    // 创建Video实例
+    let video = Video::new_with_aid(&bili_client, video_info.bvid.clone(), video_info.aid.clone());
+
+    // 使用用户配置的筛选选项（用于控制请求的画质范围，避免 qn=127 导致只返回高画质从而被本地过滤掉）
+    let filter_option = config.filter_option.clone();
+    let max_qn = filter_option.video_max_quality as u32;
+    let min_qn = filter_option.video_min_quality as u32;
 
     // 获取视频播放链接 - 根据视频类型选择不同的API
     let mut page_analyzer = if video_info.source_type == Some(1) && video_info.ep_id.is_some() {
@@ -11280,29 +11505,44 @@ pub async fn get_video_play_info(
         }
     };
 
-    let quality_desc = if !video_streams.is_empty() {
-        video_streams[0].quality_description.clone()
-    } else {
-        "未知".to_string()
+    let cache_payload = VideoPlayStreamCache {
+        video_streams: video_streams.clone(),
+        audio_streams: audio_streams.clone(),
+        subtitle_streams: subtitle_streams.clone(),
+        updated_at: None,
     };
+    if let Err(e) = save_video_play_stream_cache(&db, video_info.page_id, &cache_payload).await {
+        warn!("写入在线播放缓存失败: page_id={}, error={}", video_info.page_id, e);
+    }
+    let first_video_url = video_streams
+        .first()
+        .map(|stream| summarize_stream_url(&stream.url))
+        .unwrap_or_else(|| "-".to_string());
+    let first_audio_url = audio_streams
+        .first()
+        .map(|stream| summarize_stream_url(&stream.url))
+        .unwrap_or_else(|| "-".to_string());
+    debug!(
+        "在线播放回源成功: page_id={}, video_streams={}, audio_streams={}, subtitle_streams={}, first_video_url={}, first_audio_url={}",
+        video_info.page_id,
+        video_streams.len(),
+        audio_streams.len(),
+        subtitle_streams.len(),
+        first_video_url,
+        first_audio_url
+    );
 
-    Ok(ApiResponse::ok(VideoPlayInfoResponse {
-        success: true,
-        message: None,
+    Ok(ApiResponse::ok(build_success_response(
         video_streams,
         audio_streams,
         subtitle_streams,
-        video_title,
-        video_duration: Some(page_info.duration),
-        video_quality_description: quality_desc,
-        video_bvid: Some(video_info.bvid.clone()),
-        bilibili_url: Some(bilibili_url),
-    }))
+    )))
 }
 
 /// 查找视频信息
 #[derive(Debug)]
 struct VideoPlayInfo {
+    page_id: i32,
     bvid: String,
     aid: String,
     cid: String,
@@ -11330,6 +11570,7 @@ async fn find_video_info(video_id: &str, db: &DatabaseConnection) -> Result<Vide
                 .context("查询视频记录失败")?
             {
                 return Ok(VideoPlayInfo {
+                    page_id: page_record.id,
                     bvid: video_record.bvid.clone(),
                     aid: bvid_to_aid(&video_record.bvid).to_string(),
                     cid: page_record.cid.to_string(),
@@ -11368,6 +11609,7 @@ async fn find_video_info(video_id: &str, db: &DatabaseConnection) -> Result<Vide
         .ok_or_else(|| anyhow::anyhow!("视频没有分页信息"))?;
 
     Ok(VideoPlayInfo {
+        page_id: first_page.id,
         bvid: video.bvid.clone(),
         aid: bvid_to_aid(&video.bvid).to_string(),
         cid: first_page.cid.to_string(),
@@ -11448,8 +11690,6 @@ pub async fn proxy_video_stream(
             return (StatusCode::BAD_REQUEST, "缺少url参数").into_response();
         }
     };
-
-    debug!("代理视频流请求: {}", stream_url);
 
     // 检查认证信息
     let config = crate::config::reload_config();
@@ -11607,6 +11847,14 @@ pub async fn proxy_video_stream(
     // 服务端默认直接代理原始流，前端若识别为 FLV 将使用 flv.js 播放，从而支持拖动。
     // 如需强制在服务端转封装为 mp4（用于不支持 flv.js/MSE 的环境），可传参 transmux=1。
     let transmux_enabled = parse_bool_query(&params, "transmux");
+    debug!(
+        "代理视频流请求: url={}, raw_url_len={}, range={:?}, transmux={}, is_flv={}",
+        summarize_stream_url(stream_url),
+        stream_url.len(),
+        range_header,
+        transmux_enabled,
+        looks_like_flv_url(stream_url)
+    );
     if transmux_enabled && looks_like_flv_url(stream_url) {
         match transmux_flv_to_mp4(stream_url).await {
             Ok(resp) => return resp,
@@ -11645,8 +11893,31 @@ pub async fn proxy_video_stream(
     let status = response.status();
     let response_headers = response.headers().clone();
 
-    debug!("B站视频流响应状态: {}", status);
-    debug!("B站视频流响应头: {:?}", response_headers);
+    let content_type = response_headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    let content_length = response_headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    let content_range = response_headers
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    let accept_ranges = response_headers
+        .get("accept-ranges")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    debug!(
+        "代理视频流上游响应: url={}, status={}, content_type={}, content_length={}, content_range={}, accept_ranges={}",
+        summarize_stream_url(stream_url),
+        status,
+        content_type,
+        content_length,
+        content_range,
+        accept_ranges
+    );
 
     // 如果是401错误，记录更多详细信息
     if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -11701,7 +11972,12 @@ pub async fn proxy_video_stream(
     // 设置缓存控制
     proxy_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=3600"));
 
-    debug!("返回流式响应，状态码: {}", status);
+    debug!(
+        "代理视频流返回成功: url={}, status={}, range_forwarded={}",
+        summarize_stream_url(stream_url),
+        status,
+        range_header.is_some()
+    );
     proxy_response
 }
 
@@ -12252,6 +12528,10 @@ async fn update_bangumi_video_path_in_database(
             image: None,
             download_status: 0,
             created_at: now_standard_string(),
+            play_video_streams: None,
+            play_audio_streams: None,
+            play_subtitle_streams: None,
+            play_streams_updated_at: None,
             ai_renamed: None,
         };
 
@@ -12386,6 +12666,10 @@ async fn move_bangumi_files_to_new_path(
             image: None,
             download_status: 0,
             created_at: now_standard_string(),
+            play_video_streams: None,
+            play_audio_streams: None,
+            play_subtitle_streams: None,
+            play_streams_updated_at: None,
             ai_renamed: None,
         };
 

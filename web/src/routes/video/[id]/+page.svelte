@@ -41,6 +41,8 @@
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	let onlinePlayInfo: any = null;
 	let loadingPlayInfo = false;
+	let onlinePlayRefreshRetried = false;
+	let onlinePlayRefreshRetrying = false;
 	let isFullscreen = false; // 是否全屏模式
 	let deleteDialogOpen = false;
 	let deleting = false;
@@ -469,28 +471,73 @@
 	}
 
 	// 获取在线播放信息
-	async function loadOnlinePlayInfo(videoId: string | number) {
-		if (loadingPlayInfo) return;
+	async function loadOnlinePlayInfo(
+		videoId: string | number,
+		options?: { refresh?: boolean; silentError?: boolean; autoResume?: boolean }
+	): Promise<boolean> {
+		if (loadingPlayInfo) return false;
 
 		loadingPlayInfo = true;
 		try {
-			const result = await api.getVideoPlayInfo(videoId);
+			const result = await api.getVideoPlayInfo(videoId, { refresh: options?.refresh === true });
 			onlinePlayInfo = result.data;
 			console.log('在线播放信息:', onlinePlayInfo);
 			if (!onlinePlayInfo?.success) {
-				toast.error('获取在线播放信息失败', {
-					description: onlinePlayInfo?.message || '请稍后重试'
-				});
+				if (!options?.silentError) {
+					toast.error('获取在线播放信息失败', {
+						description: onlinePlayInfo?.message || '请稍后重试'
+					});
+				}
 				onlinePlayInfo = null;
+				return false;
 			}
+
+			if (options?.autoResume && onlinePlayMode) {
+				await tick();
+				const player = videoElement ?? (document.querySelector('video') as HTMLVideoElement | null);
+				if (player) {
+					try {
+						player.load();
+						await player.play();
+					} catch (e) {
+						console.warn('刷新播放信息后自动恢复播放失败:', e);
+					}
+				}
+			}
+			return true;
 		} catch (error) {
 			console.error('获取播放信息失败:', error);
-			toast.error('获取在线播放信息失败', {
-				description: (error as ApiError).message
-			});
+			if (!options?.silentError) {
+				toast.error('获取在线播放信息失败', {
+					description: (error as ApiError).message
+				});
+			}
 			onlinePlayInfo = null;
+			return false;
 		} finally {
 			loadingPlayInfo = false;
+		}
+	}
+
+	async function retryOnlinePlayWithRefresh() {
+		if (!onlinePlayMode || onlinePlayRefreshRetried || onlinePlayRefreshRetrying) return;
+
+		const playVideoId = getPlayVideoId();
+		if (!playVideoId) return;
+
+		onlinePlayRefreshRetried = true;
+		onlinePlayRefreshRetrying = true;
+		toast.info('播放地址可能已失效，正在刷新后重试...');
+
+		const refreshed = await loadOnlinePlayInfo(playVideoId, {
+			refresh: true,
+			silentError: true,
+			autoResume: true
+		});
+
+		onlinePlayRefreshRetrying = false;
+		if (!refreshed) {
+			toast.error('刷新播放地址失败，请稍后重试');
 		}
 	}
 
@@ -524,6 +571,8 @@
 	function togglePlayMode() {
 		onlinePlayMode = !onlinePlayMode;
 		if (onlinePlayMode && !onlinePlayInfo) {
+			onlinePlayRefreshRetried = false;
+			onlinePlayRefreshRetrying = false;
 			const videoId = getPlayVideoId();
 			loadOnlinePlayInfo(videoId);
 		}
@@ -901,6 +950,8 @@
 										onclick={() => {
 											currentPlayingPageIndex = index;
 											onlinePlayMode = true;
+											onlinePlayRefreshRetried = false;
+											onlinePlayRefreshRetrying = false;
 											showVideoPlayer = true;
 											const videoId = getPlayVideoId();
 											loadOnlinePlayInfo(videoId);
@@ -1009,6 +1060,13 @@
 												crossorigin="anonymous"
 												onerror={(e) => {
 													console.warn('视频加载错误:', e);
+													if (onlinePlayMode) {
+														if (!onlinePlayRefreshRetried) {
+															void retryOnlinePlayWithRefresh();
+														} else {
+															toast.error('在线播放失败，请尝试切换本地播放或稍后重试');
+														}
+													}
 												}}
 												onloadstart={() => {
 													console.log('开始加载视频:', getVideoSource());
@@ -1086,6 +1144,11 @@
 													src={getAudioSource()}
 													crossorigin="anonymous"
 													style="display: none;"
+													onerror={() => {
+														if (onlinePlayMode && !onlinePlayRefreshRetried) {
+															void retryOnlinePlayWithRefresh();
+														}
+													}}
 												></audio>
 											{/if}
 										</div>
@@ -1108,6 +1171,8 @@
 														currentPlayingPageIndex = index;
 														// 如果是在线播放模式，需要重新获取播放信息
 														if (onlinePlayMode) {
+															onlinePlayRefreshRetried = false;
+															onlinePlayRefreshRetrying = false;
 															const videoId = getPlayVideoId();
 															loadOnlinePlayInfo(videoId);
 														} else {

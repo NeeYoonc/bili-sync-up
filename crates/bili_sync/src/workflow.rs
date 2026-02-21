@@ -2701,6 +2701,10 @@ pub async fn download_video_pages(
                 image: None,
                 download_status: 0,
                 created_at: now_standard_string(),
+                play_video_streams: None,
+                play_audio_streams: None,
+                play_subtitle_streams: None,
+                play_streams_updated_at: None,
                 ai_renamed: None,
             };
 
@@ -5003,6 +5007,8 @@ pub async fn download_page(
             separate_status[1],
             bili_client,
             video_model,
+            connection,
+            page_model.id,
             downloader,
             &page_info,
             &video_path,
@@ -5319,10 +5325,131 @@ async fn download_stream(downloader: &UnifiedDownloader, video_id: i32, urls: &[
     }
 }
 
+fn get_cached_video_quality_description(quality: crate::bilibili::VideoQuality) -> &'static str {
+    use crate::bilibili::VideoQuality;
+    match quality {
+        VideoQuality::Quality360p => "360P",
+        VideoQuality::Quality480p => "480P",
+        VideoQuality::Quality720p => "720P",
+        VideoQuality::Quality1080p => "1080P",
+        VideoQuality::Quality1080pPLUS => "1080P+",
+        VideoQuality::Quality1080p60 => "1080P60",
+        VideoQuality::Quality4k => "4K",
+        VideoQuality::QualityHdr => "HDR",
+        VideoQuality::QualityDolby => "杜比视界",
+        VideoQuality::Quality8k => "8K",
+    }
+}
+
+fn get_cached_audio_quality_description(quality: crate::bilibili::AudioQuality) -> &'static str {
+    use crate::bilibili::AudioQuality;
+    match quality {
+        AudioQuality::Quality64k => "64K",
+        AudioQuality::Quality132k => "132K",
+        AudioQuality::Quality192k => "192K",
+        AudioQuality::QualityDolby | AudioQuality::QualityDolbyBangumi => "杜比全景声",
+        AudioQuality::QualityHiRES => "Hi-Res无损",
+    }
+}
+
+fn get_cached_video_codecs_description(codecs: crate::bilibili::VideoCodecs) -> &'static str {
+    use crate::bilibili::VideoCodecs;
+    match codecs {
+        VideoCodecs::AVC => "AVC/H.264",
+        VideoCodecs::HEV => "HEVC/H.265",
+        VideoCodecs::AV1 => "AV1",
+    }
+}
+
+async fn save_download_play_stream_cache(
+    connection: &DatabaseConnection,
+    page_id: i32,
+    best_stream: &BestStream,
+) -> Result<()> {
+    let mut video_streams = Vec::new();
+    let mut audio_streams = Vec::new();
+
+    match best_stream {
+        BestStream::VideoAudio {
+            video: video_stream,
+            audio: audio_stream,
+        } => {
+            let video_urls = video_stream.urls();
+            if let Some((main_url, backup_urls)) = video_urls.split_first() {
+                if let VideoStream::DashVideo { quality, codecs, .. } = video_stream {
+                    video_streams.push(serde_json::json!({
+                        "url": (*main_url).to_owned(),
+                        "backup_urls": backup_urls.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+                        "quality": *quality as u32,
+                        "quality_description": get_cached_video_quality_description(*quality),
+                        "codecs": get_cached_video_codecs_description(*codecs),
+                        "container": "dash",
+                        "width": null,
+                        "height": null
+                    }));
+                }
+            }
+
+            if let Some(VideoStream::DashAudio { quality, .. }) = audio_stream.as_ref() {
+                let audio_urls = audio_stream.as_ref().map(|stream| stream.urls()).unwrap_or_default();
+                if let Some((main_url, backup_urls)) = audio_urls.split_first() {
+                    audio_streams.push(serde_json::json!({
+                        "url": (*main_url).to_owned(),
+                        "backup_urls": backup_urls.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+                        "quality": *quality as u32,
+                        "quality_description": get_cached_audio_quality_description(*quality),
+                    }));
+                }
+            }
+        }
+        BestStream::Mixed(stream) => {
+            let urls = stream.urls();
+            if let Some((main_url, backup_urls)) = urls.split_first() {
+                let container = match stream {
+                    VideoStream::Flv(_) => Some("flv"),
+                    VideoStream::Html5Mp4(_) | VideoStream::EpisodeTryMp4(_) => Some("mp4"),
+                    _ => None,
+                };
+                video_streams.push(serde_json::json!({
+                    "url": (*main_url).to_owned(),
+                    "backup_urls": backup_urls.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+                    "quality": 0,
+                    "quality_description": "混合流",
+                    "codecs": "未知",
+                    "container": container,
+                    "width": null,
+                    "height": null
+                }));
+            }
+        }
+    }
+
+    if video_streams.is_empty() {
+        return Ok(());
+    }
+
+    let update_model = page::ActiveModel {
+        id: sea_orm::ActiveValue::Unchanged(page_id),
+        play_video_streams: Set(Some(
+            serde_json::to_string(&video_streams).context("序列化下载视频流缓存失败")?,
+        )),
+        play_audio_streams: Set(Some(
+            serde_json::to_string(&audio_streams).context("序列化下载音频流缓存失败")?,
+        )),
+        play_streams_updated_at: Set(Some(now_standard_string())),
+        ..Default::default()
+    };
+
+    update_model.update(connection).await.context("写入下载播放缓存失败")?;
+    Ok(())
+}
+
 pub async fn fetch_page_video(
     should_run: bool,
     bili_client: &BiliClient,
     video_model: &video::Model,
+    connection: &DatabaseConnection,
+    page_id: i32,
     downloader: &UnifiedDownloader,
     page_info: &PageInfo,
     page_path: &Path,
@@ -5428,6 +5555,9 @@ pub async fn fetch_page_video(
 
     // 根据流类型进行不同处理
     let best_stream_result = streams.best_stream(filter_option)?;
+    if let Err(e) = save_download_play_stream_cache(connection, page_id, &best_stream_result).await {
+        debug!("写入下载播放缓存失败（不影响下载）: page_id={}, error={}", page_id, e);
+    }
 
     // 添加流选择结果日志和质量分析
     debug!("=== 流选择结果 ===");

@@ -725,8 +725,17 @@ class ApiClient {
 	 * 获取视频播放信息（在线播放用）
 	 * @param videoId 视频ID或分页ID
 	 */
-	async getVideoPlayInfo(videoId: string | number): Promise<ApiResponse<VideoPlayInfoResponse>> {
-		return this.get<VideoPlayInfoResponse>(`/videos/${videoId}/play-info`);
+	async getVideoPlayInfo(
+		videoId: string | number,
+		options?: { refresh?: boolean }
+	): Promise<ApiResponse<VideoPlayInfoResponse>> {
+		const params =
+			typeof options?.refresh === 'boolean'
+				? {
+						refresh: options.refresh
+					}
+				: undefined;
+		return this.get<VideoPlayInfoResponse>(`/videos/${videoId}/play-info`, params);
 	}
 
 	/**
@@ -1185,7 +1194,8 @@ export const api = {
 	/**
 	 * 获取视频播放信息（在线播放用）
 	 */
-	getVideoPlayInfo: (videoId: string | number) => apiClient.getVideoPlayInfo(videoId),
+	getVideoPlayInfo: (videoId: string | number, options?: { refresh?: boolean }) =>
+		apiClient.getVideoPlayInfo(videoId, options),
 
 	/**
 	 * 获取视频BVID信息（用于构建B站链接）

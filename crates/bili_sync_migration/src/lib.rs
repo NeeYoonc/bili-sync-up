@@ -54,6 +54,7 @@ mod m20260125_000003_add_dynamic_api_full_synced;
 mod m20260127_000001_add_submission_scan_state;
 mod m20260202_000001_add_ai_rename_parent_dir;
 mod m20260203_000001_create_collection_season_mapping;
+mod m20260220_000001_add_page_play_stream_cache;
 
 pub struct Migrator;
 
@@ -115,6 +116,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260127_000001_add_submission_scan_state::Migration),
             Box::new(m20260202_000001_add_ai_rename_parent_dir::Migration),
             Box::new(m20260203_000001_create_collection_season_mapping::Migration),
+            Box::new(m20260220_000001_add_page_play_stream_cache::Migration),
         ]
     }
 }

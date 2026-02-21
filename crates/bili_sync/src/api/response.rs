@@ -683,7 +683,7 @@ pub struct BetaImageUpdateStatusResponse {
 }
 
 /// 视频播放信息响应
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct VideoPlayInfoResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -701,7 +701,7 @@ pub struct VideoPlayInfoResponse {
 }
 
 /// 视频流信息
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct VideoStreamInfo {
     pub url: String,
     pub backup_urls: Vec<String>,
@@ -715,7 +715,7 @@ pub struct VideoStreamInfo {
 }
 
 /// 音频流信息
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AudioStreamInfo {
     pub url: String,
     pub backup_urls: Vec<String>,
@@ -724,7 +724,7 @@ pub struct AudioStreamInfo {
 }
 
 /// 字幕信息
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SubtitleStreamInfo {
     pub language: String,
     pub language_doc: String,

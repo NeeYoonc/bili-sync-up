@@ -18,6 +18,10 @@ pub struct Model {
     pub image: Option<String>,
     pub download_status: u32,
     pub created_at: String,
+    pub play_video_streams: Option<String>,
+    pub play_audio_streams: Option<String>,
+    pub play_subtitle_streams: Option<String>,
+    pub play_streams_updated_at: Option<String>,
     /// 是否已被 AI 重命名
     #[sea_orm(default_value = "0")]
     pub ai_renamed: Option<i32>,
