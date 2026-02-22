@@ -54,6 +54,11 @@ struct SubmissionCollectionMembershipCacheEntry {
 
 const SUBMISSION_COLLECTION_META_CACHE_TTL_SECS: i64 = 30 * 60;
 const SUBMISSION_COLLECTION_MEMBERSHIP_CACHE_TTL_SECS: i64 = 30 * 60;
+const SUBMISSION_COLLECTION_MEMBERSHIP_FETCH_BATCH_SIZE: usize = 50;
+const SUBMISSION_COLLECTION_MEMBERSHIP_BATCH_COOLDOWN_MS: u64 = 600_000;
+const SUBMISSION_COLLECTION_MEMBERSHIP_ITEM_DELAY_MS: u64 = 350;
+const SUBMISSION_MEMBERSHIP_UNMATCHED_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+const SUBMISSION_MEMBERSHIP_QUERY_CHUNK_SIZE: usize = 300;
 
 fn current_unix_timestamp_secs() -> i64 {
     SystemTime::now()
@@ -84,6 +89,148 @@ fn get_submission_membership_load_lock(upper_id: i64) -> Arc<TokioMutex<()>> {
         .entry(upper_id)
         .or_insert_with(|| Arc::new(TokioMutex::new(())))
         .clone()
+}
+
+async fn load_submission_unmatched_cache_from_video(
+    connection: &DatabaseConnection,
+    source_submission_id: i32,
+    upper_id: i64,
+    target_bvids: &HashSet<String>,
+) -> Result<HashSet<String>> {
+    if target_bvids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut matched = HashSet::new();
+    let valid_after = current_unix_timestamp_secs().saturating_sub(SUBMISSION_MEMBERSHIP_UNMATCHED_TTL_SECS);
+    let mut target_list = target_bvids.iter().cloned().collect::<Vec<_>>();
+    target_list.sort_unstable();
+
+    for chunk in target_list.chunks(SUBMISSION_MEMBERSHIP_QUERY_CHUNK_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            r#"
+            SELECT bvid
+            FROM video
+            WHERE source_submission_id = ?
+              AND upper_id = ?
+              AND submission_membership_state = ?
+              AND submission_membership_checked_at IS NOT NULL
+              AND submission_membership_checked_at >= ?
+              AND bvid IN ({})
+            "#,
+            placeholders
+        );
+
+        let mut values = Vec::with_capacity(4 + chunk.len());
+        values.push(source_submission_id.into());
+        values.push(upper_id.into());
+        values.push(2_i32.into());
+        values.push(valid_after.into());
+        values.extend(chunk.iter().map(|bvid| bvid.clone().into()));
+
+        let rows = connection
+            .query_all(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
+            .await?;
+        for row in rows {
+            if let Ok(bvid) = row.try_get_by_index::<String>(0) {
+                matched.insert(bvid);
+            }
+        }
+    }
+
+    Ok(matched)
+}
+
+async fn update_submission_membership_state_batch(
+    connection: &DatabaseConnection,
+    source_submission_id: i32,
+    upper_id: i64,
+    bvids: &[String],
+    state: i32,
+    checked_at: i64,
+) -> Result<()> {
+    if bvids.is_empty() {
+        return Ok(());
+    }
+
+    for chunk in bvids.chunks(SUBMISSION_MEMBERSHIP_QUERY_CHUNK_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            r#"
+            UPDATE video
+            SET submission_membership_state = ?,
+                submission_membership_checked_at = ?
+            WHERE source_submission_id = ?
+              AND upper_id = ?
+              AND bvid IN ({})
+            "#,
+            placeholders
+        );
+
+        let mut values = Vec::with_capacity(4 + chunk.len());
+        values.push(state.into());
+        values.push(checked_at.into());
+        values.push(source_submission_id.into());
+        values.push(upper_id.into());
+        values.extend(chunk.iter().map(|bvid| bvid.clone().into()));
+
+        connection
+            .execute(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
+            .await?;
+    }
+
+    Ok(())
+}
+
+async fn persist_submission_membership_state_to_video(
+    connection: &DatabaseConnection,
+    source_submission_id: i32,
+    upper_id: i64,
+    matched_bvids: &HashSet<String>,
+    unresolved_bvids: Option<&HashSet<String>>,
+) -> Result<()> {
+    let checked_at = current_unix_timestamp_secs();
+
+    if !matched_bvids.is_empty() {
+        let mut matched_list = matched_bvids.iter().cloned().collect::<Vec<_>>();
+        matched_list.sort_unstable();
+        update_submission_membership_state_batch(
+            connection,
+            source_submission_id,
+            upper_id,
+            &matched_list,
+            1,
+            checked_at,
+        )
+        .await?;
+    }
+
+    if let Some(unresolved_set) = unresolved_bvids {
+        if !unresolved_set.is_empty() {
+            let mut unresolved_list = unresolved_set.iter().cloned().collect::<Vec<_>>();
+            unresolved_list.sort_unstable();
+            update_submission_membership_state_batch(
+                connection,
+                source_submission_id,
+                upper_id,
+                &unresolved_list,
+                2,
+                checked_at,
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
 }
 
 use crate::adapter::{video_source_from, Args, VideoSource, VideoSourceEnum};
@@ -1007,31 +1154,43 @@ pub async fn fetch_video_details(
     let videos_model = filter_unfilled_videos(video_source.filter_expr(), connection).await?;
 
     // 投稿源兜底：仅当待处理视频中确实存在缺失season_id时，才加载UP主 lists(合集/系列) 归属映射。
-    // 避免历史选择等场景下无必要地拉取全部归属，触发大量-352告警。
+    // 仅按当前待处理bvid定向补抓，并按批次拉取合集，避免一次性请求触发风控。
     // key=bvid, value=(collection_key, episode_number)
     let (submission_source_id, submission_collection_membership): (Option<i32>, Arc<HashMap<String, (String, i32)>>) =
         if let VideoSourceEnum::Submission(submission_source) = video_source {
             let is_selected_mode = submission_source.selected_videos.is_some();
-            let need_membership_backfill = !is_selected_mode
-                && videos_model.iter().any(|model| {
+            let missing_membership_bvids: HashSet<String> = videos_model
+                .iter()
+                .filter(|model| {
                     model.source_type != Some(1) // 非番剧
-                    && model
-                        .season_id
-                        .as_deref()
-                        .map(|season| season.trim().is_empty())
-                        .unwrap_or(true)
-                });
+                        && model
+                            .season_id
+                            .as_deref()
+                            .map(|season| season.trim().is_empty())
+                            .unwrap_or(true)
+                })
+                .map(|model| model.bvid.clone())
+                .collect();
+            let need_membership_backfill = !missing_membership_bvids.is_empty();
 
             if need_membership_backfill {
-                match build_submission_collection_membership_map(bili_client, submission_source.upper_id, token.clone())
-                    .await
+                match build_submission_collection_membership_map(
+                    bili_client,
+                    connection,
+                    submission_source.id,
+                    submission_source.upper_id,
+                    Some(&missing_membership_bvids),
+                    token.clone(),
+                )
+                .await
                 {
                     Ok(map) => {
                         if !map.is_empty() {
                             info!(
-                                "投稿源「{}」已加载合集/系列归属映射 {} 条",
+                                "投稿源「{}」已加载合集/系列归属映射 {} 条（目标待补抓 {} 个BV）",
                                 submission_source.upper_name,
-                                map.len()
+                                map.len(),
+                                missing_membership_bvids.len()
                             );
                         }
                         (Some(submission_source.id), Arc::new(map))
@@ -4698,16 +4857,39 @@ pub async fn download_page(
         1
     };
 
+    // 统一合集模板命名兜底：
+    // 1) up_seasonal 下若模板未使用 season 变量且写死了 S01 前缀，则按当前季度改写为 Sxx。
+    // 2) 多P场景若模板未包含 pid 变量，自动追加 Pxx，避免并发下载临时文件同名冲突。
+    let normalize_collection_unified_name =
+        |rendered: String, template: &str, is_up_seasonal: bool, is_single_page: bool| -> String {
+            let mut normalized = rendered;
+
+            let template_has_season_token = template.contains("{{season") || template.contains("{{season_pad");
+            if is_up_seasonal && !template_has_season_token {
+                if let Some(suffix) = normalized.strip_prefix("S01") {
+                    normalized = format!("S{:02}{}", collection_season_number, suffix);
+                }
+            }
+
+            let template_has_pid_token = template.contains("{{pid") || template.contains("{{pid_pad");
+            if !is_single_page && !template_has_pid_token {
+                normalized = format!("{} - P{:02}", normalized, page_model.pid.max(1));
+            }
+
+            normalized
+        };
+
     // 根据视频源类型选择不同的模板渲染方式
     let base_name = if let VideoSourceEnum::Collection(collection_source) = video_source {
         // 合集视频的特殊处理
         let config = crate::config::reload_config();
-        let legacy_fixed_season_template = config.collection_folder_mode.as_ref() == "up_seasonal"
-            && config.collection_unified_name.as_ref().contains("S01E{{episode_pad}}");
+        let collection_unified_template = config.collection_unified_name.as_ref().to_string();
+        let is_up_seasonal = config.collection_folder_mode.as_ref() == "up_seasonal";
         if matches!(config.collection_folder_mode.as_ref(), "unified" | "up_seasonal") {
             // 统一模式：使用可配置的合集统一命名模板（默认保持 S01E..）
             match get_collection_video_episode_number(connection, collection_source.id, &video_model.bvid).await {
                 Ok(episode_number) => {
+                    let is_single_page = video_model.single_page.unwrap_or(true);
                     let args = collection_unified_page_format_args(
                         video_model,
                         &page_model,
@@ -4715,17 +4897,12 @@ pub async fn download_page(
                         collection_season_number,
                     );
                     match crate::config::with_config(|bundle| bundle.render_collection_unified_template(&args)) {
-                        Ok(rendered) => {
-                            if legacy_fixed_season_template {
-                                if let Some(suffix) = rendered.strip_prefix("S01E") {
-                                    format!("S{:02}E{}", collection_season_number, suffix)
-                                } else {
-                                    rendered
-                                }
-                            } else {
-                                rendered
-                            }
-                        }
+                        Ok(rendered) => normalize_collection_unified_name(
+                            rendered,
+                            &collection_unified_template,
+                            is_up_seasonal,
+                            is_single_page,
+                        ),
                         Err(e) => {
                             warn!("合集统一模式命名模板渲染失败，将回退到默认命名: {}", e);
                             let clean_name = crate::utils::filenamify::filenamify(&video_model.name);
@@ -4777,26 +4954,22 @@ pub async fn download_page(
         }
     } else if is_submission_collection_video {
         let config = crate::config::reload_config();
-        let legacy_fixed_season_template = config.collection_folder_mode.as_ref() == "up_seasonal"
-            && config.collection_unified_name.as_ref().contains("S01E{{episode_pad}}");
+        let collection_unified_template = config.collection_unified_name.as_ref().to_string();
+        let is_up_seasonal = config.collection_folder_mode.as_ref() == "up_seasonal";
 
         if matches!(config.collection_folder_mode.as_ref(), "unified" | "up_seasonal") {
             // 投稿源中的UGC合集视频也复用合集统一命名模板
             let episode_number = video_model.episode_number.unwrap_or(page_model.pid.max(1)).max(1);
+            let is_single_page = video_model.single_page.unwrap_or(true);
             let args =
                 collection_unified_page_format_args(video_model, &page_model, episode_number, collection_season_number);
             match crate::config::with_config(|bundle| bundle.render_collection_unified_template(&args)) {
-                Ok(rendered) => {
-                    if legacy_fixed_season_template {
-                        if let Some(suffix) = rendered.strip_prefix("S01E") {
-                            format!("S{:02}E{}", collection_season_number, suffix)
-                        } else {
-                            rendered
-                        }
-                    } else {
-                        rendered
-                    }
-                }
+                Ok(rendered) => normalize_collection_unified_name(
+                    rendered,
+                    &collection_unified_template,
+                    is_up_seasonal,
+                    is_single_page,
+                ),
                 Err(e) => {
                     warn!("投稿UGC合集统一命名模板渲染失败，将回退到默认命名: {}", e);
                     let clean_name = crate::utils::filenamify::filenamify(&video_model.name);
@@ -7548,6 +7721,17 @@ fn build_submission_collection_key(collection_type: &str, sid: &str) -> Option<S
     }
 }
 
+fn is_submission_membership_rate_limited(err: &anyhow::Error) -> bool {
+    if err.to_string().contains("status code: -352") {
+        return true;
+    }
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<BiliError>()
+            .is_some_and(|e| matches!(e, BiliError::RequestFailed(code, _) if *code == -352))
+    })
+}
+
 async fn get_submission_collection_meta(
     bili_client: &BiliClient,
     upper_id: i64,
@@ -7976,13 +8160,35 @@ async fn get_submission_up_seasonal_nfo_stats(
 /// - series 类型使用前缀 sid（如 "series_5024459"）
 async fn build_submission_collection_membership_map(
     bili_client: &BiliClient,
+    connection: &DatabaseConnection,
+    source_submission_id: i32,
     upper_id: i64,
+    target_bvids: Option<&HashSet<String>>,
     token: CancellationToken,
 ) -> Result<HashMap<String, (String, i32)>> {
+    let mut seeded_map: HashMap<String, (String, i32)> = HashMap::new();
+
     if let Ok(cache) = SUBMISSION_COLLECTION_MEMBERSHIP_CACHE.lock() {
         if let Some(entry) = cache.get(&upper_id) {
             if is_cache_fresh(entry.loaded_at, SUBMISSION_COLLECTION_MEMBERSHIP_CACHE_TTL_SECS) {
-                return Ok(entry.membership.clone());
+                if let Some(targets) = target_bvids {
+                    let missing_count = targets
+                        .iter()
+                        .filter(|bvid| !entry.membership.contains_key(*bvid))
+                        .count();
+                    if missing_count == 0 {
+                        return Ok(entry.membership.clone());
+                    }
+                    seeded_map = entry.membership.clone();
+                    debug!(
+                        "投稿归属缓存部分命中（upper_id={}，目标={}，缺失={}），继续分批补抓",
+                        upper_id,
+                        targets.len(),
+                        missing_count
+                    );
+                } else {
+                    return Ok(entry.membership.clone());
+                }
             }
         }
     }
@@ -7993,18 +8199,149 @@ async fn build_submission_collection_membership_map(
     if let Ok(cache) = SUBMISSION_COLLECTION_MEMBERSHIP_CACHE.lock() {
         if let Some(entry) = cache.get(&upper_id) {
             if is_cache_fresh(entry.loaded_at, SUBMISSION_COLLECTION_MEMBERSHIP_CACHE_TTL_SECS) {
-                return Ok(entry.membership.clone());
+                if let Some(targets) = target_bvids {
+                    let missing_count = targets
+                        .iter()
+                        .filter(|bvid| !entry.membership.contains_key(*bvid))
+                        .count();
+                    if missing_count == 0 {
+                        return Ok(entry.membership.clone());
+                    }
+                    seeded_map = entry.membership.clone();
+                } else {
+                    return Ok(entry.membership.clone());
+                }
             }
         }
     }
 
-    let mut map: HashMap<String, (String, i32)> = HashMap::new();
+    let mut map: HashMap<String, (String, i32)> = seeded_map;
     let collections = bili_client.get_user_collections(upper_id, 1, 20).await?;
+    let collection_list = collections.collections;
+    let total_collections = collection_list.len();
+    if total_collections == 0 {
+        if let Ok(mut cache) = SUBMISSION_COLLECTION_MEMBERSHIP_CACHE.lock() {
+            cache.insert(
+                upper_id,
+                SubmissionCollectionMembershipCacheEntry {
+                    loaded_at: current_unix_timestamp_secs(),
+                    membership: map.clone(),
+                },
+            );
+        }
+        return Ok(map);
+    }
 
-    for item in collections.collections {
+    // 测试模式：关闭游标续扫，每轮固定从第1个合集开始
+    let traversal_start_index = 0usize;
+    let target_total = target_bvids.map(|targets| targets.len()).unwrap_or(0);
+    let persisted_unmatched = if let Some(targets) = target_bvids {
+        match load_submission_unmatched_cache_from_video(connection, source_submission_id, upper_id, targets).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("读取投稿未归属持久缓存失败（upper_id={}）: {}", upper_id, e);
+                HashSet::new()
+            }
+        }
+    } else {
+        HashSet::new()
+    };
+
+    let mut unresolved_targets: Option<HashSet<String>> = target_bvids.map(|targets| {
+        targets
+            .iter()
+            .filter(|bvid| !map.contains_key(*bvid))
+            .filter(|bvid| !persisted_unmatched.contains(*bvid))
+            .cloned()
+            .collect()
+    });
+
+    if let Some(unresolved) = unresolved_targets.as_ref() {
+        if !persisted_unmatched.is_empty() {
+            info!(
+                "投稿归属持久标记命中(video表)：upper_id={}, 已跳过 {} 个历史未归属BV",
+                upper_id,
+                persisted_unmatched.len()
+            );
+        }
+        if unresolved.is_empty() {
+            info!(
+                "投稿归属分批获取跳过：目标BV均已命中缓存或已确认未归属（upper_id={})",
+                upper_id
+            );
+            return Ok(map);
+        }
+        info!(
+            "投稿归属分批获取启动：upper_id={}, 目标BV {} 个，合集 {} 个，批次大小 {}",
+            upper_id, target_total, total_collections, SUBMISSION_COLLECTION_MEMBERSHIP_FETCH_BATCH_SIZE
+        );
+    }
+
+    let mut total_rate_limited = 0usize;
+    let mut processed_collections = 0usize;
+    let mut consecutive_rate_limited = 0usize;
+    let mut target_hits_in_round = 0usize;
+    let mut batch_target_hits_baseline = 0usize;
+    let mut low_efficiency_batches_after_rate_limit = 0usize;
+
+    'collection_loop: for offset in 0..total_collections {
         if token.is_cancelled() {
             return Err(anyhow!("Download cancelled"));
         }
+
+        if offset > 0 && offset % SUBMISSION_COLLECTION_MEMBERSHIP_FETCH_BATCH_SIZE == 0 {
+            if let Some(unresolved) = unresolved_targets.as_ref() {
+                info!(
+                    "投稿归属分批获取进度：upper_id={}, 已处理 {}/{}, 剩余目标BV {} 个，批次冷却 {}ms",
+                    upper_id,
+                    processed_collections,
+                    total_collections,
+                    unresolved.len(),
+                    SUBMISSION_COLLECTION_MEMBERSHIP_BATCH_COOLDOWN_MS
+                );
+            } else {
+                debug!(
+                    "投稿归属分批获取进度：upper_id={}, 已处理 {}/{}, 批次冷却 {}ms",
+                    upper_id,
+                    processed_collections,
+                    total_collections,
+                    SUBMISSION_COLLECTION_MEMBERSHIP_BATCH_COOLDOWN_MS
+                );
+            }
+
+            // 仅在本轮已经触发过风控时启用“低效批次提前停止”
+            // 避免在高风险状态下持续无效请求；未触发风控时保持完整扫描。
+            if total_rate_limited > 0 && target_total > 0 {
+                let hits_in_last_batch = target_hits_in_round.saturating_sub(batch_target_hits_baseline);
+                if hits_in_last_batch == 0 {
+                    low_efficiency_batches_after_rate_limit += 1;
+                } else {
+                    low_efficiency_batches_after_rate_limit = 0;
+                }
+                batch_target_hits_baseline = target_hits_in_round;
+
+                if low_efficiency_batches_after_rate_limit >= 2 {
+                    warn!(
+                        "投稿归属分批获取提前结束：触发风控后连续 {} 个批次未命中目标BV（upper_id={}, processed={}/{}, total_rate_limited={})",
+                        low_efficiency_batches_after_rate_limit,
+                        upper_id,
+                        processed_collections,
+                        total_collections,
+                        total_rate_limited
+                    );
+                    break 'collection_loop;
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(
+                SUBMISSION_COLLECTION_MEMBERSHIP_BATCH_COOLDOWN_MS,
+            ))
+            .await;
+        }
+
+        let actual_index = (traversal_start_index + offset) % total_collections;
+        let item = &collection_list[actual_index];
+        processed_collections += 1;
 
         let collection_type = match item.collection_type.as_str() {
             "season" => CollectionType::Season,
@@ -8024,12 +8361,30 @@ async fn build_submission_collection_membership_map(
         let collection = Collection::new(bili_client, &collection_item);
 
         let order_map = match collection.get_video_order_map().await {
-            Ok(v) => v,
+            Ok(v) => {
+                consecutive_rate_limited = 0;
+                v
+            }
             Err(err) => {
-                warn!(
-                    "获取投稿列表归属失败（upper_id={}, type={}, sid={}）: {}",
-                    upper_id, item.collection_type, item.sid, err
-                );
+                if is_submission_membership_rate_limited(&err) {
+                    total_rate_limited += 1;
+                    consecutive_rate_limited += 1;
+                    warn!(
+                        "获取投稿列表归属触发风控（upper_id={}, type={}, sid={}, processed={}/{}）: {}",
+                        upper_id, item.collection_type, item.sid, processed_collections, total_collections, err
+                    );
+
+                    if consecutive_rate_limited >= 3 {
+                        warn!("投稿归属分批获取提前结束（连续风控 {} 次）", consecutive_rate_limited);
+                        break;
+                    }
+                } else {
+                    consecutive_rate_limited = 0;
+                    warn!(
+                        "获取投稿列表归属失败（upper_id={}, type={}, sid={}）: {}",
+                        upper_id, item.collection_type, item.sid, err
+                    );
+                }
                 continue;
             }
         };
@@ -8039,23 +8394,103 @@ async fn build_submission_collection_membership_map(
                 continue;
             }
 
+            if let Some(targets) = target_bvids {
+                if !targets.contains(&bvid) && !map.contains_key(&bvid) {
+                    continue;
+                }
+            }
+
             match map.get(&bvid) {
                 None => {
-                    map.insert(bvid, (collection_key.clone(), episode_number));
+                    map.insert(bvid.clone(), (collection_key.clone(), episode_number));
                 }
                 Some((existing_key, _)) => {
                     // 同时属于 season+series 时优先使用 season 归属（更稳定）
                     let existing_is_series = existing_key.starts_with("series_");
                     let new_is_series = collection_key.starts_with("series_");
                     if existing_is_series && !new_is_series {
-                        map.insert(bvid, (collection_key.clone(), episode_number));
+                        map.insert(bvid.clone(), (collection_key.clone(), episode_number));
                     }
+                }
+            }
+
+            if let Some(unresolved) = unresolved_targets.as_mut() {
+                if unresolved.remove(&bvid) {
+                    target_hits_in_round += 1;
                 }
             }
         }
 
-        // 轻微限速，降低连续请求触发风控的概率
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        if let Some(unresolved) = unresolved_targets.as_ref() {
+            if unresolved.is_empty() {
+                info!(
+                    "投稿归属定向补抓完成：目标BV {} 个已全部命中（upper_id={}, processed={}/{})",
+                    target_total, upper_id, processed_collections, total_collections
+                );
+                break;
+            }
+        }
+
+        // 每个合集请求后进行轻微限速
+        tokio::time::sleep(Duration::from_millis(SUBMISSION_COLLECTION_MEMBERSHIP_ITEM_DELAY_MS)).await;
+    }
+
+    if let Some(unresolved) = unresolved_targets.as_ref() {
+        if !unresolved.is_empty() {
+            if total_rate_limited > 0 {
+                warn!(
+                    "投稿归属分批获取结束：目标BV仍有 {} 个未命中（upper_id={}, processed={}/{}，本轮有风控，且未命中中也可能包含普通投稿未入合集/系列）",
+                    unresolved.len(), upper_id, processed_collections, total_collections
+                );
+            } else {
+                info!(
+                    "投稿归属分批获取结束：目标BV仍有 {} 个未命中（upper_id={}, processed={}/{}，通常为普通投稿未入合集/系列，属正常）",
+                    unresolved.len(), upper_id, processed_collections, total_collections
+                );
+            }
+        }
+    }
+
+    if let Some(targets) = target_bvids {
+        let matched_targets: HashSet<String> = targets.iter().filter(|bvid| map.contains_key(*bvid)).cloned().collect();
+
+        // 仅在“本轮无风控且完整跑完合集列表”时，才把未命中目标标记为未归属(2)。
+        let unresolved_to_persist = if total_rate_limited == 0 && processed_collections >= total_collections {
+            unresolved_targets.as_ref()
+        } else {
+            None
+        };
+
+        if let Err(e) = persist_submission_membership_state_to_video(
+            connection,
+            source_submission_id,
+            upper_id,
+            &matched_targets,
+            unresolved_to_persist,
+        )
+        .await
+        {
+            warn!("写入投稿归属状态到video表失败（upper_id={}）: {}", upper_id, e);
+        } else if let Some(unresolved) = unresolved_to_persist {
+            if unresolved.is_empty() {
+                info!("投稿未归属持久标记已清空（upper_id={}）", upper_id);
+            } else {
+                info!(
+                    "投稿未归属持久标记已更新（upper_id={}，缓存 {} 个BV）",
+                    upper_id,
+                    unresolved.len()
+                );
+            }
+        }
+    }
+
+    if total_rate_limited > 0 {
+        warn!(
+            "投稿列表归属本轮出现风控(-352) {} 次；本轮已加载 {} 条归属映射（upper_id={}）",
+            total_rate_limited,
+            map.len(),
+            upper_id
+        );
     }
 
     if let Ok(mut cache) = SUBMISSION_COLLECTION_MEMBERSHIP_CACHE.lock() {

@@ -33,6 +33,8 @@ pub struct Model {
     pub single_page: Option<bool>,
     pub created_at: String,
     pub season_id: Option<String>,
+    pub submission_membership_state: i32,
+    pub submission_membership_checked_at: Option<i64>,
     pub ep_id: Option<String>,
     pub season_number: Option<i32>,
     pub episode_number: Option<i32>,

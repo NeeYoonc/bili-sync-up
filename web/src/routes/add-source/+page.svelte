@@ -2525,10 +2525,12 @@
 								bind:value={name}
 								placeholder="请输入视频源名称"
 								required
-								disabled={isMergingBangumi}
+								disabled={isMergingBangumi || batchMode}
 							/>
 							{#if isMergingBangumi}
 								<p class="text-xs text-purple-600">合并时自动沿用目标番剧源的名称</p>
+							{:else if batchMode}
+								<p class="text-xs text-blue-600">批量模式下名称自动使用所选视频源信息</p>
 							{/if}
 						</div>
 
@@ -3273,7 +3275,7 @@
 
 						<!-- 提交按钮 -->
 						<div class="flex {isMobile ? 'flex-col' : ''} gap-2">
-							<Button type="submit" disabled={loading} class={isMobile ? 'w-full' : ''}>
+							<Button type="submit" disabled={loading || batchMode} class={isMobile ? 'w-full' : ''}>
 								{loading ? '添加中...' : '添加'}
 							</Button>
 							<Button
