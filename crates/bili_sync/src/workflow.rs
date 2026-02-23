@@ -1105,32 +1105,8 @@ pub async fn refresh_video_source<'a>(
         }
     }
 
-    // 投稿源：在同UP分季模式下，按年季度归一化映射，避免历史数据中同季度被拆成多个Season。
-    if let VideoSourceEnum::Submission(submission_source) = video_source {
-        let config = crate::config::reload_config();
-        if config.collection_folder_mode.as_ref() == "up_seasonal" {
-            let safe_upper_name = crate::utils::filenamify::filenamify(submission_source.upper_name.trim());
-            let up_dir_name = if safe_upper_name.is_empty() {
-                format!("UP_{}", submission_source.upper_id)
-            } else {
-                safe_upper_name
-            };
-            let grouped_base_path = Path::new(&submission_source.path)
-                .join(&up_dir_name)
-                .to_string_lossy()
-                .to_string();
-
-            if let Err(err) =
-                normalize_collection_season_mapping_group(connection, submission_source.upper_id, &grouped_base_path)
-                    .await
-            {
-                warn!(
-                    "投稿源季度映射归一化失败（upper_id={}, base_path='{}'）: {}",
-                    submission_source.upper_id, grouped_base_path, err
-                );
-            }
-        }
-    }
+    // 注意：投稿源分季映射在运行中不再执行“全量归一化重排”，
+    // 避免下载过程中旧视频插入导致已有季号漂移（例如 Season 03 被重排到 Season 540）。
 
     video_source.log_refresh_video_end(count);
     debug!("workflow返回: count={}, new_videos.len()={}", count, new_videos.len());
@@ -1153,77 +1129,10 @@ pub async fn fetch_video_details(
 
     let videos_model = filter_unfilled_videos(video_source.filter_expr(), connection).await?;
 
-    // 投稿源兜底：仅当待处理视频中确实存在缺失season_id时，才加载UP主 lists(合集/系列) 归属映射。
-    // 仅按当前待处理bvid定向补抓，并按批次拉取合集，避免一次性请求触发风控。
+    // 投稿源归属映射改为“详情后兜底”：
+    // 先让详情接口尽可能填充 season_id（ugc_season），仅对剩余缺口再补抓 lists 归属，降低风控与等待。
     // key=bvid, value=(collection_key, episode_number)
-    let (submission_source_id, submission_collection_membership): (Option<i32>, Arc<HashMap<String, (String, i32)>>) =
-        if let VideoSourceEnum::Submission(submission_source) = video_source {
-            let is_selected_mode = submission_source.selected_videos.is_some();
-            let missing_membership_bvids: HashSet<String> = videos_model
-                .iter()
-                .filter(|model| {
-                    model.source_type != Some(1) // 非番剧
-                        && model
-                            .season_id
-                            .as_deref()
-                            .map(|season| season.trim().is_empty())
-                            .unwrap_or(true)
-                })
-                .map(|model| model.bvid.clone())
-                .collect();
-            let need_membership_backfill = !missing_membership_bvids.is_empty();
-
-            if need_membership_backfill {
-                match build_submission_collection_membership_map(
-                    bili_client,
-                    connection,
-                    submission_source.id,
-                    submission_source.upper_id,
-                    Some(&missing_membership_bvids),
-                    token.clone(),
-                )
-                .await
-                {
-                    Ok(map) => {
-                        if !map.is_empty() {
-                            info!(
-                                "投稿源「{}」已加载合集/系列归属映射 {} 条（目标待补抓 {} 个BV）",
-                                submission_source.upper_name,
-                                map.len(),
-                                missing_membership_bvids.len()
-                            );
-                        }
-                        (Some(submission_source.id), Arc::new(map))
-                    }
-                    Err(err) => {
-                        warn!("加载投稿合集/系列归属映射失败，将仅使用详情接口结果: {}", err);
-                        (Some(submission_source.id), Arc::new(HashMap::new()))
-                    }
-                }
-            } else {
-                debug!(
-                    "投稿源「{}」跳过合集/系列归属映射加载（selected_mode={}, 待处理视频无归属缺口）",
-                    submission_source.upper_name, is_selected_mode
-                );
-                (Some(submission_source.id), Arc::new(HashMap::new()))
-            }
-        } else {
-            (None, Arc::new(HashMap::new()))
-        };
-
-    if let Some(source_id) = submission_source_id {
-        if !submission_collection_membership.is_empty() {
-            match backfill_submission_collection_membership(connection, source_id, &submission_collection_membership)
-                .await
-            {
-                Ok(updated) if updated > 0 => {
-                    info!("投稿源归属回填完成：本轮修正 {} 条历史视频归属", updated);
-                }
-                Ok(_) => {}
-                Err(err) => warn!("投稿源归属回填失败（不影响后续流程）: {}", err),
-            }
-        }
-    }
+    let submission_collection_membership: Arc<HashMap<String, (String, i32)>> = Arc::new(HashMap::new());
 
     // 分离出番剧和普通视频
     let (bangumi_videos, normal_videos): (Vec<_>, Vec<_>) =
@@ -1749,6 +1658,100 @@ pub async fn fetch_video_details(
         }
         info!("完成普通视频详情处理");
     }
+
+    // 投稿源兜底（详情后）：仅对仍缺失 season_id 的视频按需补抓归属。
+    if let VideoSourceEnum::Submission(submission_source) = video_source {
+        if !(crate::task::TASK_CONTROLLER.is_paused() || token.is_cancelled()) {
+            let post_detail_models = video::Entity::find()
+                .filter(video_source.filter_expr())
+                .filter(video::Column::Deleted.eq(0))
+                .all(connection)
+                .await?;
+            let mut missing_membership_bvids: HashSet<String> = HashSet::new();
+            let mut missing_total = 0usize;
+            let mut skipped_multipage = 0usize;
+            let mut skipped_single_normal = 0usize;
+            for model in post_detail_models {
+                if model.source_type == Some(1) {
+                    continue; // 番剧不走投稿lists归属补抓
+                }
+                let season_missing = model
+                    .season_id
+                    .as_deref()
+                    .map(|season| season.trim().is_empty())
+                    .unwrap_or(true);
+                if !season_missing {
+                    continue;
+                }
+                missing_total += 1;
+
+                // 多P与“合集风格单P”由本地分季规则处理，不需要再走 lists 归属补抓。
+                let is_single_page = model.single_page.unwrap_or(true);
+                if !is_single_page {
+                    skipped_multipage += 1;
+                    continue;
+                }
+                if !is_submission_collection_like_title(&model.name) {
+                    // 普通单P不参与投稿lists归属补抓，避免无意义地遍历全部合集/系列。
+                    skipped_single_normal += 1;
+                    continue;
+                }
+                missing_membership_bvids.insert(model.bvid);
+            }
+
+            debug!(
+                "投稿源「{}」详情后归属缺口统计：总缺口 {}，跳过多P {}，跳过普通单P {}，待补抓 {}",
+                submission_source.upper_name,
+                missing_total,
+                skipped_multipage,
+                skipped_single_normal,
+                missing_membership_bvids.len()
+            );
+
+            if missing_membership_bvids.is_empty() {
+                debug!(
+                    "投稿源「{}」详情后无归属缺口，跳过lists归属补抓",
+                    submission_source.upper_name
+                );
+            } else {
+                match build_submission_collection_membership_map(
+                    bili_client,
+                    connection,
+                    submission_source.id,
+                    submission_source.upper_id,
+                    Some(&missing_membership_bvids),
+                    token.clone(),
+                )
+                .await
+                {
+                    Ok(map) => {
+                        if !map.is_empty() {
+                            info!(
+                                "投稿源「{}」详情后归属补抓完成：映射 {} 条（目标待补抓 {} 个BV）",
+                                submission_source.upper_name,
+                                map.len(),
+                                missing_membership_bvids.len()
+                            );
+                            match backfill_submission_collection_membership(connection, submission_source.id, &map).await {
+                                Ok(updated) if updated > 0 => {
+                                    info!("投稿源归属回填完成：本轮修正 {} 条历史视频归属", updated);
+                                }
+                                Ok(_) => {}
+                                Err(err) => warn!("投稿源归属回填失败（不影响后续流程）: {}", err),
+                            }
+                        } else {
+                            debug!(
+                                "投稿源「{}」详情后归属补抓无命中（目标 {} 个BV）",
+                                submission_source.upper_name,
+                                missing_membership_bvids.len()
+                            );
+                        }
+                    }
+                    Err(err) => warn!("详情后加载投稿合集/系列归属映射失败，将仅使用详情接口结果: {}", err),
+                }
+            }
+        }
+    }
     video_source.log_fetch_video_end();
     Ok(())
 }
@@ -1770,6 +1773,18 @@ pub async fn download_unprocessed_videos(
     let current_config = crate::config::reload_config();
     let semaphore = Semaphore::new(current_config.concurrent_limit.video);
     let unhandled_videos_pages = filter_unhandled_video_pages(video_source.filter_expr(), connection).await?;
+
+    // up_seasonal：先基于“全部视频”统一分配合集/系列/多P季号，避免下载并发阶段按处理顺序漂移。
+    if !unhandled_videos_pages.is_empty() && current_config.collection_folder_mode.as_ref() == "up_seasonal" {
+        if let VideoSourceEnum::Submission(submission_source) = video_source {
+            if let Err(err) = preallocate_submission_up_seasonal_mappings(connection, submission_source).await {
+                warn!(
+                    "投稿源「{}」分季预分配失败，将回退为下载阶段按需分配: {}",
+                    submission_source.upper_name, err
+                );
+            }
+        }
+    }
 
     // 只有当有未处理视频时才显示日志
     if !unhandled_videos_pages.is_empty() {
@@ -3149,16 +3164,69 @@ pub async fn download_video_pages(
 
         let collection_use_season_structure =
             config.collection_use_season_structure || config.collection_folder_mode.as_ref() == "up_seasonal";
+        let submission_up_seasonal_mode =
+            matches!(video_source, VideoSourceEnum::Submission(_)) && config.collection_folder_mode.as_ref() == "up_seasonal";
+        let submission_title_collection_like = is_submission_collection_like_title(&final_video_model.name);
         let submission_collection_use_season = is_submission_collection_video
             && (config.collection_folder_mode.as_ref() == "up_seasonal" || config.collection_use_season_structure);
+        let submission_force_season_structure =
+            submission_up_seasonal_mode && (!is_single_page || is_submission_collection_video || submission_title_collection_like);
 
         if !flat_folder
             && ((!is_single_page && config.multi_page_use_season_structure)
                 || (is_collection_source && collection_use_season_structure)
-                || submission_collection_use_season)
+                || submission_collection_use_season
+                || submission_force_season_structure)
         {
             // 为多P视频或合集创建Season文件夹结构
-            let season_folder_name = if is_collection && config.collection_folder_mode.as_ref() == "up_seasonal" {
+            let season_folder_name = if submission_up_seasonal_mode {
+                match video_source {
+                    VideoSourceEnum::Submission(submission_source) => {
+                        // up_seasonal 优先级：
+                        // 1) 有 season_id 的投稿合集/系列：按 season_id 分季（一个系列/合集一个季）
+                        // 2) 多P投稿（无 season_id）：一个多P一个季（按 bvid）
+                        // 3) 标题含“合集/合輯/全系列”的单P投稿（无 season_id）：一个视频一个季（按 bvid）
+                        if is_submission_collection_video {
+                            match get_submission_source_season_number(connection, submission_source, &final_video_model)
+                                .await
+                            {
+                                Ok(season_number) => format!("Season {:02}", season_number.max(1)),
+                                Err(err) => {
+                                    warn!("计算投稿UGC合集季度失败，回退为 Season 01: {}", err);
+                                    "Season 01".to_string()
+                                }
+                            }
+                        } else if !is_single_page {
+                            match get_submission_multipage_season_number(connection, submission_source, &final_video_model)
+                                .await
+                            {
+                                Ok(season_number) => format!("Season {:02}", season_number.max(1)),
+                                Err(err) => {
+                                    warn!("计算投稿多P季度失败，回退为 Season 01: {}", err);
+                                    "Season 01".to_string()
+                                }
+                            }
+                        } else if submission_title_collection_like {
+                            match get_submission_single_collection_like_season_number(
+                                connection,
+                                submission_source,
+                                &final_video_model,
+                            )
+                            .await
+                            {
+                                Ok(season_number) => format!("Season {:02}", season_number.max(1)),
+                                Err(err) => {
+                                    warn!("计算投稿合集风格单P季度失败，回退为 Season 01: {}", err);
+                                    "Season 01".to_string()
+                                }
+                            }
+                        } else {
+                            "Season 01".to_string()
+                        }
+                    }
+                    _ => "Season 01".to_string(),
+                }
+            } else if is_collection && config.collection_folder_mode.as_ref() == "up_seasonal" {
                 match video_source {
                     VideoSourceEnum::Collection(collection_source) => {
                         match get_collection_source_season_number(connection, collection_source, &final_video_model)
@@ -3167,17 +3235,6 @@ pub async fn download_video_pages(
                             Ok(season_number) => format!("Season {:02}", season_number.max(1)),
                             Err(err) => {
                                 warn!("计算同UP合集季度失败，回退为 Season 01: {}", err);
-                                "Season 01".to_string()
-                            }
-                        }
-                    }
-                    VideoSourceEnum::Submission(submission_source) if is_submission_collection_video => {
-                        match get_submission_source_season_number(connection, submission_source, &final_video_model)
-                            .await
-                        {
-                            Ok(season_number) => format!("Season {:02}", season_number.max(1)),
-                            Err(err) => {
-                                warn!("计算投稿UGC合集季度失败，回退为 Season 01: {}", err);
                                 "Season 01".to_string()
                             }
                         }
@@ -3193,24 +3250,6 @@ pub async fn download_video_pages(
                             Ok(season_number) => format!("Season {:02}", season_number.max(1)),
                             Err(err) => {
                                 warn!("计算投稿UGC合集季度失败，回退为 Season 01: {}", err);
-                                "Season 01".to_string()
-                            }
-                        }
-                    }
-                    _ => "Season 01".to_string(),
-                }
-            } else if matches!(video_source, VideoSourceEnum::Submission(_))
-                && !is_single_page
-                && config.collection_folder_mode.as_ref() == "up_seasonal"
-            {
-                match video_source {
-                    VideoSourceEnum::Submission(submission_source) => {
-                        match get_submission_multipage_season_number(connection, submission_source, &final_video_model)
-                            .await
-                        {
-                            Ok(season_number) => format!("Season {:02}", season_number.max(1)),
-                            Err(err) => {
-                                warn!("计算投稿多P季度失败，回退为 Season 01: {}", err);
                                 "Season 01".to_string()
                             }
                         }
@@ -7542,7 +7581,14 @@ async fn get_submission_multipage_episode_number(
     Ok(count.max(1))
 }
 
-async fn get_submission_multipage_season_number(
+fn is_submission_collection_like_title(title: &str) -> bool {
+    let _ = title;
+    // 关闭“按标题关键词推断合集风格”逻辑：
+    // 无 season_id 的投稿统一按普通单P处理，不再根据标题命中“合集/合輯/全系列”来分流。
+    false
+}
+
+async fn get_submission_single_collection_like_season_number(
     connection: &DatabaseConnection,
     submission_source: &bili_sync_entity::submission::Model,
     video_model: &video::Model,
@@ -7551,11 +7597,134 @@ async fn get_submission_multipage_season_number(
 
     let source_submission_id = video_model
         .source_submission_id
-        .context("投稿多P缺少source_submission_id")?;
+        .context("投稿合集风格单P缺少source_submission_id")?;
 
     let up_mid = submission_source.upper_id;
     let up_dir_name = {
-        let safe_upper_name = crate::utils::filenamify::filenamify(video_model.upper_name.trim());
+        let safe_upper_name = crate::utils::filenamify::filenamify(submission_source.upper_name.trim());
+        if safe_upper_name.is_empty() {
+            format!("UP_{}", up_mid)
+        } else {
+            safe_upper_name
+        }
+    };
+    let base_path = Path::new(&submission_source.path)
+        .join(&up_dir_name)
+        .to_string_lossy()
+        .to_string();
+    let reference_pubtime = video_model.pubtime;
+    let pub_year = reference_pubtime.year();
+    let pub_quarter = ((reference_pubtime.month0() / 3) + 1) as i32;
+    let mapping_key = format!(
+        "submission_collection_like_{}_{}",
+        source_submission_id, video_model.bvid
+    );
+    let mapping_collection_id = derive_collection_mapping_key(&mapping_key);
+
+    let mapping_row = connection
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT season_id, up_mid
+            FROM collection_season_mapping
+            WHERE collection_id = ?
+            LIMIT 1
+            "#,
+            vec![mapping_collection_id.into()],
+        ))
+        .await?;
+
+    let season_number = if let Some(row) = mapping_row {
+        let mapped_season_id = row
+            .try_get_by_index::<i64>(0)
+            .ok()
+            .and_then(|v| i32::try_from(v).ok())
+            .filter(|v| *v > 0);
+        let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
+        if mapped_season_id.is_some() && mapped_up_mid == Some(up_mid) {
+            mapped_season_id.unwrap()
+        } else {
+            let max_row = connection
+                .query_one(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    r#"
+                    SELECT COALESCE(MAX(season_id), 0)
+                    FROM collection_season_mapping
+                    WHERE up_mid = ? AND base_path = ?
+                    "#,
+                    vec![up_mid.into(), base_path.clone().into()],
+                ))
+                .await?;
+
+            let max_season = max_row
+                .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(0);
+            (max_season + 1).max(1)
+        }
+    } else {
+        let max_row = connection
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                r#"
+                SELECT COALESCE(MAX(season_id), 0)
+                FROM collection_season_mapping
+                WHERE up_mid = ? AND base_path = ?
+                "#,
+                vec![up_mid.into(), base_path.clone().into()],
+            ))
+            .await?;
+
+        let max_season = max_row
+            .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(0);
+        (max_season + 1).max(1)
+    };
+
+    let reference_pubtime_text = reference_pubtime.format("%Y-%m-%d %H:%M:%S").to_string();
+    connection
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            INSERT INTO collection_season_mapping (
+                collection_id, up_mid, base_path, pub_year, pub_quarter, season_id, reference_pubtime, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(collection_id) DO UPDATE SET
+                up_mid = excluded.up_mid,
+                base_path = excluded.base_path,
+                pub_year = excluded.pub_year,
+                pub_quarter = excluded.pub_quarter,
+                season_id = excluded.season_id,
+                reference_pubtime = excluded.reference_pubtime,
+                updated_at = CURRENT_TIMESTAMP
+            "#,
+            vec![
+                mapping_collection_id.into(),
+                up_mid.into(),
+                base_path.into(),
+                pub_year.into(),
+                pub_quarter.into(),
+                season_number.into(),
+                reference_pubtime_text.into(),
+            ],
+        ))
+        .await?;
+
+    Ok(season_number)
+}
+
+async fn get_submission_multipage_season_number(
+    connection: &DatabaseConnection,
+    submission_source: &bili_sync_entity::submission::Model,
+    video_model: &video::Model,
+) -> Result<i32> {
+    use sea_orm::*;
+
+    let up_mid = submission_source.upper_id;
+    let up_dir_name = {
+        let safe_upper_name = crate::utils::filenamify::filenamify(submission_source.upper_name.trim());
         if safe_upper_name.is_empty() {
             format!("UP_{}", up_mid)
         } else {
@@ -7570,20 +7739,15 @@ async fn get_submission_multipage_season_number(
     let reference_pubtime = video_model.pubtime;
     let pub_year = reference_pubtime.year();
     let pub_quarter = ((reference_pubtime.month0() / 3) + 1) as i32;
-    let mapping_key = format!(
-        "submission_multipage_{}_{}Q{}",
-        source_submission_id, pub_year, pub_quarter
-    );
+    let mapping_key = build_submission_multipage_mapping_key(up_mid, &video_model.bvid);
     let mapping_collection_id = derive_collection_mapping_key(&mapping_key);
 
-    normalize_collection_season_mapping_group(connection, up_mid, &base_path).await?;
-
-    // 1) 已有映射且关键字段一致则直接复用
+    // 1) 已有映射（同UP）则直接复用，保证“一个多P一个季”
     let mapping_row = connection
         .query_one(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             r#"
-            SELECT season_id, up_mid, base_path, pub_year, pub_quarter
+            SELECT season_id, up_mid
             FROM collection_season_mapping
             WHERE collection_id = ?
             LIMIT 1
@@ -7592,55 +7756,36 @@ async fn get_submission_multipage_season_number(
         ))
         .await?;
 
-    if let Some(row) = mapping_row {
+    let season_number = if let Some(row) = mapping_row {
         let mapped_season_id = row
             .try_get_by_index::<i64>(0)
             .ok()
             .and_then(|v| i32::try_from(v).ok())
             .filter(|v| *v > 0);
         let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
-        let mapped_base_path = row.try_get_by_index::<String>(2).ok();
-        let mapped_year = row.try_get_by_index::<i32>(3).ok();
-        let mapped_quarter = row.try_get_by_index::<i32>(4).ok();
+        if mapped_season_id.is_some() && mapped_up_mid == Some(up_mid) {
+            mapped_season_id.unwrap()
+        } else {
+            let max_row = connection
+                .query_one(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    r#"
+                    SELECT COALESCE(MAX(season_id), 0)
+                    FROM collection_season_mapping
+                    WHERE up_mid = ? AND base_path = ?
+                    "#,
+                    vec![up_mid.into(), base_path.clone().into()],
+                ))
+                .await?;
 
-        if mapped_season_id.is_some()
-            && mapped_up_mid == Some(up_mid)
-            && mapped_base_path.as_deref() == Some(base_path.as_str())
-            && mapped_year == Some(pub_year)
-            && mapped_quarter == Some(pub_quarter)
-        {
-            return Ok(mapped_season_id.unwrap());
+            let max_season = max_row
+                .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(0);
+            (max_season + 1).max(1)
         }
-    }
-
-    // 2) 同UP+同路径+同季度复用既有季号
-    let same_quarter_row = connection
-        .query_one(Statement::from_sql_and_values(
-            DatabaseBackend::Sqlite,
-            r#"
-            SELECT season_id
-            FROM collection_season_mapping
-            WHERE up_mid = ? AND base_path = ? AND pub_year = ? AND pub_quarter = ?
-            ORDER BY id ASC
-            LIMIT 1
-            "#,
-            vec![
-                up_mid.into(),
-                base_path.clone().into(),
-                pub_year.into(),
-                pub_quarter.into(),
-            ],
-        ))
-        .await?;
-
-    let season_number = if let Some(row) = same_quarter_row {
-        row.try_get_by_index::<i64>(0)
-            .ok()
-            .and_then(|v| i32::try_from(v).ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(1)
     } else {
-        // 3) 否则分配下一个季号
+        // 2) 未命中已有映射时，分配下一个季号（不再按季度复用）
         let max_row = connection
             .query_one(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
@@ -7707,6 +7852,279 @@ fn derive_collection_mapping_key(raw_collection_id: &str) -> i32 {
     raw_collection_id.hash(&mut hasher);
     let hashed = hasher.finish();
     ((hashed % (i32::MAX as u64 - 1)) + 1) as i32
+}
+
+fn build_submission_multipage_mapping_key(upper_id: i64, bvid: &str) -> String {
+    // 使用 upper_id + bvid 作为稳定键，避免 source_submission_id 变化导致多P季号漂移。
+    format!("submission_multipage_{}_{}", upper_id, bvid)
+}
+
+/// 在 up_seasonal 模式下，先基于“全部视频”做一次分组并按时间统一分配季号。
+/// 这样下载阶段只读取稳定映射，避免并发下载时按处理顺序临时递增导致季号漂移。
+async fn preallocate_submission_up_seasonal_mappings(
+    connection: &DatabaseConnection,
+    submission_source: &submission::Model,
+) -> Result<()> {
+    use sea_orm::*;
+
+    let up_mid = submission_source.upper_id;
+    let up_dir_name = {
+        let safe_upper_name = crate::utils::filenamify::filenamify(submission_source.upper_name.trim());
+        if safe_upper_name.is_empty() {
+            format!("UP_{}", up_mid)
+        } else {
+            safe_upper_name
+        }
+    };
+    let grouped_base_path = Path::new(&submission_source.path)
+        .join(&up_dir_name)
+        .to_string_lossy()
+        .to_string();
+
+    let videos = video::Entity::find()
+        .filter(video::Column::SourceSubmissionId.eq(submission_source.id))
+        .filter(video::Column::Deleted.eq(0))
+        .all(connection)
+        .await?;
+
+    if videos.is_empty() {
+        return Ok(());
+    }
+
+    // collection_id -> (raw_key, earliest_pubtime)
+    let mut grouped: HashMap<i32, (String, chrono::NaiveDateTime)> = HashMap::new();
+    for video_model in videos {
+        let is_single_page = video_model.single_page.unwrap_or(true);
+        let mapping_key = if let Some(season_id) = video_model
+            .season_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            // 合集/系列：按 season_id 稳定映射
+            season_id.to_string()
+        } else if !is_single_page {
+            // 多P（无 season_id）：按 bvid 稳定映射
+            build_submission_multipage_mapping_key(submission_source.upper_id, &video_model.bvid)
+        } else if is_submission_collection_like_title(&video_model.name) {
+            // 单P合集风格（无 season_id）：按 bvid 稳定映射
+            format!("submission_collection_like_{}_{}", submission_source.id, video_model.bvid)
+        } else {
+            continue;
+        };
+
+        let collection_id = derive_collection_mapping_key(&mapping_key);
+        match grouped.get_mut(&collection_id) {
+            Some((_, earliest_pubtime)) => {
+                if video_model.pubtime < *earliest_pubtime {
+                    *earliest_pubtime = video_model.pubtime;
+                }
+            }
+            None => {
+                grouped.insert(collection_id, (mapping_key, video_model.pubtime));
+            }
+        }
+    }
+
+    if grouped.is_empty() {
+        return Ok(());
+    }
+
+    // 运行时清理：删除当前投稿源（同 up_mid + base_path）下不再存在于本轮分组中的旧映射，
+    // 避免删源重加/规则变更后遗留脏数据导致季号断档或漂移。
+    let grouped_collection_ids: HashSet<i32> = grouped.keys().copied().collect();
+    let removed_stale_count = cleanup_stale_submission_season_mappings(
+        connection,
+        up_mid,
+        &grouped_base_path,
+        &grouped_collection_ids,
+    )
+    .await?;
+    if removed_stale_count > 0 {
+        info!(
+            "投稿源「{}」分季预分配前已清理旧映射 {} 条",
+            submission_source.upper_name, removed_stale_count
+        );
+    }
+
+    let mut existing_map: HashMap<i32, (i32, i64)> = HashMap::new();
+    let mut all_collection_ids: Vec<i32> = grouped.keys().copied().collect();
+    all_collection_ids.sort_unstable();
+
+    for chunk in all_collection_ids.chunks(300) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            r#"
+            SELECT collection_id, season_id, up_mid
+            FROM collection_season_mapping
+            WHERE collection_id IN ({})
+            "#,
+            placeholders
+        );
+        let values = chunk.iter().map(|id| (*id).into()).collect::<Vec<_>>();
+        let rows = connection
+            .query_all(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
+            .await?;
+        for row in rows {
+            let collection_id = row
+                .try_get_by_index::<i64>(0)
+                .ok()
+                .and_then(|v| i32::try_from(v).ok())
+                .filter(|v| *v > 0);
+            let season_id = row
+                .try_get_by_index::<i64>(1)
+                .ok()
+                .and_then(|v| i32::try_from(v).ok())
+                .filter(|v| *v > 0);
+            let mapped_up_mid = row.try_get_by_index::<i64>(2).ok();
+            if let (Some(collection_id), Some(season_id), Some(mapped_up_mid)) = (collection_id, season_id, mapped_up_mid) {
+                existing_map.insert(collection_id, (season_id, mapped_up_mid));
+            }
+        }
+    }
+
+    let mut grouped_items: Vec<(i32, String, chrono::NaiveDateTime)> = grouped
+        .into_iter()
+        .map(|(collection_id, (mapping_key, earliest_pubtime))| (collection_id, mapping_key, earliest_pubtime))
+        .collect();
+    grouped_items.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.cmp(&b.1)));
+
+    let total_groups = grouped_items.len();
+    let mut unchanged = 0usize;
+    let mut reassigned = 0usize;
+    let mut created = 0usize;
+
+    // 连续重排：按“最早发布时间 + 稳定键”排序后，始终分配 1..N。
+    // 这样可以在删源重加、清理旧映射后自动恢复连续季号，避免 Season 编号断档。
+    for (index, (collection_id, _mapping_key, earliest_pubtime)) in grouped_items.into_iter().enumerate() {
+        let season_number = i32::try_from(index + 1).unwrap_or(i32::MAX).max(1);
+        match existing_map.get(&collection_id) {
+            Some((existing_season, mapped_up_mid)) if *mapped_up_mid == up_mid && *existing_season == season_number => {
+                unchanged += 1;
+            }
+            Some(_) => {
+                reassigned += 1;
+            }
+            None => {
+                created += 1;
+            }
+        }
+
+        let pub_year = earliest_pubtime.year();
+        let pub_quarter = ((earliest_pubtime.month0() / 3) + 1) as i32;
+        let reference_pubtime_text = earliest_pubtime.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        connection
+            .execute(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                r#"
+                INSERT INTO collection_season_mapping (
+                    collection_id, up_mid, base_path, pub_year, pub_quarter, season_id, reference_pubtime, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(collection_id) DO UPDATE SET
+                    up_mid = excluded.up_mid,
+                    base_path = excluded.base_path,
+                    pub_year = excluded.pub_year,
+                    pub_quarter = excluded.pub_quarter,
+                    season_id = excluded.season_id,
+                    reference_pubtime = excluded.reference_pubtime,
+                    updated_at = CURRENT_TIMESTAMP
+                "#,
+                vec![
+                    collection_id.into(),
+                    up_mid.into(),
+                    grouped_base_path.clone().into(),
+                    pub_year.into(),
+                    pub_quarter.into(),
+                    season_number.into(),
+                    reference_pubtime_text.into(),
+                ],
+            ))
+            .await?;
+    }
+
+    info!(
+        "投稿源「{}」分季预分配完成：分组 {} 个，保持 {} 个，重排 {} 个，新增 {} 个",
+        submission_source.upper_name,
+        total_groups,
+        unchanged,
+        reassigned,
+        created
+    );
+
+    Ok(())
+}
+
+async fn cleanup_stale_submission_season_mappings(
+    connection: &DatabaseConnection,
+    up_mid: i64,
+    base_path: &str,
+    active_collection_ids: &HashSet<i32>,
+) -> Result<usize> {
+    use sea_orm::*;
+
+    let existing_rows = connection
+        .query_all(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT collection_id
+            FROM collection_season_mapping
+            WHERE up_mid = ? AND base_path = ?
+            "#,
+            vec![up_mid.into(), base_path.to_string().into()],
+        ))
+        .await?;
+
+    let mut to_delete = Vec::new();
+    for row in existing_rows {
+        let collection_id = row
+            .try_get_by_index::<i64>(0)
+            .ok()
+            .and_then(|v| i32::try_from(v).ok())
+            .filter(|v| *v > 0);
+        if let Some(collection_id) = collection_id {
+            if !active_collection_ids.contains(&collection_id) {
+                to_delete.push(collection_id);
+            }
+        }
+    }
+
+    if to_delete.is_empty() {
+        return Ok(0);
+    }
+
+    to_delete.sort_unstable();
+    to_delete.dedup();
+
+    let mut removed = 0usize;
+    for chunk in to_delete.chunks(300) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            r#"
+            DELETE FROM collection_season_mapping
+            WHERE up_mid = ? AND base_path = ? AND collection_id IN ({})
+            "#,
+            placeholders
+        );
+        let mut values = Vec::with_capacity(2 + chunk.len());
+        values.push(up_mid.into());
+        values.push(base_path.to_string().into());
+        values.extend(chunk.iter().map(|id| (*id).into()));
+
+        let result = connection
+            .execute(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
+            .await?;
+        removed += result.rows_affected() as usize;
+    }
+
+    Ok(removed)
 }
 
 fn build_submission_collection_key(collection_type: &str, sid: &str) -> Option<String> {
@@ -8081,7 +8499,7 @@ async fn get_submission_up_seasonal_nfo_stats(
         .query_all(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             r#"
-            SELECT v.id, v.season_id, v.single_page, v.pubtime, COUNT(p.id)
+            SELECT v.id, v.season_id, v.single_page, v.pubtime, COUNT(p.id), v.bvid, v.name
             FROM video v
             LEFT JOIN page p ON p.video_id = v.id
             WHERE v.source_submission_id = ?
@@ -8089,8 +8507,9 @@ async fn get_submission_up_seasonal_nfo_stats(
               AND (
                     (v.season_id IS NOT NULL AND TRIM(v.season_id) != '')
                     OR (v.single_page = 0 OR v.single_page IS NULL)
+                    OR (v.single_page = 1 AND (v.season_id IS NULL OR TRIM(v.season_id) = ''))
                   )
-            GROUP BY v.id, v.season_id, v.single_page, v.pubtime
+            GROUP BY v.id, v.season_id, v.single_page, v.pubtime, v.bvid, v.name
             "#,
             vec![submission_source.id.into()],
         ))
@@ -8107,34 +8526,31 @@ async fn get_submission_up_seasonal_nfo_stats(
             .ok()
             .or_else(|| row.try_get_by_index::<i64>(2).ok().map(|v| v != 0))
             .unwrap_or(true);
-        let pubtime_text = row
-            .try_get_by_index::<String>(3)
-            .ok()
-            .unwrap_or_else(|| video_model.pubtime.format("%Y-%m-%d %H:%M:%S").to_string());
         let page_count = row
             .try_get_by_index::<i64>(4)
             .ok()
             .and_then(|v| i32::try_from(v).ok())
             .unwrap_or(0)
             .max(1);
+        let bvid = row.try_get_by_index::<String>(5).ok().unwrap_or_default();
+        let title = row.try_get_by_index::<String>(6).ok().unwrap_or_default();
 
-        let mapped_season_number =
-            if let Some(season_id) = season_id_text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                let key = derive_collection_mapping_key(season_id);
-                season_map.get(&key).copied()
-            } else if !single_page {
-                let pubtime = parse_time_string(&pubtime_text).unwrap_or(video_model.pubtime);
-                let quarter = ((pubtime.month0() / 3) + 1) as i32;
-                let key = derive_collection_mapping_key(&format!(
-                    "submission_multipage_{}_{}Q{}",
-                    submission_source.id,
-                    pubtime.year(),
-                    quarter
-                ));
-                season_map.get(&key).copied()
-            } else {
-                None
-            };
+        let mapped_season_number = if !single_page {
+            let key =
+                derive_collection_mapping_key(&build_submission_multipage_mapping_key(submission_source.upper_id, &bvid));
+            season_map.get(&key).copied()
+        } else if is_submission_collection_like_title(&title) {
+            let key =
+                derive_collection_mapping_key(&format!("submission_collection_like_{}_{}", submission_source.id, bvid));
+            season_map.get(&key).copied()
+        } else if let Some(season_id) =
+            season_id_text.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        {
+            let key = derive_collection_mapping_key(season_id);
+            season_map.get(&key).copied()
+        } else {
+            None
+        };
 
         let Some(mapped_season_number) = mapped_season_number else {
             continue;
@@ -8546,85 +8962,6 @@ async fn backfill_submission_collection_membership(
     Ok(updated_rows)
 }
 
-async fn normalize_collection_season_mapping_group(
-    connection: &DatabaseConnection,
-    up_mid: i64,
-    base_path: &str,
-) -> Result<()> {
-    use sea_orm::*;
-
-    let rows = connection
-        .query_all(Statement::from_sql_and_values(
-            DatabaseBackend::Sqlite,
-            r#"
-            SELECT id, pub_year, pub_quarter, season_id
-            FROM collection_season_mapping
-            WHERE up_mid = ? AND base_path = ?
-            ORDER BY pub_year ASC, pub_quarter ASC, reference_pubtime ASC, id ASC
-            "#,
-            vec![up_mid.into(), base_path.to_string().into()],
-        ))
-        .await?;
-
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    let mut changed = 0usize;
-    let mut expected_by_quarter: HashMap<(i32, i32), i32> = HashMap::new();
-    let mut next_expected: i32 = 1;
-
-    for row in rows {
-        let id = row.try_get_by_index::<i64>(0).ok().filter(|v| *v > 0);
-        let year = row.try_get_by_index::<i32>(1).unwrap_or(0);
-        let quarter = row.try_get_by_index::<i32>(2).unwrap_or(0);
-        let current = row
-            .try_get_by_index::<i64>(3)
-            .ok()
-            .and_then(|v| i32::try_from(v).ok())
-            .unwrap_or(next_expected.max(1));
-
-        let key = (year, quarter);
-        let expected = if let Some(value) = expected_by_quarter.get(&key).copied() {
-            value
-        } else {
-            let value = next_expected.max(1);
-            expected_by_quarter.insert(key, value);
-            next_expected = value + 1;
-            value
-        };
-
-        if let Some(id) = id {
-            if current != expected {
-                connection
-                    .execute(Statement::from_sql_and_values(
-                        DatabaseBackend::Sqlite,
-                        r#"
-                        UPDATE collection_season_mapping
-                        SET season_id = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                        "#,
-                        vec![expected.into(), id.into()],
-                    ))
-                    .await?;
-                changed += 1;
-            }
-        }
-    }
-
-    if changed > 0 {
-        info!(
-            "已规范季度映射顺序: up_mid={}, base_path='{}', 修正 {} 条映射，当前共 {} 个季度",
-            up_mid,
-            base_path,
-            changed,
-            expected_by_quarter.len()
-        );
-    }
-
-    Ok(())
-}
-
 async fn get_submission_source_season_number(
     connection: &DatabaseConnection,
     submission_source: &bili_sync_entity::submission::Model,
@@ -8641,7 +8978,7 @@ async fn get_submission_source_season_number(
 
     let up_mid = submission_source.upper_id;
     let up_dir_name = {
-        let safe_upper_name = crate::utils::filenamify::filenamify(video_model.upper_name.trim());
+        let safe_upper_name = crate::utils::filenamify::filenamify(submission_source.upper_name.trim());
         if safe_upper_name.is_empty() {
             format!("UP_{}", up_mid)
         } else {
@@ -8671,14 +9008,12 @@ async fn get_submission_source_season_number(
     let pub_year = reference_pubtime.year();
     let pub_quarter = ((reference_pubtime.month0() / 3) + 1) as i32;
 
-    normalize_collection_season_mapping_group(connection, up_mid, &base_path).await?;
-
-    // 1) 先检查该UGC合集ID是否已有映射并与当前关键字段一致
+    // 1) 先检查该UGC合集ID是否已有映射（同UP则直接复用，保证“一个合集/系列一个季”）
     let mapping_row = connection
         .query_one(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             r#"
-            SELECT season_id, up_mid, base_path, pub_year, pub_quarter
+            SELECT season_id, up_mid
             FROM collection_season_mapping
             WHERE collection_id = ?
             LIMIT 1
@@ -8687,51 +9022,36 @@ async fn get_submission_source_season_number(
         ))
         .await?;
 
-    if let Some(row) = mapping_row {
+    let season_number = if let Some(row) = mapping_row {
         let mapped_season_id = row
             .try_get_by_index::<i64>(0)
             .ok()
             .and_then(|v| i32::try_from(v).ok())
             .filter(|v| *v > 0);
         let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
-        let mapped_base_path = row.try_get_by_index::<String>(2).ok();
+        if mapped_season_id.is_some() && mapped_up_mid == Some(up_mid) {
+            mapped_season_id.unwrap()
+        } else {
+            let max_row = connection
+                .query_one(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    r#"
+                    SELECT COALESCE(MAX(season_id), 0)
+                    FROM collection_season_mapping
+                    WHERE up_mid = ? AND base_path = ?
+                    "#,
+                    vec![up_mid.into(), base_path.clone().into()],
+                ))
+                .await?;
 
-        if mapped_season_id.is_some()
-            && mapped_up_mid == Some(up_mid)
-            && mapped_base_path.as_deref() == Some(base_path.as_str())
-        {
-            return Ok(mapped_season_id.unwrap());
+            let max_season = max_row
+                .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(0);
+            (max_season + 1).max(1)
         }
-    }
-
-    // 2) 查询同UP+同路径+同季度是否已有已分配season_id
-    let same_quarter_row = connection
-        .query_one(Statement::from_sql_and_values(
-            DatabaseBackend::Sqlite,
-            r#"
-            SELECT season_id
-            FROM collection_season_mapping
-            WHERE up_mid = ? AND base_path = ? AND pub_year = ? AND pub_quarter = ?
-            ORDER BY id ASC
-            LIMIT 1
-            "#,
-            vec![
-                up_mid.into(),
-                base_path.clone().into(),
-                pub_year.into(),
-                pub_quarter.into(),
-            ],
-        ))
-        .await?;
-
-    let season_number = if let Some(row) = same_quarter_row {
-        row.try_get_by_index::<i64>(0)
-            .ok()
-            .and_then(|v| i32::try_from(v).ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(1)
     } else {
-        // 3) 同分组无同季度映射时，分配下一个季号
+        // 2) 未命中已有映射时，分配下一个季号（不再按季度复用）
         let max_row = connection
             .query_one(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
@@ -8782,8 +9102,6 @@ async fn get_submission_source_season_number(
             ],
         ))
         .await?;
-
-    normalize_collection_season_mapping_group(connection, up_mid, &base_path).await?;
 
     let final_season_number = connection
         .query_one(Statement::from_sql_and_values(
@@ -8840,14 +9158,12 @@ async fn get_collection_source_season_number(
     let pub_year = reference_pubtime.year();
     let pub_quarter = ((reference_pubtime.month0() / 3) + 1) as i32;
 
-    normalize_collection_season_mapping_group(connection, collection_source.m_id, &grouped_base_path).await?;
-
-    // 1) 先尝试读取当前合集已有映射（若匹配当前关键字段，直接复用）
+    // 1) 先尝试读取当前合集已有映射（同UP则直接复用，保证“一个合集一个季”）
     let mapping_row = connection
         .query_one(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             r#"
-            SELECT season_id, up_mid, base_path, pub_year, pub_quarter
+            SELECT season_id, up_mid
             FROM collection_season_mapping
             WHERE collection_id = ?
             LIMIT 1
@@ -8856,51 +9172,36 @@ async fn get_collection_source_season_number(
         ))
         .await?;
 
-    if let Some(row) = mapping_row {
+    let season_id = if let Some(row) = mapping_row {
         let mapped_season_id = row
             .try_get_by_index::<i64>(0)
             .ok()
             .and_then(|v| i32::try_from(v).ok())
             .filter(|v| *v > 0);
         let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
-        let mapped_base_path = row.try_get_by_index::<String>(2).ok();
+        if mapped_season_id.is_some() && mapped_up_mid == Some(collection_source.m_id) {
+            mapped_season_id.unwrap()
+        } else {
+            let max_row = connection
+                .query_one(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    r#"
+                    SELECT COALESCE(MAX(season_id), 0)
+                    FROM collection_season_mapping
+                    WHERE up_mid = ? AND base_path = ?
+                    "#,
+                    vec![collection_source.m_id.into(), grouped_base_path.clone().into()],
+                ))
+                .await?;
 
-        if mapped_season_id.is_some()
-            && mapped_up_mid == Some(collection_source.m_id)
-            && mapped_base_path.as_deref() == Some(grouped_base_path.as_str())
-        {
-            return Ok(mapped_season_id.unwrap());
+            let max_season = max_row
+                .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(0);
+            (max_season + 1).max(1)
         }
-    }
-
-    // 2) 找同分组同季度已有season_id（同UP + 同路径 + 同年季度）
-    let same_quarter_row = connection
-        .query_one(Statement::from_sql_and_values(
-            DatabaseBackend::Sqlite,
-            r#"
-            SELECT season_id
-            FROM collection_season_mapping
-            WHERE up_mid = ? AND base_path = ? AND pub_year = ? AND pub_quarter = ?
-            ORDER BY id ASC
-            LIMIT 1
-            "#,
-            vec![
-                collection_source.m_id.into(),
-                grouped_base_path.clone().into(),
-                pub_year.into(),
-                pub_quarter.into(),
-            ],
-        ))
-        .await?;
-
-    let season_id = if let Some(row) = same_quarter_row {
-        row.try_get_by_index::<i64>(0)
-            .ok()
-            .and_then(|v| i32::try_from(v).ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(1)
     } else {
-        // 3) 同分组无同季度映射时，分配下一个season_id
+        // 2) 未命中已有映射时，分配下一个season_id（不再按季度复用）
         let max_row = connection
             .query_one(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
@@ -8951,8 +9252,6 @@ async fn get_collection_source_season_number(
             ],
         ))
         .await?;
-
-    normalize_collection_season_mapping_group(connection, collection_source.m_id, &grouped_base_path).await?;
 
     let final_season_id = connection
         .query_one(Statement::from_sql_and_values(
