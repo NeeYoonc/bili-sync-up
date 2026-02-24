@@ -58,6 +58,7 @@
 	let flatFolder = false; // 平铺目录模式
 	let downloadDanmaku = true; // 下载弹幕（默认开启）
 	let downloadSubtitle = true; // 下载字幕（默认开启）
+	let downloadNfo = true; // 下载NFO元数据（默认开启）
 	let useDynamicApi = false; // 投稿源：使用动态API
 	let aiRename = false; // AI重命名（默认关闭）
 	let aiRenameVideoPrompt = ''; // AI重命名视频提示词
@@ -616,6 +617,7 @@
 			flat_folder: flatFolder,
 			download_danmaku: downloadDanmaku,
 			download_subtitle: downloadSubtitle,
+			download_nfo: downloadNfo,
 			use_dynamic_api: useDynamicApi,
 			ai_rename: aiRename,
 			ai_rename_video_prompt: aiRenameVideoPrompt.trim() || undefined,
@@ -762,6 +764,7 @@
 			flatFolder = false;
 			downloadDanmaku = true;
 			downloadSubtitle = true;
+			downloadNfo = true;
 			useDynamicApi = false;
 			aiRename = false;
 			aiRenameVideoPrompt = '';
@@ -2785,6 +2788,41 @@
 									</div>
 									<label class="relative inline-flex cursor-pointer items-center">
 										<input type="checkbox" bind:checked={downloadSubtitle} class="peer sr-only" />
+										<div
+											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+										></div>
+									</label>
+								</div>
+
+								<!-- 下载NFO -->
+								<div
+									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
+								>
+									<div class="flex items-center gap-2">
+										<svg
+											class="h-4 w-4 text-blue-600 dark:text-blue-400"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												stroke-width="2"
+												d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+											/>
+										</svg>
+										<div>
+											<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
+												>下载NFO元数据</span
+											>
+											<p class="text-[10px] text-gray-500 dark:text-gray-400">
+												生成 NFO 格式的视频元数据文件
+											</p>
+										</div>
+									</div>
+									<label class="relative inline-flex cursor-pointer items-center">
+										<input type="checkbox" bind:checked={downloadNfo} class="peer sr-only" />
 										<div
 											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
 										></div>

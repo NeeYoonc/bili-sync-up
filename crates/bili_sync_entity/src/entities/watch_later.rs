@@ -22,6 +22,7 @@ pub struct Model {
     pub flat_folder: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
+    pub download_nfo: bool,
     pub ai_rename: bool,
     pub ai_rename_video_prompt: String,
     pub ai_rename_audio_prompt: String,

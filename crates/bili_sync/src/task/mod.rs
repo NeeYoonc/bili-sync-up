@@ -1131,6 +1131,7 @@ impl AddTaskQueue {
                 audio_only: None,                  // 任务队列中使用默认值
                 download_danmaku: None,            // 任务队列中使用默认值
                 download_subtitle: None,           // 任务队列中使用默认值
+                download_nfo: None,                // 任务队列中使用默认值
                 ai_rename: None,                   // 任务队列中使用默认值
                 ai_rename_video_prompt: None,      // 任务队列中使用默认值
                 ai_rename_audio_prompt: None,      // 任务队列中使用默认值

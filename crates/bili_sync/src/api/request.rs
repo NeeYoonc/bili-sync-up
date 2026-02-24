@@ -66,6 +66,8 @@ pub struct AddVideoSourceRequest {
     pub download_danmaku: Option<bool>,
     // 是否下载字幕文件（SRT）
     pub download_subtitle: Option<bool>,
+    // 是否下载 NFO 元数据文件
+    pub download_nfo: Option<bool>,
     // 是否启用AI重命名
     pub ai_rename: Option<bool>,
     // AI重命名视频提示词（覆盖全局配置）
@@ -119,6 +121,8 @@ pub struct UpdateVideoSourceDownloadOptionsRequest {
     pub download_danmaku: Option<bool>,
     /// 是否下载字幕文件（SRT）
     pub download_subtitle: Option<bool>,
+    /// 是否下载 NFO 元数据文件
+    pub download_nfo: Option<bool>,
     /// 是否启用AI重命名
     pub ai_rename: Option<bool>,
     /// AI重命名视频提示词（覆盖全局配置）

@@ -237,6 +237,10 @@ impl VideoSource for submission::Model {
         self.download_subtitle
     }
 
+    fn download_nfo(&self) -> bool {
+        self.download_nfo
+    }
+
     fn ai_rename(&self) -> bool {
         self.ai_rename
     }

@@ -129,6 +129,7 @@ pub struct UpdateVideoSourceDownloadOptionsResponse {
     pub flat_folder: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
+    pub download_nfo: bool,
     pub ai_rename: bool,
     pub ai_rename_video_prompt: String,
     pub ai_rename_audio_prompt: String,
@@ -214,6 +215,7 @@ pub struct VideoSource {
     pub flat_folder: bool,                 // 是否启用平铺目录模式
     pub download_danmaku: bool,            // 是否下载弹幕文件
     pub download_subtitle: bool,           // 是否下载字幕文件
+    pub download_nfo: bool,                // 是否下载 NFO 元数据文件
     pub ai_rename: bool,                   // 是否启用AI重命名
     pub ai_rename_video_prompt: String,    // AI重命名视频提示词
     pub ai_rename_audio_prompt: String,    // AI重命名音频提示词

@@ -40,6 +40,7 @@ pub struct BangumiSource {
     pub flat_folder: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
+    pub download_nfo: bool,
     pub ai_rename: bool,
     pub ai_rename_video_prompt: String,
     pub ai_rename_audio_prompt: String,
@@ -538,6 +539,10 @@ impl VideoSource for BangumiSource {
 
     fn download_subtitle(&self) -> bool {
         self.download_subtitle
+    }
+
+    fn download_nfo(&self) -> bool {
+        self.download_nfo
     }
 
     fn ai_rename(&self) -> bool {

@@ -35,6 +35,7 @@
 	import FolderSyncIcon from '@lucide/svelte/icons/folder-sync';
 	import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
 	import SubtitlesIcon from '@lucide/svelte/icons/subtitles';
+	import FileTextIcon from '@lucide/svelte/icons/file-text';
 	import ActivityIcon from '@lucide/svelte/icons/activity';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
@@ -478,6 +479,27 @@
 				successToast: () => ({
 					title: '设置更新成功',
 					description: newDownloadSubtitle ? '已启用字幕下载' : '已禁用字幕下载'
+				})
+			}
+		);
+	}
+
+	// 切换下载NFO设置
+	async function handleToggleDownloadNfo(
+		sourceType: string,
+		sourceId: number,
+		currentDownloadNfo: boolean
+	) {
+		const newDownloadNfo = !currentDownloadNfo;
+		await updateAndReload(
+			() =>
+				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
+					download_nfo: newDownloadNfo
+				}),
+			{
+				successToast: () => ({
+					title: '设置更新成功',
+					description: newDownloadNfo ? '已启用NFO下载' : '已禁用NFO下载'
 				})
 			}
 		);
@@ -983,6 +1005,9 @@
 													{#if source.download_subtitle === false}
 														<span class="text-gray-500">字幕下载已禁用</span>
 													{/if}
+													{#if source.download_nfo === false}
+														<span class="text-gray-500">NFO下载已禁用</span>
+													{/if}
 													{#if source.ai_rename}
 														<span class="text-blue-600">
 															AI重命名已启用{#if source.ai_rename_video_prompt || source.ai_rename_audio_prompt}（自定义提示词）{/if}
@@ -1191,6 +1216,28 @@
 												>
 													<SubtitlesIcon
 														class="h-4 w-4 {source.download_subtitle !== false
+															? 'text-green-600'
+															: 'text-gray-400'}"
+													/>
+												</Button>
+
+												<!-- 下载NFO -->
+												<Button
+													size="sm"
+													variant="ghost"
+													onclick={() =>
+														handleToggleDownloadNfo(
+															sourceConfig.type,
+															source.id,
+															source.download_nfo ?? true
+														)}
+													title={source.download_nfo !== false
+														? '禁用NFO下载'
+														: '启用NFO下载'}
+													class="h-8 w-8 p-0"
+												>
+													<FileTextIcon
+														class="h-4 w-4 {source.download_nfo !== false
 															? 'text-green-600'
 															: 'text-gray-400'}"
 													/>

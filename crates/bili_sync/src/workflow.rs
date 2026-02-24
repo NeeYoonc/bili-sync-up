@@ -4806,8 +4806,11 @@ pub async fn download_page(
     let mut separate_status = status.should_run();
     let is_single_page = video_model.single_page.context("single_page is null")?;
 
-    // 根据视频源设置调整弹幕和字幕下载开关
-    // separate_status[3] = 弹幕, separate_status[4] = 字幕
+    // 根据视频源设置调整弹幕、字幕和 NFO 下载开关
+    // separate_status[2] = NFO, separate_status[3] = 弹幕, separate_status[4] = 字幕
+    if !video_source.download_nfo() {
+        separate_status[2] = false;
+    }
     if !video_source.download_danmaku() {
         separate_status[3] = false;
     }
