@@ -978,13 +978,15 @@
 		});
 		if (!response) return;
 
-		if (response.data.success) {
-			toast.success('推送通知配置保存成功', { description: response.data.message });
+		const ok = response.status_code === 200;
+		const msg = typeof response.data === 'string' ? response.data : '推送配置更新成功';
+		if (ok) {
+			toast.success('推送通知配置保存成功', { description: msg });
 			// 重新加载状态
 			await loadNotificationStatus();
 			openSheet = null; // 关闭抽屉
 		} else {
-			toast.error('保存失败', { description: response.data.message });
+			toast.error('保存失败', { description: msg || '推送配置更新失败' });
 		}
 	}
 

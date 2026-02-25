@@ -870,16 +870,8 @@ class ApiClient {
 		wecom_mention_all?: boolean;
 		wecom_mentioned_list?: string[];
 		notification_min_videos?: number;
-	}): Promise<
-		ApiResponse<{
-			success: boolean;
-			message: string;
-		}>
-	> {
-		return this.post<{
-			success: boolean;
-			message: string;
-		}>('/config/notification', config);
+	}): Promise<ApiResponse<string>> {
+		return this.post<string>('/config/notification', config);
 	}
 
 	/**
