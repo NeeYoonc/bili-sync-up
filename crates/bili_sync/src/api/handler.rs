@@ -1582,6 +1582,7 @@ pub async fn reset_video(
             video::Entity::update(video::ActiveModel {
                 id: Unchanged(id),
                 download_status: Set(VideoStatus::from(video_info.download_status).into()),
+                valid: Set(true),
                 ..Default::default()
             })
             .exec(&txn)
@@ -1841,6 +1842,7 @@ pub async fn reset_all_videos(
                     id: sea_orm::ActiveValue::Unchanged(video.id),
                     download_status: sea_orm::Set(VideoStatus::from(video.download_status).into()),
                     auto_download: sea_orm::Set(true),
+                    valid: sea_orm::Set(true),
                     ..Default::default()
                 })
                 .exec(&txn)
@@ -2168,6 +2170,7 @@ pub async fn reset_specific_tasks(
                 video::Entity::update(video::ActiveModel {
                     id: sea_orm::ActiveValue::Unchanged(video.id),
                     download_status: sea_orm::Set(VideoStatus::from(video.download_status).into()),
+                    valid: sea_orm::Set(true),
                     ..Default::default()
                 })
                 .exec(&txn)
@@ -2440,6 +2443,7 @@ pub async fn update_video_status(
                 id: sea_orm::ActiveValue::Unchanged(video_info.id),
                 download_status: sea_orm::Set(VideoStatus::from(video_info.download_status).into()),
                 auto_download: sea_orm::Set(true),
+                valid: sea_orm::Set(true),
                 ..Default::default()
             })
             .exec(&txn)

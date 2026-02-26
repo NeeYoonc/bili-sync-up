@@ -373,6 +373,10 @@ pub async fn create_videos(
                     // 视频存在且未删除，检查是否需要更新字段
                     let mut needs_update = false;
                     let mut should_recalculate_name = false;
+                    let valid_changed = match &model.valid {
+                        Set(new_valid) => existing.valid != *new_valid,
+                        _ => false,
+                    };
 
                     // 检查 share_copy 字段更新
                     let share_copy_changed = if let Some(new_share_copy) = model.share_copy.as_ref() {
@@ -418,7 +422,7 @@ pub async fn create_videos(
                         }
                     };
 
-                    if share_copy_changed || show_season_type_changed || actors_changed {
+                    if share_copy_changed || show_season_type_changed || actors_changed || valid_changed {
                         needs_update = true;
                         should_recalculate_name = true;
 
@@ -438,6 +442,12 @@ pub async fn create_videos(
                             info!(
                                 "检测到需要更新actors: 视频={}, 原值={:?}, 新值={:?}",
                                 existing.name, existing.actors, model.actors
+                            );
+                        }
+                        if valid_changed {
+                            info!(
+                                "检测到需要更新valid: 视频={}, 原值={}, 新值={:?}",
+                                existing.name, existing.valid, model.valid
                             );
                         }
                     }
@@ -477,6 +487,7 @@ pub async fn create_videos(
 
                         let update_model = video::ActiveModel {
                             id: Unchanged(existing.id),
+                            valid: model.valid.clone(),
                             share_copy: model.share_copy.clone(),
                             show_season_type: model.show_season_type.clone(),
                             actors: model.actors.clone(),
@@ -636,6 +647,10 @@ pub async fn create_videos(
                     if let Some(existing) = existing_video {
                         let mut needs_update = false;
                         let mut should_recalculate_name = false;
+                        let valid_changed = match &model.valid {
+                            Set(new_valid) => existing.valid != *new_valid,
+                            _ => false,
+                        };
 
                         // 检查 share_copy 字段更新
                         let share_copy_changed = if let Some(new_share_copy) = model.share_copy.as_ref() {
@@ -682,7 +697,7 @@ pub async fn create_videos(
                             }
                         };
 
-                        if share_copy_changed || show_season_type_changed || actors_changed {
+                        if share_copy_changed || show_season_type_changed || actors_changed || valid_changed {
                             needs_update = true;
                             should_recalculate_name = true;
 
@@ -702,6 +717,12 @@ pub async fn create_videos(
                                 info!(
                                     "检测到需要更新actors(未启用扫描删除): 视频={}, 原值={:?}, 新值={:?}",
                                     existing.name, existing.actors, model.actors
+                                );
+                            }
+                            if valid_changed {
+                                info!(
+                                    "检测到需要更新valid(未启用扫描删除): 视频={}, 原值={}, 新值={:?}",
+                                    existing.name, existing.valid, model.valid
                                 );
                             }
                         }
@@ -741,6 +762,7 @@ pub async fn create_videos(
 
                             let update_model = video::ActiveModel {
                                 id: Unchanged(existing.id),
+                                valid: model.valid.clone(),
                                 share_copy: model.share_copy.clone(),
                                 show_season_type: model.show_season_type.clone(),
                                 actors: model.actors.clone(),
