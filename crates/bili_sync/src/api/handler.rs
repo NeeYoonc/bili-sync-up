@@ -6667,6 +6667,113 @@ pub async fn update_config(
 }
 
 /// 内部更新配置函数（用于队列处理和直接调用）
+fn config_update_field_display_name(field: &str) -> String {
+    let known = match field {
+        "video_name" => Some("视频命名模板"),
+        "page_name" => Some("单P分页命名模板"),
+        "multi_page_name" => Some("多P分页命名模板"),
+        "bangumi_name" => Some("番剧分页命名模板"),
+        "folder_structure" => Some("目录结构模板"),
+        "bangumi_folder_name" => Some("番剧文件夹命名模板"),
+        "collection_folder_mode" => Some("合集文件夹模式"),
+        "collection_unified_name" => Some("合集统一命名模板"),
+        "time_format" => Some("时间格式"),
+        "interval" => Some("扫描间隔"),
+        "nfo_time_type" => Some("NFO时间类型"),
+        "parallel_download_enabled" => Some("多线程下载开关"),
+        "parallel_download_threads" => Some("下载线程数"),
+        "parallel_download_use_aria2" => Some("优先使用aria2"),
+        "video_max_quality" => Some("视频最高画质"),
+        "video_min_quality" => Some("视频最低画质"),
+        "audio_max_quality" => Some("音频最高音质"),
+        "audio_min_quality" => Some("音频最低音质"),
+        "codecs" => Some("视频编码偏好"),
+        "no_dolby_video" => Some("禁用杜比视界"),
+        "no_dolby_audio" => Some("禁用杜比全景声"),
+        "no_hdr" => Some("禁用HDR"),
+        "no_hires" => Some("禁用Hi-Res"),
+        "danmaku_duration" => Some("弹幕持续时间"),
+        "danmaku_font" => Some("弹幕字体"),
+        "danmaku_font_size" => Some("弹幕字号"),
+        "danmaku_width_ratio" => Some("弹幕宽度比例"),
+        "danmaku_horizontal_gap" => Some("弹幕水平间距"),
+        "danmaku_lane_size" => Some("弹幕轨道高度"),
+        "danmaku_float_percentage" => Some("滚动弹幕占比"),
+        "danmaku_bottom_percentage" => Some("底部弹幕占比"),
+        "danmaku_opacity" => Some("弹幕透明度"),
+        "danmaku_bold" => Some("弹幕加粗"),
+        "danmaku_outline" => Some("弹幕描边"),
+        "danmaku_time_offset" => Some("弹幕时间偏移"),
+        "concurrent_video" => Some("同时处理视频数"),
+        "concurrent_page" => Some("每视频并发分页数"),
+        "rate_limit" => Some("请求频率限制"),
+        "rate_duration" => Some("请求时间窗口"),
+        "cdn_sorting" => Some("CDN优先级排序"),
+        "scan_deleted_videos" => Some("扫描已删除视频"),
+        "enable_aria2_health_check" => Some("aria2健康检查开关"),
+        "enable_aria2_auto_restart" => Some("aria2自动重启开关"),
+        "aria2_health_check_interval" => Some("aria2健康检查间隔"),
+        "large_submission_threshold" => Some("大投稿判定阈值"),
+        "base_request_delay" => Some("基础请求延迟"),
+        "large_submission_delay_multiplier" => Some("大投稿延迟倍率"),
+        "enable_progressive_delay" => Some("渐进延迟开关"),
+        "max_delay_multiplier" => Some("最大延迟倍率"),
+        "enable_incremental_fetch" => Some("增量抓取开关"),
+        "incremental_fallback_to_full" => Some("增量失败回退全量"),
+        "enable_batch_processing" => Some("分批处理开关"),
+        "batch_size" => Some("分批大小"),
+        "batch_delay_seconds" => Some("分批延迟"),
+        "enable_auto_backoff" => Some("自动退避开关"),
+        "auto_backoff_base_seconds" => Some("自动退避基础时长"),
+        "auto_backoff_max_multiplier" => Some("自动退避最大倍率"),
+        "source_delay_seconds" => Some("视频源切换延迟"),
+        "submission_source_delay_seconds" => Some("投稿源切换延迟"),
+        "submission_scan_batch_size" => Some("投稿每轮扫描上限"),
+        "submission_adaptive_scan" => Some("投稿自适应扫描开关"),
+        "submission_adaptive_max_hours" => Some("投稿自适应最大间隔"),
+        "multi_page_use_season_structure" => Some("多P使用Season目录"),
+        "collection_use_season_structure" => Some("合集使用Season目录"),
+        "bangumi_use_season_structure" => Some("番剧使用Season目录"),
+        "upper_path" => Some("UP头像缓存路径"),
+        "ffmpeg_path" => Some("ffmpeg路径"),
+        "bind_address" => Some("服务监听地址"),
+        "risk_control.enabled" => Some("风控验证开关"),
+        "risk_control.mode" => Some("风控验证模式"),
+        "risk_control.timeout" => Some("风控验证超时"),
+        "risk_control.auto_solve.service" => Some("自动打码服务"),
+        "risk_control.auto_solve.api_key" => Some("自动打码密钥"),
+        "risk_control.auto_solve.max_retries" => Some("自动打码最大重试"),
+        "risk_control.auto_solve.solve_timeout" => Some("自动打码单次超时"),
+        "ai_rename" => Some("AI重命名配置"),
+        _ => None,
+    };
+
+    if let Some(name) = known {
+        return name.to_string();
+    }
+
+    let fallback = crate::config::describe_config_key(field);
+    if fallback == "未知/未定义" {
+        field.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn format_config_update_fields_display(updated_fields: &[&str]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    for field in updated_fields {
+        let name = config_update_field_display_name(field);
+        if seen.insert(name.clone()) {
+            result.push(name);
+        }
+    }
+
+    result
+}
+
 pub async fn update_config_internal(
     db: Arc<DatabaseConnection>,
     params: crate::api::request::UpdateConfigRequest,
@@ -7570,6 +7677,9 @@ pub async fn update_config_internal(
         });
     }
 
+    let updated_field_labels = format_config_update_fields_display(&updated_fields);
+    let updated_fields_display = updated_field_labels.join("、");
+
     // 移除配置文件保存 - 配置现在完全基于数据库
     // config.save()?;
 
@@ -7893,7 +8003,11 @@ pub async fn update_config_internal(
             }
         }
 
-        info!("已更新 {} 个配置项: {:?}", updated_fields.len(), updated_fields);
+        info!(
+            "已更新 {} 个配置项: {}",
+            updated_field_labels.len(),
+            updated_fields_display
+        );
     } else {
         info!("没有配置项需要更新");
     }
@@ -7996,7 +8110,7 @@ pub async fn update_config_internal(
         message: if should_rename && should_reset_nfo {
             format!(
                 "配置更新成功，已更新字段: {}，重命名了 {} 个文件/文件夹，重置了 {} 个视频和 {} 个页面的NFO任务并已触发立即扫描",
-                updated_fields.join(", "),
+                updated_fields_display,
                 updated_files,
                 resetted_nfo_videos_count,
                 resetted_nfo_pages_count
@@ -8004,25 +8118,22 @@ pub async fn update_config_internal(
         } else if should_rename {
             format!(
                 "配置更新成功，已更新字段: {}，重命名了 {} 个文件/文件夹",
-                updated_fields.join(", "),
-                updated_files
+                updated_fields_display, updated_files
             )
         } else if should_reset_nfo {
             if resetted_nfo_videos_count > 0 || resetted_nfo_pages_count > 0 {
                 format!(
                     "配置更新成功，已更新字段: {}，重置了 {} 个视频和 {} 个页面的NFO任务并已触发立即扫描",
-                    updated_fields.join(", "),
-                    resetted_nfo_videos_count,
-                    resetted_nfo_pages_count
+                    updated_fields_display, resetted_nfo_videos_count, resetted_nfo_pages_count
                 )
             } else {
                 format!(
                     "配置更新成功，已更新字段: {}，没有找到需要重置的NFO任务",
-                    updated_fields.join(", ")
+                    updated_fields_display
                 )
             }
         } else {
-            format!("配置更新成功，已更新字段: {}", updated_fields.join(", "))
+            format!("配置更新成功，已更新字段: {}", updated_fields_display)
         },
         updated_files: if should_rename { Some(updated_files) } else { None },
         resetted_nfo_videos_count: if should_reset_nfo {

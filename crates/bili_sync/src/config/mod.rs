@@ -23,6 +23,7 @@ pub use crate::config::item::{
     EmptyUpperStrategy, NFOConfig, NFOTimeType, PathSafeTemplate, RateLimit, SubmissionRiskControlConfig,
     SubmissionScanStrategyConfig,
 };
+pub(crate) use crate::config::manager::describe_config_key;
 pub use crate::config::manager::ConfigManager;
 
 // 移除不再需要的配置结构体，因为视频源现在存储在数据库中

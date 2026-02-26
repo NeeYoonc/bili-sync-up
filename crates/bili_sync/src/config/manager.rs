@@ -47,7 +47,7 @@ struct LegacyMigrationMeta {
     no_subtitle: bool,
 }
 
-fn describe_config_key(key: &str) -> &'static str {
+pub(crate) fn describe_config_key(key: &str) -> &'static str {
     match key {
         "auth_token" => "管理页访问密钥",
         "bind_address" => "服务监听地址",
