@@ -100,7 +100,7 @@ impl ClassifiedError {
         let (should_retry, should_ignore) = match error_type {
             ErrorType::Network | ErrorType::Timeout | ErrorType::RateLimit => (true, false),
             ErrorType::Permission | ErrorType::FileSystem => (false, true),
-            ErrorType::NotFound => (false, true),
+            ErrorType::NotFound => (false, false),
             ErrorType::Authentication | ErrorType::Authorization => (false, false),
             ErrorType::RiskControl => (false, false),
             ErrorType::UserCancelled => (false, true), // 用户主动暂停：不重试，直接忽略
@@ -140,6 +140,20 @@ impl ClassifiedError {
 pub struct ErrorClassifier;
 
 impl ErrorClassifier {
+    fn is_not_found_like_message(message: &str) -> bool {
+        let message_lower = message.to_lowercase();
+        message_lower.contains("status code: -404")
+            || message_lower.contains("啥都木有")
+            || message_lower.contains("not found")
+            || message_lower.contains("无内容")
+            || message_lower.contains("视频不存在")
+            || message_lower.contains("视频已被删除")
+    }
+
+    fn is_not_found_page_error(status_code: u32, details: Option<&str>) -> bool {
+        status_code == 404 || details.is_some_and(Self::is_not_found_like_message)
+    }
+
     /// 分析并分类错误
     pub fn classify_error(err: &anyhow::Error) -> ClassifiedError {
         let error_msg = err.to_string();
@@ -189,6 +203,16 @@ impl ErrorClassifier {
                 if crate::task::TASK_CONTROLLER.is_paused() {
                     return ClassifiedError::new(ErrorType::UserCancelled, "分页下载因用户暂停而终止".to_string());
                 }
+
+                if Self::is_not_found_page_error(page_error.status_code, page_error.details.as_deref()) {
+                    let message = page_error
+                        .details
+                        .as_deref()
+                        .map(|d| format!("分页资源不存在或已下架: {}", d))
+                        .unwrap_or_else(|| "分页资源不存在或已下架".to_string());
+                    return ClassifiedError::new(ErrorType::NotFound, message).with_retry_policy(false, false);
+                }
+
                 // 使用ProcessPageError自带的详细信息
                 return ClassifiedError::new(ErrorType::Unknown, page_error.to_string());
             }
@@ -281,7 +305,7 @@ impl ErrorClassifier {
             }
             crate::bilibili::BiliError::VideoStreamEmpty(msg) => {
                 ClassifiedError::new(ErrorType::NotFound, format!("视频流为空: {}", msg))
-                    .with_retry_policy(false, true) // 不重试，可忽略
+                    .with_retry_policy(false, false) // 不重试，不忽略
                     .with_auto_delete(false) // 不自动删除，这可能是地区限制等其他原因
             }
             crate::bilibili::BiliError::RequestFailed(code, msg) => {
@@ -303,14 +327,14 @@ impl ErrorClassifier {
                 };
 
                 let should_ignore = match *code {
-                    -404 => true, // 404错误忽略，仅显示警告
-                    _ => false,   // 其他错误不忽略
+                    -404 => false, // 404错误不忽略，按失败处理
+                    _ => false,    // 其他错误不忽略
                 };
 
                 let message = format!("B站API错误: {}", msg);
 
                 ClassifiedError::new(error_type, message)
-                    .with_retry_policy(should_retry, should_ignore) // 404错误设置为忽略
+                    .with_retry_policy(should_retry, should_ignore)
                     .with_auto_delete(false) // 不自动删除
             }
         }

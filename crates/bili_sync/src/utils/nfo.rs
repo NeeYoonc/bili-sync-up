@@ -5,6 +5,7 @@ use chrono::NaiveDateTime;
 use quick_xml::events::{BytesCData, BytesText};
 use quick_xml::writer::Writer;
 use quick_xml::Error;
+use std::borrow::Cow;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::config::{EmptyUpperStrategy, NFOConfig, NFOTimeType};
@@ -79,6 +80,8 @@ pub struct TVShow<'a> {
     pub upper_face_url: Option<&'a str>,           // UP主头像URL（用于演员thumb）
     pub season_id: Option<String>,                 // 番剧季度ID（从API获取）
     pub media_id: Option<i64>,                     // 媒体ID（从API获取）
+    pub plot_link_override: Option<String>,        // 覆盖plot中的链接地址（用于合集/投稿列表页）
+    pub uniqueid_override: Option<String>,         // 覆盖uniqueid内容（用于合集/投稿列表页）
 }
 
 pub struct Upper {
@@ -88,8 +91,8 @@ pub struct Upper {
 }
 
 pub struct Episode<'a> {
-    pub name: &'a str,
-    pub original_title: &'a str,
+    pub name: Cow<'a, str>,
+    pub original_title: Cow<'a, str>,
     pub pid: String,
     pub plot: Option<&'a str>,
     pub season: i32,
@@ -140,6 +143,8 @@ pub struct Season<'a> {
     pub upper_face_url: Option<&'a str>,           // UP主头像URL（用于演员thumb）
     pub season_id: Option<String>,                 // 番剧季度ID
     pub media_id: Option<i64>,                     // 媒体ID
+    pub plot_link_override: Option<String>,        // 覆盖plot中的链接地址
+    pub uniqueid_override: Option<String>,         // 覆盖uniqueid内容
 }
 
 impl NFO<'_> {
@@ -634,9 +639,17 @@ impl NFO<'_> {
                 }
 
                 // 剧情简介
+                let plot_link = tvshow
+                    .plot_link_override
+                    .clone()
+                    .unwrap_or_else(|| format!("https://www.bilibili.com/video/{}/", tvshow.bvid));
                 writer
                     .create_element("plot")
-                    .write_cdata_content_async(BytesCData::new(Self::format_plot(tvshow.bvid, tvshow.intro)))
+                    .write_cdata_content_async(BytesCData::new(Self::format_plot_with_link(
+                        &plot_link,
+                        tvshow.bvid,
+                        tvshow.intro,
+                    )))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
 
@@ -657,11 +670,12 @@ impl NFO<'_> {
                 }
 
                 // 唯一标识符
+                let uniqueid_value = tvshow.uniqueid_override.as_deref().unwrap_or(tvshow.bvid);
                 writer
                     .create_element("uniqueid")
                     .with_attribute(("type", "bilibili"))
                     .with_attribute(("default", "true"))
-                    .write_text_content_async(BytesText::new(tvshow.bvid))
+                    .write_text_content_async(BytesText::new(uniqueid_value))
                     .await?;
 
                 // 添加番剧季度ID作为额外的uniqueid
@@ -971,12 +985,13 @@ impl NFO<'_> {
                 // 标题信息
                 writer
                     .create_element("title")
-                    .write_text_content_async(BytesText::new(episode.name))
+                    .write_text_content_async(BytesText::new(episode.name.as_ref()))
                     .await?;
 
                 // 从标题中清理语言标识，作为原始标题
                 let binding = episode
                     .original_title
+                    .as_ref()
                     .replace("-中配", "")
                     .replace("-日配", "")
                     .replace("-国语", "")
@@ -1236,14 +1251,19 @@ impl NFO<'_> {
                 }
 
                 // 剧情简介 - 为Season添加季度特定的前缀
+                let season_plot_link = season
+                    .plot_link_override
+                    .clone()
+                    .unwrap_or_else(|| format!("https://www.bilibili.com/video/{}/", season.bvid));
+                let season_plot_base = Self::format_plot_with_link(&season_plot_link, season.bvid, season.intro);
                 let season_plot = if Self::is_bangumi_video(season.category) {
                     if let Some(season_title) = Self::extract_season_title_from_full_name(season.name) {
-                        format!("【{}】{}", season_title, Self::format_plot(season.bvid, season.intro))
+                        format!("【{}】{}", season_title, season_plot_base)
                     } else {
-                        Self::format_plot(season.bvid, season.intro)
+                        season_plot_base
                     }
                 } else {
-                    Self::format_plot(season.bvid, season.intro)
+                    season_plot_base
                 };
                 writer
                     .create_element("plot")
@@ -1268,11 +1288,12 @@ impl NFO<'_> {
                 }
 
                 // 唯一标识符
+                let uniqueid_value = season.uniqueid_override.as_deref().unwrap_or(season.bvid);
                 writer
                     .create_element("uniqueid")
                     .with_attribute(("type", "bilibili"))
                     .with_attribute(("default", "true"))
-                    .write_text_content_async(BytesText::new(season.bvid))
+                    .write_text_content_async(BytesText::new(uniqueid_value))
                     .await?;
 
                 // 添加番剧季度ID作为额外的uniqueid
@@ -1531,10 +1552,13 @@ impl NFO<'_> {
 
     #[inline]
     fn format_plot(bvid: &str, intro: &str) -> String {
-        format!(
-            r#"原始视频：<a href="https://www.bilibili.com/video/{}/">{}</a><br/><br/>{}"#,
-            bvid, bvid, intro,
-        )
+        let url = format!("https://www.bilibili.com/video/{}/", bvid);
+        Self::format_plot_with_link(&url, bvid, intro)
+    }
+
+    #[inline]
+    fn format_plot_with_link(link: &str, link_text: &str, intro: &str) -> String {
+        format!(r#"原始视频：<a href="{}">{}</a><br/><br/>{}"#, link, link_text, intro,)
     }
 
     /// 检测是否为番剧视频（基于 category 字段）
@@ -1927,6 +1951,8 @@ impl<'a> From<&'a video::Model> for TVShow<'a> {
             },
             season_id: None, // 普通视频没有season_id
             media_id: None,  // 普通视频没有media_id
+            plot_link_override: None,
+            uniqueid_override: None,
         }
     }
 }
@@ -1937,7 +1963,7 @@ impl<'a> TVShow<'a> {
         video: &'a video::Model,
         collection_name: Option<&'a str>,
         collection_cover: Option<&'a str>,
-        collection_description: Option<&'a str>,
+        upper_intro: Option<&'a str>,
         season_number: i32,
         total_seasons: Option<i32>,
         total_episodes: Option<i32>,
@@ -1958,12 +1984,9 @@ impl<'a> TVShow<'a> {
             tvshow.fanart_url = Some(cover);
         }
 
-        if let Some(description) = collection_description {
-            let description = description.trim();
-            if !description.is_empty() {
-                tvshow.intro = description;
-            }
-        }
+        // 合集/投稿季级 tvshow.plot 统一使用 UP 主个人简介；
+        // 若简介为空，则保持空，不再回退到单个视频或合集描述。
+        tvshow.intro = upper_intro.unwrap_or("").trim();
 
         // 合集级NFO避免使用首个视频标签，减少媒体库错误归类
         tvshow.tags = None;
@@ -2112,6 +2135,8 @@ impl<'a> TVShow<'a> {
             // 使用season_id和media_id作为额外的uniqueid（通过扩展字段传递）
             season_id: Some(season_info.season_id.clone()),
             media_id: season_info.media_id,
+            plot_link_override: None,
+            uniqueid_override: None,
         }
     }
 }
@@ -2129,8 +2154,8 @@ impl<'a> From<&'a video::Model> for Upper {
 impl<'a> From<&'a page::Model> for Episode<'a> {
     fn from(page: &'a page::Model) -> Self {
         Self {
-            name: &page.name,
-            original_title: &page.name,
+            name: Cow::Borrowed(page.name.as_str()),
+            original_title: Cow::Borrowed(page.name.as_str()),
             pid: page.pid.to_string(),
             plot: None,                                // 分页没有单独简介
             season: 1,                                 // 默认第一季
@@ -2167,9 +2192,26 @@ impl<'a> Episode<'a> {
             video.season_number.unwrap_or(1)
         };
 
+        // 分P/合集/系列场景：
+        // - title: 使用“视频主标题 - 分P标题”（若分P标题与主标题不同）
+        // - originaltitle: 使用视频主标题
+        // 番剧继续使用分集标题，保持媒体库分集识别习惯。
+        let page_name = page.name.trim();
+        let video_name = video.name.trim();
+        let (episode_title, episode_original_title) = if video.category == 1 {
+            (Cow::Borrowed(page.name.as_str()), Cow::Borrowed(page.name.as_str()))
+        } else if page_name.is_empty() || page_name == video_name {
+            (Cow::Borrowed(video.name.as_str()), Cow::Borrowed(video.name.as_str()))
+        } else {
+            (
+                Cow::Owned(format!("{} - {}", video_name, page_name)),
+                Cow::Borrowed(video.name.as_str()),
+            )
+        };
+
         Self {
-            name: &page.name,
-            original_title: &page.name,
+            name: episode_title,
+            original_title: episode_original_title,
             pid: page.pid.to_string(),
             plot: Some(&video.intro),                                 // 使用视频简介
             season: season_number,                                    // 根据配置使用统一season或原始season_number
@@ -2288,6 +2330,8 @@ impl<'a> From<&'a video::Model> for Season<'a> {
             },
             season_id: None, // 普通视频没有season_id
             media_id: None,  // 普通视频没有media_id
+            plot_link_override: None,
+            uniqueid_override: None,
         }
     }
 }
@@ -2409,6 +2453,8 @@ impl<'a> Season<'a> {
             // 使用season_id和media_id作为额外的uniqueid
             season_id: Some(season_info.season_id.clone()),
             media_id: season_info.media_id,
+            plot_link_override: None,
+            uniqueid_override: None,
         }
     }
 }

@@ -854,6 +854,34 @@ impl BiliClient {
         Ok(all_followings)
     }
 
+    /// 获取UP主个人简介（签名）
+    pub async fn get_user_sign(&self, up_id: i64) -> Result<Option<String>, anyhow::Error> {
+        use crate::bilibili::Validate;
+
+        let url = "https://api.bilibili.com/x/web-interface/card";
+        let response = self
+            .request(Method::GET, url)
+            .await
+            .query(&[("mid", up_id.to_string())])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?
+            .validate()?;
+
+        let sign = response["data"]["card"]["sign"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if sign.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(sign))
+        }
+    }
+
     /// 获取用户关注的合集和收藏夹列表
     pub async fn get_subscribed_collections(
         &self,

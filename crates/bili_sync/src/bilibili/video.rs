@@ -45,6 +45,32 @@ fn build_playurl_quality_fallback_levels(mut max_qn: u32, mut min_qn: u32) -> Ve
     }
 }
 
+fn is_not_found_like_message(message: &str) -> bool {
+    let message_lower = message.to_lowercase();
+    message_lower.contains("啥都木有")
+        || message_lower.contains("nothing found")
+        || message_lower.contains("not found")
+        || message_lower.contains("无内容")
+        || message_lower.contains("视频不存在")
+        || message_lower.contains("视频已被删除")
+}
+
+fn is_not_found_bili_request_error(err: &anyhow::Error) -> bool {
+    if let Some(crate::bilibili::BiliError::RequestFailed(code, msg)) = err.downcast_ref::<crate::bilibili::BiliError>()
+    {
+        return *code == -404 || is_not_found_like_message(msg);
+    }
+    is_not_found_like_message(&err.to_string())
+}
+
+fn should_fallback_to_bangumi(err: &anyhow::Error) -> bool {
+    if let Some(crate::bilibili::BiliError::RequestFailed(code, msg)) = err.downcast_ref::<crate::bilibili::BiliError>()
+    {
+        return *code == -404 && is_not_found_like_message(msg);
+    }
+    false
+}
+
 pub struct Video<'a> {
     client: &'a BiliClient,
     pub aid: String,
@@ -64,7 +90,7 @@ impl serde::Serialize for Tag {
         serializer.serialize_str(&self.tag_name)
     }
 }
-#[derive(Debug, serde::Deserialize, Default)]
+#[derive(Debug, serde::Deserialize, Default, Clone)]
 pub struct PageInfo {
     pub cid: i64,
     pub page: i32,
@@ -75,7 +101,7 @@ pub struct PageInfo {
     pub dimension: Option<Dimension>,
 }
 
-#[derive(Debug, serde::Deserialize, Default)]
+#[derive(Debug, serde::Deserialize, Default, Clone)]
 pub struct Dimension {
     pub width: u32,
     pub height: u32,
@@ -609,7 +635,11 @@ impl<'a> Video<'a> {
                             )
                             .into());
                         } else {
-                            tracing::error!("所有质量级别都获取失败");
+                            if is_not_found_bili_request_error(&e) {
+                                tracing::info!("所有质量级别都不可用（资源可能不存在/已下架）");
+                            } else {
+                                tracing::error!("所有质量级别都获取失败");
+                            }
 
                             // 检查是否为HTTP 412风控错误
                             let error_str = e.to_string();
@@ -770,7 +800,11 @@ impl<'a> Video<'a> {
                             )
                             .into());
                         } else {
-                            tracing::error!("所有质量级别都获取失败");
+                            if is_not_found_bili_request_error(&e) {
+                                tracing::info!("所有质量级别都不可用（资源可能不存在/已下架）");
+                            } else {
+                                tracing::error!("所有质量级别都获取失败");
+                            }
 
                             // 检查是否为HTTP 412风控错误
                             let error_str = e.to_string();
@@ -834,19 +868,7 @@ impl<'a> Video<'a> {
             }
             Err(e) => {
                 // 检查错误类型，判断是否需要降级到番剧API
-                let should_fallback_to_bangumi = if let Some(crate::bilibili::BiliError::RequestFailed(-404, msg)) =
-                    e.downcast_ref::<crate::bilibili::BiliError>()
-                {
-                    // -404 错误，检查消息是否包含"啥都木有"或其他表示内容不存在的关键词
-                    let msg_lower = msg.to_lowercase();
-                    msg_lower.contains("啥都木有")
-                        || msg_lower.contains("nothing found")
-                        || msg_lower.contains("not found")
-                        || msg_lower.contains("无内容")
-                        || msg_lower.contains("视频不存在")
-                } else {
-                    false
-                };
+                let should_fallback_to_bangumi = should_fallback_to_bangumi(&e);
 
                 if should_fallback_to_bangumi {
                     tracing::debug!("普通视频API返回-404错误，尝试降级到番剧API: {}", e);
@@ -863,11 +885,11 @@ impl<'a> Video<'a> {
                                 Some(epid)
                             }
                             Ok(None) => {
-                                tracing::warn!("视频详情API中未找到epid信息，无法降级到番剧API");
+                                tracing::debug!("视频详情API中未找到epid信息，跳过番剧API降级");
                                 None
                             }
                             Err(detail_err) => {
-                                tracing::warn!("调用视频详情API失败: {}", detail_err);
+                                tracing::debug!("调用视频详情API失败，跳过番剧API降级: {}", detail_err);
                                 None
                             }
                         }
@@ -882,13 +904,13 @@ impl<'a> Video<'a> {
                                 Ok(analyzer)
                             }
                             Err(bangumi_err) => {
-                                tracing::warn!("× 番剧API降级也失败: {}", bangumi_err);
+                                tracing::debug!("× 番剧API降级失败: {}", bangumi_err);
                                 // 返回原始的普通视频API错误，因为这更能反映真实情况
                                 Err(e)
                             }
                         }
                     } else {
-                        tracing::warn!("无法获取epid，无法降级到番剧API");
+                        tracing::debug!("无法获取epid，跳过番剧API降级");
                         Err(e)
                     }
                 } else {
@@ -925,19 +947,7 @@ impl<'a> Video<'a> {
             }
             Err(e) => {
                 // 检查错误类型，判断是否需要降级到番剧API
-                let should_fallback_to_bangumi = if let Some(crate::bilibili::BiliError::RequestFailed(-404, msg)) =
-                    e.downcast_ref::<crate::bilibili::BiliError>()
-                {
-                    // -404 错误，检查消息是否包含"啥都木有"或其他表示内容不存在的关键词
-                    let msg_lower = msg.to_lowercase();
-                    msg_lower.contains("啥都木有")
-                        || msg_lower.contains("nothing found")
-                        || msg_lower.contains("not found")
-                        || msg_lower.contains("无内容")
-                        || msg_lower.contains("视频不存在")
-                } else {
-                    false
-                };
+                let should_fallback_to_bangumi = should_fallback_to_bangumi(&e);
 
                 if should_fallback_to_bangumi {
                     tracing::debug!("普通视频API返回-404错误，尝试降级到番剧API: {}", e);
@@ -954,11 +964,11 @@ impl<'a> Video<'a> {
                                 Some(epid)
                             }
                             Ok(None) => {
-                                tracing::warn!("视频详情API中未找到epid信息，无法降级到番剧API");
+                                tracing::debug!("视频详情API中未找到epid信息，跳过番剧API降级");
                                 None
                             }
                             Err(detail_err) => {
-                                tracing::warn!("调用视频详情API失败: {}", detail_err);
+                                tracing::debug!("调用视频详情API失败，跳过番剧API降级: {}", detail_err);
                                 None
                             }
                         }
@@ -976,13 +986,13 @@ impl<'a> Video<'a> {
                                 Ok(analyzer)
                             }
                             Err(bangumi_err) => {
-                                tracing::warn!("× 番剧API降级也失败: {}", bangumi_err);
+                                tracing::debug!("× 番剧API降级失败: {}", bangumi_err);
                                 // 返回原始的普通视频API错误，因为这更能反映真实情况
                                 Err(e)
                             }
                         }
                     } else {
-                        tracing::warn!("无法获取epid，无法降级到番剧API");
+                        tracing::debug!("无法获取epid，跳过番剧API降级");
                         Err(e)
                     }
                 } else {
