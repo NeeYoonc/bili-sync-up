@@ -89,6 +89,7 @@ export interface VideoInfo {
 	category: number;
 	download_status: [number, number, number, number, number];
 	cover: string;
+	valid: boolean;
 	bangumi_title?: string; // 番剧真实标题，用于番剧类型视频的显示
 }
 

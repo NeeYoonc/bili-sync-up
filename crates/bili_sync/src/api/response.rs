@@ -268,8 +268,38 @@ pub struct VideoInfo {
     pub category: i32,
     pub download_status: [u32; 5],
     pub cover: String,
+    pub valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bangumi_title: Option<String>, // 番剧真实标题，用于番剧类型视频的显示
+}
+
+impl From<(i32, String, String, String, String, i32, u32, String, bool)> for VideoInfo {
+    fn from(
+        (id, bvid, name, upper_name, path, category, download_status, cover, valid): (
+            i32,
+            String,
+            String,
+            String,
+            String,
+            i32,
+            u32,
+            String,
+            bool,
+        ),
+    ) -> Self {
+        Self {
+            id,
+            bvid,
+            name,
+            upper_name,
+            path,
+            category,
+            download_status: VideoStatus::from(download_status).into(),
+            cover,
+            valid,
+            bangumi_title: None, // 默认为None，将在API层根据视频类型填充
+        }
+    }
 }
 
 impl From<(i32, String, String, String, String, i32, u32, String)> for VideoInfo {
@@ -285,17 +315,7 @@ impl From<(i32, String, String, String, String, i32, u32, String)> for VideoInfo
             String,
         ),
     ) -> Self {
-        Self {
-            id,
-            bvid,
-            name,
-            upper_name,
-            path,
-            category,
-            download_status: VideoStatus::from(download_status).into(),
-            cover,
-            bangumi_title: None, // 默认为None，将在API层根据视频类型填充
-        }
+        Self::from((id, bvid, name, upper_name, path, category, download_status, cover, true))
     }
 }
 

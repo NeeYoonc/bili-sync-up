@@ -71,6 +71,10 @@
 		text: string;
 		color: 'default' | 'secondary' | 'destructive' | 'outline';
 	} {
+		if (video.valid === false) {
+			return { text: '无效', color: 'outline' };
+		}
+
 		const completed = downloadStatus.filter((status) => status === 7).length;
 		const total = downloadStatus.length;
 		const failed = downloadStatus.filter((status) => status !== 7 && status !== 0).length;

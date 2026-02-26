@@ -92,7 +92,7 @@ impl VideoInfo {
                     .with_timezone(&crate::utils::time_format::beijing_timezone())
                     .naive_local()),
                 download_status: Set(0),
-                valid: Set(attr == 0),
+                valid: Set(attr == 0 || attr == 4),
                 upper_id: Set(upper.mid),
                 upper_name: Set(upper.name),
                 upper_face: Set(upper.face),
