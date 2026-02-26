@@ -401,6 +401,8 @@ pub struct ConfigResponse {
     pub bangumi_use_season_structure: bool,
     // UP主头像保存路径
     pub upper_path: String,
+    // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
+    pub ffmpeg_path: String,
     // B站凭证信息
     pub credential: Option<CredentialInfo>,
     // 推送通知配置

@@ -112,6 +112,10 @@ fn default_upper_path() -> PathBuf {
     CONFIG_DIR.join("upper_face")
 }
 
+fn default_ffmpeg_path() -> String {
+    String::new()
+}
+
 // 移除不再需要的默认函数
 // fn default_download_all_seasons() -> bool {
 //     false
@@ -177,6 +181,9 @@ pub struct Config {
     pub interval: u64,
     #[serde(default = "default_upper_path")]
     pub upper_path: PathBuf,
+    /// 可选的 ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
+    #[serde(default = "default_ffmpeg_path")]
+    pub ffmpeg_path: String,
     #[serde(default)]
     pub nfo_time_type: NFOTimeType,
     #[serde(default)]
@@ -595,6 +602,7 @@ impl Clone for Config {
             collection_unified_name: self.collection_unified_name.clone(),
             interval: self.interval,
             upper_path: self.upper_path.clone(),
+            ffmpeg_path: self.ffmpeg_path.clone(),
             nfo_time_type: self.nfo_time_type.clone(),
             nfo_config: self.nfo_config.clone(),
             concurrent_limit: self.concurrent_limit.clone(),
@@ -638,6 +646,7 @@ impl Default for Config {
             collection_unified_name: default_collection_unified_name(),
             interval: 1200,
             upper_path: CONFIG_DIR.join("upper_face"),
+            ffmpeg_path: default_ffmpeg_path(),
             nfo_time_type: NFOTimeType::FavTime,
             nfo_config: NFOConfig::default(),
             concurrent_limit: ConcurrentLimit::default(),

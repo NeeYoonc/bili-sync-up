@@ -125,6 +125,8 @@ pub struct UpdateConfigTask {
     pub bangumi_use_season_structure: Option<bool>,
     // UP主头像保存路径
     pub upper_path: Option<String>,
+    // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
+    pub ffmpeg_path: Option<String>,
     pub ai_rename_rename_parent_dir: Option<bool>,
     pub task_id: String, // 唯一任务ID，用于追踪
 }
@@ -1659,6 +1661,8 @@ impl ConfigTaskQueue {
                 bangumi_use_season_structure: task.bangumi_use_season_structure,
                 // UP主头像保存路径
                 upper_path: task.upper_path.clone(),
+                // ffmpeg 路径
+                ffmpeg_path: task.ffmpeg_path.clone(),
                 // 风控验证配置，任务队列中不使用
                 risk_control_enabled: None,
                 risk_control_mode: None,

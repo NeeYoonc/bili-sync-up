@@ -325,6 +325,8 @@ export interface ConfigResponse {
 	};
 	// UP主头像保存路径
 	upper_path?: string;
+	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
+	ffmpeg_path?: string;
 	// 风控验证配置
 	risk_control?: {
 		enabled: boolean;
@@ -437,6 +439,8 @@ export interface UpdateConfigRequest {
 	bangumi_use_season_structure?: boolean;
 	// UP主头像保存路径
 	upper_path?: string;
+	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
+	ffmpeg_path?: string;
 	// 风控验证配置
 	risk_control_enabled?: boolean;
 	risk_control_mode?: string;

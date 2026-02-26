@@ -64,6 +64,7 @@ fn describe_config_key(key: &str) -> &'static str {
         "collection_unified_name" => "合集统一模式命名模板",
         "interval" => "扫描间隔（秒）",
         "upper_path" => "UP主头像缓存路径",
+        "ffmpeg_path" => "ffmpeg可执行文件或目录路径",
         "nfo_time_type" => "NFO时间类型（收藏/发布时间）",
         "nfo_config" => "NFO生成配置",
         "concurrent_limit" => "并发/限速/多线程配置",

@@ -1,5 +1,5 @@
 use core::str;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use futures::TryStreamExt;
@@ -12,6 +12,73 @@ use tracing::{debug, error, info, warn};
 use crate::bilibili::Client;
 pub struct Downloader {
     client: Client,
+}
+
+fn media_tool_executable_name(tool: &str) -> String {
+    #[cfg(windows)]
+    {
+        return match tool {
+            "ffmpeg" => "ffmpeg.exe".to_string(),
+            "ffprobe" => "ffprobe.exe".to_string(),
+            _ => tool.to_string(),
+        };
+    }
+
+    #[cfg(not(windows))]
+    {
+        tool.to_string()
+    }
+}
+
+#[cfg(windows)]
+fn normalize_windows_exe_path(path: &Path) -> PathBuf {
+    if path.extension().is_none() {
+        let exe_path = path.with_extension("exe");
+        if exe_path.exists() {
+            return exe_path;
+        }
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn normalize_windows_exe_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+/// 解析媒体工具可执行路径：
+/// - 优先使用配置中的 `ffmpeg_path`（可填目录或 ffmpeg 可执行文件路径）
+/// - 若未配置或解析失败，则回退到系统 PATH（ffmpeg/ffprobe）
+pub fn resolve_media_tool_path(tool: &str) -> PathBuf {
+    let fallback = PathBuf::from(media_tool_executable_name(tool));
+    let configured_path = crate::config::with_config(|bundle| bundle.config.ffmpeg_path.clone());
+    let configured_path = configured_path.trim();
+
+    if configured_path.is_empty() {
+        return fallback;
+    }
+
+    let configured = PathBuf::from(configured_path);
+    if configured.is_dir() {
+        let candidate = normalize_windows_exe_path(&configured.join(media_tool_executable_name(tool)));
+        return if candidate.exists() { candidate } else { fallback };
+    }
+
+    let configured = normalize_windows_exe_path(&configured);
+    if tool.eq_ignore_ascii_case("ffmpeg") {
+        return if configured.exists() { configured } else { fallback };
+    }
+
+    if tool.eq_ignore_ascii_case("ffprobe") {
+        if let Some(parent) = configured.parent() {
+            let sibling = normalize_windows_exe_path(&parent.join(media_tool_executable_name("ffprobe")));
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+
+    fallback
 }
 
 impl Downloader {
@@ -292,7 +359,10 @@ impl Downloader {
             &output_path_str,
         ];
 
-        let output = tokio::process::Command::new("ffmpeg").args(args).output().await?;
+        let output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = str::from_utf8(&output.stderr).unwrap_or("unknown");
@@ -327,7 +397,7 @@ impl Downloader {
 
         // 使用ffprobe快速验证文件格式
         let file_path_str = file_path.to_string_lossy().to_string();
-        let result = tokio::process::Command::new("ffprobe")
+        let result = tokio::process::Command::new(resolve_media_tool_path("ffprobe"))
             .args([
                 "-v",
                 "quiet", // 静默模式
@@ -445,7 +515,10 @@ pub async fn remux_with_ffmpeg(input_path: &Path, output_path: &Path) -> Result<
         &output_path_str,
     ];
 
-    let output = tokio::process::Command::new("ffmpeg").args(args).output().await?;
+    let output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+        .args(args)
+        .output()
+        .await?;
     if !output.status.success() {
         let stderr = str::from_utf8(&output.stderr).unwrap_or("unknown");
         bail!("ffmpeg error: {}", stderr.trim());

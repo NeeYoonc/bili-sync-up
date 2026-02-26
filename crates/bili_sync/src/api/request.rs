@@ -258,6 +258,8 @@ pub struct UpdateConfigRequest {
     pub bangumi_use_season_structure: Option<bool>,
     // UP主头像保存路径
     pub upper_path: Option<String>,
+    // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
+    pub ffmpeg_path: Option<String>,
     // 风控验证配置
     pub risk_control_enabled: Option<bool>,
     pub risk_control_mode: Option<String>,

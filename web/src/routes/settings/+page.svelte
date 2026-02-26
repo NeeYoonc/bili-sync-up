@@ -175,6 +175,7 @@
 	let cdnSorting = false;
 	let scanDeletedVideos = false;
 	let upperPath = ''; // UP主头像保存路径
+	let ffmpegPath = ''; // ffmpeg可执行路径（文件或目录）
 
 	// B站凭证设置
 	let sessdata = '';
@@ -496,6 +497,7 @@
 		cdnSorting = config.cdn_sorting || false;
 		scanDeletedVideos = config.scan_deleted_videos || false;
 		upperPath = config.upper_path || '';
+		ffmpegPath = config.ffmpeg_path || '';
 
 		// B站凭证设置
 		sessdata = config.credential?.sessdata || '';
@@ -801,6 +803,7 @@
 			cdn_sorting: cdnSorting,
 			scan_deleted_videos: scanDeletedVideos,
 			upper_path: upperPath,
+			ffmpeg_path: ffmpegPath,
 			// UP主投稿风控配置
 			large_submission_threshold: largeSubmissionThreshold,
 			base_request_delay: baseRequestDelay,
@@ -2871,6 +2874,19 @@
 					<p class="text-muted-foreground text-sm">UP主头像和person.nfo文件的保存目录路径</p>
 				</div>
 
+				<div class="space-y-2">
+					<Label for="ffmpeg-path">ffmpeg 路径（Windows 可选）</Label>
+					<Input
+						id="ffmpeg-path"
+						type="text"
+						bind:value={ffmpegPath}
+						placeholder="C:\ffmpeg\bin\ffmpeg.exe 或 C:\ffmpeg\bin"
+					/>
+					<p class="text-muted-foreground text-sm">
+						可填写 ffmpeg.exe 的完整路径，或其所在目录；留空时使用系统环境变量 PATH。
+					</p>
+				</div>
+
 				<div
 					class="rounded-lg border border-orange-200 bg-orange-50 p-3 dark:border-orange-800 dark:bg-orange-950/20"
 				>
@@ -2888,6 +2904,9 @@
 						</p>
 						<p>
 							<strong>UP主头像路径：</strong>UP主头像和person.nfo文件的保存目录，用于媒体库显示
+						</p>
+						<p>
+							<strong>ffmpeg路径：</strong>Windows 推荐配置本地 ffmpeg 路径，避免仅依赖系统环境变量
 						</p>
 					</div>
 				</div>

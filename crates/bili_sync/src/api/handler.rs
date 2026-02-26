@@ -6486,6 +6486,8 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         bangumi_use_season_structure: config.bangumi_use_season_structure,
         // UP主头像保存路径
         upper_path: config.upper_path.to_string_lossy().to_string(),
+        // ffmpeg 路径
+        ffmpeg_path: config.ffmpeg_path.clone(),
         // B站凭证信息
         credential: {
             let credential = config.credential.load();
@@ -6638,6 +6640,8 @@ pub async fn update_config(
             bangumi_use_season_structure: params.bangumi_use_season_structure,
             // UP主头像保存路径
             upper_path: params.upper_path.clone(),
+            // ffmpeg 路径
+            ffmpeg_path: params.ffmpeg_path.clone(),
             ai_rename_rename_parent_dir: params.ai_rename_rename_parent_dir,
             task_id: task_id.clone(),
         };
@@ -7309,6 +7313,14 @@ pub async fn update_config_internal(
         }
     }
 
+    if let Some(ffmpeg_path) = params.ffmpeg_path {
+        let normalized = ffmpeg_path.trim().to_string();
+        if normalized != config.ffmpeg_path {
+            config.ffmpeg_path = normalized;
+            updated_fields.push("ffmpeg_path");
+        }
+    }
+
     // 服务器绑定地址配置
     if let Some(bind_address) = params.bind_address {
         if !bind_address.trim().is_empty() {
@@ -7637,6 +7649,11 @@ pub async fn update_config_internal(
                 "upper_path" => {
                     manager
                         .update_config_item("upper_path", serde_json::to_value(&config.upper_path)?)
+                        .await
+                }
+                "ffmpeg_path" => {
+                    manager
+                        .update_config_item("ffmpeg_path", serde_json::to_value(&config.ffmpeg_path)?)
                         .await
                 }
                 "bind_address" => {
@@ -12131,7 +12148,7 @@ pub async fn proxy_video_stream(
             anyhow::bail!("B站视频流返回错误状态: {}", status);
         }
 
-        let mut cmd = tokio::process::Command::new("ffmpeg");
+        let mut cmd = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"));
         cmd.args([
             "-hide_banner",
             "-loglevel",
