@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use arc_swap::ArcSwapOption;
 use leaky_bucket::RateLimiter;
+use reqwest::StatusCode;
 use reqwest::{header, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -327,6 +328,11 @@ impl BiliClient {
         let response = self.request(Method::GET, url).await.query(&params).send().await?;
 
         if !response.status().is_success() {
+            // 旧搜索接口在部分环境会返回 412，回退到 all/v2 接口以保证可用性
+            if response.status() == StatusCode::PRECONDITION_FAILED {
+                warn!("旧搜索接口触发412，回退到all/v2搜索接口");
+                return self.search_via_all_v2(keyword, search_type, page, page_size).await;
+            }
             return Err(anyhow!("搜索请求失败: {}", response.status()));
         }
 
@@ -362,6 +368,69 @@ impl BiliClient {
         for item in results {
             if let Ok(result) = self.parse_search_result(&item, search_type) {
                 parsed_results.push(result);
+            }
+        }
+
+        Ok(SearchResponseWrapper {
+            results: parsed_results,
+            total,
+            num_pages,
+        })
+    }
+
+    /// 使用 all/v2 搜索接口（旧接口触发 412 时回退）
+    async fn search_via_all_v2(
+        &self,
+        keyword: &str,
+        search_type: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<SearchResponseWrapper> {
+        let url = "https://api.bilibili.com/x/web-interface/search/all/v2";
+        let params = [
+            ("keyword", keyword),
+            ("page", &page.to_string()),
+            ("page_size", &page_size.to_string()),
+        ];
+
+        let response = self.request(Method::GET, url).await.query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(anyhow!("all/v2 搜索请求失败: {}", response.status()));
+        }
+
+        let payload = response.json::<serde_json::Value>().await?;
+        let code = payload["code"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            let msg = payload["message"].as_str().unwrap_or("unknown");
+            return Err(anyhow!("all/v2 搜索API返回错误: {}", msg));
+        }
+
+        let data = &payload["data"];
+        let pageinfo = &data["pageinfo"][search_type];
+        let total = pageinfo["numResults"]
+            .as_u64()
+            .or_else(|| pageinfo["total"].as_u64())
+            .unwrap_or(0) as u32;
+        let mut num_pages = pageinfo["pages"].as_u64().unwrap_or(0) as u32;
+        if num_pages == 0 {
+            num_pages = data["numPages"].as_u64().unwrap_or(0) as u32;
+        }
+        if num_pages == 0 {
+            num_pages = if total > 0 { total.div_ceil(page_size) } else { 1 };
+        }
+
+        let mut parsed_results = Vec::new();
+        let type_block = data["result"].as_array().and_then(|arr| {
+            arr.iter()
+                .find(|item| item["result_type"].as_str() == Some(search_type))
+        });
+        let items = type_block.and_then(|block| block["data"].as_array());
+
+        if let Some(items) = items {
+            for item in items {
+                if let Ok(result) = self.parse_search_result(item, search_type) {
+                    parsed_results.push(result);
+                }
             }
         }
 
