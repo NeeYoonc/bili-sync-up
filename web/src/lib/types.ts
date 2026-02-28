@@ -42,6 +42,7 @@ export interface VideoSource {
 	f_id?: number; // 收藏夹ID
 	s_id?: number; // 合集ID
 	m_id?: number; // UP主ID (用于合集)
+	collection_type?: string; // 合集类型: season/series
 	upper_id?: number; // UP主ID (用于投稿)
 	season_id?: string; // 番剧season_id
 	media_id?: string; // 番剧media_id

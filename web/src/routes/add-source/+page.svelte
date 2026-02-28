@@ -1020,7 +1020,7 @@
 	// 选择合集
 	function selectCollection(collection: UserCollectionItem) {
 		// 检查合集是否已存在
-		if (isCollectionExists(collection.sid, collection.mid.toString())) {
+		if (isCollectionExists(collection.sid, collection.mid.toString(), collection.collection_type)) {
 			toast.error('合集已存在', {
 				description: `该合集「${collection.name}」已经添加过了`
 			});
@@ -1114,11 +1114,11 @@
 
 		existingVideoSources = result.data;
 
-		// 处理合集：存储 s_id_m_id 的组合
+		// 处理合集：存储 s_id_m_id_type 的组合
 		existingCollectionIds.clear();
 		result.data.collection?.forEach((c) => {
 			if (c.s_id && c.m_id) {
-				const key = `${c.s_id}_${c.m_id}`;
+				const key = buildCollectionIdentityKey(c.s_id, c.m_id, c.collection_type);
 				existingCollectionIds.add(key);
 			}
 		});
@@ -1170,9 +1170,21 @@
 		});
 	}
 
+	function normalizeCollectionType(collectionType?: string): string {
+		return collectionType === 'series' ? 'series' : 'season';
+	}
+
+	function buildCollectionIdentityKey(
+		sId: string | number,
+		mId: string | number,
+		collectionType?: string
+	): string {
+		return `${sId}_${mId}_${normalizeCollectionType(collectionType)}`;
+	}
+
 	// 检查合集是否已存在
-	function isCollectionExists(sId: string, mId: string): boolean {
-		const key = `${sId}_${mId}`;
+	function isCollectionExists(sId: string, mId: string, collectionType?: string): boolean {
+		const key = buildCollectionIdentityKey(sId, mId, collectionType);
 		return existingCollectionIds.has(key);
 	}
 
@@ -1923,9 +1935,13 @@
 				break;
 			case 'collection':
 				userCollections.forEach((collection) => {
-					const key = `collection_${collection.sid}`;
+					const key = `collection_${collection.sid}_${normalizeCollectionType(collection.collection_type)}`;
 					// 跳过已添加的合集
-					const isDisabled = isCollectionExists(collection.sid, collection.mid.toString());
+					const isDisabled = isCollectionExists(
+						collection.sid,
+						collection.mid.toString(),
+						collection.collection_type
+					);
 					if (!batchSelectedItems.has(key) && !isDisabled) {
 						toggleBatchSelection(key, collection, 'collection');
 					}
@@ -1933,11 +1949,18 @@
 				break;
 			case 'subscribed-collection':
 				subscribedCollections.forEach((collection) => {
-					const key = `subscribed-collection_${collection.sid}`;
-					// 跳过已添加的合集
-					const isDisabled = isCollectionExists(collection.sid, collection.up_mid.toString());
+					const key = `subscribed-collection_${collection.sid}_${collection.collection_type || 'season'}`;
+					const isFavorite = collection.collection_type === 'favorite';
+					// 跳过已添加项（收藏夹按fid判断，合集/系列按 sid+mid+type 判断）
+					const isDisabled = isFavorite
+						? existingFavoriteIds.has(Number(collection.sid))
+						: isCollectionExists(
+								collection.sid,
+								collection.up_mid.toString(),
+								collection.collection_type
+							);
 					if (!batchSelectedItems.has(key) && !isDisabled) {
-						toggleBatchSelection(key, collection, 'collection');
+						toggleBatchSelection(key, collection, isFavorite ? 'favorite' : 'collection');
 					}
 				});
 				break;
@@ -2000,7 +2023,7 @@
 						} else {
 							// 普通合集使用 mid
 							params.up_id = item.data.mid.toString();
-							params.collection_type = item.data.type || 'season';
+							params.collection_type = item.data.collection_type || 'season';
 						}
 					}
 
@@ -3589,11 +3612,12 @@
 									? ''
 									: 'grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));'}
 							>
-								{#each filteredUserCollections as collection (collection.sid)}
-									{@const itemKey = `collection_${collection.sid}`}
+								{#each filteredUserCollections as collection (`${collection.sid}_${normalizeCollectionType(collection.collection_type)}`)}
+									{@const itemKey = `collection_${collection.sid}_${normalizeCollectionType(collection.collection_type)}`}
 									{@const isDisabled = isCollectionExists(
 										collection.sid,
-										collection.mid.toString()
+										collection.mid.toString(),
+										collection.collection_type
 									)}
 									<SelectableCardButton
 										onclick={() => {
@@ -3635,7 +3659,11 @@
 													>
 														{collection.collection_type === 'season' ? '合集' : '系列'}
 													</span>
-													{#if isCollectionExists(collection.sid, collection.mid.toString())}
+													{#if isCollectionExists(
+														collection.sid,
+														collection.mid.toString(),
+														collection.collection_type
+													)}
 														<span
 															class="flex-shrink-0 rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-300"
 														>
@@ -3644,7 +3672,12 @@
 													{/if}
 												</div>
 												<p class="text-muted-foreground mb-1 text-xs">
-													ID: {collection.sid} (检查key: {collection.sid}_{collection.mid})
+													ID: {collection.sid} (检查key:
+													{buildCollectionIdentityKey(
+														collection.sid,
+														collection.mid.toString(),
+														collection.collection_type
+													)})
 												</p>
 												<p class="text-muted-foreground text-xs">共 {collection.total} 个视频</p>
 												{#if collection.description}
@@ -4057,12 +4090,16 @@
 									? ''
 									: 'grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));'}
 							>
-								{#each subscribedCollections as collection (collection.sid)}
-									{@const itemKey = `subscribed-collection_${collection.sid}`}
+								{#each subscribedCollections as collection (`${collection.sid}_${collection.collection_type || 'season'}`)}
+									{@const itemKey = `subscribed-collection_${collection.sid}_${collection.collection_type || 'season'}`}
 									{@const isExisting =
 										collection.collection_type === 'favorite'
 											? existingFavoriteIds.has(Number(collection.sid))
-											: isCollectionExists(collection.sid, collection.up_mid.toString())}
+											: isCollectionExists(
+													collection.sid,
+													collection.up_mid.toString(),
+													collection.collection_type
+												)}
 									<SelectableCardButton
 										onclick={() => {
 											if (batchMode) {

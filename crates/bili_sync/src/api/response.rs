@@ -192,6 +192,8 @@ pub struct VideoSource {
     pub f_id: Option<i64>,         // 收藏夹ID
     pub s_id: Option<i64>,         // 合集ID
     pub m_id: Option<i64>,         // UP主ID (用于合集)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection_type: Option<String>, // 合集类型: season/series
     pub upper_id: Option<i64>,     // UP主ID (用于投稿)
     pub season_id: Option<String>, // 番剧season_id
     pub media_id: Option<String>,  // 番剧media_id

@@ -801,6 +801,7 @@ pub async fn get_video_sources(
                 f_id: None,
                 s_id: Some(model.s_id),
                 m_id: Some(model.m_id),
+                collection_type: Some(if model.r#type == 1 { "series" } else { "season" }.to_string()),
                 upper_id: None,
                 season_id: None,
                 media_id: None,
@@ -853,6 +854,7 @@ pub async fn get_video_sources(
                 f_id: Some(model.f_id),
                 s_id: None,
                 m_id: None,
+                collection_type: None,
                 upper_id: None,
                 season_id: None,
                 media_id: None,
@@ -905,6 +907,7 @@ pub async fn get_video_sources(
                 f_id: None,
                 s_id: None,
                 m_id: None,
+                collection_type: None,
                 upper_id: Some(model.upper_id),
                 season_id: None,
                 media_id: None,
@@ -957,6 +960,7 @@ pub async fn get_video_sources(
                 f_id: None,
                 s_id: None,
                 m_id: None,
+                collection_type: None,
                 upper_id: None,
                 season_id: None,
                 media_id: None,
@@ -1028,6 +1032,7 @@ pub async fn get_video_sources(
                 f_id: None,
                 s_id: None,
                 m_id: None,
+                collection_type: None,
                 upper_id: None,
                 season_id: model.season_id,
                 media_id: model.media_id,
@@ -2603,30 +2608,31 @@ pub async fn add_video_source_internal(
             let up_id = up_id_str.parse::<i64>().map_err(|_| anyhow!("无效的UP主ID"))?;
             let s_id = params.source_id.parse::<i64>().map_err(|_| anyhow!("无效的合集ID"))?;
 
-            // 检查是否已存在相同的合集
-            let existing_collection = collection::Entity::find()
-                .filter(collection::Column::SId.eq(s_id))
-                .filter(collection::Column::MId.eq(up_id))
-                .one(&txn)
-                .await?;
-
-            if let Some(existing) = existing_collection {
-                return Err(anyhow!(
-                    "合集已存在！合集名称：\"{}\"，合集ID：{}，UP主ID：{}，保存路径：{}。如需修改设置，请先删除现有合集再重新添加。",
-                    existing.name,
-                    existing.s_id,
-                    existing.m_id,
-                    existing.path
-                ).into());
-            }
-
-            // 添加合集
             let collection_type_value = params.collection_type.as_deref().unwrap_or("season");
             let collection_type = match collection_type_value {
                 "season" => 2, // 视频合集
                 "series" => 1, // 视频列表
                 _ => 2,        // 默认使用season类型
             };
+
+            // 检查是否已存在相同的合集（按 sid + mid + type 唯一）
+            let existing_collection = collection::Entity::find()
+                .filter(collection::Column::SId.eq(s_id))
+                .filter(collection::Column::MId.eq(up_id))
+                .filter(collection::Column::Type.eq(collection_type))
+                .one(&txn)
+                .await?;
+
+            if let Some(existing) = existing_collection {
+                return Err(anyhow!(
+                    "合集已存在！类型：{}，合集名称：\"{}\"，合集ID：{}，UP主ID：{}，保存路径：{}。如需修改设置，请先删除现有合集再重新添加。",
+                    if existing.r#type == 1 { "series" } else { "season" },
+                    existing.name,
+                    existing.s_id,
+                    existing.m_id,
+                    existing.path
+                ).into());
+            }
 
             let collection_name = params.name.clone();
 
