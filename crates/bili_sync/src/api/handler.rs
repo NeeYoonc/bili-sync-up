@@ -13882,6 +13882,20 @@ pub async fn test_notification_handler(
                 ));
             }
         }
+        "serverchan3" => {
+            if config.serverchan3_uid.is_none()
+                || config.serverchan3_uid.as_ref().unwrap().is_empty()
+                || config.serverchan3_sendkey.is_none()
+                || config.serverchan3_sendkey.as_ref().unwrap().is_empty()
+            {
+                return Ok(ApiResponse::bad_request(
+                    crate::api::response::TestNotificationResponse {
+                        success: false,
+                        message: "未配置Server酱3 UID或SendKey".to_string(),
+                    },
+                ));
+            }
+        }
         "wecom" => {
             if config.wecom_webhook_url.is_none() || config.wecom_webhook_url.as_ref().unwrap().is_empty() {
                 return Ok(ApiResponse::bad_request(

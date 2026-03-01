@@ -133,6 +133,7 @@ pub struct Season<'a> {
     pub view_count: Option<i64>,                   // 总播放量
     pub like_count: Option<i64>,                   // 总点赞数
     pub category: i32,                             // 视频分类
+    pub source_type: Option<i32>,                  // 视频来源类型（用于精确区分番剧）
     pub tagline: Option<String>,                   // 标语/副标题
     pub set: Option<String>,                       // 系列名称
     pub sorttitle: Option<String>,                 // 排序标题
@@ -1181,8 +1182,10 @@ impl NFO<'_> {
         writer
             .create_element("season")
             .write_inner_content_async::<_, _, Error>(|writer| async move {
-                // 标题信息 - 根据Emby标准，Season应该显示纯季度标题（如"第二季"）
-                let (display_title, original_title) = if Self::is_bangumi_video(season.category) {
+                // 标题信息
+                // 仅在 source_type=1（真实番剧）时使用纯季度标题；避免把分类为动画(category=1)的UGC多P误判为番剧
+                let is_real_bangumi = season.source_type == Some(1);
+                let (display_title, original_title) = if is_real_bangumi {
                     // 尝试提取纯季度标题
                     if let Some(season_title) = Self::extract_season_title_from_full_name(season.name) {
                         (season_title, season.name.to_string())
@@ -2363,6 +2366,7 @@ impl<'a> From<&'a video::Model> for Season<'a> {
             view_count: None,           // video模型中没有view_count字段
             like_count: None,           // video模型中没有like_count字段
             category: video.category,
+            source_type: video.source_type,
             tagline,
             set: set_name,
             sorttitle,
@@ -2476,6 +2480,7 @@ impl<'a> Season<'a> {
             view_count: season_info.total_views,
             like_count: season_info.total_favorites,
             category: video.category,
+            source_type: video.source_type,
             tagline: season_info.alias.as_deref().map(|s| s.to_string()),
             set: if NFO::is_bangumi_video(video.category) {
                 NFO::extract_bangumi_title_from_full_name(&season_info.title)
@@ -3094,6 +3099,7 @@ mod tests {
             upper_id: 0,
             upper_name: "".to_string(),
             category: 1,            // 番剧分类
+            source_type: Some(1),   // 番剧来源
             season_number: Some(2), // 第二季
             favtime: chrono::NaiveDateTime::new(
                 chrono::NaiveDate::from_ymd_opt(2025, 5, 23).unwrap(),
@@ -3191,6 +3197,7 @@ mod tests {
             upper_id: 0,
             upper_name: "".to_string(),
             category: 1,            // 番剧分类
+            source_type: Some(1),   // 番剧来源
             season_number: Some(2), // 第二季
             favtime: chrono::NaiveDateTime::new(
                 chrono::NaiveDate::from_ymd_opt(2025, 7, 11).unwrap(),
@@ -3244,6 +3251,7 @@ mod tests {
             upper_id: 0,
             upper_name: "".to_string(),
             category: 1,            // 番剧分类
+            source_type: Some(1),   // 番剧来源
             season_number: Some(2), // 第二季
             favtime: chrono::NaiveDateTime::new(
                 chrono::NaiveDate::from_ymd_opt(2025, 7, 11).unwrap(),
@@ -3291,6 +3299,39 @@ mod tests {
         println!("Emby标准Season NFO测试通过");
         println!("生成的Season NFO:");
         println!("{}", season_nfo);
+    }
+
+    #[tokio::test]
+    async fn test_ugc_multi_page_season_title_uses_chinese_and_video_title() {
+        // UGC多P即使分类为动画(category=1)，也不应按番剧输出“第X季”纯标题
+        let video = video::Model {
+            intro: "测试简介".to_string(),
+            name: "BV标题占位".to_string(),
+            upper_id: 445754101,
+            upper_name: "流木咲夜".to_string(),
+            category: 1,          // 动画分区
+            source_type: None,    // 非番剧来源
+            season_number: Some(10),
+            favtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 2, 26).unwrap(),
+                chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            ),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 2, 26).unwrap(),
+                chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            ),
+            bvid: "BV1KJ411r7xC".to_string(),
+            ..Default::default()
+        };
+
+        let season_title = "【流木/合集】《新樱花大战》全剧情流程合集（樱/act/剧情/机战/萝卜/死神/恋爱/gal/情怀/经典/神作/治愈/末日/世嘉/久保带人）";
+        let season = Season::from_video_with_collection(&video, Some(season_title), None, 10, Some(12));
+        let season_nfo = NFO::Season(season).generate_nfo().await.unwrap();
+
+        assert!(
+            season_nfo.contains(&format!("<title>第十季 {}</title>", season_title)),
+            "UGC多P season.nfo 标题应为中文季数 + 视频标题"
+        );
     }
 
     #[tokio::test]

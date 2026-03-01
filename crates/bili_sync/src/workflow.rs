@@ -35,6 +35,16 @@ lazy_static::lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
     static ref SUBMISSION_UPPER_INTRO_LOAD_LOCKS: Arc<Mutex<HashMap<i64, Arc<TokioMutex<()>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    static ref ROOT_ALIAS_ASSET_WRITE_LOCKS: Arc<Mutex<HashMap<String, Arc<TokioMutex<()>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    static ref ROOT_ALIAS_ASSET_ONCE_CACHE: Arc<Mutex<HashSet<String>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+    static ref ROOT_ALIAS_ASSET_SKIP_LOGGED_CACHE: Arc<Mutex<HashSet<String>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+    static ref ROOT_ALIAS_ASSET_FAILURE_CACHE: Arc<Mutex<HashMap<String, i64>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    static ref ROOT_ALIAS_ASSET_FORCE_REFRESH_CACHE: Arc<Mutex<HashMap<String, i64>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +81,8 @@ const SUBMISSION_COLLECTION_MEMBERSHIP_BATCH_COOLDOWN_MS: u64 = 600_000;
 const SUBMISSION_COLLECTION_MEMBERSHIP_ITEM_DELAY_MS: u64 = 350;
 const SUBMISSION_MEMBERSHIP_UNMATCHED_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 const SUBMISSION_MEMBERSHIP_QUERY_CHUNK_SIZE: usize = 300;
+const ROOT_ALIAS_ASSET_FAILURE_RETRY_SECS: i64 = 10 * 60;
+const ROOT_ALIAS_ASSET_FORCE_REFRESH_DEBOUNCE_SECS: i64 = 5 * 60;
 
 fn current_unix_timestamp_secs() -> i64 {
     SystemTime::now()
@@ -111,6 +123,82 @@ fn get_submission_upper_intro_load_lock(upper_id: i64) -> Arc<TokioMutex<()>> {
         .entry(upper_id)
         .or_insert_with(|| Arc::new(TokioMutex::new(())))
         .clone()
+}
+
+fn get_root_alias_asset_write_lock(root_dir: &Path) -> Arc<TokioMutex<()>> {
+    let key = root_dir.to_string_lossy().to_string();
+    let mut locks = ROOT_ALIAS_ASSET_WRITE_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
+        .clone()
+}
+
+fn mark_root_alias_asset_once(root_dir: &Path) -> bool {
+    let key = root_dir.to_string_lossy().to_string();
+    let mut set = ROOT_ALIAS_ASSET_ONCE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    set.insert(key)
+}
+
+fn should_log_root_alias_skip_once(root_dir: &Path) -> bool {
+    let key = root_dir.to_string_lossy().to_string();
+    let mut set = ROOT_ALIAS_ASSET_SKIP_LOGGED_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    set.insert(key)
+}
+
+fn should_skip_root_alias_asset_retry(root_dir: &Path) -> bool {
+    let key = root_dir.to_string_lossy().to_string();
+    let cache = ROOT_ALIAS_ASSET_FAILURE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(last_failed_at) = cache.get(&key) {
+        return current_unix_timestamp_secs().saturating_sub(*last_failed_at) < ROOT_ALIAS_ASSET_FAILURE_RETRY_SECS;
+    }
+    false
+}
+
+fn mark_root_alias_asset_failed(root_dir: &Path) {
+    let key = root_dir.to_string_lossy().to_string();
+    let mut cache = ROOT_ALIAS_ASSET_FAILURE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cache.insert(key, current_unix_timestamp_secs());
+}
+
+fn clear_root_alias_asset_failed(root_dir: &Path) {
+    let key = root_dir.to_string_lossy().to_string();
+    let mut cache = ROOT_ALIAS_ASSET_FAILURE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cache.remove(&key);
+}
+
+fn should_force_refresh_root_alias_asset_once(root_dir: &Path) -> bool {
+    let key = root_dir.to_string_lossy().to_string();
+    let now = current_unix_timestamp_secs();
+    let mut cache = ROOT_ALIAS_ASSET_FORCE_REFRESH_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    if let Some(last_at) = cache.get(&key) {
+        if now.saturating_sub(*last_at) < ROOT_ALIAS_ASSET_FORCE_REFRESH_DEBOUNCE_SECS {
+            return false;
+        }
+    }
+
+    cache.insert(key.clone(), now);
+    // 新一轮强制刷新前，允许后续再次输出一次“skip”日志，避免长期静默难排查
+    let mut skip_logged = ROOT_ALIAS_ASSET_SKIP_LOGGED_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    skip_logged.remove(&key);
+    true
 }
 
 async fn load_submission_unmatched_cache_from_video(
@@ -3632,13 +3720,19 @@ pub async fn download_video_pages(
             separate_status[2] && !is_single_page && !disable_tvshow_assets
         };
 
-        if should_generate_nfo
-            && (is_collection
-                || (matches!(video_source, VideoSourceEnum::Submission(_))
-                    && !is_submission_collection_video
-                    && !is_single_page
-                    && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"))
-        {
+        let is_collection_like_nfo_target = is_collection
+            || (matches!(video_source, VideoSourceEnum::Submission(_))
+                && !is_submission_collection_video
+                && !is_single_page
+                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal");
+        let should_generate_collection_tvshow_nfo = should_generate_nfo && is_collection_like_nfo_target;
+        let should_generate_collection_season_nfo = is_collection_like_nfo_target
+            && !disable_tvshow_assets
+            && separate_status[2]
+            && collection_use_season_structure
+            && season_folder.is_some();
+
+        if should_generate_collection_tvshow_nfo || should_generate_collection_season_nfo {
             // 合集：使用带合集信息的NFO生成（第一个视频时）
             let nfo_fixed_root_name = {
                 let cfg = crate::config::reload_config();
@@ -3709,6 +3803,10 @@ pub async fn download_video_pages(
                         if root_name.is_some() {
                             name = root_name;
                         }
+                    }
+                    // Season NFO标题优先使用当前视频标题；若为空再退回到合集根名称
+                    if season_name.is_none() {
+                        season_name = Some(final_video_model.name.clone()).filter(|s| !s.trim().is_empty());
                     }
                     if season_name.is_none() {
                         season_name = name.clone();
@@ -3833,7 +3931,8 @@ pub async fn download_video_pages(
             let season_uniqueid_override = season_lists_link_override.clone();
 
             generate_collection_video_nfo(
-                true,
+                should_generate_collection_tvshow_nfo,
+                should_generate_collection_season_nfo,
                 &video_model,
                 collection_name.as_deref(),
                 season_collection_name.as_deref(),
@@ -4176,6 +4275,7 @@ pub async fn download_video_pages(
     let use_upper_face_for_root_named_thumb_fanart = {
         let base_name = video_base_name.trim();
         root_assets_upper_face_url.is_some()
+            && matches!(video_source, VideoSourceEnum::Submission(_))
             && !base_name.is_empty()
             && !base_name.starts_with("Season")
             && (base_name.ends_with("合集")
@@ -4462,48 +4562,124 @@ pub async fn download_video_pages(
             let alias_thumb_path = root_dir.join(format!("{}-thumb.jpg", alias_base_name));
             let alias_fanart_path = root_dir.join(format!("{}-fanart.jpg", alias_base_name));
 
-            let wrote_alias_by_face = if let Some(face_url) = root_assets_upper_face_url {
-                let urls = vec![face_url];
-                match downloader.fetch_with_fallback(&urls, &alias_thumb_path).await {
-                    Ok(_) => {
-                        if let Err(e) = fs::copy(&alias_thumb_path, &alias_fanart_path).await {
-                            warn!(
-                                "生成整合目录根 fanart 失败（从头像复制）: {} -> {}: {}",
-                                alias_thumb_path.display(),
-                                alias_fanart_path.display(),
-                                e
-                            );
-                            false
-                        } else {
-                            debug!(
-                                "已生成整合目录根封面（UP头像）: {}, {}",
-                                alias_thumb_path.display(),
-                                alias_fanart_path.display()
-                            );
-                            true
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "下载UP头像用于整合目录根封面失败（将回退）: url={}, err={}",
-                            face_url, e
-                        );
-                        false
-                    }
+            let has_non_empty_file = |p: &Path| -> bool {
+                std::fs::metadata(p)
+                    .map(|m| m.is_file() && m.len() > 0)
+                    .unwrap_or(false)
+            };
+            let alias_thumb_exists = has_non_empty_file(&alias_thumb_path);
+            let alias_fanart_exists = has_non_empty_file(&alias_fanart_path);
+            let force_refresh_alias = separate_status[0]
+                && should_download_season_poster
+                && should_force_refresh_root_alias_asset_once(root_dir);
+            let allow_once_attempt = force_refresh_alias || mark_root_alias_asset_once(root_dir);
+            if !allow_once_attempt {
+                if should_log_root_alias_skip_once(root_dir) {
+                    debug!(
+                        "整合目录根封面同源仅处理一次，已跳过后续请求: root={}",
+                        root_dir.display()
+                    );
+                }
+            } else if !force_refresh_alias && alias_thumb_exists && alias_fanart_exists {
+                // 已完成初始化：无需重复处理
+                clear_root_alias_asset_failed(root_dir);
+            } else if !force_refresh_alias && should_skip_root_alias_asset_retry(root_dir) {
+                // 避免同一轮每个视频都重复尝试，导致日志风暴
+                if should_log_root_alias_skip_once(root_dir) {
+                    debug!(
+                        "整合目录根封面最近刚失败，暂不重试: root={}",
+                        root_dir.display()
+                    );
                 }
             } else {
-                false
-            };
-
-            // 头像获取失败时兜底：回退复制 SeasonXX-thumb/fanart，避免兼容文件缺失。
-            if !wrote_alias_by_face {
-                let season_thumb_path = root_dir.join(format!("{}-thumb.jpg", video_base_name));
-                let season_fanart_path = root_dir.join(format!("{}-fanart.jpg", video_base_name));
-                if season_thumb_path.exists() {
-                    let _ = fs::copy(&season_thumb_path, &alias_thumb_path).await;
+                if force_refresh_alias {
+                    debug!("检测到封面重置，执行整合目录根封面强制刷新: {}", root_dir.display());
                 }
-                if season_fanart_path.exists() {
-                    let _ = fs::copy(&season_fanart_path, &alias_fanart_path).await;
+                let alias_lock = get_root_alias_asset_write_lock(root_dir);
+                let _alias_guard = alias_lock.lock().await;
+
+                let mut alias_thumb_ready = has_non_empty_file(&alias_thumb_path);
+                let mut alias_fanart_ready = has_non_empty_file(&alias_fanart_path);
+
+                if !alias_thumb_ready || !alias_fanart_ready {
+                    let wrote_alias_by_face = if matches!(video_source, VideoSourceEnum::Submission(_)) {
+                        if !alias_thumb_ready {
+                            // 优先复用已下载的UP头像文件，避免并发下反复写同一目标文件触发 Windows 文件占用错误
+                            let cached_face_path = base_upper_path.join("folder.jpg");
+                            if has_non_empty_file(&cached_face_path) {
+                                match fs::copy(&cached_face_path, &alias_thumb_path).await {
+                                    Ok(_) => alias_thumb_ready = true,
+                                    Err(e) => warn!(
+                                        "复制UP头像缓存到整合目录根封面失败（将尝试直连下载）: {} -> {}: {}",
+                                        cached_face_path.display(),
+                                        alias_thumb_path.display(),
+                                        e
+                                    ),
+                                }
+                            }
+                        }
+
+                        if !alias_thumb_ready {
+                            if let Some(face_url) = root_assets_upper_face_url {
+                                let urls = vec![face_url];
+                                match downloader.fetch_with_fallback(&urls, &alias_thumb_path).await {
+                                    Ok(_) => {
+                                        alias_thumb_ready = has_non_empty_file(&alias_thumb_path);
+                                        if !alias_thumb_ready {
+                                            warn!(
+                                                "整合目录根 thumb 下载完成但文件为空: {}",
+                                                alias_thumb_path.display()
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "下载UP头像用于整合目录根封面失败（将回退）: url={}, err={}",
+                                            face_url, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        if alias_thumb_ready && !alias_fanart_ready {
+                            if let Err(e) = fs::copy(&alias_thumb_path, &alias_fanart_path).await {
+                                warn!(
+                                    "生成整合目录根 fanart 失败（从头像复制）: {} -> {}: {}",
+                                    alias_thumb_path.display(),
+                                    alias_fanart_path.display(),
+                                    e
+                                );
+                            } else {
+                                alias_fanart_ready = true;
+                            }
+                        }
+
+                        alias_thumb_ready && alias_fanart_ready
+                    } else {
+                        false
+                    };
+
+                    // 头像获取失败时兜底：回退复制 SeasonXX-thumb/fanart，避免兼容文件缺失。
+                    if !wrote_alias_by_face {
+                        let season_thumb_path = root_dir.join(format!("{}-thumb.jpg", video_base_name));
+                        let season_fanart_path = root_dir.join(format!("{}-fanart.jpg", video_base_name));
+                        if !alias_thumb_ready && season_thumb_path.exists() {
+                            let _ = fs::copy(&season_thumb_path, &alias_thumb_path).await;
+                        }
+                        if !alias_fanart_ready && season_fanart_path.exists() {
+                            let _ = fs::copy(&season_fanart_path, &alias_fanart_path).await;
+                        }
+                    }
+                }
+
+                // 最终结果回写缓存：成功则清理失败标记，失败则进入冷却期，避免同轮反复重试
+                let final_thumb_ready = has_non_empty_file(&alias_thumb_path);
+                let final_fanart_ready = has_non_empty_file(&alias_fanart_path);
+                if final_thumb_ready && final_fanart_ready {
+                    clear_root_alias_asset_failed(root_dir);
+                } else {
+                    mark_root_alias_asset_failed(root_dir);
                 }
             }
         }
@@ -7165,7 +7341,8 @@ pub async fn generate_video_nfo(
 
 /// 为合集生成带有合集信息的TVShow NFO
 pub async fn generate_collection_video_nfo(
-    should_run: bool,
+    should_generate_tvshow_nfo: bool,
+    should_generate_season_nfo: bool,
     video_model: &video::Model,
     collection_name: Option<&str>,
     season_collection_name: Option<&str>,
@@ -7182,34 +7359,37 @@ pub async fn generate_collection_video_nfo(
     season_total_episodes: Option<i32>,
     season_nfo_path: Option<PathBuf>,
 ) -> Result<ExecutionStatus> {
-    if !should_run {
+    if !should_generate_tvshow_nfo && !should_generate_season_nfo {
         return Ok(ExecutionStatus::Skipped);
     }
     use crate::utils::nfo::{Season, TVShow};
-    let mut tvshow = TVShow::from_video_with_collection(
-        video_model,
-        collection_name,
-        collection_cover,
-        upper_intro,
-        season_number,
-        total_seasons,
-        total_episodes,
-    );
-    if let Some(plot_link) = plot_link_override {
-        let trimmed = plot_link.trim();
-        if !trimmed.is_empty() {
-            tvshow.plot_link_override = Some(trimmed.to_string());
+    if should_generate_tvshow_nfo {
+        let mut tvshow = TVShow::from_video_with_collection(
+            video_model,
+            collection_name,
+            collection_cover,
+            upper_intro,
+            season_number,
+            total_seasons,
+            total_episodes,
+        );
+        if let Some(plot_link) = plot_link_override {
+            let trimmed = plot_link.trim();
+            if !trimmed.is_empty() {
+                tvshow.plot_link_override = Some(trimmed.to_string());
+            }
         }
-    }
-    if let Some(uniqueid) = uniqueid_override {
-        let trimmed = uniqueid.trim();
-        if !trimmed.is_empty() {
-            tvshow.uniqueid_override = Some(trimmed.to_string());
+        if let Some(uniqueid) = uniqueid_override {
+            let trimmed = uniqueid.trim();
+            if !trimmed.is_empty() {
+                tvshow.uniqueid_override = Some(trimmed.to_string());
+            }
         }
+        generate_nfo(NFO::TVShow(tvshow), nfo_path).await?;
     }
-    generate_nfo(NFO::TVShow(tvshow), nfo_path).await?;
 
-    if let Some(season_nfo_path) = season_nfo_path {
+    if should_generate_season_nfo {
+        if let Some(season_nfo_path) = season_nfo_path {
         let season_name_for_nfo = season_collection_name.or(collection_name);
         let mut season = Season::from_video_with_collection(
             video_model,
@@ -7231,6 +7411,7 @@ pub async fn generate_collection_video_nfo(
             }
         }
         generate_nfo(NFO::Season(season), season_nfo_path).await?;
+        }
     }
 
     Ok(ExecutionStatus::Succeeded)

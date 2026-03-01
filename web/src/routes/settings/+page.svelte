@@ -625,7 +625,7 @@
 		return true;
 	}
 
-	// 验证合集统一命名模板（统一模式/同UP合集分季生效）
+	// 验证合集统一命名模板（统一模式/投稿源同UP分季生效）
 	function validateCollectionUnifiedName(value: string) {
 		const trimmed = value.trim();
 		if (!trimmed) {
@@ -1441,7 +1441,7 @@
 
 			<div class="grid grid-cols-1 gap-4 {isMobile ? 'sm:grid-cols-1' : 'md:grid-cols-2'}">
 				<div class="space-y-2">
-					<Label for="collection-folder-mode">合集文件夹模式</Label>
+					<Label for="collection-folder-mode">合集/投稿目录模式</Label>
 					<select
 						id="collection-folder-mode"
 						bind:value={collectionFolderMode}
@@ -1449,12 +1449,12 @@
 					>
 						<option value="separate">分离模式</option>
 						<option value="unified" selected>统一模式</option>
-						<option value="up_seasonal">同UP合集分季</option>
+						<option value="up_seasonal">投稿源同UP分季（仅投稿源）</option>
 					</select>
 					<p class="text-muted-foreground text-sm">
-						分离模式·：每个视频独立文件夹<br />
+						分离模式：每个视频独立文件夹<br />
 						统一模式：所有视频在合集文件夹下<br />
-						同UP合集分季：同一个UP的多个合集归并到统一根目录，并按 Season 01/02 分季
+						投稿源同UP分季：仅作用于UP主投稿源（含投稿内UGC合集/多P），不作用于独立合集源
 					</p>
 				</div>
 
@@ -1478,7 +1478,7 @@
 						<p class="text-xs text-red-500 dark:text-red-400">{collectionUnifiedNameError}</p>
 					{/if}
 					<p class="text-muted-foreground text-xs">
-						仅在“合集文件夹模式=统一模式/同UP合集分季”生效，默认保持 S01E.. 命名。<strong
+						仅在“合集/投稿目录模式=统一模式/投稿源同UP分季”生效，默认保持 S01E.. 命名。<strong
 							>不允许使用路径分隔符 / 或 \\</strong
 						>。
 					</p>
