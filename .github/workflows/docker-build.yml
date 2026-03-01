@@ -142,7 +142,7 @@ jobs:
         npm run build
 
     - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@1.93.1
       with:
         targets: ${{ matrix.target }}
       env:
@@ -153,7 +153,7 @@ jobs:
       
     - name: Setup Rust (Retry)
       if: failure()
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@1.93.1
       with:
         targets: ${{ matrix.target }}
       env:

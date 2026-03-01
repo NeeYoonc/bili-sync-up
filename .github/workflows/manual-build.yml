@@ -70,7 +70,7 @@ jobs:
         npm run build
 
     - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@1.93.1
       with:
         targets: ${{ matrix.target }}
 
