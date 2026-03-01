@@ -1193,7 +1193,11 @@ impl NFO<'_> {
                 } else {
                     // 非番剧合集使用标准季度标题，避免媒体库把季当成单个视频
                     if let Some(ref set_name) = season.set {
-                        (format!("第{}季", season.season_number.max(1)), set_name.clone())
+                        let season_label = Self::number_to_chinese(season.season_number.max(1));
+                        (
+                            format!("第{}季 {}", season_label, set_name),
+                            set_name.clone(),
+                        )
                     } else {
                         (season.name.to_string(), season.original_title.to_string())
                     }
@@ -1639,6 +1643,49 @@ impl NFO<'_> {
 
         // 没有季度信息，假设为单季
         1
+    }
+
+    /// 阿拉伯数字转中文数字（用于季度标题展示，如 12 -> 十二）
+    fn number_to_chinese(num: i32) -> String {
+        let n = num.max(1) as i64;
+        if n == 0 {
+            return "零".to_string();
+        }
+
+        let digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+        let units = ["", "十", "百", "千", "万", "十", "百", "千", "亿"];
+
+        let text = n.to_string();
+        let len = text.len();
+        let mut out = String::new();
+        let mut pending_zero = false;
+
+        for (idx, ch) in text.chars().enumerate() {
+            let d = ch.to_digit(10).unwrap_or(0) as usize;
+            let pos = len.saturating_sub(idx + 1);
+            if d == 0 {
+                if !out.is_empty() {
+                    pending_zero = true;
+                }
+                continue;
+            }
+
+            if pending_zero {
+                out.push('零');
+                pending_zero = false;
+            }
+
+            out.push_str(digits[d]);
+            if pos > 0 && pos < units.len() {
+                out.push_str(units[pos]);
+            }
+        }
+
+        if out.starts_with("一十") {
+            out.replacen("一十", "十", 1)
+        } else {
+            out
+        }
     }
 
     /// 从share_copy或标题中提取副标题信息

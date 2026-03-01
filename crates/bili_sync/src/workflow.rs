@@ -3037,29 +3037,14 @@ pub async fn download_video_pages(
                     video_source_base_path.join(&safe_collection_name)
                 }
                 "up_seasonal" => {
-                    // 同UP合集分季模式：同一个UP主的合集/列表归并到“源路径/UP主名/UP主名合集”根目录
-                    let safe_upper_name = crate::utils::filenamify::filenamify(final_video_model.upper_name.trim());
-                    let up_dir_name = if safe_upper_name.is_empty() {
-                        format!("UP_{}", collection_source.m_id)
-                    } else {
-                        safe_upper_name.clone()
-                    };
-                    let up_collection_root_name = if safe_upper_name.is_empty() {
-                        format!("UP_{}合集", collection_source.m_id)
-                    } else if safe_upper_name.ends_with("合集") {
-                        safe_upper_name
-                    } else {
-                        format!("{}合集", safe_upper_name)
-                    };
+                    // 合集源不走UP源的“同UP归并分季”模式：
+                    // 保持每个合集独立目录，避免多个合集被归并到同一根目录后出现季号漂移。
+                    let safe_collection_name = crate::utils::filenamify::filenamify(&collection_source.name);
                     debug!(
-                        "合集同UP分季模式 - UP主: '{}' ({}), 路径: '{}/{}/{}'",
-                        final_video_model.upper_name,
-                        collection_source.m_id,
-                        video_source_base_path.display(),
-                        up_dir_name,
-                        up_collection_root_name
+                        "合集源在up_seasonal下使用独立目录 - 原名称: '{}', 安全化后: '{}'",
+                        collection_source.name, safe_collection_name
                     );
-                    video_source_base_path.join(&up_dir_name).join(&up_collection_root_name)
+                    video_source_base_path.join(&safe_collection_name)
                 }
                 _ => {
                     // 分离模式（默认）：每个视频有自己的文件夹
@@ -3188,8 +3173,10 @@ pub async fn download_video_pages(
         let config = crate::config::reload_config();
         let is_single_page = final_video_model.single_page.unwrap_or(true);
 
-        let collection_use_season_structure =
-            config.collection_use_season_structure || config.collection_folder_mode.as_ref() == "up_seasonal";
+        // 合集源不默认跟随 up_seasonal 进入 Season 结构，避免套用投稿源的“同UP分季”规则。
+        let collection_use_season_structure = config.collection_use_season_structure
+            || (config.collection_folder_mode.as_ref() == "up_seasonal"
+                && !matches!(video_source, VideoSourceEnum::Collection(_)));
         let submission_up_seasonal_mode = matches!(video_source, VideoSourceEnum::Submission(_))
             && config.collection_folder_mode.as_ref() == "up_seasonal";
         let submission_title_collection_like = is_submission_collection_like_title(&final_video_model.name);
@@ -3256,7 +3243,10 @@ pub async fn download_video_pages(
                     }
                     _ => "Season 01".to_string(),
                 }
-            } else if is_collection && config.collection_folder_mode.as_ref() == "up_seasonal" {
+            } else if is_collection
+                && config.collection_folder_mode.as_ref() == "up_seasonal"
+                && !matches!(video_source, VideoSourceEnum::Collection(_))
+            {
                 match video_source {
                     VideoSourceEnum::Collection(collection_source) => {
                         match get_collection_source_season_number(connection, collection_source, &final_video_model)
@@ -3359,13 +3349,31 @@ pub async fn download_video_pages(
             // 合集启用Season结构时，使用合集名称作为文件名前缀
             match video_source {
                 VideoSourceEnum::Collection(collection_source) => {
-                    // 对合集名称进行安全化处理，避免poster/fanart文件名包含斜杠导致创建子文件夹
-                    let safe_collection_name = crate::utils::filenamify::filenamify(&collection_source.name);
-                    debug!(
-                        "合集poster/fanart文件名安全化 - 原名称: '{}', 安全化后: '{}'",
-                        collection_source.name, safe_collection_name
-                    );
-                    safe_collection_name
+                    if config.collection_folder_mode.as_ref() == "up_seasonal" {
+                        if let Some(season_folder_name) = season_folder.as_ref() {
+                            // up_seasonal 下合集源与投稿源统一：按 SeasonXX 命名根封面
+                            let season_name = if let Some(raw_no) = season_folder_name.strip_prefix("Season ") {
+                                if let Ok(no) = raw_no.trim().parse::<i32>() {
+                                    format!("Season{:02}", no.max(1))
+                                } else {
+                                    "Season01".to_string()
+                                }
+                            } else {
+                                "Season01".to_string()
+                            };
+                            crate::utils::filenamify::filenamify(&season_name)
+                        } else {
+                            "Season01".to_string()
+                        }
+                    } else {
+                        // 旧模式保持原行为：合集名作为前缀
+                        let safe_collection_name = crate::utils::filenamify::filenamify(&collection_source.name);
+                        debug!(
+                            "合集poster/fanart文件名安全化 - 原名称: '{}', 安全化后: '{}'",
+                            collection_source.name, safe_collection_name
+                        );
+                        safe_collection_name
+                    }
                 }
                 VideoSourceEnum::Submission(_) if is_submission_collection_video => {
                     if let Some(season_folder_name) = season_folder.as_ref() {
@@ -3649,7 +3657,8 @@ pub async fn download_video_pages(
                 }
             };
 
-            let (collection_name, collection_cover, _collection_description): (
+            let (collection_name, season_collection_name, collection_cover, _collection_description): (
+                Option<String>,
                 Option<String>,
                 Option<String>,
                 Option<String>,
@@ -3662,13 +3671,15 @@ pub async fn download_video_pages(
                         Ok(Some(fresh_collection)) => fresh_collection.cover.clone(),
                         _ => None,
                     };
+                    let season_name = Some(collection_source.name.clone());
                     let name = nfo_fixed_root_name
                         .clone()
                         .unwrap_or_else(|| collection_source.name.clone());
-                    (Some(name), collection_cover, None)
+                    (Some(name), season_name, collection_cover, None)
                 }
                 VideoSourceEnum::Submission(submission_source) if is_submission_collection_video => {
                     let mut name: Option<String> = None;
+                    let mut season_name: Option<String> = None;
                     let mut cover: Option<String> = None;
                     let mut _description: Option<String> = None;
 
@@ -3681,6 +3692,7 @@ pub async fn download_video_pages(
                         )
                         .await
                         {
+                            season_name = Some(meta.name.clone());
                             name = Some(meta.name);
                             cover = meta.cover;
                             _description = meta.description;
@@ -3698,12 +3710,15 @@ pub async fn download_video_pages(
                             name = root_name;
                         }
                     }
+                    if season_name.is_none() {
+                        season_name = name.clone();
+                    }
 
                     if let Some(ref fixed_root_name) = nfo_fixed_root_name {
                         name = Some(fixed_root_name.clone());
                     }
 
-                    (name, cover, _description)
+                    (name, season_name, cover, _description)
                 }
                 VideoSourceEnum::Submission(_) => {
                     let name = nfo_fixed_root_name.clone().or_else(|| {
@@ -3713,9 +3728,12 @@ pub async fn download_video_pages(
                             .map(|s| s.to_string_lossy().to_string())
                             .filter(|s| !s.trim().is_empty())
                     });
-                    (name, None, None)
+                    let season_name = Some(final_video_model.name.clone())
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| name.clone());
+                    (name, season_name, None, None)
                 }
-                _ => (None, None, None),
+                _ => (None, None, None, None),
             };
 
             let upper_intro = get_submission_upper_intro(bili_client, final_video_model.upper_id, token.clone()).await;
@@ -3818,6 +3836,7 @@ pub async fn download_video_pages(
                 true,
                 &video_model,
                 collection_name.as_deref(),
+                season_collection_name.as_deref(),
                 collection_cover.as_deref(),
                 upper_intro.as_deref(),
                 collection_plot_link_override.as_deref(),
@@ -3954,6 +3973,23 @@ pub async fn download_video_pages(
     } else {
         None
     };
+
+    // up_seasonal「整合目录」下（投稿源 + 合集源），根目录 folder.jpg / poster.jpg 固定使用 UP 头像，
+    // 以便媒体库把该目录识别为同一UP主的统一入口。
+    let use_upper_face_for_up_seasonal_root_assets = {
+        let cfg = crate::config::reload_config();
+        !is_bangumi
+            && season_folder.is_some()
+            && (matches!(video_source, VideoSourceEnum::Submission(_))
+                || matches!(video_source, VideoSourceEnum::Collection(_)))
+            && cfg.collection_folder_mode.as_ref() == "up_seasonal"
+    };
+    let root_assets_upper_face_url =
+        if use_upper_face_for_up_seasonal_root_assets && !final_video_model.upper_face.trim().is_empty() {
+            Some(final_video_model.upper_face.as_str())
+        } else {
+            None
+        };
 
     // 为有Season文件夹的番剧生成season.nfo（无论是否启用统一结构）
     let season_nfo_result = if is_bangumi && season_info.is_some() && season_folder.is_some() {
@@ -4135,6 +4171,18 @@ pub async fn download_video_pages(
         Some(ExecutionStatus::Skipped)
     };
 
+    // up_seasonal 整合目录下，若将生成根目录级“*-thumb/fanart.jpg”（非 SeasonXX-*），
+    // 则改为使用 UP 头像，保持媒体库入口形象一致。
+    let use_upper_face_for_root_named_thumb_fanart = {
+        let base_name = video_base_name.trim();
+        root_assets_upper_face_url.is_some()
+            && !base_name.is_empty()
+            && !base_name.starts_with("Season")
+            && (base_name.ends_with("合集")
+                || base_name.ends_with("合輯")
+                || base_name.ends_with("Collection"))
+    };
+
     let (res_1, res_2, res_folder, res_3, res_4, res_5) = tokio::join!(
         // 下载视频封面（番剧和普通视频采用不同策略）
         fetch_video_poster(
@@ -4234,6 +4282,8 @@ pub async fn download_video_pages(
                 debug!("  最终选择的thumb URL: {:?}", thumb_url);
 
                 thumb_url
+            } else if use_upper_face_for_root_named_thumb_fanart {
+                root_assets_upper_face_url
             } else if let Some(ref cover_url) = collection_cover_url {
                 Some(cover_url.as_str())
             } else {
@@ -4248,6 +4298,8 @@ pub async fn download_video_pages(
                 debug!("  最终选择的fanart URL: {:?}", fanart_url);
 
                 fanart_url
+            } else if use_upper_face_for_root_named_thumb_fanart {
+                root_assets_upper_face_url
             } else {
                 None
             },
@@ -4298,6 +4350,8 @@ pub async fn download_video_pages(
                 debug!("番剧「{}」poster.jpg选择逻辑:", video_model.name);
                 debug!("  最终选择的poster URL: {:?}", poster_url);
                 poster_url
+            } else if let Some(face_url) = root_assets_upper_face_url {
+                Some(face_url)
             } else if let Some(ref cover_url) = collection_cover_url {
                 // 合集也使用封面URL
                 Some(cover_url.as_str())
@@ -4351,6 +4405,8 @@ pub async fn download_video_pages(
                 debug!("番剧「{}」folder.jpg选择逻辑:", video_model.name);
                 debug!("  最终选择的folder URL: {:?}", folder_url);
                 folder_url
+            } else if let Some(face_url) = root_assets_upper_face_url {
+                Some(face_url)
             } else if let Some(ref cover_url) = collection_cover_url {
                 // 合集也使用封面URL
                 Some(cover_url.as_str())
@@ -4387,6 +4443,71 @@ pub async fn download_video_pages(
             token.clone()
         )
     );
+
+    // 兼容命名：up_seasonal 整合目录根补充“根目录名-thumb/fanart”，
+    // 例如：浅影阿_合集-thumb.jpg / 浅影阿_合集-fanart.jpg。
+    // 这两张图强制使用 UP 头像，避免误用合集封面。
+    if !is_bangumi
+        && season_folder.is_some()
+        && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"
+        && (matches!(video_source, VideoSourceEnum::Collection(_))
+            || matches!(video_source, VideoSourceEnum::Submission(_)))
+    {
+        let root_dir = base_path.parent().unwrap_or(&base_path);
+        let alias_base_name = root_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| !name.trim().is_empty());
+        if let Some(alias_base_name) = alias_base_name {
+            let alias_thumb_path = root_dir.join(format!("{}-thumb.jpg", alias_base_name));
+            let alias_fanart_path = root_dir.join(format!("{}-fanart.jpg", alias_base_name));
+
+            let wrote_alias_by_face = if let Some(face_url) = root_assets_upper_face_url {
+                let urls = vec![face_url];
+                match downloader.fetch_with_fallback(&urls, &alias_thumb_path).await {
+                    Ok(_) => {
+                        if let Err(e) = fs::copy(&alias_thumb_path, &alias_fanart_path).await {
+                            warn!(
+                                "生成整合目录根 fanart 失败（从头像复制）: {} -> {}: {}",
+                                alias_thumb_path.display(),
+                                alias_fanart_path.display(),
+                                e
+                            );
+                            false
+                        } else {
+                            debug!(
+                                "已生成整合目录根封面（UP头像）: {}, {}",
+                                alias_thumb_path.display(),
+                                alias_fanart_path.display()
+                            );
+                            true
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "下载UP头像用于整合目录根封面失败（将回退）: url={}, err={}",
+                            face_url, e
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+            // 头像获取失败时兜底：回退复制 SeasonXX-thumb/fanart，避免兼容文件缺失。
+            if !wrote_alias_by_face {
+                let season_thumb_path = root_dir.join(format!("{}-thumb.jpg", video_base_name));
+                let season_fanart_path = root_dir.join(format!("{}-fanart.jpg", video_base_name));
+                if season_thumb_path.exists() {
+                    let _ = fs::copy(&season_thumb_path, &alias_thumb_path).await;
+                }
+                if season_fanart_path.exists() {
+                    let _ = fs::copy(&season_fanart_path, &alias_fanart_path).await;
+                }
+            }
+        }
+    }
 
     // 主要的5个任务结果，保持与VideoStatus<5>兼容
     let mut main_results = [res_1, nfo_result, res_3, res_4, res_5]
@@ -7047,6 +7168,7 @@ pub async fn generate_collection_video_nfo(
     should_run: bool,
     video_model: &video::Model,
     collection_name: Option<&str>,
+    season_collection_name: Option<&str>,
     collection_cover: Option<&str>,
     upper_intro: Option<&str>,
     plot_link_override: Option<&str>,
@@ -7088,9 +7210,10 @@ pub async fn generate_collection_video_nfo(
     generate_nfo(NFO::TVShow(tvshow), nfo_path).await?;
 
     if let Some(season_nfo_path) = season_nfo_path {
+        let season_name_for_nfo = season_collection_name.or(collection_name);
         let mut season = Season::from_video_with_collection(
             video_model,
-            collection_name,
+            season_name_for_nfo,
             collection_cover,
             season_number,
             season_total_episodes,
