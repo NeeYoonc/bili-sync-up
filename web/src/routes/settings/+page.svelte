@@ -233,7 +233,8 @@
 
 	// 推送通知配置
 	let notificationEnabled = false;
-	let activeNotificationChannel: 'none' | 'serverchan' | 'serverchan3' | 'wecom' = 'none';
+	let activeNotificationChannel: 'none' | 'serverchan' | 'serverchan3' | 'wecom' | 'webhook' =
+		'none';
 	let serverchanKey = '';
 	let serverchan3Uid = '';
 	let serverchan3Sendkey = '';
@@ -241,6 +242,8 @@
 	let wecomMsgtype = 'markdown';
 	let wecomMentionAll = false;
 	let wecomMentionedList = '';
+	let webhookUrl = '';
+	let webhookBearerToken = '';
 	let notificationMinVideos = 1;
 	let notificationSaving = false;
 	let notificationStatus: {
@@ -973,6 +976,13 @@
 					.map((s) => s.trim())
 					.filter((s) => s);
 			}
+		} else if (activeNotificationChannel === 'webhook') {
+			if (webhookUrl.trim()) {
+				config.webhook_url = webhookUrl.trim();
+			}
+			if (webhookBearerToken.trim()) {
+				config.webhook_bearer_token = webhookBearerToken.trim();
+			}
 		}
 
 		const response = await runRequest(() => api.updateNotificationConfig(config), {
@@ -1079,7 +1089,8 @@
 			| 'none'
 			| 'serverchan'
 			| 'serverchan3'
-			| 'wecom';
+			| 'wecom'
+			| 'webhook';
 
 		notificationEnabled = response.data.enable_scan_notifications;
 		notificationMinVideos = response.data.notification_min_videos;
@@ -1098,6 +1109,10 @@
 		if (response.data.wecom_mentioned_list) {
 			wecomMentionedList = response.data.wecom_mentioned_list.join(', ');
 		}
+
+		// 加载通用Webhook配置（如果有）
+		webhookUrl = response.data.webhook_url || '';
+		webhookBearerToken = response.data.webhook_bearer_token || '';
 	}
 
 	// 测试推送通知
@@ -2953,7 +2968,9 @@
 									? 'Server酱'
 									: activeNotificationChannel === 'serverchan3'
 										? 'Server酱3'
-										: '企业微信'}已配置
+										: activeNotificationChannel === 'wecom'
+											? '企业微信'
+											: 'Webhook'}已配置
 							</span>
 						{:else}
 							<Badge variant="secondary">未配置</Badge>
@@ -2997,6 +3014,7 @@
 						<option value="serverchan">Server酱</option>
 						<option value="serverchan3">Server酱3</option>
 						<option value="wecom">企业微信群机器人</option>
+						<option value="webhook">Webhook</option>
 					</select>
 					<p class="text-muted-foreground text-sm">选择一个推送渠道，所有推送将发送到该渠道</p>
 				</div>
@@ -3025,6 +3043,41 @@
 								target="_blank"
 								class="text-primary hover:underline">sct.ftqq.com</a
 							> 获取您的SendKey
+						</p>
+					</div>
+				</div>
+			{/if}
+
+			<!-- Webhook配置 -->
+			{#if activeNotificationChannel === 'webhook'}
+				<div
+					class="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50/50 p-4 dark:border-emerald-800 dark:bg-emerald-950/10"
+				>
+					<h3 class="text-base font-semibold">Webhook配置</h3>
+
+					<div class="space-y-2">
+						<Label for="generic-webhook-url">Webhook URL</Label>
+						<Input
+							id="generic-webhook-url"
+							type="password"
+							bind:value={webhookUrl}
+							placeholder="https://example.com/notify/webhook"
+						/>
+						<p class="text-muted-foreground text-sm">
+							将发送JSON POST请求到该地址，状态码2xx视为成功
+						</p>
+					</div>
+
+					<div class="space-y-2">
+						<Label for="generic-webhook-token">Bearer Token（可选）</Label>
+						<Input
+							id="generic-webhook-token"
+							type="password"
+							bind:value={webhookBearerToken}
+							placeholder="可选，自动带 Authorization: Bearer xxx"
+						/>
+						<p class="text-muted-foreground text-sm">
+							留空则不附带认证头
 						</p>
 					</div>
 				</div>
@@ -3230,6 +3283,17 @@
 							<li>选择消息格式（推荐使用Markdown）</li>
 							<li>根据需要配置@功能</li>
 							<li>保存后使用测试按钮验证</li>
+						</ol>
+					</div>
+
+					<!-- Webhook说明 -->
+					<div>
+						<p class="mb-2 font-medium text-gray-700 dark:text-gray-300">🔗 Webhook配置</p>
+						<ol class="list-inside list-decimal space-y-2 text-sm text-gray-600 dark:text-gray-400">
+							<li>准备可接收HTTP POST的Webhook地址</li>
+							<li>将地址填入Webhook URL并保存</li>
+							<li>如服务需要鉴权，填写Bearer Token</li>
+							<li>使用测试按钮验证是否可收到推送</li>
 						</ol>
 					</div>
 

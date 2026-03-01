@@ -835,6 +835,8 @@ class ApiClient {
 			wecom_msgtype: string;
 			wecom_mention_all: boolean;
 			wecom_mentioned_list?: string[];
+			webhook_url?: string;
+			webhook_bearer_token?: string;
 			notification_min_videos: number;
 			notification_timeout: number;
 			notification_retry_count: number;
@@ -850,6 +852,8 @@ class ApiClient {
 			wecom_msgtype: string;
 			wecom_mention_all: boolean;
 			wecom_mentioned_list?: string[];
+			webhook_url?: string;
+			webhook_bearer_token?: string;
 			notification_min_videos: number;
 			notification_timeout: number;
 			notification_retry_count: number;
@@ -869,6 +873,8 @@ class ApiClient {
 		wecom_msgtype?: string;
 		wecom_mention_all?: boolean;
 		wecom_mentioned_list?: string[];
+		webhook_url?: string;
+		webhook_bearer_token?: string;
 		notification_min_videos?: number;
 	}): Promise<ApiResponse<string>> {
 		return this.post<string>('/config/notification', config);
@@ -1243,6 +1249,8 @@ export const api = {
 		wecom_msgtype?: string;
 		wecom_mention_all?: boolean;
 		wecom_mentioned_list?: string[];
+		webhook_url?: string;
+		webhook_bearer_token?: string;
 		notification_min_videos?: number;
 	}) => apiClient.updateNotificationConfig(config),
 

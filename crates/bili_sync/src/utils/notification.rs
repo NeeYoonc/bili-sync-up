@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -77,6 +78,16 @@ impl WecomResponse {
     fn is_success(&self) -> bool {
         self.errcode == 0
     }
+}
+
+#[derive(Serialize)]
+struct GenericWebhookRequest {
+    source: String,
+    title: String,
+    content: String,
+    channel: String,
+    event: String,
+    sent_at: String,
 }
 
 // 推送通知客户端
@@ -235,6 +246,31 @@ impl NotificationClient {
                 }
                 error!("企业微信推送发送失败，已达最大重试次数");
             }
+            "webhook" => {
+                let Some(ref webhook_url) = self.config.webhook_url else {
+                    warn!("Webhook渠道已激活但未配置URL");
+                    return Ok(());
+                };
+
+                for attempt in 1..=self.config.notification_retry_count {
+                    match self.send_to_webhook(webhook_url, &title, &content, "scan_completion").await {
+                        Ok(_) => {
+                            info!("Webhook推送发送成功");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Webhook推送发送失败 (尝试 {}/{}): {}",
+                                attempt, self.config.notification_retry_count, e
+                            );
+                            if attempt < self.config.notification_retry_count {
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
+                        }
+                    }
+                }
+                error!("Webhook推送发送失败，已达最大重试次数");
+            }
             _ => {
                 warn!("未知的通知渠道: {}", active_channel);
             }
@@ -342,6 +378,33 @@ impl NotificationClient {
                 wecom_response.errcode,
                 wecom_response.errmsg
             ))
+        }
+    }
+
+    async fn send_to_webhook(&self, url: &str, title: &str, content: &str, event: &str) -> Result<()> {
+        let payload = GenericWebhookRequest {
+            source: "bili-sync".to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            channel: self.config.active_channel.clone(),
+            event: event.to_string(),
+            sent_at: chrono::Local::now().to_rfc3339(),
+        };
+
+        let mut req = self.client.post(url).header(CONTENT_TYPE, "application/json").json(&payload);
+
+        if let Some(token) = self.config.webhook_bearer_token.as_ref().filter(|v| !v.trim().is_empty()) {
+            req = req.header(AUTHORIZATION, format!("Bearer {}", token.trim()));
+        }
+
+        let resp = req.send().await?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(anyhow!("Webhook返回错误 (status: {}): {}", status, body))
         }
     }
 
@@ -576,6 +639,17 @@ impl NotificationClient {
                 info!("企业微信测试推送发送成功");
                 Ok(())
             }
+            "webhook" => {
+                let Some(ref webhook_url) = self.config.webhook_url else {
+                    return Err(anyhow!("Webhook渠道已选择但未配置URL"));
+                };
+
+                let title = "Bili Sync 测试推送";
+                let content = "这是一条Webhook测试推送消息。\n\n如果您收到此消息，说明Webhook推送配置正确。\n\n🎉 推送功能工作正常！";
+                self.send_to_webhook(webhook_url, title, content, "test_notification").await?;
+                info!("Webhook测试推送发送成功");
+                Ok(())
+            }
             _ => Err(anyhow!("未知的通知渠道: {}", active_channel)),
         }
     }
@@ -615,6 +689,15 @@ impl NotificationClient {
                 let wecom_content = self.format_wecom_content(&content);
                 self.send_to_wecom(title, &wecom_content).await?;
                 info!("企业微信自定义测试推送发送成功");
+                Ok(())
+            }
+            "webhook" => {
+                let Some(ref webhook_url) = self.config.webhook_url else {
+                    return Err(anyhow!("Webhook渠道已选择但未配置URL"));
+                };
+                self.send_to_webhook(webhook_url, title, &content, "custom_test_notification")
+                    .await?;
+                info!("Webhook自定义测试推送发送成功");
                 Ok(())
             }
             _ => Err(anyhow!("未知的通知渠道: {}", active_channel)),
@@ -678,6 +761,20 @@ impl NotificationClient {
                     }
                     Err(e) => {
                         warn!("风控通知推送失败 (企业微信): {}", e);
+                    }
+                }
+            }
+            "webhook" => {
+                let Some(ref webhook_url) = self.config.webhook_url else {
+                    warn!("Webhook渠道已激活但未配置URL，跳过风控通知");
+                    return Ok(());
+                };
+                match self.send_to_webhook(webhook_url, title, &content, "risk_control").await {
+                    Ok(_) => {
+                        info!("风控通知推送成功 (Webhook)");
+                    }
+                    Err(e) => {
+                        warn!("风控通知推送失败 (Webhook): {}", e);
                     }
                 }
             }
@@ -765,6 +862,23 @@ impl NotificationClient {
                     }
                 }
             }
+            "webhook" => {
+                let Some(ref webhook_url) = self.config.webhook_url else {
+                    warn!("Webhook渠道已激活但未配置URL，跳过单P变多P通知");
+                    return Ok(());
+                };
+                match self
+                    .send_to_webhook(webhook_url, title, &content, "single_to_multi_page")
+                    .await
+                {
+                    Ok(_) => {
+                        info!("单P变多P通知推送成功 (Webhook)");
+                    }
+                    Err(e) => {
+                        warn!("单P变多P通知推送失败 (Webhook): {}", e);
+                    }
+                }
+            }
             _ => {
                 warn!("未知的通知渠道: {}", active_channel);
             }
@@ -839,6 +953,20 @@ impl NotificationClient {
                     }
                     Err(e) => {
                         warn!("错误通知推送失败 (企业微信): {}", e);
+                    }
+                }
+            }
+            "webhook" => {
+                let Some(ref webhook_url) = self.config.webhook_url else {
+                    warn!("Webhook渠道已激活但未配置URL，跳过错误通知");
+                    return Ok(());
+                };
+                match self.send_to_webhook(webhook_url, &title, &content, "error").await {
+                    Ok(_) => {
+                        info!("错误通知推送成功 (Webhook)");
+                    }
+                    Err(e) => {
+                        warn!("错误通知推送失败 (Webhook): {}", e);
                     }
                 }
             }

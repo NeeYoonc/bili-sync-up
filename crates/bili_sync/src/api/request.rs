@@ -323,6 +323,8 @@ pub struct UpdateNotificationConfigRequest {
     pub wecom_msgtype: Option<String>,
     pub wecom_mention_all: Option<bool>,
     pub wecom_mentioned_list: Option<Vec<String>>,
+    pub webhook_url: Option<String>,
+    pub webhook_bearer_token: Option<String>,
     pub enable_scan_notifications: Option<bool>,
     pub notification_min_videos: Option<usize>,
     pub notification_timeout: Option<u64>,

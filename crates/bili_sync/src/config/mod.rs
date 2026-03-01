@@ -271,7 +271,7 @@ fn default_cdn_sorting() -> bool {
 pub struct NotificationConfig {
     // === 当前激活的通知渠道 ===
     #[serde(default = "default_active_channel")]
-    pub active_channel: String, // "none", "serverchan", "serverchan3", "wecom"
+    pub active_channel: String, // "none", "serverchan", "serverchan3", "wecom", "webhook"
 
     // === Server酱配置 ===
     #[serde(default)]
@@ -292,6 +292,12 @@ pub struct NotificationConfig {
     pub wecom_mention_all: bool,
     #[serde(default)]
     pub wecom_mentioned_list: Option<Vec<String>>,
+
+    // === 通用Webhook配置 ===
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    #[serde(default)]
+    pub webhook_bearer_token: Option<String>,
 
     // === 通用配置 ===
     #[serde(default)]
@@ -335,6 +341,8 @@ impl Default for NotificationConfig {
             wecom_msgtype: default_wecom_msgtype(),
             wecom_mention_all: false,
             wecom_mentioned_list: None,
+            webhook_url: None,
+            webhook_bearer_token: None,
             enable_scan_notifications: false,
             notification_min_videos: default_notification_min_videos(),
             notification_timeout: default_notification_timeout(),
@@ -366,11 +374,15 @@ impl NotificationConfig {
         else if self.wecom_webhook_url.is_some() && !self.wecom_webhook_url.as_ref().unwrap().is_empty() {
             self.active_channel = "wecom".to_string();
         }
+        // 再次选择通用Webhook
+        else if self.webhook_url.is_some() && !self.webhook_url.as_ref().unwrap().is_empty() {
+            self.active_channel = "webhook".to_string();
+        }
     }
 
     pub fn validate(&self) -> Result<(), String> {
         // 验证 active_channel 的有效性
-        if !["none", "serverchan", "serverchan3", "wecom"].contains(&self.active_channel.as_str()) {
+        if !["none", "serverchan", "serverchan3", "wecom", "webhook"].contains(&self.active_channel.as_str()) {
             return Err(format!("无效的通知渠道: {}", self.active_channel));
         }
 
@@ -391,6 +403,10 @@ impl NotificationConfig {
             // 最后选择企业微信
             else if self.wecom_webhook_url.is_some() && !self.wecom_webhook_url.as_ref().unwrap().is_empty() {
                 "wecom"
+            }
+            // 再次选择通用Webhook
+            else if self.webhook_url.is_some() && !self.webhook_url.as_ref().unwrap().is_empty() {
+                "webhook"
             } else {
                 "none"
             }
@@ -431,6 +447,15 @@ impl NotificationConfig {
 
                     if !matches!(self.wecom_msgtype.as_str(), "text" | "markdown") {
                         return Err("企业微信消息类型必须是 'text' 或 'markdown'".to_string());
+                    }
+                }
+                "webhook" => {
+                    if self.webhook_url.is_none() || self.webhook_url.as_ref().unwrap().is_empty() {
+                        return Err("已选择Webhook但未配置Webhook URL".to_string());
+                    }
+                    let url = self.webhook_url.as_ref().unwrap();
+                    if !(url.starts_with("http://") || url.starts_with("https://")) {
+                        return Err("Webhook URL格式不正确".to_string());
                     }
                 }
                 _ => {}

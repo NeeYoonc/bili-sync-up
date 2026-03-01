@@ -304,8 +304,12 @@ const GLOSSARY_ENTRIES: GlossaryEntry[] = [
 		description: '配置任务结果通知，在扫描完成或异常时推送消息到指定渠道。'
 	},
 	{
-		terms: ['Server酱', 'Server酱3', '企业微信群机器人'],
+		terms: ['Server酱', 'Server酱3', '企业微信群机器人', 'Webhook'],
 		description: '可选通知渠道类型，分别使用对应平台的密钥或 webhook。'
+	},
+	{
+		terms: ['Webhook URL', 'Bearer Token（可选）'],
+		description: '通用Webhook通知配置：向指定URL发送JSON POST；可选附带Bearer鉴权。'
 	},
 	{
 		terms: ['消息格式', 'Markdown格式（推荐）', '纯文本格式'],

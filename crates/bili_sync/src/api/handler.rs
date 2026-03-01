@@ -6517,6 +6517,8 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
             wecom_msgtype: config.notification.wecom_msgtype.clone(),
             wecom_mention_all: config.notification.wecom_mention_all,
             wecom_mentioned_list: config.notification.wecom_mentioned_list.clone(),
+            webhook_url: config.notification.webhook_url.clone(),
+            webhook_bearer_token: config.notification.webhook_bearer_token.clone(),
             enable_scan_notifications: config.notification.enable_scan_notifications,
             notification_min_videos: config.notification.notification_min_videos,
             notification_timeout: config.notification.notification_timeout,
@@ -13906,6 +13908,16 @@ pub async fn test_notification_handler(
                 ));
             }
         }
+        "webhook" => {
+            if config.webhook_url.is_none() || config.webhook_url.as_ref().unwrap().is_empty() {
+                return Ok(ApiResponse::bad_request(
+                    crate::api::response::TestNotificationResponse {
+                        success: false,
+                        message: "未配置Webhook URL".to_string(),
+                    },
+                ));
+            }
+        }
         _ => {
             return Ok(ApiResponse::bad_request(
                 crate::api::response::TestNotificationResponse {
@@ -13961,6 +13973,8 @@ pub async fn get_notification_config() -> Result<ApiResponse<crate::api::respons
         wecom_msgtype: config.wecom_msgtype,
         wecom_mention_all: config.wecom_mention_all,
         wecom_mentioned_list: config.wecom_mentioned_list,
+        webhook_url: config.webhook_url,
+        webhook_bearer_token: config.webhook_bearer_token,
         enable_scan_notifications: config.enable_scan_notifications,
         notification_min_videos: config.notification_min_videos,
         notification_timeout: config.notification_timeout,
@@ -14055,6 +14069,24 @@ pub async fn update_notification_config(
         updated = true;
     }
 
+    if let Some(ref webhook_url) = request.webhook_url {
+        if webhook_url.trim().is_empty() {
+            notification_config.webhook_url = None;
+        } else {
+            notification_config.webhook_url = Some(webhook_url.trim().to_string());
+        }
+        updated = true;
+    }
+
+    if let Some(ref bearer_token) = request.webhook_bearer_token {
+        if bearer_token.trim().is_empty() {
+            notification_config.webhook_bearer_token = None;
+        } else {
+            notification_config.webhook_bearer_token = Some(bearer_token.trim().to_string());
+        }
+        updated = true;
+    }
+
     if let Some(enabled) = request.enable_scan_notifications {
         notification_config.enable_scan_notifications = enabled;
         updated = true;
@@ -14124,8 +14156,19 @@ pub async fn get_notification_status() -> Result<ApiResponse<crate::api::respons
     let config = crate::config::with_config(|bundle| bundle.config.notification.clone());
 
     // 这里可以从数据库或缓存中获取推送统计信息
+    let configured = match config.active_channel.as_str() {
+        "serverchan" => config.serverchan_key.as_ref().is_some_and(|v| !v.is_empty()),
+        "serverchan3" => {
+            config.serverchan3_uid.as_ref().is_some_and(|v| !v.is_empty())
+                && config.serverchan3_sendkey.as_ref().is_some_and(|v| !v.is_empty())
+        }
+        "wecom" => config.wecom_webhook_url.as_ref().is_some_and(|v| !v.is_empty()),
+        "webhook" => config.webhook_url.as_ref().is_some_and(|v| !v.is_empty()),
+        _ => false,
+    };
+
     let status = crate::api::response::NotificationStatusResponse {
-        configured: config.serverchan_key.is_some(),
+        configured,
         enabled: config.enable_scan_notifications,
         last_notification_time: None, // TODO: 从存储中获取
     };
