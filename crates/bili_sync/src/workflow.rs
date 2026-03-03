@@ -3389,6 +3389,47 @@ pub async fn download_video_pages(
     let base_upper_path = &current_config.upper_path.join(&first_char).join(&upper_name);
     let is_single_page = final_video_model.single_page.context("single_page is null")?;
 
+    // 提前计算并持久化 video.path，避免下载中途失败后下轮将同一目录误判为“同名冲突”。
+    // 典型场景：上一轮在下载初期（如 412 风控）中止，目录已创建但路径尚未写回数据库。
+    let path_to_save = if is_bangumi {
+        if let Some(ref bangumi_folder_path) = bangumi_folder_path {
+            bangumi_folder_path.to_string_lossy().to_string()
+        } else {
+            base_path.to_string_lossy().to_string()
+        }
+    } else if (!is_single_page && current_config.multi_page_use_season_structure && season_folder.is_some())
+        || (is_collection && collection_use_season_structure && season_folder.is_some())
+    {
+        // 对于多P视频或合集使用Season结构时，保存根目录路径而不是Season子文件夹路径
+        base_path
+            .parent()
+            .map(|parent| parent.to_string_lossy().to_string())
+            .unwrap_or_else(|| base_path.to_string_lossy().to_string())
+    } else {
+        base_path.to_string_lossy().to_string()
+    };
+
+    if !path_to_save.is_empty() && final_video_model.path != path_to_save {
+        if let Err(e) = video::Entity::update(video::ActiveModel {
+            id: Set(final_video_model.id),
+            path: Set(path_to_save.clone()),
+            ..Default::default()
+        })
+        .exec(connection)
+        .await
+        {
+            warn!(
+                "提前持久化 video.path 失败（不中断下载流程）: video_id={}, old='{}', new='{}', err={}",
+                final_video_model.id, final_video_model.path, path_to_save, e
+            );
+        } else {
+            debug!(
+                "已提前持久化 video.path: video_id={}, old='{}', new='{}'",
+                final_video_model.id, final_video_model.path, path_to_save
+            );
+        }
+    }
+
     // 为多P视频生成基于视频名称的文件名
     let video_base_name = if !is_single_page {
         // 多P视频启用Season结构时，使用视频根目录的文件夹名作为系列级封面的文件名
@@ -4887,29 +4928,6 @@ pub async fn download_video_pages(
 
     let mut video_active_model: video::ActiveModel = final_video_model.into();
     video_active_model.download_status = Set(status.into());
-
-    // 对于番剧和多P视频使用Season结构时，保存根文件夹路径而不是Season文件夹路径
-    let path_to_save = if is_bangumi {
-        if let Some(ref bangumi_folder_path) = bangumi_folder_path {
-            bangumi_folder_path.to_string_lossy().to_string()
-        } else {
-            base_path.to_string_lossy().to_string()
-        }
-    } else {
-        // 检查是否为多P视频或合集且启用了Season结构
-        let config = crate::config::reload_config();
-        if (!is_single_page && config.multi_page_use_season_structure && season_folder.is_some())
-            || (is_collection && collection_use_season_structure && season_folder.is_some())
-        {
-            // 对于多P视频或合集使用Season结构时，保存根目录路径而不是Season子文件夹路径
-            base_path
-                .parent()
-                .map(|parent| parent.to_string_lossy().to_string())
-                .unwrap_or_else(|| base_path.to_string_lossy().to_string())
-        } else {
-            base_path.to_string_lossy().to_string()
-        }
-    };
 
     debug!("=== 路径保存 ===");
     debug!("最终保存到数据库的路径: {:?}", path_to_save);
