@@ -244,6 +244,7 @@
 	let wecomMentionedList = '';
 	let webhookUrl = '';
 	let webhookBearerToken = '';
+	let webhookFormat: 'auto' | 'generic' | 'opensend' = 'auto';
 	let notificationMinVideos = 1;
 	let notificationSaving = false;
 	let notificationStatus: {
@@ -983,6 +984,7 @@
 			if (webhookBearerToken.trim()) {
 				config.webhook_bearer_token = webhookBearerToken.trim();
 			}
+			config.webhook_format = webhookFormat;
 		}
 
 		const response = await runRequest(() => api.updateNotificationConfig(config), {
@@ -1113,11 +1115,37 @@
 		// 加载通用Webhook配置（如果有）
 		webhookUrl = response.data.webhook_url || '';
 		webhookBearerToken = response.data.webhook_bearer_token || '';
+		webhookFormat =
+			(response.data.webhook_format as 'auto' | 'generic' | 'opensend' | undefined) || 'auto';
 	}
 
 	// 测试推送通知
 	async function testNotification() {
-		const response = await runRequest(() => api.testNotification(), {
+		type TestNotificationParams = Parameters<typeof api.testNotification>[0];
+		const request: TestNotificationParams = {
+			active_channel: activeNotificationChannel
+		};
+
+		if (activeNotificationChannel === 'serverchan') {
+			request.serverchan_key = serverchanKey.trim();
+		} else if (activeNotificationChannel === 'serverchan3') {
+			request.serverchan3_uid = serverchan3Uid.trim();
+			request.serverchan3_sendkey = serverchan3Sendkey.trim();
+		} else if (activeNotificationChannel === 'wecom') {
+			request.wecom_webhook_url = wecomWebhookUrl.trim();
+			request.wecom_msgtype = wecomMsgtype;
+			request.wecom_mention_all = wecomMentionAll;
+			request.wecom_mentioned_list = wecomMentionedList
+				.split(',')
+				.map((s) => s.trim())
+				.filter((s) => s.length > 0);
+		} else if (activeNotificationChannel === 'webhook') {
+			request.webhook_url = webhookUrl.trim();
+			request.webhook_bearer_token = webhookBearerToken.trim();
+			request.webhook_format = webhookFormat;
+		}
+
+		const response = await runRequest(() => api.testNotification(request), {
 			context: '测试推送失败'
 		});
 		if (!response) return;
@@ -3056,6 +3084,22 @@
 					<h3 class="text-base font-semibold">Webhook配置</h3>
 
 					<div class="space-y-2">
+						<Label for="generic-webhook-format">Webhook格式</Label>
+						<select
+							id="generic-webhook-format"
+							bind:value={webhookFormat}
+							class="bg-background border-input ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							<option value="auto">自动识别（推荐）</option>
+							<option value="generic">通用 JSON</option>
+							<option value="opensend">openSend</option>
+						</select>
+						<p class="text-muted-foreground text-sm">
+							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头
+						</p>
+					</div>
+
+					<div class="space-y-2">
 						<Label for="generic-webhook-url">Webhook URL</Label>
 						<Input
 							id="generic-webhook-url"
@@ -3064,7 +3108,7 @@
 							placeholder="https://example.com/notify/webhook"
 						/>
 						<p class="text-muted-foreground text-sm">
-							将发送JSON POST请求到该地址，状态码2xx视为成功
+							将发送JSON POST请求到该地址，支持按响应内容判定成功
 						</p>
 					</div>
 
@@ -3077,7 +3121,7 @@
 							placeholder="可选，自动带 Authorization: Bearer xxx"
 						/>
 						<p class="text-muted-foreground text-sm">
-							留空则不附带认证头
+							留空则不附带认证头；openSend 模式下该值也会作为 apikey 发送
 						</p>
 					</div>
 				</div>
@@ -3215,7 +3259,7 @@
 				>
 					<h4 class="mb-3 font-medium text-blue-800 dark:text-blue-400">测试推送</h4>
 					<p class="mb-3 text-sm text-blue-700 dark:text-blue-300">
-						发送一条测试消息到您的推送接收端，验证配置是否正确
+						发送一条测试消息到您的推送接收端，验证配置是否正确。测试会优先使用当前输入内容（未保存也可测试）。
 					</p>
 					<Button type="button" variant="outline" size="sm" onclick={testNotification}>
 						发送测试推送

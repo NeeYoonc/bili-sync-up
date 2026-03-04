@@ -325,6 +325,7 @@ pub struct UpdateNotificationConfigRequest {
     pub wecom_mentioned_list: Option<Vec<String>>,
     pub webhook_url: Option<String>,
     pub webhook_bearer_token: Option<String>,
+    pub webhook_format: Option<String>,
     pub enable_scan_notifications: Option<bool>,
     pub notification_min_videos: Option<usize>,
     pub notification_timeout: Option<u64>,
@@ -335,6 +336,18 @@ pub struct UpdateNotificationConfigRequest {
 #[derive(Deserialize, ToSchema)]
 pub struct TestNotificationRequest {
     pub custom_message: Option<String>,
+    // 以下字段为临时测试覆盖参数（仅本次测试生效，不会写入配置）
+    pub active_channel: Option<String>,
+    pub serverchan_key: Option<String>,
+    pub serverchan3_uid: Option<String>,
+    pub serverchan3_sendkey: Option<String>,
+    pub wecom_webhook_url: Option<String>,
+    pub wecom_msgtype: Option<String>,
+    pub wecom_mention_all: Option<bool>,
+    pub wecom_mentioned_list: Option<Vec<String>>,
+    pub webhook_url: Option<String>,
+    pub webhook_bearer_token: Option<String>,
+    pub webhook_format: Option<String>,
 }
 
 // 分页状态更新结构

@@ -6595,6 +6595,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
             wecom_mentioned_list: config.notification.wecom_mentioned_list.clone(),
             webhook_url: config.notification.webhook_url.clone(),
             webhook_bearer_token: config.notification.webhook_bearer_token.clone(),
+            webhook_format: config.notification.webhook_format.clone(),
             enable_scan_notifications: config.notification.enable_scan_notifications,
             notification_min_videos: config.notification.notification_min_videos,
             notification_timeout: config.notification.notification_timeout,
@@ -13927,16 +13928,58 @@ ORDER BY
 pub async fn test_notification_handler(
     axum::Json(request): axum::Json<crate::api::request::TestNotificationRequest>,
 ) -> Result<ApiResponse<crate::api::response::TestNotificationResponse>, ApiError> {
-    let config = crate::config::reload_config().notification;
+    let mut config = crate::config::reload_config().notification;
 
-    if !config.enable_scan_notifications {
-        return Ok(ApiResponse::bad_request(
-            crate::api::response::TestNotificationResponse {
-                success: false,
-                message: "推送通知功能未启用".to_string(),
-            },
-        ));
+    // 应用临时测试覆盖参数（仅本次请求生效，不写入数据库）
+    if let Some(active_channel) = request.active_channel.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        config.active_channel = active_channel.to_string();
     }
+    if let Some(serverchan_key) = request.serverchan_key.as_ref() {
+        let v = serverchan_key.trim();
+        config.serverchan_key = if v.is_empty() { None } else { Some(v.to_string()) };
+    }
+    if let Some(serverchan3_uid) = request.serverchan3_uid.as_ref() {
+        let v = serverchan3_uid.trim();
+        config.serverchan3_uid = if v.is_empty() { None } else { Some(v.to_string()) };
+    }
+    if let Some(serverchan3_sendkey) = request.serverchan3_sendkey.as_ref() {
+        let v = serverchan3_sendkey.trim();
+        config.serverchan3_sendkey = if v.is_empty() { None } else { Some(v.to_string()) };
+    }
+    if let Some(wecom_webhook_url) = request.wecom_webhook_url.as_ref() {
+        let v = wecom_webhook_url.trim();
+        config.wecom_webhook_url = if v.is_empty() { None } else { Some(v.to_string()) };
+    }
+    if let Some(wecom_msgtype) = request.wecom_msgtype.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        config.wecom_msgtype = wecom_msgtype.to_string();
+    }
+    if let Some(wecom_mention_all) = request.wecom_mention_all {
+        config.wecom_mention_all = wecom_mention_all;
+    }
+    if let Some(wecom_mentioned_list) = request.wecom_mentioned_list.as_ref() {
+        let list: Vec<String> = wecom_mentioned_list
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        config.wecom_mentioned_list = if list.is_empty() { None } else { Some(list) };
+    }
+    if let Some(webhook_url) = request.webhook_url.as_ref() {
+        let v = webhook_url.trim();
+        config.webhook_url = if v.is_empty() { None } else { Some(v.to_string()) };
+    }
+    if let Some(webhook_bearer_token) = request.webhook_bearer_token.as_ref() {
+        let v = webhook_bearer_token.trim();
+        config.webhook_bearer_token = if v.is_empty() { None } else { Some(v.to_string()) };
+    }
+    if let Some(webhook_format) = request.webhook_format.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        config.webhook_format = webhook_format.to_ascii_lowercase();
+    }
+
+    // 测试推送允许在未启用通知开关时执行，但仍需要可用渠道配置
+    config.enable_scan_notifications = true;
+    config.infer_active_channel();
 
     // 检查激活的渠道
     if config.active_channel == "none" {
@@ -14051,6 +14094,7 @@ pub async fn get_notification_config() -> Result<ApiResponse<crate::api::respons
         wecom_mentioned_list: config.wecom_mentioned_list,
         webhook_url: config.webhook_url,
         webhook_bearer_token: config.webhook_bearer_token,
+        webhook_format: config.webhook_format,
         enable_scan_notifications: config.enable_scan_notifications,
         notification_min_videos: config.notification_min_videos,
         notification_timeout: config.notification_timeout,
@@ -14160,6 +14204,17 @@ pub async fn update_notification_config(
         } else {
             notification_config.webhook_bearer_token = Some(bearer_token.trim().to_string());
         }
+        updated = true;
+    }
+
+    if let Some(ref webhook_format) = request.webhook_format {
+        let format = webhook_format.trim().to_ascii_lowercase();
+        if !["auto", "generic", "opensend"].contains(&format.as_str()) {
+            return Err(ApiError::from(anyhow!(
+                "Webhook格式必须是 auto / generic / opensend"
+            )));
+        }
+        notification_config.webhook_format = format;
         updated = true;
     }
 

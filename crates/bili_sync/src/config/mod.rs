@@ -298,6 +298,8 @@ pub struct NotificationConfig {
     pub webhook_url: Option<String>,
     #[serde(default)]
     pub webhook_bearer_token: Option<String>,
+    #[serde(default = "default_webhook_format")]
+    pub webhook_format: String, // "auto", "generic", "opensend"
 
     // === 通用配置 ===
     #[serde(default)]
@@ -330,6 +332,10 @@ fn default_active_channel() -> String {
     "none".to_string()
 }
 
+fn default_webhook_format() -> String {
+    "auto".to_string()
+}
+
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
@@ -343,6 +349,7 @@ impl Default for NotificationConfig {
             wecom_mentioned_list: None,
             webhook_url: None,
             webhook_bearer_token: None,
+            webhook_format: default_webhook_format(),
             enable_scan_notifications: false,
             notification_min_videos: default_notification_min_videos(),
             notification_timeout: default_notification_timeout(),
@@ -354,6 +361,10 @@ impl Default for NotificationConfig {
 impl NotificationConfig {
     /// 为旧配置自动推断 active_channel
     pub fn infer_active_channel(&mut self) {
+        if self.webhook_format.trim().is_empty() {
+            self.webhook_format = default_webhook_format();
+        }
+
         if self.active_channel != "none" {
             return;
         }
@@ -456,6 +467,9 @@ impl NotificationConfig {
                     let url = self.webhook_url.as_ref().unwrap();
                     if !(url.starts_with("http://") || url.starts_with("https://")) {
                         return Err("Webhook URL格式不正确".to_string());
+                    }
+                    if !["auto", "generic", "opensend"].contains(&self.webhook_format.as_str()) {
+                        return Err(format!("Webhook格式不支持: {}", self.webhook_format));
                     }
                 }
                 _ => {}

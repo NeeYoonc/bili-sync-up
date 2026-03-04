@@ -391,12 +391,15 @@ impl NotificationClient {
             sent_at: chrono::Local::now().to_rfc3339(),
         };
 
-        let is_open_send = Self::is_open_send_webhook(url);
+        let webhook_format = Self::resolve_webhook_format(self.config.webhook_format.as_str(), url);
+        let is_open_send = webhook_format == "opensend";
         let mut req = self.client.post(url).header(CONTENT_TYPE, "application/json");
 
         if let Some(token) = self.config.webhook_bearer_token.as_ref().filter(|v| !v.trim().is_empty()) {
-            // 兼容部分Webhook网关（如 openSend）使用 apikey 鉴权
-            req = req.header("apikey", token.trim());
+            if is_open_send {
+                // openSend 网关使用 apikey 鉴权
+                req = req.header("apikey", token.trim());
+            }
             req = req.header(AUTHORIZATION, format!("Bearer {}", token.trim()));
         }
 
@@ -431,6 +434,20 @@ impl NotificationClient {
 
     fn is_open_send_webhook(url: &str) -> bool {
         url.to_ascii_lowercase().contains("/api/v1/message/opensend")
+    }
+
+    fn resolve_webhook_format(configured: &str, url: &str) -> &'static str {
+        match configured.trim().to_ascii_lowercase().as_str() {
+            "generic" => "generic",
+            "opensend" => "opensend",
+            _ => {
+                if Self::is_open_send_webhook(url) {
+                    "opensend"
+                } else {
+                    "generic"
+                }
+            }
+        }
     }
 
     fn webhook_response_indicates_success(body: &str) -> bool {

@@ -101,9 +101,24 @@ class ApiClient {
 				// 尝试读取响应体获取详细错误信息
 				let errorMessage = `HTTP error! status: ${response.status}`;
 				try {
-					const errorData = await response.json();
+					const errorData = await response.json() as {
+						data?: string | { message?: string };
+						message?: string;
+						error?: string;
+					};
 					if (errorData && typeof errorData.data === 'string') {
 						errorMessage = errorData.data;
+					} else if (
+						errorData &&
+						typeof errorData.data === 'object' &&
+						errorData.data &&
+						typeof errorData.data.message === 'string'
+					) {
+						errorMessage = errorData.data.message;
+					} else if (errorData && typeof errorData.message === 'string') {
+						errorMessage = errorData.message;
+					} else if (errorData && typeof errorData.error === 'string') {
+						errorMessage = errorData.error;
 					}
 				} catch {
 					// 如果无法解析JSON，使用默认错误消息
@@ -837,6 +852,7 @@ class ApiClient {
 			wecom_mentioned_list?: string[];
 			webhook_url?: string;
 			webhook_bearer_token?: string;
+			webhook_format?: string;
 			notification_min_videos: number;
 			notification_timeout: number;
 			notification_retry_count: number;
@@ -854,6 +870,7 @@ class ApiClient {
 			wecom_mentioned_list?: string[];
 			webhook_url?: string;
 			webhook_bearer_token?: string;
+			webhook_format?: string;
 			notification_min_videos: number;
 			notification_timeout: number;
 			notification_retry_count: number;
@@ -875,6 +892,7 @@ class ApiClient {
 		wecom_mentioned_list?: string[];
 		webhook_url?: string;
 		webhook_bearer_token?: string;
+		webhook_format?: string;
 		notification_min_videos?: number;
 	}): Promise<ApiResponse<string>> {
 		return this.post<string>('/config/notification', config);
@@ -883,7 +901,20 @@ class ApiClient {
 	/**
 	 * 测试推送通知
 	 */
-	async testNotification(message?: string): Promise<
+	async testNotification(params?: {
+		custom_message?: string;
+		active_channel?: string;
+		serverchan_key?: string;
+		serverchan3_uid?: string;
+		serverchan3_sendkey?: string;
+		wecom_webhook_url?: string;
+		wecom_msgtype?: string;
+		wecom_mention_all?: boolean;
+		wecom_mentioned_list?: string[];
+		webhook_url?: string;
+		webhook_bearer_token?: string;
+		webhook_format?: string;
+	}): Promise<
 		ApiResponse<{
 			success: boolean;
 			message: string;
@@ -892,7 +923,7 @@ class ApiClient {
 		return this.post<{
 			success: boolean;
 			message: string;
-		}>('/notification/test', { message });
+		}>('/notification/test', params ?? {});
 	}
 }
 
@@ -1251,13 +1282,27 @@ export const api = {
 		wecom_mentioned_list?: string[];
 		webhook_url?: string;
 		webhook_bearer_token?: string;
+		webhook_format?: string;
 		notification_min_videos?: number;
 	}) => apiClient.updateNotificationConfig(config),
 
 	/**
 	 * 测试推送通知
 	 */
-	testNotification: (message?: string) => apiClient.testNotification(message),
+	testNotification: (params?: {
+		custom_message?: string;
+		active_channel?: string;
+		serverchan_key?: string;
+		serverchan3_uid?: string;
+		serverchan3_sendkey?: string;
+		wecom_webhook_url?: string;
+		wecom_msgtype?: string;
+		wecom_mention_all?: boolean;
+		wecom_mentioned_list?: string[];
+		webhook_url?: string;
+		webhook_bearer_token?: string;
+		webhook_format?: string;
+	}) => apiClient.testNotification(params),
 
 	/**
 	 * 订阅系统信息WebSocket事件
