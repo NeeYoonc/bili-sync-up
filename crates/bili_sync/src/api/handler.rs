@@ -6551,6 +6551,8 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         auto_backoff_max_multiplier: config.submission_risk_control.auto_backoff_max_multiplier,
         source_delay_seconds: config.submission_risk_control.source_delay_seconds,
         submission_source_delay_seconds: config.submission_risk_control.submission_source_delay_seconds,
+        enable_dynamic_api_delay: config.submission_risk_control.enable_dynamic_api_delay,
+        dynamic_api_delay_multiplier: config.submission_risk_control.dynamic_api_delay_multiplier,
         // UP主投稿源扫描策略
         submission_scan_batch_size: config.submission_scan_strategy.batch_size,
         submission_adaptive_scan: config.submission_scan_strategy.adaptive_enabled,
@@ -6813,6 +6815,8 @@ fn config_update_field_display_name(field: &str) -> String {
         "auto_backoff_max_multiplier" => Some("自动退避最大倍率"),
         "source_delay_seconds" => Some("视频源切换延迟"),
         "submission_source_delay_seconds" => Some("投稿源切换延迟"),
+        "enable_dynamic_api_delay" => Some("动态API延迟开关"),
+        "dynamic_api_delay_multiplier" => Some("动态API延迟倍率"),
         "submission_scan_batch_size" => Some("投稿每轮扫描上限"),
         "submission_adaptive_scan" => Some("投稿自适应扫描开关"),
         "submission_adaptive_max_hours" => Some("投稿自适应最大间隔"),
@@ -7444,6 +7448,23 @@ pub async fn update_config_internal(
         }
     }
 
+    if let Some(enabled) = params.enable_dynamic_api_delay {
+        if enabled != config.submission_risk_control.enable_dynamic_api_delay {
+            config.submission_risk_control.enable_dynamic_api_delay = enabled;
+            updated_fields.push("enable_dynamic_api_delay");
+        }
+    }
+
+    if let Some(multiplier) = params.dynamic_api_delay_multiplier {
+        if !multiplier.is_finite() || multiplier <= 0.0 {
+            return Err(anyhow!("动态API延迟倍率必须为大于0的有效数字").into());
+        }
+        if multiplier != config.submission_risk_control.dynamic_api_delay_multiplier {
+            config.submission_risk_control.dynamic_api_delay_multiplier = multiplier;
+            updated_fields.push("dynamic_api_delay_multiplier");
+        }
+    }
+
     // UP主投稿源扫描策略
     if let Some(size) = params.submission_scan_batch_size {
         if size != config.submission_scan_strategy.batch_size {
@@ -7929,7 +7950,9 @@ pub async fn update_config_internal(
                 | "auto_backoff_base_seconds"
                 | "auto_backoff_max_multiplier"
                 | "source_delay_seconds"
-                | "submission_source_delay_seconds" => {
+                | "submission_source_delay_seconds"
+                | "enable_dynamic_api_delay"
+                | "dynamic_api_delay_multiplier" => {
                     manager
                         .update_config_item(
                             "submission_risk_control",

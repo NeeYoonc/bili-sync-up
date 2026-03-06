@@ -385,6 +385,8 @@ pub struct ConfigResponse {
     pub auto_backoff_max_multiplier: u64,
     pub source_delay_seconds: u64,
     pub submission_source_delay_seconds: u64,
+    pub enable_dynamic_api_delay: bool,
+    pub dynamic_api_delay_multiplier: f64,
     // UP主投稿源扫描策略
     pub submission_scan_batch_size: usize,
     pub submission_adaptive_scan: bool,

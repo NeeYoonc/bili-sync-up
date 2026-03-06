@@ -216,6 +216,8 @@
 	let autoBackoffMaxMultiplier = 5;
 	let sourceDelaySeconds = 2;
 	let submissionSourceDelaySeconds = 5;
+	let enableDynamicApiDelay = true;
+	let dynamicApiDelayMultiplier = 1.5;
 
 	// aria2监控配置
 	let enableAria2HealthCheck = false;
@@ -528,6 +530,8 @@
 		autoBackoffMaxMultiplier = config.auto_backoff_max_multiplier || 5;
 		sourceDelaySeconds = config.source_delay_seconds ?? 2;
 		submissionSourceDelaySeconds = config.submission_source_delay_seconds ?? 5;
+		enableDynamicApiDelay = config.enable_dynamic_api_delay ?? true;
+		dynamicApiDelayMultiplier = config.dynamic_api_delay_multiplier ?? 1.5;
 
 		// 风控验证配置
 		riskControlEnabled = config.risk_control?.enabled ?? false;
@@ -824,6 +828,8 @@
 			auto_backoff_max_multiplier: autoBackoffMaxMultiplier,
 			source_delay_seconds: sourceDelaySeconds,
 			submission_source_delay_seconds: submissionSourceDelaySeconds,
+			enable_dynamic_api_delay: enableDynamicApiDelay,
+			dynamic_api_delay_multiplier: dynamicApiDelayMultiplier,
 			// aria2监控配置
 			enable_aria2_health_check: enableAria2HealthCheck,
 			enable_aria2_auto_restart: enableAria2AutoRestart,
@@ -2392,6 +2398,40 @@
 					/>
 					<Label for="enable-progressive-delay" class="text-sm">启用渐进式延迟</Label>
 					<p class="text-muted-foreground ml-2 text-xs">随着请求次数增加逐步延长延迟时间</p>
+				</div>
+
+				<div class="mt-4 space-y-4 border-t border-blue-200 pt-4 dark:border-blue-800">
+					<h4 class="text-sm font-medium text-blue-700 dark:text-blue-300">动态API配置</h4>
+					<div class="grid grid-cols-1 gap-4 {isMobile ? 'sm:grid-cols-1' : 'md:grid-cols-2'}">
+						<div class="space-y-2">
+							<Label for="dynamic-api-delay-multiplier">动态API延迟倍数</Label>
+							<Input
+								id="dynamic-api-delay-multiplier"
+								type="number"
+								bind:value={dynamicApiDelayMultiplier}
+								min="0.1"
+								max="10"
+								step="0.1"
+								placeholder="1.5"
+							/>
+							<p class="text-muted-foreground text-xs">相对于基础请求间隔的倍率（推荐 1.2~2.0）</p>
+						</div>
+
+						<div class="flex items-center space-x-2">
+							<input
+								type="checkbox"
+								id="enable-dynamic-api-delay"
+								bind:checked={enableDynamicApiDelay}
+								class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+							/>
+							<Label for="enable-dynamic-api-delay" class="text-sm">启用动态API延迟</Label>
+						</div>
+					</div>
+					<div class="rounded-md bg-yellow-50 p-3 dark:bg-yellow-950/20">
+						<p class="text-xs text-yellow-800 dark:text-yellow-200">
+							动态API每次最多返回 12 条记录。首次全量扫描请求次数多，建议保持启用延迟，后续增量扫描耗时较小。
+						</p>
+					</div>
 				</div>
 			</div>
 

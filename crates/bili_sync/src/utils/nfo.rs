@@ -1197,10 +1197,7 @@ impl NFO<'_> {
                     // 非番剧合集使用标准季度标题，避免媒体库把季当成单个视频
                     if let Some(ref set_name) = season.set {
                         let season_label = Self::number_to_chinese(season.season_number.max(1));
-                        (
-                            format!("第{}季 {}", season_label, set_name),
-                            set_name.clone(),
-                        )
+                        (format!("第{}季 {}", season_label, set_name), set_name.clone())
                     } else {
                         (season.name.to_string(), season.original_title.to_string())
                     }
@@ -3309,8 +3306,8 @@ mod tests {
             name: "BV标题占位".to_string(),
             upper_id: 445754101,
             upper_name: "流木咲夜".to_string(),
-            category: 1,          // 动画分区
-            source_type: None,    // 非番剧来源
+            category: 1,       // 动画分区
+            source_type: None, // 非番剧来源
             season_number: Some(10),
             favtime: chrono::NaiveDateTime::new(
                 chrono::NaiveDate::from_ymd_opt(2026, 2, 26).unwrap(),

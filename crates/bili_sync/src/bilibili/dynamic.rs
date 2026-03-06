@@ -4,10 +4,12 @@ use chrono::DateTime;
 use futures::Stream;
 use reqwest::Method;
 use serde_json::Value;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::bilibili::credential::encoded_query;
 use crate::bilibili::{BiliClient, Validate, VideoInfo, MIXIN_KEY};
+use crate::config::SubmissionRiskControlConfig;
 
 pub struct Dynamic<'a> {
     client: &'a BiliClient,
@@ -48,7 +50,37 @@ impl<'a> Dynamic<'a> {
     ) -> impl Stream<Item = Result<VideoInfo>> + 'a {
         try_stream! {
             let mut offset: Option<String> = None;
+            let mut request_count = 0usize;
+            let current_config = crate::config::reload_config();
+            let risk_config = current_config.submission_risk_control;
+
             loop {
+                if cancellation_token.is_cancelled() {
+                    return;
+                }
+
+                if request_count > 0 && risk_config.enable_dynamic_api_delay {
+                    let delay = Self::calculate_dynamic_api_delay(request_count, &risk_config);
+                    if !delay.is_zero() {
+                        if request_count % 10 == 0 {
+                            info!(
+                                "动态API请求节流：UP主={}，已请求={}次，当前延迟={}ms",
+                                self.upper_id,
+                                request_count,
+                                delay.as_millis()
+                            );
+                        } else {
+                            debug!(
+                                "动态API请求延迟：UP主={}，第{}次请求前延迟={}ms",
+                                self.upper_id,
+                                request_count + 1,
+                                delay.as_millis()
+                            );
+                        }
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+
                 if cancellation_token.is_cancelled() {
                     return;
                 }
@@ -57,6 +89,7 @@ impl<'a> Dynamic<'a> {
                     .get_dynamics(offset.as_deref())
                     .await
                     .with_context(|| "failed to get dynamics")?;
+                request_count += 1;
                 let items = res["data"]["items"].as_array_mut().context("items not exist")?;
 
                 for item in items.iter_mut() {
@@ -94,5 +127,26 @@ impl<'a> Dynamic<'a> {
                 }
             }
         }
+    }
+
+    fn calculate_dynamic_api_delay(request_count: usize, config: &SubmissionRiskControlConfig) -> Duration {
+        let base_delay_ms = (config.base_request_delay as f64 * config.dynamic_api_delay_multiplier).round();
+        let base_delay_ms = if base_delay_ms.is_finite() && base_delay_ms > 0.0 {
+            base_delay_ms as u64
+        } else {
+            0
+        };
+        if base_delay_ms == 0 {
+            return Duration::ZERO;
+        }
+
+        let max_multiplier = config.max_delay_multiplier.max(1);
+        let progressive_multiplier = if config.enable_progressive_delay {
+            ((request_count as u64 / 5) + 1).min(max_multiplier)
+        } else {
+            1
+        };
+
+        Duration::from_millis(base_delay_ms.saturating_mul(progressive_multiplier))
     }
 }

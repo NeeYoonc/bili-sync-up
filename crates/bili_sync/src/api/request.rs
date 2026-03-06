@@ -240,6 +240,8 @@ pub struct UpdateConfigRequest {
     pub auto_backoff_max_multiplier: Option<u64>,
     pub source_delay_seconds: Option<u64>,
     pub submission_source_delay_seconds: Option<u64>,
+    pub enable_dynamic_api_delay: Option<bool>,
+    pub dynamic_api_delay_multiplier: Option<f64>,
     // UP主投稿源扫描策略
     pub submission_scan_batch_size: Option<usize>,
     pub submission_adaptive_scan: Option<bool>,

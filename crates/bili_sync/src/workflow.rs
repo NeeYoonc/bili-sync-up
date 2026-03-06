@@ -128,9 +128,7 @@ fn get_submission_upper_intro_load_lock(upper_id: i64) -> Arc<TokioMutex<()>> {
 
 fn get_root_alias_asset_write_lock(root_dir: &Path) -> Arc<TokioMutex<()>> {
     let key = root_dir.to_string_lossy().to_string();
-    let mut locks = ROOT_ALIAS_ASSET_WRITE_LOCKS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut locks = ROOT_ALIAS_ASSET_WRITE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
     locks
         .entry(key)
         .or_insert_with(|| Arc::new(TokioMutex::new(())))
@@ -139,9 +137,7 @@ fn get_root_alias_asset_write_lock(root_dir: &Path) -> Arc<TokioMutex<()>> {
 
 fn mark_root_alias_asset_once(root_dir: &Path) -> bool {
     let key = root_dir.to_string_lossy().to_string();
-    let mut set = ROOT_ALIAS_ASSET_ONCE_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut set = ROOT_ALIAS_ASSET_ONCE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     set.insert(key)
 }
 
@@ -155,9 +151,7 @@ fn should_log_root_alias_skip_once(root_dir: &Path) -> bool {
 
 fn should_skip_root_alias_asset_retry(root_dir: &Path) -> bool {
     let key = root_dir.to_string_lossy().to_string();
-    let cache = ROOT_ALIAS_ASSET_FAILURE_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let cache = ROOT_ALIAS_ASSET_FAILURE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(last_failed_at) = cache.get(&key) {
         return current_unix_timestamp_secs().saturating_sub(*last_failed_at) < ROOT_ALIAS_ASSET_FAILURE_RETRY_SECS;
     }
@@ -166,17 +160,13 @@ fn should_skip_root_alias_asset_retry(root_dir: &Path) -> bool {
 
 fn mark_root_alias_asset_failed(root_dir: &Path) {
     let key = root_dir.to_string_lossy().to_string();
-    let mut cache = ROOT_ALIAS_ASSET_FAILURE_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut cache = ROOT_ALIAS_ASSET_FAILURE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     cache.insert(key, current_unix_timestamp_secs());
 }
 
 fn clear_root_alias_asset_failed(root_dir: &Path) {
     let key = root_dir.to_string_lossy().to_string();
-    let mut cache = ROOT_ALIAS_ASSET_FAILURE_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut cache = ROOT_ALIAS_ASSET_FAILURE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     cache.remove(&key);
 }
 
@@ -3268,8 +3258,8 @@ pub async fn download_video_pages(
         let submission_up_seasonal_mode = matches!(video_source, VideoSourceEnum::Submission(_))
             && config.collection_folder_mode.as_ref() == "up_seasonal";
         let submission_title_collection_like = is_submission_collection_like_title(&final_video_model.name);
-        let submission_collection_use_season = is_submission_collection_video
-            && config.collection_folder_mode.as_ref() == "up_seasonal";
+        let submission_collection_use_season =
+            is_submission_collection_video && config.collection_folder_mode.as_ref() == "up_seasonal";
         let submission_force_season_structure = submission_up_seasonal_mode
             && (!is_single_page || is_submission_collection_video || submission_title_collection_like);
 
@@ -4318,9 +4308,7 @@ pub async fn download_video_pages(
             && matches!(video_source, VideoSourceEnum::Submission(_))
             && !base_name.is_empty()
             && !base_name.starts_with("Season")
-            && (base_name.ends_with("合集")
-                || base_name.ends_with("合輯")
-                || base_name.ends_with("Collection"))
+            && (base_name.ends_with("合集") || base_name.ends_with("合輯") || base_name.ends_with("Collection"))
     };
 
     let (res_1, res_2, res_folder, res_3, res_4, res_5) = tokio::join!(
@@ -4626,10 +4614,7 @@ pub async fn download_video_pages(
             } else if !force_refresh_alias && should_skip_root_alias_asset_retry(root_dir) {
                 // 避免同一轮每个视频都重复尝试，导致日志风暴
                 if should_log_root_alias_skip_once(root_dir) {
-                    debug!(
-                        "整合目录根封面最近刚失败，暂不重试: root={}",
-                        root_dir.display()
-                    );
+                    debug!("整合目录根封面最近刚失败，暂不重试: root={}", root_dir.display());
                 }
             } else {
                 if force_refresh_alias {
@@ -7291,11 +7276,7 @@ pub async fn generate_upper_nfo(
 async fn remove_zero_byte_file_if_exists(path: &Path, reason: &str) -> bool {
     match fs::metadata(path).await {
         Ok(meta) if meta.is_file() && meta.len() == 0 => {
-            warn!(
-                "检测到0字节文件，准备删除并重试下载: {} ({})",
-                path.display(),
-                reason
-            );
+            warn!("检测到0字节文件，准备删除并重试下载: {} ({})", path.display(), reason);
             match fs::remove_file(path).await {
                 Ok(_) => true,
                 Err(e) => {
@@ -7498,27 +7479,27 @@ pub async fn generate_collection_video_nfo(
 
     if should_generate_season_nfo {
         if let Some(season_nfo_path) = season_nfo_path {
-        let season_name_for_nfo = season_collection_name.or(collection_name);
-        let mut season = Season::from_video_with_collection(
-            video_model,
-            season_name_for_nfo,
-            collection_cover,
-            season_number,
-            season_total_episodes,
-        );
-        if let Some(plot_link) = season_plot_link_override {
-            let trimmed = plot_link.trim();
-            if !trimmed.is_empty() {
-                season.plot_link_override = Some(trimmed.to_string());
+            let season_name_for_nfo = season_collection_name.or(collection_name);
+            let mut season = Season::from_video_with_collection(
+                video_model,
+                season_name_for_nfo,
+                collection_cover,
+                season_number,
+                season_total_episodes,
+            );
+            if let Some(plot_link) = season_plot_link_override {
+                let trimmed = plot_link.trim();
+                if !trimmed.is_empty() {
+                    season.plot_link_override = Some(trimmed.to_string());
+                }
             }
-        }
-        if let Some(uniqueid) = season_uniqueid_override {
-            let trimmed = uniqueid.trim();
-            if !trimmed.is_empty() {
-                season.uniqueid_override = Some(trimmed.to_string());
+            if let Some(uniqueid) = season_uniqueid_override {
+                let trimmed = uniqueid.trim();
+                if !trimmed.is_empty() {
+                    season.uniqueid_override = Some(trimmed.to_string());
+                }
             }
-        }
-        generate_nfo(NFO::Season(season), season_nfo_path).await?;
+            generate_nfo(NFO::Season(season), season_nfo_path).await?;
         }
     }
 

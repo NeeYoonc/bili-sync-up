@@ -241,6 +241,12 @@ pub struct SubmissionRiskControlConfig {
     /// UP主投稿源之间的特殊延迟（秒）
     #[serde(default = "default_submission_source_delay_seconds")]
     pub submission_source_delay_seconds: u64,
+    /// 是否对动态API启用延迟机制
+    #[serde(default = "default_enable_dynamic_api_delay")]
+    pub enable_dynamic_api_delay: bool,
+    /// 动态API延迟倍数（相对基础请求延迟）
+    #[serde(default = "default_dynamic_api_delay_multiplier")]
+    pub dynamic_api_delay_multiplier: f64,
 }
 
 /// UP主投稿源扫描优化配置
@@ -335,6 +341,14 @@ fn default_submission_source_delay_seconds() -> u64 {
     5 // UP主投稿源之间默认延迟5秒
 }
 
+fn default_enable_dynamic_api_delay() -> bool {
+    true
+}
+
+fn default_dynamic_api_delay_multiplier() -> f64 {
+    1.5
+}
+
 impl Default for SubmissionRiskControlConfig {
     fn default() -> Self {
         Self {
@@ -353,6 +367,8 @@ impl Default for SubmissionRiskControlConfig {
             auto_backoff_max_multiplier: default_auto_backoff_max_multiplier(),
             source_delay_seconds: default_source_delay_seconds(),
             submission_source_delay_seconds: default_submission_source_delay_seconds(),
+            enable_dynamic_api_delay: default_enable_dynamic_api_delay(),
+            dynamic_api_delay_multiplier: default_dynamic_api_delay_multiplier(),
         }
     }
 }

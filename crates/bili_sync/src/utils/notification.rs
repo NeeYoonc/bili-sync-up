@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
-use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -253,7 +253,10 @@ impl NotificationClient {
                 };
 
                 for attempt in 1..=self.config.notification_retry_count {
-                    match self.send_to_webhook(webhook_url, &title, &content, "scan_completion").await {
+                    match self
+                        .send_to_webhook(webhook_url, &title, &content, "scan_completion")
+                        .await
+                    {
                         Ok(_) => {
                             info!("Webhook推送发送成功");
                             return Ok(());
@@ -395,7 +398,12 @@ impl NotificationClient {
         let is_open_send = webhook_format == "opensend";
         let mut req = self.client.post(url).header(CONTENT_TYPE, "application/json");
 
-        if let Some(token) = self.config.webhook_bearer_token.as_ref().filter(|v| !v.trim().is_empty()) {
+        if let Some(token) = self
+            .config
+            .webhook_bearer_token
+            .as_ref()
+            .filter(|v| !v.trim().is_empty())
+        {
             if is_open_send {
                 // openSend 网关使用 apikey 鉴权
                 req = req.header("apikey", token.trim());
@@ -747,7 +755,8 @@ impl NotificationClient {
 
                 let title = "Bili Sync 测试推送";
                 let content = "这是一条Webhook测试推送消息。\n\n如果您收到此消息，说明Webhook推送配置正确。\n\n🎉 推送功能工作正常！";
-                self.send_to_webhook(webhook_url, title, content, "test_notification").await?;
+                self.send_to_webhook(webhook_url, title, content, "test_notification")
+                    .await?;
                 info!("Webhook测试推送发送成功");
                 Ok(())
             }

@@ -1644,6 +1644,8 @@ impl ConfigTaskQueue {
                 auto_backoff_max_multiplier: task.auto_backoff_max_multiplier,
                 source_delay_seconds: task.source_delay_seconds,
                 submission_source_delay_seconds: task.submission_source_delay_seconds,
+                enable_dynamic_api_delay: None,
+                dynamic_api_delay_multiplier: None,
                 submission_scan_batch_size: task.submission_scan_batch_size,
                 submission_adaptive_scan: task.submission_adaptive_scan,
                 submission_adaptive_max_hours: task.submission_adaptive_max_hours,

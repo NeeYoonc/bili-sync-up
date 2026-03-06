@@ -298,6 +298,8 @@ export interface ConfigResponse {
 	auto_backoff_max_multiplier?: number;
 	source_delay_seconds?: number;
 	submission_source_delay_seconds?: number;
+	enable_dynamic_api_delay?: boolean;
+	dynamic_api_delay_multiplier?: number;
 	// UP主投稿源扫描策略
 	submission_scan_batch_size?: number;
 	submission_adaptive_scan?: boolean;
@@ -422,6 +424,8 @@ export interface UpdateConfigRequest {
 	auto_backoff_max_multiplier?: number;
 	source_delay_seconds?: number;
 	submission_source_delay_seconds?: number;
+	enable_dynamic_api_delay?: boolean;
+	dynamic_api_delay_multiplier?: number;
 	// UP主投稿源扫描策略
 	submission_scan_batch_size?: number;
 	submission_adaptive_scan?: boolean;
