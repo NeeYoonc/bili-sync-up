@@ -48,6 +48,7 @@
 	let deleting = false;
 	let videoElement: HTMLVideoElement | null = null;
 	let flvTransmuxFallbackUrl: string | null = null;
+	let safePlayingPageIndex = 0;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	let flvPlayer: any = null;
 	let flvPlayerUrl: string | null = null;
@@ -340,13 +341,25 @@
 	// 获取播放的视频ID（分页ID或视频ID）
 	function getPlayVideoId(): number {
 		if (videoData && videoData.pages && videoData.pages.length > 0) {
-			// 如果有分页，使用分页ID
-			return videoData.pages[currentPlayingPageIndex].id;
+			// 如果有分页，使用安全索引，避免路由切换后越界
+			return videoData.pages[safePlayingPageIndex].id;
 		} else if (videoData) {
 			// 如果没有分页（单P视频），使用视频ID
 			return videoData.video.id;
 		}
 		return 0;
+	}
+
+	$: {
+		const pageCount = videoData?.pages?.length ?? 0;
+		if (pageCount <= 0) {
+			safePlayingPageIndex = 0;
+		} else {
+			safePlayingPageIndex = Math.min(Math.max(currentPlayingPageIndex, 0), pageCount - 1);
+			if (safePlayingPageIndex !== currentPlayingPageIndex) {
+				currentPlayingPageIndex = safePlayingPageIndex;
+			}
+		}
 	}
 
 	async function loadVideoDetail() {
@@ -438,6 +451,8 @@
 
 	// 监听路由参数变化
 	$: if ($page.params.id) {
+		// 切换视频时默认回到P1，避免沿用上一个视频的分页索引
+		currentPlayingPageIndex = 0;
 		loadVideoDetail();
 	}
 
@@ -1033,8 +1048,8 @@
 							<!-- 当前播放的分页信息 -->
 							{#if videoData.pages.length > 1}
 								<div class="mb-2 text-sm text-gray-600">
-									正在播放: P{videoData.pages[currentPlayingPageIndex].pid} - {videoData.pages[
-										currentPlayingPageIndex
+									正在播放: P{videoData.pages[safePlayingPageIndex].pid} - {videoData.pages[
+										safePlayingPageIndex
 									].name}
 								</div>
 							{/if}
