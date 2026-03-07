@@ -124,6 +124,9 @@ pub struct UpdateVideoSourceDownloadOptionsResponse {
     pub success: bool,
     pub source_id: i32,
     pub source_type: String,
+    pub collection_aggregate_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection_aggregate_season_number: Option<i32>,
     pub audio_only: bool,
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
@@ -194,6 +197,9 @@ pub struct VideoSource {
     pub m_id: Option<i64>, // UP主ID (用于合集)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collection_type: Option<String>, // 合集类型: season/series
+    pub collection_aggregate_enabled: bool, // 合集源：是否启用合集聚合
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection_aggregate_season_number: Option<i32>, // 合集源：缓存的绝对季号
     pub upper_id: Option<i64>, // UP主ID (用于投稿)
     pub season_id: Option<String>, // 番剧season_id
     pub media_id: Option<String>, // 番剧media_id

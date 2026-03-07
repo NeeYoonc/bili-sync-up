@@ -43,6 +43,8 @@ export interface VideoSource {
 	s_id?: number; // 合集ID
 	m_id?: number; // UP主ID (用于合集)
 	collection_type?: string; // 合集类型: season/series
+	collection_aggregate_enabled: boolean; // 合集源：是否启用合集聚合
+	collection_aggregate_season_number?: number; // 合集源：缓存的绝对季度编号
 	upper_id?: number; // UP主ID (用于投稿)
 	season_id?: string; // 番剧season_id
 	media_id?: string; // 番剧media_id
@@ -195,6 +197,7 @@ export interface AddVideoSourceRequest {
 	path: string;
 	cover?: string;
 	collection_type?: string;
+	collection_aggregate_enabled?: boolean;
 	media_id?: string;
 	ep_id?: string;
 	download_all_seasons?: boolean;

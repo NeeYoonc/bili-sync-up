@@ -58,6 +58,7 @@ mod m20260220_000001_add_page_play_stream_cache;
 mod m20260222_000001_create_image_proxy_cache;
 mod m20260222_000002_add_video_submission_membership_state;
 mod m20260307_000001_add_advanced_keyword_filters;
+mod m20260307_000002_add_collection_aggregate_fields;
 
 pub struct Migrator;
 
@@ -123,6 +124,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260222_000002_add_video_submission_membership_state::Migration),
             Box::new(m20260222_000001_create_image_proxy_cache::Migration),
             Box::new(m20260307_000001_add_advanced_keyword_filters::Migration),
+            Box::new(m20260307_000002_add_collection_aggregate_fields::Migration),
         ]
     }
 }

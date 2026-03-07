@@ -49,6 +49,7 @@
 	let path = '';
 	let cover = '';
 	let collectionType = 'season';
+	let collectionAggregateEnabled = false;
 	let downloadAllSeasons = false;
 	let loading = false;
 
@@ -152,6 +153,7 @@
 	let batchSelectedItems = new Map<string, BatchSelectedItem>(); // 存储选中项 {key: {type, data, name}}
 	let batchCheckboxStates: Record<string, boolean> = {}; // 存储checkbox状态的响应式对象
 	let batchBasePath = '/Downloads'; // 批量基础路径
+	let batchCollectionAggregateEnabled = false; // 批量添加合集时是否启用合集聚合
 	let batchAdding = false; // 批量添加进行中
 	let batchProgress = { current: 0, total: 0 }; // 批量添加进度
 	let batchDialogOpen = false; // 批量配置对话框状态
@@ -696,6 +698,7 @@
 		if (sourceType === 'collection') {
 			params.up_id = upId;
 			params.collection_type = collectionType;
+			params.collection_aggregate_enabled = collectionAggregateEnabled;
 			if (cover) {
 				params.cover = cover;
 			}
@@ -812,6 +815,7 @@
 			path = '/Downloads';
 			downloadAllSeasons = false;
 			collectionType = 'season';
+			collectionAggregateEnabled = false;
 			isManualInput = false;
 			bangumiSeasons = [];
 			selectedSeasons = [];
@@ -2085,6 +2089,7 @@
 						if (sourceType === 'collection') {
 							params.up_id = item.data.mid.toString();
 							params.collection_type = 'season';
+							params.collection_aggregate_enabled = batchCollectionAggregateEnabled;
 						} else if (sourceType === 'submission') {
 							// 批量添加UP主投稿时总是使用全部投稿模式
 						}
@@ -2094,10 +2099,12 @@
 							// 关注的合集使用 up_mid
 							params.up_id = item.data.up_mid.toString();
 							params.collection_type = item.data.collection_type || 'season';
+							params.collection_aggregate_enabled = batchCollectionAggregateEnabled;
 						} else {
 							// 普通合集使用 mid
 							params.up_id = item.data.mid.toString();
 							params.collection_type = item.data.collection_type || 'season';
+							params.collection_aggregate_enabled = batchCollectionAggregateEnabled;
 						}
 					}
 
@@ -2152,6 +2159,7 @@
 		clearBatchSelection();
 		batchMode = false;
 		batchDialogOpen = false;
+		batchCollectionAggregateEnabled = false;
 
 		// 如果有成功添加的，跳转到视频源管理页面
 		if (successCount > 0) {
@@ -2199,6 +2207,14 @@
 			default:
 				return '';
 		}
+	}
+
+	function getBatchSelectedSourceType(): string | null {
+		if (batchSelectedItems.size === 0) {
+			return null;
+		}
+		const firstItem = Array.from(batchSelectedItems.values())[0];
+		return getSourceTypeFromBatchItem(firstItem);
 	}
 </script>
 
@@ -2468,6 +2484,35 @@
 										✓ 已获取合集列表，请在{isCompactLayout ? '下方' : '右侧'}选择
 									</p>
 								{/if}
+							</div>
+
+							<div class="space-y-2">
+								<Label>合集聚合</Label>
+								<div
+									class="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-800 dark:bg-blue-950/30"
+								>
+									<div class="pr-3">
+										<div class="text-sm font-medium text-blue-800 dark:text-blue-200">
+											按同UP合集绝对顺序聚合
+										</div>
+										<p class="mt-1 text-xs text-blue-600 dark:text-blue-300">
+											开启后，该合集会归并到“同UP合集根目录”，并按该UP远端全部合集/系列列表的绝对顺序映射 Season xx。
+										</p>
+									</div>
+									<label class="relative inline-flex cursor-pointer items-center">
+										<input
+											type="checkbox"
+											bind:checked={collectionAggregateEnabled}
+											class="peer sr-only"
+										/>
+										<div
+											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+										></div>
+									</label>
+								</div>
+								<p class="text-muted-foreground text-xs">
+									关闭时保持合集源独立目录；开启时不压缩季号，远端排第几就是 Season 几。
+								</p>
 							</div>
 						{/if}
 
@@ -4856,6 +4901,34 @@
 					<p class="text-muted-foreground mt-1 text-xs">所有选中的视频源将保存到此路径</p>
 				</div>
 
+				{#if getBatchSelectedSourceType() === 'collection'}
+					<div class="space-y-2">
+						<Label>合集聚合</Label>
+						<div
+							class="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-800 dark:bg-blue-950/30"
+						>
+							<div class="pr-3">
+								<div class="text-sm font-medium text-blue-800 dark:text-blue-200">
+									按同UP合集绝对顺序聚合
+								</div>
+								<p class="mt-1 text-xs text-blue-600 dark:text-blue-300">
+									批量添加的合集源将按各自UP远端合集/系列列表顺序映射 Season xx，并归并到对应UP合集根目录。
+								</p>
+							</div>
+							<label class="relative inline-flex cursor-pointer items-center">
+								<input
+									type="checkbox"
+									bind:checked={batchCollectionAggregateEnabled}
+									class="peer sr-only"
+								/>
+								<div
+									class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+								></div>
+							</label>
+						</div>
+					</div>
+				{/if}
+
 				<div class="max-h-60 overflow-y-auto rounded border">
 					<div class="space-y-2 p-3">
 						{#each Array.from(batchSelectedItems.values()) as item, index}
@@ -4888,6 +4961,7 @@
 					variant="outline"
 					onclick={() => {
 						batchDialogOpen = false;
+						batchCollectionAggregateEnabled = false;
 					}}
 					disabled={batchAdding}
 				>

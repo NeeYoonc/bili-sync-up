@@ -802,6 +802,8 @@ pub async fn get_video_sources(
                 s_id: Some(model.s_id),
                 m_id: Some(model.m_id),
                 collection_type: Some(if model.r#type == 1 { "series" } else { "season" }.to_string()),
+                collection_aggregate_enabled: model.aggregate_enabled,
+                collection_aggregate_season_number: model.aggregate_season_number,
                 upper_id: None,
                 season_id: None,
                 media_id: None,
@@ -859,6 +861,8 @@ pub async fn get_video_sources(
                 s_id: None,
                 m_id: None,
                 collection_type: None,
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
                 upper_id: None,
                 season_id: None,
                 media_id: None,
@@ -916,6 +920,8 @@ pub async fn get_video_sources(
                 s_id: None,
                 m_id: None,
                 collection_type: None,
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
                 upper_id: Some(model.upper_id),
                 season_id: None,
                 media_id: None,
@@ -973,6 +979,8 @@ pub async fn get_video_sources(
                 s_id: None,
                 m_id: None,
                 collection_type: None,
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
                 upper_id: None,
                 season_id: None,
                 media_id: None,
@@ -1049,6 +1057,8 @@ pub async fn get_video_sources(
                 s_id: None,
                 m_id: None,
                 collection_type: None,
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
                 upper_id: None,
                 season_id: model.season_id,
                 media_id: model.media_id,
@@ -1087,6 +1097,41 @@ pub async fn get_video_sources(
         watch_later: watch_later_sources,
         bangumi: bangumi_sources,
     }))
+}
+
+async fn resolve_collection_aggregate_season_number(
+    up_id: i64,
+    s_id: i64,
+    collection_type: i32,
+) -> Option<i32> {
+    match crate::utils::collection_aggregate::fetch_absolute_collection_season_number(
+        up_id,
+        s_id,
+        collection_type,
+    )
+    .await
+    {
+        Ok(Some(season_number)) => Some(season_number.max(1)),
+        Ok(None) => {
+            warn!(
+                "未在UP主 {} 的远端合集/系列列表中找到合集 {} ({})，暂不写入聚合季号",
+                up_id,
+                s_id,
+                crate::utils::collection_aggregate::collection_type_name_from_db(collection_type)
+            );
+            None
+        }
+        Err(err) => {
+            warn!(
+                "获取合集 {} 的远端绝对季号失败（UP主: {}, 类型: {}）: {}",
+                s_id,
+                up_id,
+                crate::utils::collection_aggregate::collection_type_name_from_db(collection_type),
+                err
+            );
+            None
+        }
+    }
 }
 
 fn resolution_to_height_range(resolution: u32) -> Option<(u32, u32)> {
@@ -2578,6 +2623,7 @@ pub async fn add_video_source(
             path: params.path.clone(),
             up_id: params.up_id.clone(),
             collection_type: params.collection_type.clone(),
+            collection_aggregate_enabled: params.collection_aggregate_enabled,
             media_id: params.media_id.clone(),
             ep_id: params.ep_id.clone(),
             download_all_seasons: params.download_all_seasons,
@@ -2706,6 +2752,12 @@ pub async fn add_video_source_internal(
 
             // 处理关键词过滤模式
             let keyword_filter_mode = params.keyword_filter_mode.clone();
+            let aggregate_enabled = params.collection_aggregate_enabled.unwrap_or(false);
+            let aggregate_season_number = if aggregate_enabled {
+                resolve_collection_aggregate_season_number(up_id, s_id, collection_type).await
+            } else {
+                None
+            };
 
             let collection = collection::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
@@ -2728,6 +2780,8 @@ pub async fn add_video_source_internal(
                 max_duration_seconds: sea_orm::Set(None),
                 published_after: sea_orm::Set(None),
                 published_before: sea_orm::Set(None),
+                aggregate_enabled: sea_orm::Set(aggregate_enabled),
+                aggregate_season_number: sea_orm::Set(aggregate_season_number),
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
                 flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
@@ -5027,6 +5081,26 @@ pub async fn update_video_source_download_options_internal(
             let flat_folder = params.flat_folder.unwrap_or(collection.flat_folder);
             let download_danmaku = params.download_danmaku.unwrap_or(collection.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(collection.download_subtitle);
+            let collection_aggregate_enabled = params
+                .collection_aggregate_enabled
+                .unwrap_or(collection.aggregate_enabled);
+            let collection_aggregate_season_number = if collection_aggregate_enabled {
+                if params.collection_aggregate_enabled == Some(true)
+                    || collection.aggregate_season_number.unwrap_or(0) <= 0
+                {
+                    resolve_collection_aggregate_season_number(
+                        collection.m_id,
+                        collection.s_id,
+                        collection.r#type,
+                    )
+                    .await
+                    .or(collection.aggregate_season_number)
+                } else {
+                    collection.aggregate_season_number
+                }
+            } else {
+                collection.aggregate_season_number
+            };
             let ai_rename = params.ai_rename.unwrap_or(collection.ai_rename);
             let ai_rename_video_prompt = params
                 .ai_rename_video_prompt
@@ -5051,6 +5125,8 @@ pub async fn update_video_source_download_options_internal(
 
             collection::Entity::update(collection::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
+                aggregate_enabled: sea_orm::Set(collection_aggregate_enabled),
+                aggregate_season_number: sea_orm::Set(collection_aggregate_season_number),
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
@@ -5072,6 +5148,8 @@ pub async fn update_video_source_download_options_internal(
                 success: true,
                 source_id: id,
                 source_type: "collection".to_string(),
+                collection_aggregate_enabled,
+                collection_aggregate_season_number,
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
@@ -5144,6 +5222,8 @@ pub async fn update_video_source_download_options_internal(
                 success: true,
                 source_id: id,
                 source_type: "favorite".to_string(),
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
@@ -5234,6 +5314,8 @@ pub async fn update_video_source_download_options_internal(
                 success: true,
                 source_id: id,
                 source_type: "submission".to_string(),
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
@@ -5306,6 +5388,8 @@ pub async fn update_video_source_download_options_internal(
                 success: true,
                 source_id: id,
                 source_type: "watch_later".to_string(),
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
@@ -5378,6 +5462,8 @@ pub async fn update_video_source_download_options_internal(
                 success: true,
                 source_id: id,
                 source_type: "bangumi".to_string(),
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,

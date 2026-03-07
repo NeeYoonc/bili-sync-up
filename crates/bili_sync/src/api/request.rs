@@ -43,6 +43,8 @@ pub struct AddVideoSourceRequest {
     pub path: String,
     // 合集类型: "season"(视频合集) 或 "series"(视频列表)，仅当source_type为"collection"时有效
     pub collection_type: Option<String>,
+    // 是否启用合集聚合（仅当source_type为"collection"时有效）
+    pub collection_aggregate_enabled: Option<bool>,
     // 番剧特有字段
     pub media_id: Option<String>,
     pub ep_id: Option<String>,
@@ -135,6 +137,8 @@ pub struct UpdateVideoSourceDownloadOptionsRequest {
     pub ai_rename_rename_parent_dir: Option<bool>,
     /// 是否使用动态API获取UP主投稿（仅submission有效）
     pub use_dynamic_api: Option<bool>,
+    /// 是否启用合集聚合（仅collection有效）
+    pub collection_aggregate_enabled: Option<bool>,
 }
 
 // 更新投稿源选中视频列表的请求结构体

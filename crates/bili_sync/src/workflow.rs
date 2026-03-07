@@ -2734,6 +2734,8 @@ pub async fn download_video_pages(
 
     // 检查是否为合集源
     let is_collection_source = matches!(video_source, VideoSourceEnum::Collection(_));
+    let collection_aggregate_enabled =
+        matches!(video_source, VideoSourceEnum::Collection(collection_source) if collection_source.aggregate_enabled);
 
     // 定义最终使用的视频模型
     let final_video_model = if is_bangumi {
@@ -3104,55 +3106,80 @@ pub async fn download_video_pages(
             video_source_base_path.to_path_buf()
         } else if let VideoSourceEnum::Collection(collection_source) = video_source {
             // 合集的特殊处理
-            let config = crate::config::reload_config();
-            match config.collection_folder_mode.as_ref() {
-                "unified" => {
-                    // 统一模式：所有视频放在以合集名称命名的同一个文件夹下
-                    let safe_collection_name = crate::utils::filenamify::filenamify(&collection_source.name);
-                    debug!(
-                        "合集统一模式 - 原名称: '{}', 安全化后: '{}'",
-                        collection_source.name, safe_collection_name
-                    );
-                    video_source_base_path.join(&safe_collection_name)
-                }
-                "up_seasonal" => {
-                    // 合集源不走UP源的“同UP归并分季”模式：
-                    // 保持每个合集独立目录，避免多个合集被归并到同一根目录后出现季号漂移。
-                    let safe_collection_name = crate::utils::filenamify::filenamify(&collection_source.name);
-                    debug!(
-                        "合集源在up_seasonal下使用独立目录 - 原名称: '{}', 安全化后: '{}'",
-                        collection_source.name, safe_collection_name
-                    );
-                    video_source_base_path.join(&safe_collection_name)
-                }
-                _ => {
-                    // 分离模式（默认）：每个视频有自己的文件夹
-                    let base_folder_name = crate::config::with_config(|bundle| {
-                        bundle.render_video_template(&video_format_args(&final_video_model))
-                    })
-                    .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?;
-
-                    debug!("合集分离模式 - 渲染的文件夹名: '{}'", base_folder_name);
-                    debug!("合集分离模式 - 基础路径: {:?}", video_source_base_path);
-
-                    // **智能判断：根据模板内容决定是否需要去重**
-                    let video_template =
-                        crate::config::with_config(|bundle| bundle.config.video_name.as_ref().to_string());
-                    let needs_deduplication = video_template.contains("title")
-                        || (video_template.contains("name") && !video_template.contains("upper_name"));
-
-                    if needs_deduplication {
-                        // 智能去重：检查文件夹名是否已存在，如果存在则追加唯一标识符
-                        let unique_folder_name = generate_unique_folder_name(
-                            video_source_base_path,
-                            &base_folder_name,
-                            &video_model,
-                            &video_model.pubtime.format("%Y-%m-%d").to_string(),
+            if collection_aggregate_enabled {
+                let safe_upper_name = crate::utils::filenamify::filenamify(final_video_model.upper_name.trim());
+                let up_dir_name = if safe_upper_name.is_empty() {
+                    format!("UP_{}", collection_source.m_id)
+                } else {
+                    safe_upper_name.clone()
+                };
+                let up_collection_root_name = if safe_upper_name.is_empty() {
+                    format!("UP_{}合集", collection_source.m_id)
+                } else if safe_upper_name.ends_with("合集") {
+                    safe_upper_name
+                } else {
+                    format!("{}合集", safe_upper_name)
+                };
+                debug!(
+                    "合集源聚合模式 - UP主: '{}' ({}), 路径: '{}/{}/{}'",
+                    final_video_model.upper_name,
+                    collection_source.m_id,
+                    video_source_base_path.display(),
+                    up_dir_name,
+                    up_collection_root_name
+                );
+                video_source_base_path.join(&up_dir_name).join(&up_collection_root_name)
+            } else {
+                let config = crate::config::reload_config();
+                match config.collection_folder_mode.as_ref() {
+                    "unified" => {
+                        // 统一模式：所有视频放在以合集名称命名的同一个文件夹下
+                        let safe_collection_name = crate::utils::filenamify::filenamify(&collection_source.name);
+                        debug!(
+                            "合集统一模式 - 原名称: '{}', 安全化后: '{}'",
+                            collection_source.name, safe_collection_name
                         );
-                        video_source_base_path.join(&unique_folder_name)
-                    } else {
-                        // 不使用去重，允许多个视频共享同一文件夹
-                        video_source_base_path.join(&base_folder_name)
+                        video_source_base_path.join(&safe_collection_name)
+                    }
+                    "up_seasonal" => {
+                        // 合集源不走全局投稿源的“同UP归并分季”模式；
+                        // 合集源的聚合改为按源级 aggregate_enabled 单独控制。
+                        let safe_collection_name = crate::utils::filenamify::filenamify(&collection_source.name);
+                        debug!(
+                            "合集源在全局up_seasonal下保持独立目录 - 原名称: '{}', 安全化后: '{}'",
+                            collection_source.name, safe_collection_name
+                        );
+                        video_source_base_path.join(&safe_collection_name)
+                    }
+                    _ => {
+                        // 分离模式（默认）：每个视频有自己的文件夹
+                        let base_folder_name = crate::config::with_config(|bundle| {
+                            bundle.render_video_template(&video_format_args(&final_video_model))
+                        })
+                        .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?;
+
+                        debug!("合集分离模式 - 渲染的文件夹名: '{}'", base_folder_name);
+                        debug!("合集分离模式 - 基础路径: {:?}", video_source_base_path);
+
+                        // **智能判断：根据模板内容决定是否需要去重**
+                        let video_template =
+                            crate::config::with_config(|bundle| bundle.config.video_name.as_ref().to_string());
+                        let needs_deduplication = video_template.contains("title")
+                            || (video_template.contains("name") && !video_template.contains("upper_name"));
+
+                        if needs_deduplication {
+                            // 智能去重：检查文件夹名是否已存在，如果存在则追加唯一标识符
+                            let unique_folder_name = generate_unique_folder_name(
+                                video_source_base_path,
+                                &base_folder_name,
+                                &video_model,
+                                &video_model.pubtime.format("%Y-%m-%d").to_string(),
+                            );
+                            video_source_base_path.join(&unique_folder_name)
+                        } else {
+                            // 不使用去重，允许多个视频共享同一文件夹
+                            video_source_base_path.join(&base_folder_name)
+                        }
                     }
                 }
             }
@@ -3253,6 +3280,7 @@ pub async fn download_video_pages(
 
         // 合集源不默认跟随 up_seasonal 进入 Season 结构，避免套用投稿源的“同UP分季”规则。
         let collection_use_season_structure = config.collection_use_season_structure
+            || collection_aggregate_enabled
             || (config.collection_folder_mode.as_ref() == "up_seasonal"
                 && !matches!(video_source, VideoSourceEnum::Collection(_)));
         let submission_up_seasonal_mode = matches!(video_source, VideoSourceEnum::Submission(_))
@@ -3321,10 +3349,7 @@ pub async fn download_video_pages(
                     }
                     _ => "Season 01".to_string(),
                 }
-            } else if is_collection
-                && config.collection_folder_mode.as_ref() == "up_seasonal"
-                && !matches!(video_source, VideoSourceEnum::Collection(_))
-            {
+            } else if matches!(video_source, VideoSourceEnum::Collection(_)) && collection_aggregate_enabled {
                 match video_source {
                     VideoSourceEnum::Collection(collection_source) => {
                         match get_collection_source_season_number(connection, collection_source, &final_video_model)
@@ -3368,7 +3393,8 @@ pub async fn download_video_pages(
 
     let current_config = crate::config::reload_config();
     let collection_use_season_structure = current_config.collection_use_season_structure
-        || current_config.collection_folder_mode.as_ref() == "up_seasonal";
+        || current_config.collection_folder_mode.as_ref() == "up_seasonal"
+        || collection_aggregate_enabled;
     // 使用UP主昵称作为文件夹名，并使用首字进行分类
     let upper_name = crate::utils::filenamify::filenamify(&final_video_model.upper_name);
     if upper_name.is_empty() {
@@ -3462,13 +3488,16 @@ pub async fn download_video_pages(
     } else if is_collection {
         // 合集中的单页视频：检查是否启用Season结构
         let config = crate::config::reload_config();
-        let collection_like_use_season =
-            config.collection_use_season_structure || config.collection_folder_mode.as_ref() == "up_seasonal";
+        let collection_like_use_season = config.collection_use_season_structure
+            || collection_aggregate_enabled
+            || config.collection_folder_mode.as_ref() == "up_seasonal";
         if collection_like_use_season && season_folder.is_some() {
             // 合集启用Season结构时，使用合集名称作为文件名前缀
             match video_source {
                 VideoSourceEnum::Collection(collection_source) => {
-                    if config.collection_folder_mode.as_ref() == "up_seasonal" {
+                    if config.collection_folder_mode.as_ref() == "up_seasonal"
+                        || collection_source.aggregate_enabled
+                    {
                         if let Some(season_folder_name) = season_folder.as_ref() {
                             // up_seasonal 下合集源与投稿源统一：按 SeasonXX 命名根封面
                             let season_name = if let Some(raw_no) = season_folder_name.strip_prefix("Season ") {
@@ -3769,7 +3798,8 @@ pub async fn download_video_pages(
                 let cfg = crate::config::reload_config();
                 // 在“同UP分季”场景下，tvshow 标题固定使用根目录名，
                 // 避免回退成某个官方合集标题（如第一季名）导致媒体库聚合错乱。
-                let lock_to_root_name = cfg.collection_folder_mode.as_ref() == "up_seasonal";
+                let lock_to_root_name =
+                    cfg.collection_folder_mode.as_ref() == "up_seasonal" || collection_aggregate_enabled;
                 if lock_to_root_name {
                     base_path
                         .parent()
@@ -4111,7 +4141,7 @@ pub async fn download_video_pages(
             && season_folder.is_some()
             && (matches!(video_source, VideoSourceEnum::Submission(_))
                 || matches!(video_source, VideoSourceEnum::Collection(_)))
-            && cfg.collection_folder_mode.as_ref() == "up_seasonal"
+            && (cfg.collection_folder_mode.as_ref() == "up_seasonal" || collection_aggregate_enabled)
     };
     let root_assets_upper_face_url =
         if use_upper_face_for_up_seasonal_root_assets && !final_video_model.upper_face.trim().is_empty() {
@@ -4577,7 +4607,8 @@ pub async fn download_video_pages(
     // 这两张图强制使用 UP 头像，避免误用合集封面。
     if !is_bangumi
         && season_folder.is_some()
-        && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"
+        && (crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"
+            || collection_aggregate_enabled)
         && (matches!(video_source, VideoSourceEnum::Collection(_))
             || matches!(video_source, VideoSourceEnum::Submission(_)))
     {
@@ -4627,7 +4658,9 @@ pub async fn download_video_pages(
                 let mut alias_fanart_ready = has_non_empty_file(&alias_fanart_path);
 
                 if !alias_thumb_ready || !alias_fanart_ready {
-                    let wrote_alias_by_face = if matches!(video_source, VideoSourceEnum::Submission(_)) {
+                    let wrote_alias_by_face = if matches!(video_source, VideoSourceEnum::Submission(_))
+                        || collection_aggregate_enabled
+                    {
                         if !alias_thumb_ready {
                             // 优先复用已下载的UP头像文件，避免并发下反复写同一目标文件触发 Windows 文件占用错误
                             let cached_face_path = base_upper_path.join("folder.jpg");
@@ -5415,7 +5448,9 @@ pub async fn download_page(
     };
 
     let collection_page_episode_number = if let VideoSourceEnum::Collection(collection_source) = video_source {
-        if crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal" {
+        if collection_source.aggregate_enabled
+            || crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"
+        {
             match get_collection_page_episode_number(connection, collection_source.id, video_model, &page_model).await {
                 Ok(v) => Some(v.max(1)),
                 Err(e) => {
@@ -5481,8 +5516,9 @@ pub async fn download_page(
         // 合集视频的特殊处理
         let config = crate::config::reload_config();
         let collection_unified_template = config.collection_unified_name.as_ref().to_string();
-        let is_up_seasonal = config.collection_folder_mode.as_ref() == "up_seasonal";
-        if is_up_seasonal {
+        let collection_uses_absolute_seasons =
+            collection_source.aggregate_enabled || config.collection_folder_mode.as_ref() == "up_seasonal";
+        if collection_uses_absolute_seasons {
             // up_seasonal 下合集源统一采用“页级唯一集号”，不再使用 Pxx
             let episode_number = collection_page_episode_number
                 .or(video_model.episode_number)
@@ -5501,7 +5537,7 @@ pub async fn download_page(
                     collection_season_number, episode_number, clean_video_name
                 )
             }
-        } else if matches!(config.collection_folder_mode.as_ref(), "unified" | "up_seasonal") {
+        } else if config.collection_folder_mode.as_ref() == "unified" {
             // 统一模式：使用可配置的合集统一命名模板（默认保持 S01E..）
             match get_collection_video_episode_number(connection, collection_source.id, &video_model.bvid).await {
                 Ok(episode_number) => {
@@ -5516,7 +5552,7 @@ pub async fn download_page(
                         Ok(rendered) => normalize_collection_unified_name(
                             rendered,
                             &collection_unified_template,
-                            is_up_seasonal,
+                            collection_uses_absolute_seasons,
                             is_single_page,
                             true,
                         ),
@@ -9442,6 +9478,73 @@ async fn get_collection_nfo_stats(
         VideoSourceEnum::Collection(collection_source) => {
             let config = crate::config::reload_config();
             let is_up_seasonal = config.collection_folder_mode.as_ref() == "up_seasonal";
+            let current_season_number = collection_source
+                .aggregate_season_number
+                .or_else(|| extract_season_number_from_path(&video_model.path))
+                .unwrap_or(1)
+                .max(1);
+
+            if collection_source.aggregate_enabled {
+                let total_seasons = query_count_i32(
+                    connection,
+                    r#"
+                    SELECT COUNT(DISTINCT aggregate_season_number)
+                    FROM collection
+                    WHERE m_id = ?
+                      AND path = ?
+                      AND aggregate_enabled = 1
+                      AND aggregate_season_number IS NOT NULL
+                      AND aggregate_season_number > 0
+                    "#,
+                    vec![collection_source.m_id.into(), collection_source.path.clone().into()],
+                )
+                .await?;
+
+                let total_episodes = query_count_i32(
+                    connection,
+                    r#"
+                    SELECT COUNT(*)
+                    FROM video
+                    WHERE collection_id IN (
+                        SELECT id
+                        FROM collection
+                        WHERE m_id = ?
+                          AND path = ?
+                          AND aggregate_enabled = 1
+                    )
+                    "#,
+                    vec![collection_source.m_id.into(), collection_source.path.clone().into()],
+                )
+                .await?;
+
+                let season_total_episodes = query_count_i32(
+                    connection,
+                    r#"
+                    SELECT COUNT(*)
+                    FROM video
+                    WHERE collection_id IN (
+                        SELECT id
+                        FROM collection
+                        WHERE m_id = ?
+                          AND path = ?
+                          AND aggregate_enabled = 1
+                          AND aggregate_season_number = ?
+                    )
+                    "#,
+                    vec![
+                        collection_source.m_id.into(),
+                        collection_source.path.clone().into(),
+                        current_season_number.into(),
+                    ],
+                )
+                .await?;
+
+                return Ok(CollectionNfoStats {
+                    total_seasons: total_seasons.max(1),
+                    total_episodes: total_episodes.max(1),
+                    season_total_episodes: season_total_episodes.max(1),
+                });
+            }
 
             if is_up_seasonal {
                 let up_dir_name = {
@@ -9483,7 +9586,6 @@ async fn get_collection_nfo_stats(
                 )
                 .await?;
 
-                let season_number = extract_season_number_from_path(&video_model.path).unwrap_or(1).max(1);
                 let season_total_episodes = query_count_i32(
                     connection,
                     r#"
@@ -9498,7 +9600,7 @@ async fn get_collection_nfo_stats(
                     vec![
                         collection_source.m_id.into(),
                         grouped_base_path.into(),
-                        season_number.into(),
+                        current_season_number.into(),
                     ],
                 )
                 .await?;
@@ -10424,8 +10526,53 @@ async fn get_collection_source_season_number(
     collection_source: &bili_sync_entity::collection::Model,
     video_model: &video::Model,
 ) -> Result<i32> {
-    use bili_sync_entity::video;
     use sea_orm::*;
+
+    if collection_source.aggregate_enabled {
+        if let Some(cached) = collection_source.aggregate_season_number.filter(|v| *v > 0) {
+            return Ok(cached);
+        }
+
+        match crate::utils::collection_aggregate::fetch_absolute_collection_season_number(
+            collection_source.m_id,
+            collection_source.s_id,
+            collection_source.r#type,
+        )
+        .await
+        {
+            Ok(Some(season_number)) if season_number > 0 => {
+                let final_season_number = season_number.max(1);
+                let mut active_model: collection::ActiveModel = collection_source.clone().into();
+                active_model.aggregate_season_number = Set(Some(final_season_number));
+                if let Err(err) = active_model.update(connection).await {
+                    warn!(
+                        "回写合集聚合绝对季号失败，将继续使用当前结果: collection_id={}, sid={}, season={}, err={}",
+                        collection_source.id, collection_source.s_id, final_season_number, err
+                    );
+                } else {
+                    debug!(
+                        "已缓存合集聚合绝对季号: collection_id={}, sid={}, season={}",
+                        collection_source.id, collection_source.s_id, final_season_number
+                    );
+                }
+                return Ok(final_season_number);
+            }
+            Ok(_) => {
+                warn!(
+                    "未在UP主远端合集/系列列表中找到当前合集，回退到本地季号分配: collection_id={}, sid={}, up_mid={}",
+                    collection_source.id, collection_source.s_id, collection_source.m_id
+                );
+            }
+            Err(err) => {
+                warn!(
+                    "获取合集聚合绝对季号失败，回退到本地季号分配: collection_id={}, sid={}, up_mid={}, err={}",
+                    collection_source.id, collection_source.s_id, collection_source.m_id, err
+                );
+            }
+        }
+    }
+
+    use bili_sync_entity::video;
 
     // 读取该合集最早投稿时间（用于季度映射）
     let earliest_video = video::Entity::find()
