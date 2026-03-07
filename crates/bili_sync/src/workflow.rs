@@ -6951,7 +6951,7 @@ pub async fn generate_page_nfo(
     let nfo = match video_model.single_page {
         Some(single_page) => {
             if single_page {
-                if is_bangumi || video_model.collection_id.is_some() || season_number_override.is_some() {
+                if is_bangumi || video_model.collection_id.is_some() {
                     // 番剧单页或合集视频应使用Episode格式，符合Emby标准
                     use crate::utils::nfo::Episode;
                     let mut episode = Episode::from_video_and_page(video_model, page_model);
