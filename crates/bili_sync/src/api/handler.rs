@@ -1321,6 +1321,18 @@ pub async fn get_videos(
                 query.order_by_desc(video::Column::Pubtime)
             }
         }
+        "is_charge_video" => {
+            // 充电视频优先；同组内再按添加时间排序，保证列表稳定
+            if sort_order == "asc" {
+                query
+                    .order_by_asc(video::Column::IsChargeVideo)
+                    .order_by_desc(video::Column::Id)
+            } else {
+                query
+                    .order_by_desc(video::Column::IsChargeVideo)
+                    .order_by_desc(video::Column::Id)
+            }
+        }
         _ => {
             // 默认按ID排序
             if sort_order == "asc" {

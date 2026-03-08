@@ -6,7 +6,7 @@ export interface ApiResponse<T> {
 }
 
 // 排序字段枚举
-export type SortBy = 'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime';
+export type SortBy = 'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime' | 'is_charge_video';
 
 // 排序顺序枚举
 export type SortOrder = 'asc' | 'desc';

@@ -133,13 +133,28 @@
 		if (value === 'upper_name') return 'id';
 		// 兼容旧参数（created_at 等同于添加时间）
 		if (value === 'created_at') return 'id';
-		if (value === 'id' || value === 'pubtime' || value === 'name') return value;
+		if (value === 'id' || value === 'pubtime' || value === 'name' || value === 'is_charge_video') return value;
 		return 'id';
 	}
 
 	function normalizeSortOrder(value: string | null): SortOrder {
 		if (value === 'asc' || value === 'desc') return value;
 		return 'desc';
+	}
+
+	function parseSortValue(value: string): { sortBy: SortBy; sortOrder: SortOrder } {
+		const lastUnderscoreIndex = value.lastIndexOf('_');
+		if (lastUnderscoreIndex === -1) {
+			return {
+				sortBy: 'id',
+				sortOrder: 'desc'
+			};
+		}
+
+		return {
+			sortBy: normalizeSortBy(value.slice(0, lastUnderscoreIndex)),
+			sortOrder: normalizeSortOrder(value.slice(lastUnderscoreIndex + 1))
+		};
 	}
 
 	// 批量选择状态
@@ -701,7 +716,7 @@
 							class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full rounded-md border px-3 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-auto"
 							value="{currentSortBy}_{currentSortOrder}"
 							onchange={(e) => {
-								const [sortBy, sortOrder] = e.currentTarget.value.split('_') as [SortBy, SortOrder];
+								const { sortBy, sortOrder } = parseSortValue(e.currentTarget.value);
 								handleSortChange(sortBy, sortOrder);
 							}}
 						>
@@ -709,6 +724,7 @@
 							<option value="id_asc">添加时间 (最早)</option>
 							<option value="pubtime_desc">发布时间 (最新)</option>
 							<option value="pubtime_asc">发布时间 (最早)</option>
+							<option value="is_charge_video_desc">充电视频在前</option>
 							<option value="name_asc">名称 (A-Z)</option>
 							<option value="name_desc">名称 (Z-A)</option>
 						</select>
