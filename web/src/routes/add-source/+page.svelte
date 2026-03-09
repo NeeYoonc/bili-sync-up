@@ -202,12 +202,23 @@
 		{ value: 'watch_later', label: '稍后观看', description: '同步稍后观看列表' },
 		{ value: 'bangumi', label: '番剧', description: '番剧season_id可在番剧页面URL中获取' }
 	];
+	const sourceTypeLabelMap: Record<string, string> = {
+		collection: '合集',
+		favorite: '收藏夹',
+		submission: 'UP主投稿',
+		watch_later: '稍后观看',
+		bangumi: '番剧'
+	};
 
 	// 合集类型选项
 	const collectionTypeOptions = [
 		{ value: 'season', label: '合集', description: 'B站标准合集' },
 		{ value: 'series', label: '系列', description: '视频系列' }
 	];
+
+	function getSourceTypeLabel(type: string): string {
+		return sourceTypeLabelMap[type] ?? type;
+	}
 
 	// 订阅的合集相关
 	let subscribedCollections: UserCollectionInfo[] = [];
@@ -2192,6 +2203,22 @@
 				return 'bangumi';
 			default:
 				return sourceType;
+		}
+	}
+
+	function getBatchItemTypeLabel(item: BatchSelectedItem): string {
+		switch (item.type) {
+			case 'search':
+			case 'following':
+				return getSourceTypeLabel(getSourceTypeFromBatchItem(item));
+			case 'favorite':
+				return '收藏夹';
+			case 'collection':
+				return '合集';
+			case 'bangumi':
+				return '番剧';
+			default:
+				return getSourceTypeLabel(item.type);
 		}
 	}
 
@@ -4948,15 +4975,7 @@
 									</div>
 								</div>
 								<span class="bg-background ml-2 rounded px-2 py-1 text-xs">
-									{item.type === 'search'
-										? '搜索'
-										: item.type === 'favorite'
-											? '收藏夹'
-											: item.type === 'following'
-												? 'UP主'
-												: item.type === 'bangumi'
-													? '番剧'
-													: item.type}
+									{getBatchItemTypeLabel(item)}
 								</span>
 							</div>
 						{/each}

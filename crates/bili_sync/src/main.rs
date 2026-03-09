@@ -62,6 +62,12 @@ async fn main() -> Result<()> {
         warn!("恢复断点信息失败: {:#}", e);
     }
 
+    let token = CancellationToken::new();
+    let tracker = TaskTracker::new();
+
+    // 优先启动管理页，避免启动阶段恢复待处理任务耗时过长时阻塞前端访问
+    spawn_task("HTTP 服务", http_server(connection.clone()), &tracker, token.clone());
+
     // 恢复待处理的任务到内存队列
     if let Err(e) = crate::task::recover_pending_tasks(connection.as_ref()).await {
         warn!("恢复待处理任务失败: {:#}", e);
@@ -122,11 +128,6 @@ async fn main() -> Result<()> {
     }
 
     // SQLite配置已经在database::setup_database中设置了mmap，不再需要额外的初始化
-
-    let token = CancellationToken::new();
-    let tracker = TaskTracker::new();
-
-    spawn_task("HTTP 服务", http_server(connection.clone()), &tracker, token.clone());
     spawn_task("定时下载", video_downloader(connection), &tracker, token.clone());
 
     tracker.close();

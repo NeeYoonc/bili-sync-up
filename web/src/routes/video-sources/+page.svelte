@@ -1272,7 +1272,7 @@
 										{:else if sourceConfig.type === 'collection'}
 											还没有添加任何合集或列表订阅
 										{:else if sourceConfig.type === 'submission'}
-											还没有添加任何用户投稿订阅
+											还没有添加任何UP主投稿订阅
 										{:else}
 											还没有添加稍后再看订阅
 										{/if}

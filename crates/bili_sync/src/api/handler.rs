@@ -4006,7 +4006,7 @@ pub async fn delete_video(
 
 /// 内部删除视频函数（用于队列处理和直接调用）
 pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -> Result<(), ApiError> {
-    use bili_sync_entity::video;
+    use bili_sync_entity::{page, video};
     use sea_orm::*;
 
     // 检查视频是否存在
@@ -4061,6 +4061,15 @@ pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -
         cleanup_empty_subdirs_under(base_path);
         cleanup_empty_dir_if_empty(base_path, "视频源基础目录");
     }
+
+    // 删除分页记录，避免留下“分页存在但路径已失效”的坏状态，
+    // 也防止后续在线播放继续命中已不存在的本地文件。
+    page::Entity::delete_many()
+        .filter(page::Column::VideoId.eq(video_id))
+        .exec(db.as_ref())
+        .await?;
+
+    info!("已删除video_id={}的所有page记录", video_id);
 
     // 执行软删除：将deleted字段设为1
     video::Entity::update_many()

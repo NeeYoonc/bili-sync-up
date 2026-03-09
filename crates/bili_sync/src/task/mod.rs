@@ -15,8 +15,11 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
+
+const TASK_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// 删除视频源任务结构体
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2348,7 +2351,9 @@ pub fn is_scanning() -> bool {
 
 /// 添加删除任务到队列的便捷函数
 pub async fn enqueue_delete_task(task: DeleteVideoSourceTask, connection: &DatabaseConnection) -> Result<()> {
-    DELETE_TASK_QUEUE.enqueue_task(task, connection).await
+    timeout(TASK_ENQUEUE_TIMEOUT, DELETE_TASK_QUEUE.enqueue_task(task, connection))
+        .await
+        .map_err(|_| anyhow::anyhow!("删除视频源任务加入队列超时，请稍后重试"))?
 }
 
 /// 处理所有删除任务的便捷函数
@@ -2358,7 +2363,9 @@ pub async fn process_delete_tasks(db: Arc<DatabaseConnection>) -> Result<u32, an
 
 /// 添加添加任务到队列的便捷函数
 pub async fn enqueue_add_task(task: AddVideoSourceTask, connection: &DatabaseConnection) -> Result<()> {
-    ADD_TASK_QUEUE.enqueue_task(task, connection).await
+    timeout(TASK_ENQUEUE_TIMEOUT, ADD_TASK_QUEUE.enqueue_task(task, connection))
+        .await
+        .map_err(|_| anyhow::anyhow!("添加视频源任务加入队列超时，请稍后重试"))?
 }
 
 /// 处理所有添加任务的便捷函数
@@ -2368,12 +2375,16 @@ pub async fn process_add_tasks(db: Arc<DatabaseConnection>) -> Result<u32, anyho
 
 /// 添加更新配置任务到队列的便捷函数
 pub async fn enqueue_update_task(task: UpdateConfigTask, connection: &DatabaseConnection) -> Result<()> {
-    CONFIG_TASK_QUEUE.enqueue_update_task(task, connection).await
+    timeout(TASK_ENQUEUE_TIMEOUT, CONFIG_TASK_QUEUE.enqueue_update_task(task, connection))
+        .await
+        .map_err(|_| anyhow::anyhow!("更新配置任务加入队列超时，请稍后重试"))?
 }
 
 /// 添加重载配置任务到队列的便捷函数
 pub async fn enqueue_reload_task(task: ReloadConfigTask, connection: &DatabaseConnection) -> Result<()> {
-    CONFIG_TASK_QUEUE.enqueue_reload_task(task, connection).await
+    timeout(TASK_ENQUEUE_TIMEOUT, CONFIG_TASK_QUEUE.enqueue_reload_task(task, connection))
+        .await
+        .map_err(|_| anyhow::anyhow!("重载配置任务加入队列超时，请稍后重试"))?
 }
 
 /// 处理所有配置任务的便捷函数
@@ -2383,7 +2394,9 @@ pub async fn process_config_tasks(db: Arc<DatabaseConnection>) -> Result<u32, an
 
 /// 添加视频删除任务到队列的便捷函数
 pub async fn enqueue_video_delete_task(task: DeleteVideoTask, connection: &DatabaseConnection) -> Result<()> {
-    VIDEO_DELETE_TASK_QUEUE.enqueue_task(task, connection).await
+    timeout(TASK_ENQUEUE_TIMEOUT, VIDEO_DELETE_TASK_QUEUE.enqueue_task(task, connection))
+        .await
+        .map_err(|_| anyhow::anyhow!("删除视频任务加入队列超时，请稍后重试"))?
 }
 
 /// 处理所有视频删除任务的便捷函数

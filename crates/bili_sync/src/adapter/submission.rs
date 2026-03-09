@@ -54,6 +54,12 @@ impl VideoSource for submission::Model {
             return true;
         }
 
+        // 开启“扫描已删除视频”后，必须全量拉取投稿列表，
+        // 否则较早的已删除视频会在增量截断阶段被直接跳过，无法恢复。
+        if self.scan_deleted_videos {
+            return true;
+        }
+
         // 如果有选择的视频列表，检查是否是首次扫描
         if self.selected_videos.is_some() {
             // 检查 latest_row_at 是否为初始值（首次扫描）
@@ -118,6 +124,8 @@ impl VideoSource for submission::Model {
 
         if has_checkpoint {
             info!("开始断点恢复「{}」投稿扫描..", self.upper_name);
+        } else if self.scan_deleted_videos {
+            info!("开始全量扫描「{}」投稿（已启用扫描已删除视频）..", self.upper_name);
         } else if self.selected_videos.is_some() {
             // 选择性下载模式
             let is_first_scan = self.latest_row_at == "1970-01-01 00:00:00" || self.latest_row_at.is_empty();
