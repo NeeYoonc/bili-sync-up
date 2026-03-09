@@ -22,6 +22,10 @@ pub struct RangeSpec {
 
 /// 解析HTTP Range头
 pub fn parse_range_header(range_header: &str, file_size: u64) -> Result<RangeSpec> {
+    if file_size == 0 {
+        bail!("Empty file cannot satisfy range requests");
+    }
+
     if !range_header.starts_with("bytes=") {
         bail!("Invalid range header format");
     }
@@ -90,6 +94,19 @@ async fn stream_video_impl(video_id: String, headers: HeaderMap, db: Arc<Databas
     let file_size = fs::metadata(&video_path).await.context("无法获取文件大小")?.len();
 
     debug!("视频文件路径: {:?}, 大小: {} bytes", video_path, file_size);
+
+    if file_size == 0 {
+        info!("检测到充电视频占位文件，返回不可播放提示: {:?}", video_path);
+        let mut response = Response::new("充电视频未充电".into());
+        *response.status_mut() = StatusCode::FORBIDDEN;
+        let headers = response.headers_mut();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return Ok(response);
+    }
 
     // 检查是否有Range请求
     if let Some(range_header) = headers.get(header::RANGE) {

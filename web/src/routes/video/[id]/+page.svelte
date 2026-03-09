@@ -55,6 +55,10 @@
 	let flvAttachedElement: HTMLVideoElement | null = null;
 	let flvSetupToken = 0;
 	let flvScriptPromise: Promise<any> | null = null;
+	let videoDetailLoadToken = 0;
+	let onlinePlayLoadToken = 0;
+	let lastPlaybackNoticeKey: string | null = null;
+	let chargeLockedDisplayMode: 'local' | 'online' | null = null;
 
 	function isFlvUrl(url: string): boolean {
 		const lower = url.toLowerCase();
@@ -225,6 +229,45 @@
 		destroyFlvPlayer();
 	});
 
+	function isChargeLockedMessage(message?: string | null): boolean {
+		if (!message) return false;
+		return (
+			message.includes('充电视频未充电') ||
+			message.includes('充电专享视频') ||
+			message.includes('需要为UP主充电才能观看') ||
+			message.includes('视频需要充电才能观看') ||
+			message.includes('status code: 87007') ||
+			message.includes('status code: 87008')
+		);
+	}
+
+	function showChargeLockedToast(mode: 'local' | 'online') {
+		const noticeKey = `${currentVideoId}-${safePlayingPageIndex}-${mode}-charge-locked`;
+		if (lastPlaybackNoticeKey === noticeKey) return;
+		lastPlaybackNoticeKey = noticeKey;
+		toast.error('充电视频未充电');
+	}
+
+	function resetPlaybackState(options?: { keepPlayerVisible?: boolean; keepPlayMode?: boolean }) {
+		onlinePlayLoadToken += 1;
+		abortFlvSetup();
+		destroyFlvPlayer();
+		flvTransmuxFallbackUrl = null;
+		onlinePlayInfo = null;
+		loadingPlayInfo = false;
+		onlinePlayRefreshRetried = false;
+		onlinePlayRefreshRetrying = false;
+		videoElement = null;
+		lastPlaybackNoticeKey = null;
+		chargeLockedDisplayMode = null;
+		if (!options?.keepPlayerVisible) {
+			showVideoPlayer = false;
+		}
+		if (!options?.keepPlayMode) {
+			onlinePlayMode = false;
+		}
+	}
+
 	// 响应式相关
 	const isMobileQuery = new IsMobile();
 	let isMobile: boolean = false;
@@ -370,25 +413,41 @@
 			return;
 		}
 
+		const loadToken = ++videoDetailLoadToken;
 		loading = true;
 		error = null;
+		resetPlaybackState({ keepPlayerVisible: showVideoPlayer, keepPlayMode: showVideoPlayer });
 
 		try {
 			const result = await api.getVideo(videoId);
+			if (loadToken !== videoDetailLoadToken) return;
 			videoData = result.data;
 
 			// 如果 videoIds 为空（页面刷新后状态丢失），需要找到当前视频所在的页并加载
 			const state = get(appStateStore);
 			if (state.videoIds.length === 0) {
 				await findAndLoadPageForVideo(videoId);
+				if (loadToken !== videoDetailLoadToken) return;
+			}
+
+			if (showVideoPlayer && onlinePlayMode) {
+				await tick();
+				if (loadToken !== videoDetailLoadToken) return;
+				const playVideoId = getPlayVideoId();
+				if (playVideoId) {
+					void loadOnlinePlayInfo(playVideoId);
+				}
 			}
 		} catch (error) {
+			if (loadToken !== videoDetailLoadToken) return;
 			console.error('加载视频详情失败:', error);
 			toast.error('加载视频详情失败', {
 				description: (error as ApiError).message
 			});
 		} finally {
-			loading = false;
+			if (loadToken === videoDetailLoadToken) {
+				loading = false;
+			}
 		}
 	}
 
@@ -490,15 +549,19 @@
 		videoId: string | number,
 		options?: { refresh?: boolean; silentError?: boolean; autoResume?: boolean }
 	): Promise<boolean> {
-		if (loadingPlayInfo) return false;
-
+		const loadToken = ++onlinePlayLoadToken;
 		loadingPlayInfo = true;
 		try {
 			const result = await api.getVideoPlayInfo(videoId, { refresh: options?.refresh === true });
+			if (loadToken !== onlinePlayLoadToken) return false;
 			onlinePlayInfo = result.data;
+			chargeLockedDisplayMode = null;
 			console.log('在线播放信息:', onlinePlayInfo);
 			if (!onlinePlayInfo?.success) {
-				if (!options?.silentError) {
+				if (!options?.silentError && isChargeLockedMessage(onlinePlayInfo?.message)) {
+					chargeLockedDisplayMode = 'online';
+					showChargeLockedToast('online');
+				} else if (!options?.silentError) {
 					toast.error('获取在线播放信息失败', {
 						description: onlinePlayInfo?.message || '请稍后重试'
 					});
@@ -521,16 +584,23 @@
 			}
 			return true;
 		} catch (error) {
+			if (loadToken !== onlinePlayLoadToken) return false;
 			console.error('获取播放信息失败:', error);
-			if (!options?.silentError) {
+			const message = (error as ApiError).message;
+			if (!options?.silentError && isChargeLockedMessage(message)) {
+				chargeLockedDisplayMode = 'online';
+				showChargeLockedToast('online');
+			} else if (!options?.silentError) {
 				toast.error('获取在线播放信息失败', {
-					description: (error as ApiError).message
+					description: message
 				});
 			}
 			onlinePlayInfo = null;
 			return false;
 		} finally {
-			loadingPlayInfo = false;
+			if (loadToken === onlinePlayLoadToken) {
+				loadingPlayInfo = false;
+			}
 		}
 	}
 
@@ -588,6 +658,7 @@
 		if (onlinePlayMode && !onlinePlayInfo) {
 			onlinePlayRefreshRetried = false;
 			onlinePlayRefreshRetrying = false;
+			chargeLockedDisplayMode = null;
 			const videoId = getPlayVideoId();
 			loadOnlinePlayInfo(videoId);
 		}
@@ -942,17 +1013,18 @@
 								<!-- 播放按钮区域 -->
 								<div class="flex justify-center gap-2">
 									{#if pageInfo.download_status[1] === 7}
-										<Button
-											size="sm"
-											variant="default"
-											class="flex-1"
-											title="本地播放"
-											onclick={() => {
-												currentPlayingPageIndex = index;
-												onlinePlayMode = false;
-												showVideoPlayer = true;
-											}}
-										>
+									<Button
+										size="sm"
+										variant="default"
+										class="flex-1"
+										title="本地播放"
+										onclick={() => {
+											currentPlayingPageIndex = index;
+											onlinePlayMode = false;
+											chargeLockedDisplayMode = null;
+											showVideoPlayer = true;
+										}}
+									>
 											<PlayIcon class="mr-2 h-4 w-4" />
 											本地播放
 										</Button>
@@ -967,6 +1039,7 @@
 											onlinePlayMode = true;
 											onlinePlayRefreshRetried = false;
 											onlinePlayRefreshRetrying = false;
+											chargeLockedDisplayMode = null;
 											showVideoPlayer = true;
 											const videoId = getPlayVideoId();
 											loadOnlinePlayInfo(videoId);
@@ -1059,8 +1132,16 @@
 									<div class="flex h-64 items-center justify-center text-white">
 										<div>加载播放信息中...</div>
 									</div>
+								{:else if chargeLockedDisplayMode === 'online' && onlinePlayMode}
+									<div class="flex h-64 items-center justify-center text-white">
+										<div>充电视频未充电</div>
+									</div>
+								{:else if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
+									<div class="flex h-64 items-center justify-center text-white">
+										<div>充电视频未充电</div>
+									</div>
 								{:else}
-									{#key `${currentPlayingPageIndex}-${onlinePlayMode}`}
+									{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
 										<div
 											class="video-container relative {onlinePlayMode ? 'online-mode' : ''}"
 											role="group"
@@ -1081,6 +1162,9 @@
 														} else {
 															toast.error('在线播放失败，请尝试切换本地播放或稍后重试');
 														}
+													} else if (videoData?.video.is_charge_video) {
+														chargeLockedDisplayMode = 'local';
+														showChargeLockedToast('local');
 													}
 												}}
 												onloadstart={() => {
@@ -1188,9 +1272,11 @@
 														if (onlinePlayMode) {
 															onlinePlayRefreshRetried = false;
 															onlinePlayRefreshRetrying = false;
+															chargeLockedDisplayMode = null;
 															const videoId = getPlayVideoId();
 															loadOnlinePlayInfo(videoId);
 														} else {
+															chargeLockedDisplayMode = null;
 															// 本地播放模式：强制重新加载视频
 															setTimeout(() => {
 																const videoElement = document.querySelector('video');

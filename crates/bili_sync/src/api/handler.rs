@@ -12385,6 +12385,7 @@ pub async fn get_video_play_info(
                 crate::bilibili::BiliError::RiskControlOccurred => {
                     "触发B站风控，请稍后重试（频繁出现可尝试刷新凭证或完成验证码验证）".to_string()
                 }
+                crate::bilibili::BiliError::RequestFailed(87007 | 87008, _) => "充电视频未充电".to_string(),
                 crate::bilibili::BiliError::RequestFailed(-404, _) => "视频已被删除或不存在".to_string(),
                 crate::bilibili::BiliError::VideoStreamEmpty(_) => "没有可用的视频流".to_string(),
                 _ => bili_err.to_string(),
@@ -12392,6 +12393,21 @@ pub async fn get_video_play_info(
         } else {
             err_str
         }
+    };
+
+    let is_charge_locked_error = |err: &anyhow::Error| -> bool {
+        if let Some(crate::bilibili::BiliError::RequestFailed(87007 | 87008, _)) =
+            err.downcast_ref::<crate::bilibili::BiliError>()
+        {
+            return true;
+        }
+
+        let err_str = err.to_string();
+        err_str.contains("充电专享视频")
+            || err_str.contains("需要为UP主充电才能观看")
+            || err_str.contains("视频需要充电才能观看")
+            || err_str.contains("status code: 87007")
+            || err_str.contains("status code: 87008")
     };
 
     let fail = |message: String| {
@@ -12501,8 +12517,16 @@ pub async fn get_video_play_info(
         {
             Ok(analyzer) => analyzer,
             Err(e) => {
-                warn!("获取番剧视频分析器失败: {:#}", e);
-                return Ok(fail(build_error_message(&e)));
+                let message = build_error_message(&e);
+                if is_charge_locked_error(&e) {
+                    info!(
+                        "充电视频未充电，无法获取在线播放信息: page_id={}, bvid={}",
+                        video_info.page_id, video_info.bvid
+                    );
+                } else {
+                    warn!("获取番剧视频分析器失败: {:#}", e);
+                }
+                return Ok(fail(message));
             }
         }
     } else {
@@ -12513,8 +12537,16 @@ pub async fn get_video_play_info(
         {
             Ok(analyzer) => analyzer,
             Err(e) => {
-                warn!("获取视频分析器失败: {:#}", e);
-                return Ok(fail(build_error_message(&e)));
+                let message = build_error_message(&e);
+                if is_charge_locked_error(&e) {
+                    info!(
+                        "充电视频未充电，无法获取在线播放信息: page_id={}, bvid={}",
+                        video_info.page_id, video_info.bvid
+                    );
+                } else {
+                    warn!("获取视频分析器失败: {:#}", e);
+                }
+                return Ok(fail(message));
             }
         }
     };
@@ -12522,6 +12554,13 @@ pub async fn get_video_play_info(
     let best_stream = match page_analyzer.best_stream(&filter_option) {
         Ok(stream) => stream,
         Err(e) => {
+            if is_charge_locked_error(&e) {
+                info!(
+                    "充电视频未充电，无法获取在线播放信息: page_id={}, bvid={}",
+                    video_info.page_id, video_info.bvid
+                );
+                return Ok(fail("充电视频未充电".to_string()));
+            }
             warn!("获取最佳视频流失败: {:#}", e);
             return Ok(fail(format!("获取最佳视频流失败: {}", e)));
         }

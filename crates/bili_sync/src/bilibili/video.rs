@@ -619,14 +619,14 @@ impl<'a> Video<'a> {
                         tracing::debug!("× 质量 qn={} 获取失败: {}", qn, e);
                     } else if attempt == 0 && is_trial_video {
                         // 只在第一次尝试时记录试看视频信息
-                        tracing::info!("检测到试看视频，需要充电才能观看完整版");
+                        tracing::debug!("检测到试看视频，需要充电才能观看完整版");
                     }
 
                     if attempt == quality_levels.len() - 1 {
                         // 最后一次尝试也失败了
                         if is_charging_video_error {
                             if !is_trial_video {
-                                tracing::info!("视频需要充电才能观看");
+                                tracing::debug!("检测到充电视频未解锁");
                             }
                             // 对于充电专享视频，统一返回87007错误以便上层正确处理
                             return Err(crate::bilibili::BiliError::RequestFailed(
@@ -665,7 +665,7 @@ impl<'a> Video<'a> {
                                 || error_str_lower.contains("试看模式")
                                 || error_str_lower.contains("试看片段")
                             {
-                                tracing::info!("检测到隐蔽的充电专享视频（试看片段模式）");
+                                tracing::debug!("检测到隐蔽的充电专享视频（试看片段模式）");
                                 return Err(crate::bilibili::BiliError::RequestFailed(
                                     87008,
                                     "充电专享视频（试看片段），需要为UP主充电才能观看".to_string(),
@@ -784,14 +784,14 @@ impl<'a> Video<'a> {
                         tracing::debug!("× 质量 qn={} 获取失败: {}", qn_str, e);
                     } else if attempt == 0 && is_trial_video {
                         // 只在第一次尝试时记录试看视频信息
-                        tracing::info!("检测到试看视频，需要充电才能观看完整版");
+                        tracing::debug!("检测到试看视频，需要充电才能观看完整版");
                     }
 
                     if attempt == quality_levels.len() - 1 {
                         // 最后一次尝试也失败了
                         if is_charging_video_error {
                             if !is_trial_video {
-                                tracing::info!("视频需要充电才能观看");
+                                tracing::debug!("检测到充电视频未解锁");
                             }
                             // 对于充电专享视频，统一返回87007错误以便上层正确处理
                             return Err(crate::bilibili::BiliError::RequestFailed(
@@ -830,7 +830,7 @@ impl<'a> Video<'a> {
                                 || error_str_lower.contains("试看模式")
                                 || error_str_lower.contains("试看片段")
                             {
-                                tracing::info!("检测到隐蔽的充电专享视频（试看片段模式）");
+                                tracing::debug!("检测到隐蔽的充电专享视频（试看片段模式）");
                                 return Err(crate::bilibili::BiliError::RequestFailed(
                                     87008,
                                     "充电专享视频（试看片段），需要为UP主充电才能观看".to_string(),
