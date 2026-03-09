@@ -761,10 +761,19 @@
 			const currentVideoId = videoData.video.id;
 			const result = await api.deleteVideo(currentVideoId);
 			const data = result.data;
+			const queuedDelete = data.message?.includes('加入队列');
 
 			if (data.success) {
+				if (queuedDelete) {
+					toast.info('视频删除任务已入队', {
+						description: data.message || '将在扫描完成后自动处理'
+					});
+					deleteDialogOpen = false;
+					return;
+				}
+
 				toast.success('视频删除成功', {
-					description: '视频已被标记为删除状态'
+					description: data.message || '视频已被标记为删除状态'
 				});
 				deleteDialogOpen = false;
 

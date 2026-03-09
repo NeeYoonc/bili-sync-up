@@ -617,11 +617,17 @@
 		selectedVideos = selectedVideos;
 	}
 
+	function isQueuedDeleteMessage(message?: string | null): boolean {
+		if (!message) return false;
+		return message.includes('加入队列');
+	}
+
 	async function handleBatchDelete() {
 		if (selectedVideos.size === 0) return;
 
 		batchDeleting = true;
 		let successCount = 0;
+		let queuedCount = 0;
 		let failedCount = 0;
 		const selectedVideoIds = Array.from(selectedVideos);
 
@@ -631,7 +637,11 @@
 				try {
 					const result = await api.deleteVideo(videoId);
 					if (result.data.success) {
-						successCount++;
+						if (isQueuedDeleteMessage(result.data.message)) {
+							queuedCount++;
+						} else {
+							successCount++;
+						}
 					} else {
 						failedCount++;
 					}
@@ -641,10 +651,16 @@
 				}
 			}
 
-			if (successCount > 0) {
-				toast.success('批量删除完成', {
-					description: `成功删除 ${successCount} 个视频${failedCount > 0 ? `，失败 ${failedCount} 个` : ''}`
-				});
+			if (successCount > 0 || queuedCount > 0) {
+				if (successCount > 0) {
+					toast.success('批量删除完成', {
+						description: `成功删除 ${successCount} 个视频${queuedCount > 0 ? `，已入队 ${queuedCount} 个` : ''}${failedCount > 0 ? `，失败 ${failedCount} 个` : ''}`
+					});
+				} else {
+					toast.info('批量删除任务已入队', {
+						description: `已加入队列 ${queuedCount} 个视频${failedCount > 0 ? `，失败 ${failedCount} 个` : ''}，将在扫描完成后自动处理`
+					});
+				}
 
 				// 重新加载视频列表
 				const { query, currentPage, videoSource, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight } =

@@ -55,4 +55,8 @@ impl TaskStatusNotifier {
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Arc<TaskStatus>> {
         self.rx.clone()
     }
+
+    pub fn is_running(&self) -> bool {
+        self.tx.borrow().is_running
+    }
 }

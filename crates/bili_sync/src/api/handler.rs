@@ -3902,9 +3902,13 @@ pub async fn delete_video(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Path(id): Path<i32>,
 ) -> Result<ApiResponse<crate::api::response::DeleteVideoResponse>, ApiError> {
-    // 检查是否正在扫描
-    if crate::task::is_scanning() {
-        // 正在扫描，将删除任务加入队列
+    let video_delete_queue_busy = crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing();
+    let has_pending_video_delete_tasks = crate::task::VIDEO_DELETE_TASK_QUEUE.queue_length().await > 0;
+    let scanning = crate::task::is_scanning();
+    let task_running = crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running();
+
+    // 扫描中、任务运行中、视频删除处理中，或已有待删任务时：统一入队，避免直删与扫描/批量删除互相打架。
+    if scanning || task_running || video_delete_queue_busy || has_pending_video_delete_tasks {
         let task_id = uuid::Uuid::new_v4().to_string();
         let delete_task = crate::task::DeleteVideoTask {
             video_id: id,
@@ -3913,23 +3917,90 @@ pub async fn delete_video(
 
         crate::task::enqueue_video_delete_task(delete_task, &db).await?;
 
-        info!("检测到正在扫描，视频删除任务已加入队列等待处理: 视频ID={}", id);
+        if scanning || task_running {
+            info!("检测到扫描任务正在运行，视频删除任务已加入队列等待处理: 视频ID={}", id);
+        } else {
+            info!(
+                "检测到视频删除任务正在执行/排队，视频删除任务已加入队列等待处理: 视频ID={}",
+                id
+            );
+
+            if !crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing() {
+                let db_clone = db.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = crate::task::process_video_delete_tasks(db_clone).await {
+                        error!("后台处理视频删除任务队列失败: {:#}", err);
+                    }
+                });
+            }
+        }
 
         return Ok(ApiResponse::ok(crate::api::response::DeleteVideoResponse {
             success: true,
             video_id: id,
-            message: "正在扫描中，视频删除任务已加入队列，将在扫描完成后自动处理".to_string(),
+            message: if scanning || task_running {
+                "正在扫描中，视频删除任务已加入队列，将在扫描完成后自动处理".to_string()
+            } else {
+                "视频删除任务已加入队列，正在按顺序处理".to_string()
+            },
         }));
     }
 
-    // 没有扫描，直接执行删除
-    match delete_video_internal(db, id).await {
+    // 没有扫描且没有在执行/排队：直接执行删除，并标记“删除处理中”状态。
+    crate::task::VIDEO_DELETE_TASK_QUEUE.set_processing(true);
+    let direct_delete_result = delete_video_internal(db.clone(), id).await;
+    crate::task::VIDEO_DELETE_TASK_QUEUE.set_processing(false);
+
+    // 直删期间若有新请求入队，立即后台处理，避免等待下一轮扫描。
+    if !crate::task::is_scanning()
+        && !crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running()
+        && crate::task::VIDEO_DELETE_TASK_QUEUE.queue_length().await > 0
+        && !crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing()
+    {
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            if let Err(err) = crate::task::process_video_delete_tasks(db_clone).await {
+                error!("后台处理视频删除任务队列失败: {:#}", err);
+            }
+        });
+    }
+
+    match direct_delete_result {
         Ok(_) => Ok(ApiResponse::ok(crate::api::response::DeleteVideoResponse {
             success: true,
             video_id: id,
             message: "视频已成功删除".to_string(),
         })),
-        Err(e) => Err(e),
+        Err(e) => {
+            let err_text = format!("{:#?}", e);
+            let is_db_locked = err_text.contains("database is locked")
+                || err_text.contains("Database is locked")
+                || err_text.contains("(code: 5)");
+
+            if is_db_locked {
+                let task_id = uuid::Uuid::new_v4().to_string();
+                let delete_task = crate::task::DeleteVideoTask { video_id: id, task_id };
+                crate::task::enqueue_video_delete_task(delete_task, &db).await?;
+                info!("直删视频遇到数据库锁，已自动回退为队列处理: 视频ID={}", id);
+
+                if !crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing() {
+                    let db_clone = db.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = crate::task::process_video_delete_tasks(db_clone).await {
+                            error!("后台处理视频删除任务队列失败: {:#}", err);
+                        }
+                    });
+                }
+
+                Ok(ApiResponse::ok(crate::api::response::DeleteVideoResponse {
+                    success: true,
+                    video_id: id,
+                    message: "视频删除任务已加入队列，正在按顺序处理".to_string(),
+                }))
+            } else {
+                Err(e)
+            }
+        }
     }
 }
 
