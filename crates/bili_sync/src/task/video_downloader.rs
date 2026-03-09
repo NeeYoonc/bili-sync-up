@@ -179,9 +179,7 @@ async fn try_disable_cancelled_submission_source(
         }
     }
 
-    let Some(disable_reason) = disable_reason else {
-        return Ok(None);
-    };
+    let disable_reason = disable_reason.unwrap_or("无视频投稿");
 
     let now_str = now_standard_string();
     let mut active: entities::submission::ActiveModel = model.into();
@@ -870,12 +868,12 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             Ok(Some(source_name)) => {
                                 processed_sources += 1;
                                 last_successful_source = Some(source);
-                                info!("检测到已注销/已封禁UP主投稿源「{}」，已自动停用该源", source_name);
+                                info!("检测到不可扫描UP主投稿源「{}」，已自动停用该源", source_name);
                                 continue;
                             }
                             Ok(None) => {}
                             Err(disable_err) => {
-                                warn!("自动停用已注销/已封禁UP主投稿源失败 (ID: {}): {}", source.id, disable_err);
+                                warn!("自动停用不可扫描UP主投稿源失败 (ID: {}): {}", source.id, disable_err);
                             }
                         }
 
