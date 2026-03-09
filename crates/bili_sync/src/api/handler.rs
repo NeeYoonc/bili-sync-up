@@ -4056,12 +4056,6 @@ pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -
         debug!("未找到需要删除的文件，视频ID: {}", video_id);
     }
 
-    for base_path in &source_base_paths {
-        cleanup_empty_parent_dirs(&video.path, base_path);
-        cleanup_empty_subdirs_under(base_path);
-        cleanup_empty_dir_if_empty(base_path, "视频源基础目录");
-    }
-
     // 删除分页记录，避免留下“分页存在但路径已失效”的坏状态，
     // 也防止后续在线播放继续命中已不存在的本地文件。
     page::Entity::delete_many()
@@ -4077,6 +4071,12 @@ pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -
         .filter(video::Column::Id.eq(video_id))
         .exec(db.as_ref())
         .await?;
+
+    for base_path in &source_base_paths {
+        cleanup_empty_parent_dirs(&video.path, base_path);
+        cleanup_empty_subdirs_under(base_path);
+        cleanup_empty_dir_if_empty(base_path, "视频源基础目录");
+    }
 
     info!("视频已成功删除: ID={}, 名称={}", video_id, video.name);
 

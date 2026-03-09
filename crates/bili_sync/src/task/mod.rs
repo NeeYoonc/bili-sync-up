@@ -697,12 +697,6 @@ async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -> Re
         debug!("未找到需要删除的文件，视频ID: {}", video_id);
     }
 
-    for base_path in &source_base_paths {
-        cleanup_empty_parent_dirs_task(&video.path, base_path);
-        cleanup_empty_subdirs_under_task(base_path);
-        cleanup_empty_dir_if_empty_task(base_path, "视频源基础目录");
-    }
-
     // 在软删除video之前，先删除page表记录
     page::Entity::delete_many()
         .filter(page::Column::VideoId.eq(video_id))
@@ -719,6 +713,12 @@ async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -> Re
         .exec(db.as_ref())
         .await
         .map_err(|e| anyhow::anyhow!("更新视频删除状态失败: {}", e))?;
+
+    for base_path in &source_base_paths {
+        cleanup_empty_parent_dirs_task(&video.path, base_path);
+        cleanup_empty_subdirs_under_task(base_path);
+        cleanup_empty_dir_if_empty_task(base_path, "视频源基础目录");
+    }
 
     info!("视频已成功删除: ID={}, 名称={}", video_id, video.name);
 

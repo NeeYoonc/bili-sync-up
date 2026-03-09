@@ -75,6 +75,14 @@ pub async fn stream_video(
     match stream_video_impl(video_id, headers, db).await {
         Ok(response) => response,
         Err(e) => {
+            let error_text = format!("{:#}", e);
+            if error_text.contains("分页记录存在但没有有效的文件路径")
+                || error_text.contains("分页记录对应的视频已删除")
+            {
+                warn!("视频流请求命中已删除或失效的分页记录: {}", error_text);
+                return (StatusCode::NOT_FOUND, "Video Not Found").into_response();
+            }
+
             error!("视频流传输失败: {:#}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
         }
@@ -198,6 +206,16 @@ async fn find_video_file(video_id: &str, db: &DatabaseConnection) -> Result<Path
                 if page_path.exists() && page_path.is_file() {
                     debug!("通过分页ID找到视频文件: {:?}", page_path);
                     return Ok(page_path);
+                }
+            }
+
+            if let Some(video_record) = video::Entity::find_by_id(page_record.video_id)
+                .one(db)
+                .await
+                .context("查询分页对应视频记录失败")?
+            {
+                if video_record.deleted == 1 {
+                    bail!("分页记录对应的视频已删除: page_id={}", page_id);
                 }
             }
 
