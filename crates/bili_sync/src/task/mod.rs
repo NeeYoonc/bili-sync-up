@@ -716,7 +716,6 @@ async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -> Re
 
     for base_path in &source_base_paths {
         cleanup_empty_parent_dirs_task(&video.path, base_path);
-        cleanup_empty_subdirs_under_task(base_path);
         cleanup_empty_dir_if_empty_task(base_path, "视频源基础目录");
     }
 
@@ -975,59 +974,6 @@ fn cleanup_empty_parent_dirs_task(deleted_path: &str, stop_at: &str) {
             }
         } else {
             break;
-        }
-    }
-}
-
-fn cleanup_empty_subdirs_under_task(base_path: &str) {
-    use std::fs;
-    use std::path::PathBuf;
-
-    let base_norm = normalize_file_path_task(base_path).trim_end_matches('/').to_string();
-    if base_norm.is_empty() || is_dangerous_path_for_deletion_task(&base_norm) {
-        return;
-    }
-
-    let base = PathBuf::from(&base_norm);
-    if !base.exists() || !base.is_dir() {
-        return;
-    }
-
-    let mut dirs = Vec::new();
-    let mut stack = vec![base.clone()];
-    while let Some(current) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&current) else {
-            continue;
-        };
-
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path.clone());
-                dirs.push(path);
-            }
-        }
-    }
-
-    dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-
-    for dir in dirs {
-        let dir_str = dir.to_string_lossy().to_string();
-        let dir_norm = normalize_file_path_task(&dir_str).trim_end_matches('/').to_string();
-        if dir_norm == base_norm {
-            continue;
-        }
-
-        match fs::read_dir(&dir) {
-            Ok(mut entries) => {
-                if entries.next().is_none() {
-                    match fs::remove_dir(&dir) {
-                        Ok(_) => info!("清理空子目录: {}", dir_str),
-                        Err(e) => warn!("无法删除空子目录 {}: {}", dir_str, e),
-                    }
-                }
-            }
-            Err(e) => warn!("无法读取子目录 {}: {}", dir_str, e),
         }
     }
 }

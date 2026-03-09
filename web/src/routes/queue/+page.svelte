@@ -183,7 +183,7 @@
 		</div>
 	{:else if queueStatus}
 		<!-- 系统状态总览 -->
-		<div class="mb-6 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+		<div class="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
 			<Card>
 				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
 					<CardTitle class="text-sm font-medium">扫描状态</CardTitle>
@@ -205,7 +205,7 @@
 
 			<Card>
 				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-					<CardTitle class="text-sm font-medium">删除队列</CardTitle>
+					<CardTitle class="text-sm font-medium">视频源删除队列</CardTitle>
 					<Trash2 class="text-muted-foreground h-4 w-4" />
 				</CardHeader>
 				<CardContent>
@@ -220,6 +220,29 @@
 							{getQueueStatusText(
 								queueStatus.delete_queue.is_processing,
 								queueStatus.delete_queue.length > 0
+							)}
+						</Badge>
+					</div>
+				</CardContent>
+			</Card>
+
+			<Card>
+				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
+					<CardTitle class="text-sm font-medium">视频删除队列</CardTitle>
+					<Trash2 class="text-muted-foreground h-4 w-4" />
+				</CardHeader>
+				<CardContent>
+					<div class="text-2xl font-bold">{queueStatus.video_delete_queue.length}</div>
+					<div class="flex items-center gap-2">
+						<Badge
+							variant={getQueueStatusVariant(
+								queueStatus.video_delete_queue.is_processing,
+								queueStatus.video_delete_queue.length > 0
+							)}
+						>
+							{getQueueStatusText(
+								queueStatus.video_delete_queue.is_processing,
+								queueStatus.video_delete_queue.length > 0
 							)}
 						</Badge>
 					</div>
@@ -278,12 +301,12 @@
 		<!-- 队列详情 -->
 		<div class="grid gap-6 lg:grid-cols-3">
 			<div class="space-y-6 lg:col-span-2">
-				<!-- 删除队列 -->
+				<!-- 视频源删除队列 -->
 				<Card>
 					<CardHeader>
 						<CardTitle class="flex items-center gap-2">
 							<Trash2 class="h-5 w-5" />
-							删除队列
+							视频源删除队列
 							{#if queueStatus.delete_queue.is_processing}
 								<Badge variant="destructive">处理中</Badge>
 							{/if}
@@ -301,6 +324,61 @@
 						{:else}
 							<div class="space-y-3">
 								{#each queueStatus.delete_queue.tasks as task (task.task_id)}
+									<div class="bg-muted/50 flex items-center justify-between rounded-lg p-3">
+										<div class="flex items-center gap-3">
+											<svelte:component
+												this={getTaskTypeIcon(task.task_type)}
+												class="text-muted-foreground h-4 w-4"
+											/>
+											<div>
+												<p class="text-sm font-medium">{getTaskTypeName(task.task_type)}</p>
+												<p class="text-muted-foreground text-xs">ID: {task.task_id}</p>
+											</div>
+										</div>
+										<div class="flex items-center gap-2">
+											<p class="text-muted-foreground text-xs">{formatTime(task.created_at)}</p>
+											<Button
+												variant="outline"
+												size="sm"
+												class="h-7 px-2 text-xs"
+												data-glossary-term="取消任务"
+												disabled={isCancelling(task.task_id)}
+												onclick={() => handleCancelTask(task.task_id)}
+											>
+												<X class="mr-1 h-3.5 w-3.5" />
+												{isCancelling(task.task_id) ? '取消中' : '取消'}
+											</Button>
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</CardContent>
+				</Card>
+
+				<!-- 视频删除队列 -->
+				<Card>
+					<CardHeader>
+						<CardTitle class="flex items-center gap-2">
+							<Trash2 class="h-5 w-5" />
+							视频删除队列
+							{#if queueStatus.video_delete_queue.is_processing}
+								<Badge variant="destructive">处理中</Badge>
+							{/if}
+						</CardTitle>
+						<CardDescription>等待处理的视频删除任务</CardDescription>
+					</CardHeader>
+					<CardContent>
+						{#if queueStatus.video_delete_queue.tasks.length === 0}
+							<div class="text-muted-foreground flex items-center justify-center py-8">
+								<div class="text-center">
+									<CheckCircle class="mx-auto mb-3 h-12 w-12 opacity-50" />
+									<p>队列为空</p>
+								</div>
+							</div>
+						{:else}
+							<div class="space-y-3">
+								{#each queueStatus.video_delete_queue.tasks as task (task.task_id)}
 									<div class="bg-muted/50 flex items-center justify-between rounded-lg p-3">
 										<div class="flex items-center gap-3">
 											<svelte:component
@@ -520,9 +598,18 @@
 								<div class="flex items-start gap-3 rounded-lg bg-red-50 p-3 dark:bg-red-950/20">
 									<Trash2 class="mt-0.5 h-4 w-4 text-red-600" />
 									<div>
-										<p class="font-medium text-red-900 dark:text-red-100">删除队列</p>
+										<p class="font-medium text-red-900 dark:text-red-100">视频源删除队列</p>
 										<p class="text-xs text-red-700 dark:text-red-300">
 											处理视频源删除操作，确保数据一致性
+										</p>
+									</div>
+								</div>
+								<div class="flex items-start gap-3 rounded-lg bg-rose-50 p-3 dark:bg-rose-950/20">
+									<Trash2 class="mt-0.5 h-4 w-4 text-rose-600" />
+									<div>
+										<p class="font-medium text-rose-900 dark:text-rose-100">视频删除队列</p>
+										<p class="text-xs text-rose-700 dark:text-rose-300">
+											处理扫描中或冲突状态下的视频删除请求
 										</p>
 									</div>
 								</div>

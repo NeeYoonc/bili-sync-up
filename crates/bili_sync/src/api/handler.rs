@@ -4074,7 +4074,6 @@ pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -
 
     for base_path in &source_base_paths {
         cleanup_empty_parent_dirs(&video.path, base_path);
-        cleanup_empty_subdirs_under(base_path);
         cleanup_empty_dir_if_empty(base_path, "视频源基础目录");
     }
 
