@@ -158,6 +158,10 @@
 	let batchProgress = { current: 0, total: 0 }; // 批量添加进度
 	let batchDialogOpen = false; // 批量配置对话框状态
 
+	function getFavoriteDisplayName(favorite: Partial<UserFavoriteFolder> & { name?: string }) {
+		return favorite.title || favorite.name || '未命名收藏夹';
+	}
+
 	// 响应式语句：当Map变化时更新checkbox状态对象
 	$: {
 		const newStates: Record<string, boolean> = {};
@@ -883,12 +887,12 @@
 		// 检查收藏夹是否已存在
 		if (isFavoriteExists(favorite.id)) {
 			toast.error('收藏夹已存在', {
-				description: `该收藏夹「${favorite.name || favorite.title}」已经添加过了`
+				description: `该收藏夹「${getFavoriteDisplayName(favorite)}」已经添加过了`
 			});
 			return;
 		}
 
-		const favoriteName = favorite.name || favorite.title;
+		const favoriteName = getFavoriteDisplayName(favorite);
 		if (!favoriteName) {
 			toast.error('无法选择收藏夹', { description: '收藏夹缺少标题' });
 			return;
@@ -1930,7 +1934,7 @@
 					itemName = cleanTitle(item.title);
 					break;
 				case 'favorite':
-					itemName = item.name || item.title;
+					itemName = getFavoriteDisplayName(item);
 					break;
 				case 'collection':
 					itemName = item.name || item.title;
@@ -2163,6 +2167,10 @@
 
 		// 如果有成功添加的，跳转到视频源管理页面
 		if (successCount > 0) {
+			await runRequest(() => api.refreshScanning(), {
+				showErrorToast: false,
+				context: '触发立即扫描失败'
+			});
 			setTimeout(() => {
 				goto('/video-sources');
 			}, 1000);
@@ -2198,8 +2206,8 @@
 			case 'following':
 				return item.data.mid.toString();
 			case 'favorite':
-				// 处理两种收藏夹数据结构：用户自己的收藏夹使用id，搜索到的收藏夹使用fid
-				return (item.data.fid || item.data.id).toString();
+				// 优先使用完整收藏夹ID，短ID仅作兜底
+				return (item.data.id || item.data.fid).toString();
 			case 'collection':
 				return item.data.sid.toString();
 			case 'bangumi':
@@ -3944,14 +3952,14 @@
 											{/if}
 											<BiliImage
 												src={favorite.cover}
-												alt={favorite.name || favorite.title}
+												alt={getFavoriteDisplayName(favorite)}
 												class="h-16 w-24 flex-shrink-0 rounded object-cover"
 												placeholder="无封面"
 											/>
 											<div class="min-w-0 flex-1">
 												<div class="mb-1 flex items-center gap-2">
 													<h4 class="truncate text-sm font-medium">
-														{favorite.name || favorite.title}
+														{getFavoriteDisplayName(favorite)}
 													</h4>
 													{#if existingFavoriteIds.has(Number(favorite.id))}
 														<span

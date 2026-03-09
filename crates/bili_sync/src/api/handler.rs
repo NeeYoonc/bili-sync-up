@@ -560,6 +560,112 @@ fn cleanup_empty_parent_dirs(deleted_path: &str, stop_at: &str) {
     }
 }
 
+/// 递归清理基础目录下已空的子目录。
+///
+/// 用于处理“先批量删除视频，再删除视频源”时遗留的上层空目录。
+/// 这类目录已经不再对应任何视频根目录，无法再通过单次视频删除回收。
+fn cleanup_empty_subdirs_under(base_path: &str) {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let base_norm = normalize_file_path(base_path).trim_end_matches('/').to_string();
+    if base_norm.is_empty() || is_dangerous_path_for_deletion(&base_norm) {
+        return;
+    }
+
+    let base = PathBuf::from(&base_norm);
+    if !base.exists() || !base.is_dir() {
+        return;
+    }
+
+    let mut dirs = Vec::new();
+    let mut stack = vec![base.clone()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path.clone());
+                dirs.push(path);
+            }
+        }
+    }
+
+    dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+
+    for dir in dirs {
+        let dir_str = dir.to_string_lossy().to_string();
+        let dir_norm = normalize_file_path(&dir_str).trim_end_matches('/').to_string();
+        if dir_norm == base_norm {
+            continue;
+        }
+
+        match fs::read_dir(&dir) {
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    match fs::remove_dir(&dir) {
+                        Ok(_) => info!("清理空子目录: {}", dir_str),
+                        Err(e) => warn!("无法删除空子目录 {}: {}", dir_str, e),
+                    }
+                }
+            }
+            Err(e) => warn!("无法读取子目录 {}: {}", dir_str, e),
+        }
+    }
+}
+
+async fn collect_video_source_base_paths(
+    conn: &impl ConnectionTrait,
+    video: &video::Model,
+) -> Result<Vec<String>, ApiError> {
+    use std::collections::HashSet;
+
+    let mut unique_paths = HashSet::new();
+    let mut base_paths = Vec::new();
+
+    let mut push_path = |path: String| {
+        let normalized = normalize_file_path(&path).trim_end_matches('/').to_string();
+        if !normalized.is_empty() && unique_paths.insert(normalized.clone()) {
+            base_paths.push(path);
+        }
+    };
+
+    if let Some(collection_id) = video.collection_id {
+        if let Some(collection) = collection::Entity::find_by_id(collection_id).one(conn).await? {
+            push_path(collection.path);
+        }
+    }
+
+    if let Some(favorite_id) = video.favorite_id {
+        if let Some(favorite) = favorite::Entity::find_by_id(favorite_id).one(conn).await? {
+            push_path(favorite.path);
+        }
+    }
+
+    if let Some(watch_later_id) = video.watch_later_id {
+        if let Some(watch_later) = watch_later::Entity::find_by_id(watch_later_id).one(conn).await? {
+            push_path(watch_later.path);
+        }
+    }
+
+    if let Some(submission_id) = video.submission_id {
+        if let Some(submission) = submission::Entity::find_by_id(submission_id).one(conn).await? {
+            push_path(submission.path);
+        }
+    }
+
+    if let Some(source_id) = video.source_id {
+        if let Some(source) = video_source::Entity::find_by_id(source_id).one(conn).await? {
+            push_path(source.path);
+        }
+    }
+
+    Ok(base_paths)
+}
+
 /// 处理包含路径分隔符的模板结果，对每个路径段单独应用filenamify
 /// 这样可以保持目录结构同时确保每个段都是安全的文件名
 fn process_path_with_filenamify(input: &str) -> String {
@@ -2849,8 +2955,36 @@ pub async fn add_video_source_internal(
                 ).into());
             }
 
-            // 添加收藏夹
-            let favorite_name = params.name.clone();
+            // 添加收藏夹，若前端传入的是默认占位名称则回源获取真实标题
+            let mut favorite_name = params.name.clone();
+            if favorite_name.trim().is_empty() || favorite_name.trim() == "默认收藏夹" {
+                let config = crate::config::reload_config();
+                let credential = config.credential.load();
+                let cookie = credential
+                    .as_ref()
+                    .map(|cred| {
+                        format!(
+                            "SESSDATA={};bili_jct={};buvid3={};DedeUserID={};ac_time_value={}",
+                            cred.sessdata,
+                            cred.bili_jct,
+                            cred.buvid3,
+                            cred.dedeuserid,
+                            cred.ac_time_value
+                        )
+                    })
+                    .unwrap_or_default();
+                let client = crate::bilibili::BiliClient::new(cookie);
+                match crate::bilibili::FavoriteList::new(&client, f_id.to_string())
+                    .get_info()
+                    .await
+                {
+                    Ok(info) if !info.title.trim().is_empty() => favorite_name = info.title,
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!("回源获取收藏夹 {} 标题失败，继续使用前端名称: {}", f_id, err);
+                    }
+                }
+            }
 
             // 处理关键词过滤器
             let keyword_filters_json = params
@@ -2865,7 +2999,7 @@ pub async fn add_video_source_internal(
             let favorite = favorite::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
                 f_id: sea_orm::Set(f_id),
-                name: sea_orm::Set(params.name),
+                name: sea_orm::Set(favorite_name.clone()),
                 path: sea_orm::Set(params.path.clone()),
                 created_at: sea_orm::Set(now_standard_string()),
                 latest_row_at: sea_orm::Set("1970-01-01 00:00:00".to_string()),
@@ -3819,6 +3953,8 @@ pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -
         return Err(crate::api::error::InnerApiError::BadRequest("视频已经被删除".to_string()).into());
     }
 
+    let source_base_paths = collect_video_source_base_paths(db.as_ref(), &video).await?;
+
     // 删除本地文件 - 根据page表中的路径精确删除
     let deleted_files = delete_video_files_from_pages(db.as_ref(), video_id).await?;
 
@@ -3849,6 +3985,12 @@ pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -
         debug!("未找到需要删除的文件，视频ID: {}", video_id);
     }
 
+    for base_path in &source_base_paths {
+        cleanup_empty_parent_dirs(&video.path, base_path);
+        cleanup_empty_subdirs_under(base_path);
+        cleanup_empty_dir_if_empty(base_path, "视频源基础目录");
+    }
+
     // 执行软删除：将deleted字段设为1
     video::Entity::update_many()
         .col_expr(video::Column::Deleted, sea_orm::prelude::Expr::value(1))
@@ -3859,6 +4001,158 @@ pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -
     info!("视频已成功删除: ID={}, 名称={}", video_id, video.name);
 
     Ok(())
+}
+
+fn is_media_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "mp4" | "mkv" | "flv" | "avi" | "mov" | "wmv" | "m4v" | "ts" | "m4s" | "webm" | "strm"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn dir_has_media_files(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .any(|entry| entry.path().is_file() && is_media_file(&entry.path()))
+}
+
+fn dir_has_media_files_recursive(dir: &std::path::Path) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if is_media_file(&path) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn remove_file_if_exists(path: &std::path::Path, deleted_count: &mut usize, log_label: &str) {
+    if path.exists() {
+        match tokio::fs::remove_file(path).await {
+            Ok(_) => {
+                debug!("已删除{}: {:?}", log_label, path);
+                *deleted_count += 1;
+            }
+            Err(e) => {
+                warn!("删除{}失败: {:?} - {}", log_label, path, e);
+            }
+        }
+    }
+}
+
+async fn cleanup_empty_season_dirs(
+    root_dir: &std::path::Path,
+    season_dirs: &[std::path::PathBuf],
+    deleted_count: &mut usize,
+) {
+    let mut visited = std::collections::BTreeSet::new();
+
+    for season_dir in season_dirs {
+        let normalized = season_dir.to_string_lossy().replace('\\', "/");
+        if !visited.insert(normalized) || !season_dir.exists() || dir_has_media_files(season_dir) {
+            continue;
+        }
+
+        remove_file_if_exists(&season_dir.join("season.nfo"), deleted_count, "season.nfo文件").await;
+
+        if let Some(season_name) = season_dir.file_name().and_then(|name| name.to_str()) {
+            let season_asset_prefix = season_name.replace(' ', "");
+            for suffix in ["thumb", "fanart", "poster"] {
+                for ext in ["jpg", "jpeg", "png", "webp"] {
+                    remove_file_if_exists(
+                        &root_dir.join(format!("{}-{}.{}", season_asset_prefix, suffix, ext)),
+                        deleted_count,
+                        "Season封面文件",
+                    )
+                    .await;
+                }
+            }
+        }
+
+        match std::fs::read_dir(season_dir) {
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    if let Err(e) = std::fs::remove_dir(season_dir) {
+                        warn!("删除空Season目录失败: {:?} - {}", season_dir, e);
+                    } else {
+                        info!("已删除空Season目录: {:?}", season_dir);
+                    }
+                }
+            }
+            Err(e) => warn!("读取Season目录失败: {:?} - {}", season_dir, e),
+        }
+    }
+}
+
+async fn cleanup_root_metadata_if_no_media(
+    root_dir: &std::path::Path,
+    deleted_count: &mut usize,
+) {
+    if !root_dir.exists() || dir_has_media_files_recursive(root_dir) {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(root_dir) else {
+        return;
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let file_name_lower = file_name.to_ascii_lowercase();
+        let should_remove = file_name_lower == "tvshow.nfo"
+            || file_name_lower == "folder.jpg"
+            || file_name_lower == "poster.jpg"
+            || file_name_lower.ends_with("-thumb.jpg")
+            || file_name_lower.ends_with("-thumb.jpeg")
+            || file_name_lower.ends_with("-thumb.png")
+            || file_name_lower.ends_with("-thumb.webp")
+            || file_name_lower.ends_with("-fanart.jpg")
+            || file_name_lower.ends_with("-fanart.jpeg")
+            || file_name_lower.ends_with("-fanart.png")
+            || file_name_lower.ends_with("-fanart.webp")
+            || file_name_lower.ends_with("-poster.jpg")
+            || file_name_lower.ends_with("-poster.jpeg")
+            || file_name_lower.ends_with("-poster.png")
+            || file_name_lower.ends_with("-poster.webp");
+
+        if should_remove {
+            remove_file_if_exists(&path, deleted_count, "根目录元数据文件").await;
+        }
+    }
+
+    match std::fs::read_dir(root_dir) {
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                if let Err(e) = std::fs::remove_dir(root_dir) {
+                    warn!("删除空根目录失败: {:?} - {}", root_dir, e);
+                } else {
+                    info!("已删除空根目录: {:?}", root_dir);
+                }
+            }
+        }
+        Err(e) => warn!("读取根目录失败: {:?} - {}", root_dir, e),
+    }
 }
 
 /// 根据page表精确删除视频文件
@@ -3872,11 +4166,22 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
         .await?;
 
     let mut deleted_count = 0;
+    let mut season_dirs = Vec::new();
 
     for page in pages {
         if let Some(file_path) = &page.path {
             let path = std::path::Path::new(file_path);
             info!("尝试删除视频文件: {}", file_path);
+            if let Some(parent_dir) = path.parent() {
+                if parent_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("Season "))
+                    .unwrap_or(false)
+                {
+                    season_dirs.push(parent_dir.to_path_buf());
+                }
+            }
             if path.exists() {
                 match fs::remove_file(path).await {
                     Ok(_) => {
@@ -3949,7 +4254,7 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
                         }
 
                         // 删除封面文件 (-fanart.jpg, -thumb.jpg等)
-                        for suffix in &["fanart", "thumb"] {
+                        for suffix in &["fanart", "thumb", "poster"] {
                             for ext in &["jpg", "jpeg", "png", "webp"] {
                                 let cover_path = parent_dir.join(format!("{}-{}.{}", file_stem_str, suffix, ext));
                                 if cover_path.exists() {
@@ -3993,7 +4298,7 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
             }
         }
 
-        // Season结构检测和根目录元数据文件删除
+        // Season结构检测和聚合元数据文件删除
         if !pages.is_empty() {
             // 检测是否使用Season结构：比较video.path和page.path
             if let Some(first_page) = pages.first() {
@@ -4011,7 +4316,11 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
                     });
 
                     if uses_season_structure {
-                        debug!("检测到Season结构，删除根目录元数据文件");
+                        debug!("检测到Season结构，尝试清理空Season目录和根目录元数据");
+
+                        // 只要实际使用了Season目录结构，就先尝试清理已经空掉的Season目录。
+                        // 这一步不能只限定在“合集/多P”上，因为投稿源聚合后的季目录也会遗留 season.nfo。
+                        cleanup_empty_season_dirs(video_path, &season_dirs, &mut deleted_count).await;
 
                         // 获取配置以确定video_base_name生成规则
                         let config = crate::config::reload_config();
@@ -4045,27 +4354,30 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
                                 }
                             };
 
-                            // 删除根目录的元数据文件
-                            let metadata_files = [
-                                "tvshow.nfo".to_string(),
-                                format!("{}-thumb.jpg", video_base_name),
-                                format!("{}-fanart.jpg", video_base_name),
-                            ];
+                            // 只有整个聚合根目录下没有媒体文件时，才删除共享元数据
+                            if !dir_has_media_files_recursive(video_path) {
+                                let metadata_files = [
+                                    "tvshow.nfo".to_string(),
+                                    "folder.jpg".to_string(),
+                                    "poster.jpg".to_string(),
+                                    format!("{}-thumb.jpg", video_base_name),
+                                    format!("{}-fanart.jpg", video_base_name),
+                                    format!("{}-poster.jpg", video_base_name),
+                                ];
 
-                            for metadata_file in &metadata_files {
-                                let metadata_path = video_path.join(metadata_file);
-                                if metadata_path.exists() {
-                                    match fs::remove_file(&metadata_path).await {
-                                        Ok(_) => {
-                                            info!("已删除Season结构根目录元数据文件: {:?}", metadata_path);
-                                            deleted_count += 1;
-                                        }
-                                        Err(e) => {
-                                            warn!("删除Season结构根目录元数据文件失败: {:?} - {}", metadata_path, e);
+                                for metadata_file in &metadata_files {
+                                    let metadata_path = video_path.join(metadata_file);
+                                    if metadata_path.exists() {
+                                        match fs::remove_file(&metadata_path).await {
+                                            Ok(_) => {
+                                                info!("已删除Season结构根目录元数据文件: {:?}", metadata_path);
+                                                deleted_count += 1;
+                                            }
+                                            Err(e) => {
+                                                warn!("删除Season结构根目录元数据文件失败: {:?} - {}", metadata_path, e);
+                                            }
                                         }
                                     }
-                                } else {
-                                    debug!("Season结构根目录元数据文件不存在: {:?}", metadata_path);
                                 }
                             }
                         }
@@ -4073,6 +4385,8 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
                 }
             }
         }
+
+        cleanup_root_metadata_if_no_media(std::path::Path::new(&video.path), &mut deleted_count).await;
     }
 
     Ok(deleted_count)
@@ -4218,7 +4532,8 @@ pub async fn delete_video_source_internal(
                     }
                 }
 
-                // 若合集基础目录也已空，则清理它（但不向上继续删除）
+                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
+                cleanup_empty_subdirs_under(base_path);
                 cleanup_empty_dir_if_empty(base_path, "合集基础目录");
             }
 
@@ -4372,7 +4687,8 @@ pub async fn delete_video_source_internal(
                     }
                 }
 
-                // 若收藏夹基础目录也已空，则清理它（但不向上继续删除）
+                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
+                cleanup_empty_subdirs_under(base_path);
                 cleanup_empty_dir_if_empty(base_path, "收藏夹基础目录");
             }
 
@@ -4532,7 +4848,8 @@ pub async fn delete_video_source_internal(
                     }
                 }
 
-                // 若UP主投稿基础目录也已空，则清理它（但不向上继续删除）
+                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
+                cleanup_empty_subdirs_under(base_path);
                 cleanup_empty_dir_if_empty(base_path, "UP主投稿基础目录");
             }
 
@@ -4685,7 +5002,8 @@ pub async fn delete_video_source_internal(
                     }
                 }
 
-                // 若稍后再看基础目录也已空，则清理它（但不向上继续删除）
+                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
+                cleanup_empty_subdirs_under(base_path);
                 cleanup_empty_dir_if_empty(base_path, "稍后再看基础目录");
             }
 
@@ -4845,7 +5163,8 @@ pub async fn delete_video_source_internal(
                     }
                 }
 
-                // 若番剧基础目录也已空，则清理它（但不向上继续删除）
+                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
+                cleanup_empty_subdirs_under(base_path);
                 cleanup_empty_dir_if_empty(base_path, "番剧基础目录");
             }
 
