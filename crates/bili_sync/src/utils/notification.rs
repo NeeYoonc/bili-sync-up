@@ -80,7 +80,7 @@ impl WecomResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct GenericWebhookRequest {
     source: String,
     title: String,
@@ -421,6 +421,15 @@ impl NotificationClient {
             }))
             .send()
             .await?
+        } else if webhook_format == "custom" {
+            let custom_body = self
+                .config
+                .webhook_custom_body
+                .as_deref()
+                .filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| anyhow!("未配置自定义 POST Body"))?;
+            let rendered = Self::render_custom_webhook_body(custom_body, &payload)?;
+            req.json(&rendered).send().await?
         } else {
             req.json(&payload).send().await?
         };
@@ -448,6 +457,7 @@ impl NotificationClient {
         match configured.trim().to_ascii_lowercase().as_str() {
             "generic" => "generic",
             "opensend" => "opensend",
+            "custom" => "custom",
             _ => {
                 if Self::is_open_send_webhook(url) {
                     "opensend"
@@ -515,6 +525,90 @@ impl NotificationClient {
         }
 
         false
+    }
+
+    fn placeholder_scalar_text(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => "null".to_string(),
+            _ => serde_json::to_string(value).unwrap_or_default(),
+        }
+    }
+
+    fn apply_template_placeholders(
+        value: serde_json::Value,
+        context: &serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, Self::apply_template_placeholders(value, context)))
+                    .collect(),
+            ),
+            serde_json::Value::Array(values) => serde_json::Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| Self::apply_template_placeholders(value, context))
+                    .collect(),
+            ),
+            serde_json::Value::String(text) => {
+                let trimmed = text.trim();
+                if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
+                    let key = trimmed
+                        .trim_start_matches("{{")
+                        .trim_end_matches("}}")
+                        .trim();
+                    if let Some(value) = context.get(key) {
+                        return value.clone();
+                    }
+                }
+
+                let mut replaced = text;
+                for (key, value) in context {
+                    let placeholder = format!("{{{{{}}}}}", key);
+                    if replaced.contains(&placeholder) {
+                        replaced = replaced.replace(&placeholder, &Self::placeholder_scalar_text(value));
+                    }
+                }
+                serde_json::Value::String(replaced)
+            }
+            other => other,
+        }
+    }
+
+    fn build_custom_webhook_context(payload: &GenericWebhookRequest) -> serde_json::Map<String, serde_json::Value> {
+        let serde_json::Value::Object(map) = serde_json::json!({
+            "source": payload.source,
+            "title": payload.title,
+            "content": payload.content,
+            "channel": payload.channel,
+            "event": payload.event,
+            "sent_at": payload.sent_at
+        }) else {
+            unreachable!()
+        };
+        map
+    }
+
+    fn render_custom_webhook_body(template: &str, payload: &GenericWebhookRequest) -> Result<serde_json::Value> {
+        let parsed: serde_json::Value = serde_json::from_str(template)
+            .map_err(|e| anyhow!("自定义 POST Body 不是有效 JSON: {}", e))?;
+        let context = Self::build_custom_webhook_context(payload);
+        Ok(Self::apply_template_placeholders(parsed, &context))
+    }
+
+    pub fn validate_custom_webhook_body_template(template: &str) -> Result<()> {
+        let sample_payload = GenericWebhookRequest {
+            source: "bili-sync".to_string(),
+            title: "Bili Sync 测试推送".to_string(),
+            content: "这是一条Webhook测试推送消息。".to_string(),
+            channel: "webhook".to_string(),
+            event: "test_notification".to_string(),
+            sent_at: chrono::Local::now().to_rfc3339(),
+        };
+        Self::render_custom_webhook_body(template, &sample_payload).map(|_| ())
     }
 
     /// 截断 UTF-8 字符串到指定字节长度，并追加提示（保证结果仍是合法 UTF-8）。

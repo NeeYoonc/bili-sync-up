@@ -4,6 +4,7 @@
 	import { Card, CardDescription, CardHeader, CardTitle } from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import { Textarea } from '$lib/components/ui/textarea';
 	import { Badge } from '$lib/components/ui/badge';
 	import { SheetFooter } from '$lib/components/ui/sheet';
 	import * as Tabs from '$lib/components/ui/tabs';
@@ -246,7 +247,8 @@
 	let wecomMentionedList = '';
 	let webhookUrl = '';
 	let webhookBearerToken = '';
-	let webhookFormat: 'auto' | 'generic' | 'opensend' = 'auto';
+	let webhookFormat: 'auto' | 'generic' | 'opensend' | 'custom' = 'auto';
+	let webhookCustomBody = '';
 	let notificationMinVideos = 1;
 	let notificationSaving = false;
 	let notificationStatus: {
@@ -270,6 +272,15 @@
 	let aiRenameRenameParentDir = false;
 	let aiRenameSaving = false;
 	let aiRenameClearingCache = false;
+
+	const defaultWebhookCustomBody = `{
+  "source": "{{source}}",
+  "title": "{{title}}",
+  "content": "{{content}}",
+  "channel": "{{channel}}",
+  "event": "{{event}}",
+  "sent_at": "{{sent_at}}"
+}`;
 
 	// 显示帮助信息的状态（在文件命名抽屉中使用）
 	let showHelp = false;
@@ -991,6 +1002,7 @@
 				config.webhook_bearer_token = webhookBearerToken.trim();
 			}
 			config.webhook_format = webhookFormat;
+			config.webhook_custom_body = webhookCustomBody.trim();
 		}
 
 		const response = await runRequest(() => api.updateNotificationConfig(config), {
@@ -1122,7 +1134,9 @@
 		webhookUrl = response.data.webhook_url || '';
 		webhookBearerToken = response.data.webhook_bearer_token || '';
 		webhookFormat =
-			(response.data.webhook_format as 'auto' | 'generic' | 'opensend' | undefined) || 'auto';
+			(response.data.webhook_format as 'auto' | 'generic' | 'opensend' | 'custom' | undefined) ||
+			'auto';
+		webhookCustomBody = response.data.webhook_custom_body || '';
 	}
 
 	// 测试推送通知
@@ -1149,6 +1163,7 @@
 			request.webhook_url = webhookUrl.trim();
 			request.webhook_bearer_token = webhookBearerToken.trim();
 			request.webhook_format = webhookFormat;
+			request.webhook_custom_body = webhookCustomBody.trim();
 		}
 
 		const response = await runRequest(() => api.testNotification(request), {
@@ -3133,9 +3148,10 @@
 							<option value="auto">自动识别（推荐）</option>
 							<option value="generic">通用 JSON</option>
 							<option value="opensend">openSend</option>
+							<option value="custom">自定义 JSON</option>
 						</select>
 						<p class="text-muted-foreground text-sm">
-							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头
+							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头；自定义 JSON 可自行定义 POST Body 结构
 						</p>
 					</div>
 
@@ -3164,6 +3180,41 @@
 							留空则不附带认证头；openSend 模式下该值也会作为 apikey 发送
 						</p>
 					</div>
+
+					{#if webhookFormat === 'custom'}
+						<div class="space-y-2">
+							<div class="flex items-center justify-between gap-3">
+								<Label for="generic-webhook-custom-body">自定义 POST Body</Label>
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onclick={() => {
+										webhookCustomBody = defaultWebhookCustomBody;
+									}}
+								>
+									填入示例
+								</Button>
+							</div>
+							<Textarea
+								id="generic-webhook-custom-body"
+								bind:value={webhookCustomBody}
+								rows={10}
+								placeholder={defaultWebhookCustomBody}
+								class="font-mono text-xs"
+							/>
+							<div class="text-muted-foreground space-y-1 text-sm">
+								<p>支持占位符：&#123;&#123;source&#125;&#125;、&#123;&#123;title&#125;&#125;、&#123;&#123;content&#125;&#125;、&#123;&#123;channel&#125;&#125;、&#123;&#123;event&#125;&#125;、&#123;&#123;sent_at&#125;&#125;</p>
+								<p>&#123;&#123;source&#125;&#125;：固定来源名，当前为 bili-sync</p>
+								<p>&#123;&#123;title&#125;&#125;：推送标题</p>
+								<p>&#123;&#123;content&#125;&#125;：推送正文内容</p>
+								<p>&#123;&#123;channel&#125;&#125;：当前通知渠道名称，例如 webhook</p>
+								<p>&#123;&#123;event&#125;&#125;：事件类型，例如 test_notification</p>
+								<p>&#123;&#123;sent_at&#125;&#125;：发送时间</p>
+								<p>请直接填写有效 JSON。若某个值只写占位符，发送时会按原始类型写入；若嵌在字符串中，则会按文本替换。</p>
+							</div>
+						</div>
+					{/if}
 				</div>
 			{/if}
 

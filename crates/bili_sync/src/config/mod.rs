@@ -300,6 +300,8 @@ pub struct NotificationConfig {
     pub webhook_bearer_token: Option<String>,
     #[serde(default = "default_webhook_format")]
     pub webhook_format: String, // "auto", "generic", "opensend"
+    #[serde(default)]
+    pub webhook_custom_body: Option<String>,
 
     // === 通用配置 ===
     #[serde(default)]
@@ -350,6 +352,7 @@ impl Default for NotificationConfig {
             webhook_url: None,
             webhook_bearer_token: None,
             webhook_format: default_webhook_format(),
+            webhook_custom_body: None,
             enable_scan_notifications: false,
             notification_min_videos: default_notification_min_videos(),
             notification_timeout: default_notification_timeout(),
@@ -468,8 +471,16 @@ impl NotificationConfig {
                     if !(url.starts_with("http://") || url.starts_with("https://")) {
                         return Err("Webhook URL格式不正确".to_string());
                     }
-                    if !["auto", "generic", "opensend"].contains(&self.webhook_format.as_str()) {
+                    if !["auto", "generic", "opensend", "custom"].contains(&self.webhook_format.as_str()) {
                         return Err(format!("Webhook格式不支持: {}", self.webhook_format));
+                    }
+                    if self.webhook_format == "custom"
+                        && self
+                            .webhook_custom_body
+                            .as_ref()
+                            .is_none_or(|v| v.trim().is_empty())
+                    {
+                        return Err("已选择自定义 JSON 但未配置 POST Body".to_string());
                     }
                 }
                 _ => {}

@@ -7160,6 +7160,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
             webhook_url: config.notification.webhook_url.clone(),
             webhook_bearer_token: config.notification.webhook_bearer_token.clone(),
             webhook_format: config.notification.webhook_format.clone(),
+            webhook_custom_body: config.notification.webhook_custom_body.clone(),
             enable_scan_notifications: config.notification.enable_scan_notifications,
             notification_min_videos: config.notification.notification_min_videos,
             notification_timeout: config.notification.notification_timeout,
@@ -14600,6 +14601,16 @@ pub async fn test_notification_handler(
     if let Some(webhook_format) = request.webhook_format.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         config.webhook_format = webhook_format.to_ascii_lowercase();
     }
+    if let Some(webhook_custom_body) = request.webhook_custom_body.as_ref() {
+        let v = webhook_custom_body.trim();
+        if v.is_empty() {
+            config.webhook_custom_body = None;
+        } else {
+            crate::utils::notification::NotificationClient::validate_custom_webhook_body_template(v)
+                .map_err(ApiError::from)?;
+            config.webhook_custom_body = Some(v.to_string());
+        }
+    }
 
     // 测试推送允许在未启用通知开关时执行，但仍需要可用渠道配置
     config.enable_scan_notifications = true;
@@ -14719,6 +14730,7 @@ pub async fn get_notification_config() -> Result<ApiResponse<crate::api::respons
         webhook_url: config.webhook_url,
         webhook_bearer_token: config.webhook_bearer_token,
         webhook_format: config.webhook_format,
+        webhook_custom_body: config.webhook_custom_body,
         enable_scan_notifications: config.enable_scan_notifications,
         notification_min_videos: config.notification_min_videos,
         notification_timeout: config.notification_timeout,
@@ -14833,12 +14845,25 @@ pub async fn update_notification_config(
 
     if let Some(ref webhook_format) = request.webhook_format {
         let format = webhook_format.trim().to_ascii_lowercase();
-        if !["auto", "generic", "opensend"].contains(&format.as_str()) {
+        if !["auto", "generic", "opensend", "custom"].contains(&format.as_str()) {
             return Err(ApiError::from(anyhow!(
-                "Webhook格式必须是 auto / generic / opensend"
+                "Webhook格式必须是 auto / generic / opensend / custom"
             )));
         }
         notification_config.webhook_format = format;
+        updated = true;
+    }
+
+    if let Some(ref webhook_custom_body) = request.webhook_custom_body {
+        if webhook_custom_body.trim().is_empty() {
+            notification_config.webhook_custom_body = None;
+        } else {
+            crate::utils::notification::NotificationClient::validate_custom_webhook_body_template(
+                webhook_custom_body.trim(),
+            )
+            .map_err(ApiError::from)?;
+            notification_config.webhook_custom_body = Some(webhook_custom_body.trim().to_string());
+        }
         updated = true;
     }
 

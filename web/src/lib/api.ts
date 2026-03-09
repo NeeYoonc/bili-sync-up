@@ -866,6 +866,7 @@ class ApiClient {
 			webhook_url?: string;
 			webhook_bearer_token?: string;
 			webhook_format?: string;
+			webhook_custom_body?: string;
 			notification_min_videos: number;
 			notification_timeout: number;
 			notification_retry_count: number;
@@ -884,6 +885,7 @@ class ApiClient {
 			webhook_url?: string;
 			webhook_bearer_token?: string;
 			webhook_format?: string;
+			webhook_custom_body?: string;
 			notification_min_videos: number;
 			notification_timeout: number;
 			notification_retry_count: number;
@@ -906,6 +908,7 @@ class ApiClient {
 		webhook_url?: string;
 		webhook_bearer_token?: string;
 		webhook_format?: string;
+		webhook_custom_body?: string;
 		notification_min_videos?: number;
 	}): Promise<ApiResponse<string>> {
 		return this.post<string>('/config/notification', config);
@@ -927,6 +930,7 @@ class ApiClient {
 		webhook_url?: string;
 		webhook_bearer_token?: string;
 		webhook_format?: string;
+		webhook_custom_body?: string;
 	}): Promise<
 		ApiResponse<{
 			success: boolean;
