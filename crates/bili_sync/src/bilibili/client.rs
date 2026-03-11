@@ -255,9 +255,25 @@ impl BiliClient {
         let Some(credential) = credential.as_deref() else {
             return Ok(());
         };
-        if !credential.need_refresh(&self.client).await? {
+
+        let should_refresh = match credential.need_refresh(&self.client).await {
+            Ok(need_refresh) => need_refresh,
+            Err(err) => {
+                let error_text = format!("{:#}", err);
+                let is_login_expired = error_text.contains("status code: -101") || error_text.contains("账号未登录");
+                if is_login_expired && !credential.ac_time_value.trim().is_empty() {
+                    warn!("检测到凭证已过期，跳过预检查并直接尝试刷新凭证");
+                    true
+                } else {
+                    return Err(err);
+                }
+            }
+        };
+
+        if !should_refresh {
             return Ok(());
         }
+
         let new_credential = credential.refresh(&self.client).await?;
         config.credential.store(Some(Arc::new(new_credential.clone())));
 

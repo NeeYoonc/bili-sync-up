@@ -584,31 +584,64 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                 }
                 Err(e) => {
                     let error_msg = format!("{:#}", e);
-                    // 检查是否是登录状态过期错误（-101错误码）
-                    if error_msg.contains("status code: -101") || error_msg.contains("账号未登录") {
-                        warn!("检测到登录状态过期或未登录，请检查配置文件中的SESSDATA等认证信息");
+                    let is_login_expired = error_msg.contains("status code: -101") || error_msg.contains("账号未登录");
 
-                        // 发送登录状态过期日志
-                        crate::api::handler::add_log_entry(
-                            crate::api::handler::LogLevel::Warn,
-                            "检测到登录状态过期或未登录，请更新配置文件中的SESSDATA等认证信息".to_string(),
-                            Some("bili_sync::task::video_downloader".to_string()),
-                        );
+                    if is_login_expired {
+                        warn!("检测到登录状态过期或未登录，尝试自动续登并重试...");
+                        match bili_client.check_refresh().await {
+                            Ok(()) => match bili_client.wbi_img().await.map(|wbi_img| wbi_img.into()) {
+                                Ok(Some(mixin_key)) => {
+                                    info!("自动续登成功，已恢复登录状态");
+                                    bilibili::set_global_mixin_key(mixin_key);
+                                }
+                                Ok(_) => {
+                                    error!("自动续登后仍无法解析 mixin key，等待下一轮执行");
+                                    crate::api::handler::add_log_entry(
+                                        crate::api::handler::LogLevel::Warn,
+                                        "自动续登后仍无法恢复登录状态，请检查认证信息".to_string(),
+                                        Some("bili_sync::task::video_downloader".to_string()),
+                                    );
+                                    TASK_CONTROLLER.set_scanning(false);
+                                    crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
+                                    break 'inner;
+                                }
+                                Err(retry_err) => {
+                                    warn!("自动续登失败或重试仍未登录: {:#}", retry_err);
+                                    crate::api::handler::add_log_entry(
+                                        crate::api::handler::LogLevel::Warn,
+                                        "检测到登录状态过期或未登录，自动续登失败，请更新配置文件中的SESSDATA等认证信息".to_string(),
+                                        Some("bili_sync::task::video_downloader".to_string()),
+                                    );
+                                    TASK_CONTROLLER.set_scanning(false);
+                                    crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
+                                    break 'inner;
+                                }
+                            },
+                            Err(refresh_err) => {
+                                warn!("检测到登录状态过期或未登录，自动续登失败: {:#}", refresh_err);
+                                crate::api::handler::add_log_entry(
+                                    crate::api::handler::LogLevel::Warn,
+                                    "检测到登录状态过期或未登录，自动续登失败，请更新配置文件中的SESSDATA等认证信息".to_string(),
+                                    Some("bili_sync::task::video_downloader".to_string()),
+                                );
+                                TASK_CONTROLLER.set_scanning(false);
+                                crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
+                                break 'inner;
+                            }
+                        }
                     } else {
                         error!("解析 mixin key 失败: {:#}", e);
 
-                        // 发送一般性错误日志
                         crate::api::handler::add_log_entry(
                             crate::api::handler::LogLevel::Error,
                             format!("解析 mixin key 失败: {:#}", e),
                             Some("bili_sync::task::video_downloader".to_string()),
                         );
-                    }
 
-                    // 扫描失败，标记扫描结束
-                    TASK_CONTROLLER.set_scanning(false);
-                    crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
-                    break 'inner;
+                        TASK_CONTROLLER.set_scanning(false);
+                        crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
+                        break 'inner;
+                    }
                 }
             }
 
