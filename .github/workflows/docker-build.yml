@@ -69,7 +69,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Determine release channel
       id: release_channel
@@ -127,7 +127,7 @@ jobs:
         echo "构建通道: $CHANNEL"
 
     - name: Setup Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v6
       with:
         node-version: '20'
 
@@ -202,7 +202,7 @@ jobs:
         tar -czf ${{ matrix.archive_name }} bili-sync-rs
 
     - name: Upload binary archive
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: ${{ matrix.archive_name }}
         path: release/${{ matrix.archive_name }}
@@ -214,16 +214,16 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Download Linux x86_64 binary
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: bili-sync-rs-Linux-x86_64-musl.tar.gz
         path: ./
 
     - name: Download Linux ARM64 binary
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: bili-sync-rs-Linux-aarch64-musl.tar.gz
         path: ./
@@ -234,18 +234,18 @@ jobs:
         ls -la *.tar.gz
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
 
     - name: Log in to Docker Hub
       if: github.event_name != 'pull_request'
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
     - name: Log in to CNB.Cool Registry
       if: github.event_name != 'pull_request'
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: docker.cnb.cool
         username: cnb
@@ -420,7 +420,7 @@ jobs:
 
     - name: Build and push to all registries
       if: github.event_name != 'pull_request'
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@v6
       with:
         context: .
         platforms: ${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}
