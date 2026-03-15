@@ -197,19 +197,76 @@
 		description?: string;
 		variant?: 'success' | 'info';
 	};
+	type SourceUpdater = (source: VideoSource) => VideoSource;
 
 	function isQueuedMessage(message?: string | null): boolean {
 		return message?.includes('加入队列') ?? false;
 	}
 
-	async function updateAndReload<T extends UpdateResult>(
+	function updateSourceInStore(sourceType: string, sourceId: number, updater: SourceUpdater) {
+		videoSourceStore.update((sources) => {
+			if (!sources) return sources;
+
+			const key = sourceType as VideoSourceType;
+			const sourceList = sources[key];
+			if (!sourceList) return sources;
+
+			let changed = false;
+			const nextSourceList = sourceList.map((source) => {
+				if (source.id !== sourceId) return source;
+				changed = true;
+				return updater(source);
+			});
+
+			return changed ? { ...sources, [key]: nextSourceList } : sources;
+		});
+	}
+
+	function updateSourcesInStore(sourceType: string, sourceIds: number[], updater: SourceUpdater) {
+		const targetIds = new Set(sourceIds);
+		videoSourceStore.update((sources) => {
+			if (!sources) return sources;
+
+			const key = sourceType as VideoSourceType;
+			const sourceList = sources[key];
+			if (!sourceList) return sources;
+
+			let changed = false;
+			const nextSourceList = sourceList.map((source) => {
+				if (!targetIds.has(source.id)) return source;
+				changed = true;
+				return updater(source);
+			});
+
+			return changed ? { ...sources, [key]: nextSourceList } : sources;
+		});
+	}
+
+	function removeSourceFromStore(sourceType: string, sourceId: number) {
+		videoSourceStore.update((sources) => {
+			if (!sources) return sources;
+
+			const key = sourceType as VideoSourceType;
+			const sourceList = sources[key];
+			if (!sourceList) return sources;
+
+			const nextSourceList = sourceList.filter((source) => source.id !== sourceId);
+			return nextSourceList.length === sourceList.length
+				? sources
+				: { ...sources, [key]: nextSourceList };
+		});
+	}
+
+	async function updateAndApply<T extends UpdateResult>(
 		action: () => Promise<{ data: T }>,
 		{
 			successToast,
-			errorTitle = '设置更新失败'
+			errorTitle = '设置更新失败',
+			applyLocalUpdate
 		}: {
 			successToast?: (data: T) => SuccessToast;
 			errorTitle?: string;
+			applyLocalUpdate?: (data: T) => void;
 		} = {}
 	) {
 		const result = await runRequest(action, { context: errorTitle });
@@ -228,7 +285,7 @@
 			showToast(toastInfo.title);
 		}
 
-		await loadVideoSources();
+		applyLocalUpdate?.(result.data);
 	}
 
 	function getSelectedSet(sectionKey: string) {
@@ -315,7 +372,12 @@
 			});
 		}
 
-		await loadVideoSources();
+		if (successCount > 0) {
+			const failedIds = new Set(failed.map((item) => item.id));
+			updateSourcesInStore(sourceType, ids, (source) =>
+				failedIds.has(source.id) ? source : { ...source, enabled }
+			);
+		}
 		clearSelection(sectionKey);
 		bulkUpdating = false;
 	}
@@ -327,9 +389,17 @@
 		currentEnabled: boolean,
 		_sourceName: string // eslint-disable-line @typescript-eslint/no-unused-vars
 	) {
-		await updateAndReload(
+		await updateAndApply(
 			() => api.updateVideoSourceEnabled(sourceType, sourceId, !currentEnabled),
-			{ errorTitle: '操作失败' }
+			{
+				errorTitle: '操作失败',
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						enabled: data.enabled
+					}));
+				}
+			}
 		);
 	}
 
@@ -366,13 +436,19 @@
 		currentScanDeleted: boolean
 	) {
 		const newScanDeleted = !currentScanDeleted;
-		await updateAndReload(
+		await updateAndApply(
 			() => api.updateVideoSourceScanDeleted(sourceType, sourceId, newScanDeleted),
 			{
 				successToast: () => ({
 					title: '设置更新成功',
 					description: newScanDeleted ? '已启用扫描已删除视频' : '已禁用扫描已删除视频'
-				})
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						scan_deleted_videos: data.scan_deleted_videos
+					}));
+				}
 			}
 		);
 	}
@@ -384,7 +460,7 @@
 		currentAudioOnly: boolean
 	) {
 		const newAudioOnly = !currentAudioOnly;
-		await updateAndReload(
+		await updateAndApply(
 			() =>
 				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
 					audio_only: newAudioOnly
@@ -393,7 +469,13 @@
 				successToast: () => ({
 					title: '设置更新成功',
 					description: newAudioOnly ? '已启用仅下载音频模式' : '已禁用仅下载音频模式'
-				})
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						audio_only: data.audio_only
+					}));
+				}
 			}
 		);
 	}
@@ -405,7 +487,7 @@
 		currentAudioOnlyM4aOnly: boolean
 	) {
 		const newAudioOnlyM4aOnly = !currentAudioOnlyM4aOnly;
-		await updateAndReload(
+		await updateAndApply(
 			() =>
 				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
 					audio_only_m4a_only: newAudioOnlyM4aOnly
@@ -414,7 +496,13 @@
 				successToast: () => ({
 					title: '设置更新成功',
 					description: newAudioOnlyM4aOnly ? '已启用仅保留M4A模式' : '已禁用仅保留M4A模式'
-				})
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						audio_only_m4a_only: data.audio_only_m4a_only
+					}));
+				}
 			}
 		);
 	}
@@ -426,7 +514,7 @@
 		currentFlatFolder: boolean
 	) {
 		const newFlatFolder = !currentFlatFolder;
-		await updateAndReload(
+		await updateAndApply(
 			() =>
 				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
 					flat_folder: newFlatFolder
@@ -435,7 +523,13 @@
 				successToast: () => ({
 					title: '设置更新成功',
 					description: newFlatFolder ? '已启用平铺目录模式' : '已禁用平铺目录模式'
-				})
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						flat_folder: data.flat_folder
+					}));
+				}
 			}
 		);
 	}
@@ -443,7 +537,7 @@
 	// 切换动态API（仅投稿源）
 	async function handleToggleDynamicApi(sourceId: number, currentUseDynamicApi: boolean) {
 		const newUseDynamicApi = !currentUseDynamicApi;
-		await updateAndReload(
+		await updateAndApply(
 			() =>
 				api.updateVideoSourceDownloadOptions('submission', sourceId, {
 					use_dynamic_api: newUseDynamicApi
@@ -452,7 +546,13 @@
 				successToast: () => ({
 					title: '设置更新成功',
 					description: newUseDynamicApi ? '已启用动态API' : '已关闭动态API'
-				})
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore('submission', sourceId, (source) => ({
+						...source,
+						use_dynamic_api: data.use_dynamic_api
+					}));
+				}
 			}
 		);
 	}
@@ -464,7 +564,7 @@
 		currentDownloadDanmaku: boolean
 	) {
 		const newDownloadDanmaku = !currentDownloadDanmaku;
-		await updateAndReload(
+		await updateAndApply(
 			() =>
 				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
 					download_danmaku: newDownloadDanmaku
@@ -473,7 +573,13 @@
 				successToast: () => ({
 					title: '设置更新成功',
 					description: newDownloadDanmaku ? '已启用弹幕下载' : '已禁用弹幕下载'
-				})
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						download_danmaku: data.download_danmaku
+					}));
+				}
 			}
 		);
 	}
@@ -485,7 +591,7 @@
 		currentDownloadSubtitle: boolean
 	) {
 		const newDownloadSubtitle = !currentDownloadSubtitle;
-		await updateAndReload(
+		await updateAndApply(
 			() =>
 				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
 					download_subtitle: newDownloadSubtitle
@@ -494,7 +600,13 @@
 				successToast: () => ({
 					title: '设置更新成功',
 					description: newDownloadSubtitle ? '已启用字幕下载' : '已禁用字幕下载'
-				})
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						download_subtitle: data.download_subtitle
+					}));
+				}
 			}
 		);
 	}
@@ -528,8 +640,28 @@
 	}
 
 	// AI提示词保存后的回调
-	async function handleAiPromptSave() {
-		await loadVideoSources();
+	async function handleAiPromptSave(
+		event: CustomEvent<{
+			videoPrompt: string;
+			audioPrompt: string;
+			aiRename: boolean;
+			enableMultiPage: boolean;
+			enableCollection: boolean;
+			enableBangumi: boolean;
+			renameParentDir: boolean;
+		}>
+	) {
+		const detail = event.detail;
+		updateSourceInStore(aiPromptInfo.type, aiPromptInfo.id, (source) => ({
+			...source,
+			ai_rename: detail.aiRename,
+			ai_rename_video_prompt: detail.videoPrompt,
+			ai_rename_audio_prompt: detail.audioPrompt,
+			ai_rename_enable_multi_page: detail.enableMultiPage,
+			ai_rename_enable_collection: detail.enableCollection,
+			ai_rename_enable_bangumi: detail.enableBangumi,
+			ai_rename_rename_parent_dir: detail.renameParentDir
+		}));
 	}
 
 	// AI批量重命名历史文件 - 打开对话框
@@ -561,14 +693,23 @@
 	// AI批量重命名完成后的回调
 	function handleAiRenameHistoryComplete() {
 		// 刷新视频源列表以显示最新状态（AI重命名已开启）
-		loadVideoSources();
+		updateSourceInStore(aiRenameHistoryInfo.type, aiRenameHistoryInfo.id, (source) => ({
+			...source,
+			ai_rename: true,
+			ai_rename_video_prompt: aiRenameHistoryInfo.videoPrompt,
+			ai_rename_audio_prompt: aiRenameHistoryInfo.audioPrompt,
+			ai_rename_enable_multi_page: aiRenameHistoryInfo.enableMultiPage,
+			ai_rename_enable_collection: aiRenameHistoryInfo.enableCollection,
+			ai_rename_enable_bangumi: aiRenameHistoryInfo.enableBangumi,
+			ai_rename_rename_parent_dir: aiRenameHistoryInfo.renameParentDir
+		}));
 	}
 
 	// 确认删除
 	async function handleConfirmDelete(event: CustomEvent<{ deleteLocalFiles: boolean }>) {
 		const { deleteLocalFiles } = event.detail;
 
-		await updateAndReload(
+		await updateAndApply(
 			() => api.deleteVideoSource(deleteSourceInfo.type, deleteSourceInfo.id, deleteLocalFiles),
 			{
 				errorTitle: '删除失败',
@@ -587,6 +728,10 @@
 						title: '删除成功',
 						description: data.message + (deleteLocalFiles ? '，本地文件已删除' : '，本地文件已保留')
 					};
+				},
+				applyLocalUpdate: (data) => {
+					if (isQueuedMessage(data.message)) return;
+					removeSourceFromStore(deleteSourceInfo.type, deleteSourceInfo.id);
 				}
 			}
 		);
@@ -607,7 +752,7 @@
 	) {
 		const request = event.detail;
 
-		await updateAndReload(
+		await updateAndApply(
 			() => api.resetVideoSourcePath(resetPathSourceInfo.type, resetPathSourceInfo.id, request),
 			{
 				errorTitle: '路径重设失败',
@@ -616,7 +761,13 @@
 					description:
 						data.message +
 						(request.apply_rename_rules ? `，已移动 ${data.moved_files_count} 个文件` : '')
-				})
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(resetPathSourceInfo.type, resetPathSourceInfo.id, (source) => ({
+						...source,
+						path: data.new_path
+					}));
+				}
 			}
 		);
 	}
@@ -667,7 +818,10 @@
 				toast.success('历史投稿选择已更新', {
 					description: result.data.message
 				});
-				await loadVideoSources();
+				updateSourceInStore('submission', submissionSelectionInfo.id, (source) => ({
+					...source,
+					selected_videos: JSON.stringify(selectedVideos)
+				}));
 			} else {
 				toast.error('更新失败', { description: result.data.message });
 			}
@@ -705,9 +859,29 @@
 	}
 
 	// 关键词保存成功
-	function handleKeywordFilterSave() {
+	function handleKeywordFilterSave(
+		event: CustomEvent<{
+			blacklistKeywords: string[];
+			whitelistKeywords: string[];
+			caseSensitive: boolean;
+			minDurationSeconds: number | null;
+			maxDurationSeconds: number | null;
+			publishedAfter: string;
+			publishedBefore: string;
+		}>
+	) {
 		toast.success('关键词过滤器已更新');
-		loadVideoSources();
+		const detail = event.detail;
+		updateSourceInStore(keywordFilterInfo.type, keywordFilterInfo.id, (source) => ({
+			...source,
+			blacklist_keywords: detail.blacklistKeywords,
+			whitelist_keywords: detail.whitelistKeywords,
+			case_sensitive: detail.caseSensitive,
+			min_duration_seconds: detail.minDurationSeconds ?? undefined,
+			max_duration_seconds: detail.maxDurationSeconds ?? undefined,
+			published_after: detail.publishedAfter || undefined,
+			published_before: detail.publishedBefore || undefined
+		}));
 	}
 
 	// 取消关键词过滤
