@@ -43,6 +43,7 @@
 	let loadingPlayInfo = false;
 	let onlinePlayRefreshRetried = false;
 	let onlinePlayRefreshRetrying = false;
+	let onlinePlaybackErrorMessage: string | null = null;
 	let isFullscreen = false; // 是否全屏模式
 	let deleteDialogOpen = false;
 	let deleting = false;
@@ -248,6 +249,27 @@
 		toast.error('充电视频未充电');
 	}
 
+	function isUnavailableOnlinePlayMessage(message?: string | null): boolean {
+		if (!message) return false;
+		return (
+			message.includes('403 Forbidden') ||
+			message.includes('视频已被删除或不存在') ||
+			message.includes('视频不存在') ||
+			message.includes('视频已失效') ||
+			message.includes('status code: -404') ||
+			message.includes('啥都木有') ||
+			message.includes('无权限访问')
+		);
+	}
+
+	function setOnlinePlaybackError(message?: string | null) {
+		onlinePlayInfo = null;
+		loadingPlayInfo = false;
+		onlinePlaybackErrorMessage = isUnavailableOnlinePlayMessage(message)
+			? '该视频已失效，无法在线播放'
+			: '当前视频无法在线播放';
+	}
+
 	function resetPlaybackState(options?: { keepPlayerVisible?: boolean; keepPlayMode?: boolean }) {
 		onlinePlayLoadToken += 1;
 		abortFlvSetup();
@@ -257,6 +279,7 @@
 		loadingPlayInfo = false;
 		onlinePlayRefreshRetried = false;
 		onlinePlayRefreshRetrying = false;
+		onlinePlaybackErrorMessage = null;
 		videoElement = null;
 		lastPlaybackNoticeKey = null;
 		chargeLockedDisplayMode = null;
@@ -551,6 +574,7 @@
 	): Promise<boolean> {
 		const loadToken = ++onlinePlayLoadToken;
 		loadingPlayInfo = true;
+		onlinePlaybackErrorMessage = null;
 		try {
 			const result = await api.getVideoPlayInfo(videoId, { refresh: options?.refresh === true });
 			if (loadToken !== onlinePlayLoadToken) return false;
@@ -561,12 +585,16 @@
 				if (!options?.silentError && isChargeLockedMessage(onlinePlayInfo?.message)) {
 					chargeLockedDisplayMode = 'online';
 					showChargeLockedToast('online');
+				} else if (isUnavailableOnlinePlayMessage(onlinePlayInfo?.message)) {
+					setOnlinePlaybackError(onlinePlayInfo?.message);
 				} else if (!options?.silentError) {
 					toast.error('获取在线播放信息失败', {
 						description: onlinePlayInfo?.message || '请稍后重试'
 					});
 				}
-				onlinePlayInfo = null;
+				if (!onlinePlaybackErrorMessage) {
+					onlinePlayInfo = null;
+				}
 				return false;
 			}
 
@@ -590,12 +618,16 @@
 			if (!options?.silentError && isChargeLockedMessage(message)) {
 				chargeLockedDisplayMode = 'online';
 				showChargeLockedToast('online');
+			} else if (isUnavailableOnlinePlayMessage(message)) {
+				setOnlinePlaybackError(message);
 			} else if (!options?.silentError) {
 				toast.error('获取在线播放信息失败', {
 					description: message
 				});
 			}
-			onlinePlayInfo = null;
+			if (!onlinePlaybackErrorMessage) {
+				onlinePlayInfo = null;
+			}
 			return false;
 		} finally {
 			if (loadToken === onlinePlayLoadToken) {
@@ -622,7 +654,10 @@
 
 		onlinePlayRefreshRetrying = false;
 		if (!refreshed) {
-			toast.error('刷新播放地址失败，请稍后重试');
+			if (!onlinePlaybackErrorMessage) {
+				setOnlinePlaybackError();
+			}
+			toast.error(onlinePlaybackErrorMessage ?? '当前视频无法在线播放');
 		}
 	}
 
@@ -659,6 +694,7 @@
 			onlinePlayRefreshRetried = false;
 			onlinePlayRefreshRetrying = false;
 			chargeLockedDisplayMode = null;
+			onlinePlaybackErrorMessage = null;
 			const videoId = getPlayVideoId();
 			loadOnlinePlayInfo(videoId);
 		}
@@ -1141,6 +1177,10 @@
 									<div class="flex h-64 items-center justify-center text-white">
 										<div>加载播放信息中...</div>
 									</div>
+								{:else if onlinePlaybackErrorMessage && onlinePlayMode}
+									<div class="flex h-64 items-center justify-center text-white">
+										<div>{onlinePlaybackErrorMessage}</div>
+									</div>
 								{:else if chargeLockedDisplayMode === 'online' && onlinePlayMode}
 									<div class="flex h-64 items-center justify-center text-white">
 										<div>充电视频未充电</div>
@@ -1169,7 +1209,8 @@
 														if (!onlinePlayRefreshRetried) {
 															void retryOnlinePlayWithRefresh();
 														} else {
-															toast.error('在线播放失败，请尝试切换本地播放或稍后重试');
+															setOnlinePlaybackError();
+															toast.error(onlinePlaybackErrorMessage ?? '当前视频无法在线播放');
 														}
 													} else if (videoData?.video.is_charge_video) {
 														chargeLockedDisplayMode = 'local';
