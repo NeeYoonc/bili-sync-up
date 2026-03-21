@@ -82,16 +82,16 @@ if let Err(e) = crate::task::process_config_tasks(connection.clone()).await {
 - **添加**：`UpdateConfigTask` 和 `ReloadConfigTask` 结构体
 - **添加**：`ConfigTaskQueue` 配置任务队列管理器
 - **添加**：全局 `CONFIG_TASK_QUEUE` 实例
-- **添加**：便捷函数 `enqueue_update_task`、`enqueue_reload_task`、`process_config_tasks`
+- **添加**：队列入口 `enqueue_update_task`、`enqueue_reload_task`、`process_config_tasks`
 
 #### 2. **`crates/bili_sync/src/task/video_downloader.rs`**
 - **添加**：扫描完成后自动处理配置任务队列
 
 #### 3. **`crates/bili_sync/src/api/handler.rs`**
-- **修改**：`update_config` 函数，实现智能扫描检测
-- **添加**：`update_config_internal` 内部函数
-- **修改**：`reload_config` 函数，实现智能扫描检测  
-- **添加**：`reload_config_internal` 内部函数
+- **修改**：`update_config` 接口处理逻辑，实现智能扫描检测
+- **添加**：`update_config_internal` 内部处理逻辑
+- **修改**：`reload_config` 接口处理逻辑，实现智能扫描检测  
+- **添加**：`reload_config_internal` 内部处理逻辑
 
 #### 4. **`crates/bili_sync/src/api/mod.rs`**
 - **修改**：将 `request` 模块改为公开访问
