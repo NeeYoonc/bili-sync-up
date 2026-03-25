@@ -36,6 +36,11 @@ jobs:
             name: Linux-aarch64-musl
             platform: linux
             archive_name: bili-sync-rs-Linux-aarch64-musl.tar.gz
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            name: Linux-armv7l-musl
+            platform: linux
+            archive_name: bili-sync-rs-Linux-armv7l-musl.tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
             name: Darwin-x86_64
@@ -77,8 +82,8 @@ jobs:
     - name: Cache Rust
       uses: Swatinem/rust-cache@v2
 
-    - name: Install cross (Linux ARM64)
-      if: matrix.target == 'aarch64-unknown-linux-musl'
+    - name: Install cross (Linux ARM targets)
+      if: matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'armv7-unknown-linux-musleabihf'
       run: cargo install cross --git https://github.com/cross-rs/cross
 
     - name: Install musl (Linux x86_64)
@@ -87,7 +92,7 @@ jobs:
 
     - name: Build
       run: |
-        if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+        if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ] || [ "${{ matrix.target }}" = "armv7-unknown-linux-musleabihf" ]; then
           cross build --release --target ${{ matrix.target }} -p bili_sync
         else
           cargo build --release --target ${{ matrix.target }} -p bili_sync
