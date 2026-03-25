@@ -49,45 +49,65 @@ jobs:
           name: web-build
           path: web/build
 
+  prepare_matrix:
+    name: Prepare build matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      platforms: ${{ steps.set_matrix.outputs.platforms }}
+    steps:
+      - name: Select platforms
+        id: set_matrix
+        shell: bash
+        run: |
+          case "${{ github.event.inputs.platforms }}" in
+            all)
+              matrix='[
+                {"target":"x86_64-pc-windows-msvc","os":"windows-latest","name":"Windows-x86_64","bin":"bili-sync-rs.exe","archive_name":"bili-sync-rs-Windows-x86_64.zip"},
+                {"target":"x86_64-unknown-linux-musl","os":"ubuntu-24.04","name":"Linux-x86_64-musl","bin":"bili-sync-rs","archive_name":"bili-sync-rs-Linux-x86_64-musl.tar.gz"},
+                {"target":"aarch64-unknown-linux-musl","os":"ubuntu-24.04","name":"Linux-aarch64-musl","bin":"bili-sync-rs","archive_name":"bili-sync-rs-Linux-aarch64-musl.tar.gz"},
+                {"target":"x86_64-apple-darwin","os":"macos-15","name":"Darwin-x86_64","bin":"bili-sync-rs","archive_name":"bili-sync-rs-Darwin-x86_64.tar.gz"},
+                {"target":"aarch64-apple-darwin","os":"macos-latest","name":"Darwin-aarch64","bin":"bili-sync-rs","archive_name":"bili-sync-rs-Darwin-aarch64.tar.gz"}
+              ]'
+              ;;
+            windows)
+              matrix='[
+                {"target":"x86_64-pc-windows-msvc","os":"windows-latest","name":"Windows-x86_64","bin":"bili-sync-rs.exe","archive_name":"bili-sync-rs-Windows-x86_64.zip"}
+              ]'
+              ;;
+            linux)
+              matrix='[
+                {"target":"x86_64-unknown-linux-musl","os":"ubuntu-24.04","name":"Linux-x86_64-musl","bin":"bili-sync-rs","archive_name":"bili-sync-rs-Linux-x86_64-musl.tar.gz"},
+                {"target":"aarch64-unknown-linux-musl","os":"ubuntu-24.04","name":"Linux-aarch64-musl","bin":"bili-sync-rs","archive_name":"bili-sync-rs-Linux-aarch64-musl.tar.gz"}
+              ]'
+              ;;
+            macos)
+              matrix='[
+                {"target":"x86_64-apple-darwin","os":"macos-15","name":"Darwin-x86_64","bin":"bili-sync-rs","archive_name":"bili-sync-rs-Darwin-x86_64.tar.gz"},
+                {"target":"aarch64-apple-darwin","os":"macos-latest","name":"Darwin-aarch64","bin":"bili-sync-rs","archive_name":"bili-sync-rs-Darwin-aarch64.tar.gz"}
+              ]'
+              ;;
+            *)
+              echo "Unsupported platform selection: ${{ github.event.inputs.platforms }}" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo 'platforms<<EOF'
+            echo "$matrix"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.platform.name }}
-    needs: build_frontend
-    if: github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform.group
+    needs:
+      - build_frontend
+      - prepare_matrix
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            group: windows
-            name: Windows-x86_64
-            bin: bili-sync-rs.exe
-            archive_name: bili-sync-rs-Windows-x86_64.zip
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-24.04
-            group: linux
-            name: Linux-x86_64-musl
-            bin: bili-sync-rs
-            archive_name: bili-sync-rs-Linux-x86_64-musl.tar.gz
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04
-            group: linux
-            name: Linux-aarch64-musl
-            bin: bili-sync-rs
-            archive_name: bili-sync-rs-Linux-aarch64-musl.tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-15
-            group: macos
-            name: Darwin-x86_64
-            bin: bili-sync-rs
-            archive_name: bili-sync-rs-Darwin-x86_64.tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            group: macos
-            name: Darwin-aarch64
-            bin: bili-sync-rs
-            archive_name: bili-sync-rs-Darwin-aarch64.tar.gz
+        platform: ${{ fromJSON(needs.prepare_matrix.outputs.platforms) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
