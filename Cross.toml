@@ -7,3 +7,8 @@ pre-build = [
 pre-build = [
     "apt-get update && apt-get install -y unzip",
 ]
+
+[target.armv7-unknown-linux-musleabihf]
+pre-build = [
+    "apt-get update && apt-get install -y unzip",
+]

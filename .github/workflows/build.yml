@@ -66,16 +66,21 @@ jobs:
             name: Linux-aarch64-musl
             bin: bili-sync-rs
             archive_name: bili-sync-rs-Linux-aarch64-musl.tar.gz
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-24.04
+            name: Linux-armv7l-musl
+            bin: bili-sync-rs
+            archive_name: bili-sync-rs-Linux-armv7l-musl.tar.gz
           - target: x86_64-apple-darwin
             os: macos-15
-            name: Darwin-x86_64
+            name: macos-x86_64
             bin: bili-sync-rs
-            archive_name: bili-sync-rs-Darwin-x86_64.tar.gz
+            archive_name: bili-sync-rs-macos-x86_64.tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: Darwin-aarch64
+            name: macos-aarch64
             bin: bili-sync-rs
-            archive_name: bili-sync-rs-Darwin-aarch64.tar.gz
+            archive_name: bili-sync-rs-macos-aarch64.tar.gz
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

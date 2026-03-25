@@ -10,6 +10,7 @@ use regex::Regex;
 use sha3::{Digest, Keccak256};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
+#[cfg(not(target_arch = "arm"))]
 use wasmtime::*;
 
 use crate::config::CONFIG_DIR;
@@ -265,10 +266,12 @@ pub struct PowResponse {
 }
 
 /// WASM 运行时（全局单例，支持重新初始化）
+#[cfg(not(target_arch = "arm"))]
 static WASM_RUNTIME: Lazy<parking_lot::RwLock<Option<WasmPowSolver>>> =
     Lazy::new(|| parking_lot::RwLock::new(init_wasm_solver()));
 
 /// 初始化 WASM 求解器
+#[cfg(not(target_arch = "arm"))]
 fn init_wasm_solver() -> Option<WasmPowSolver> {
     match WasmPowSolver::new() {
         Ok(solver) => {
@@ -283,12 +286,17 @@ fn init_wasm_solver() -> Option<WasmPowSolver> {
 }
 
 /// 重新初始化 WASM 运行时（WASM 更新后调用）
+#[cfg(not(target_arch = "arm"))]
 fn reinit_wasm_runtime() {
     let mut guard = WASM_RUNTIME.write();
     *guard = init_wasm_solver();
 }
 
+#[cfg(target_arch = "arm")]
+fn reinit_wasm_runtime() {}
+
 /// WASM POW 求解器
+#[cfg(not(target_arch = "arm"))]
 struct WasmPowSolver {
     store: Store<()>,
     memory: Memory,
@@ -297,6 +305,7 @@ struct WasmPowSolver {
     wasm_solve: TypedFunc<(i32, i32, i32, i32, i32, f64), ()>,
 }
 
+#[cfg(not(target_arch = "arm"))]
 impl WasmPowSolver {
     /// 创建新的 WASM 求解器
     fn new() -> anyhow::Result<Self> {
@@ -421,6 +430,7 @@ pub fn solve_pow(challenge: &PowChallenge) -> u64 {
 }
 
 /// 使用 WASM 求解 POW
+#[cfg(not(target_arch = "arm"))]
 fn solve_pow_wasm(challenge: &PowChallenge) -> Option<u64> {
     let prefix = format!("{}_{}_", challenge.salt, challenge.expire_at);
 
@@ -453,6 +463,12 @@ fn solve_pow_wasm(challenge: &PowChallenge) -> Option<u64> {
             None
         }
     }
+}
+
+#[cfg(target_arch = "arm")]
+fn solve_pow_wasm(_challenge: &PowChallenge) -> Option<u64> {
+    debug!("当前 arm 架构不支持 wasmtime，跳过 WASM POW 求解");
+    None
 }
 
 /// 使用 Keccak-256 求解 POW（备用方案，可能被服务器拒绝）
