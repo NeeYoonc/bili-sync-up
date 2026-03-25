@@ -1,8 +1,7 @@
 use anyhow::{bail, Context, Result};
-use flate2::read::GzDecoder;
 use reqwest::Client as ReqwestClient;
 use reqwest::Method;
-use std::io::Read;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -10,22 +9,26 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
+use zip::ZipArchive;
 
 use crate::bilibili::Client;
 use crate::config::CONFIG_DIR;
 use crate::http::headers::{create_api_headers, create_aria2_headers};
 
-/// 嵌入的aria2二进制文件 (编译时自动下载对应平台版本)
-#[cfg(target_os = "windows")]
-static ARIA2_BINARY_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/aria2c.exe.gz"));
+/// aria2 运行时下载配置
+const ARIA2_VERSION: &str = "1.37.0";
+const ARIA2_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
-#[cfg(target_os = "linux")]
-static ARIA2_BINARY_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/aria2c.gz"));
+static ARIA2_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-static ARIA2_BINARY_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/aria2c.gz"));
-
-static ARIA2_BINARY_DECOMPRESSED: OnceLock<Vec<u8>> = OnceLock::new();
+#[derive(Clone, Copy)]
+struct Aria2Package {
+    target_key: &'static str,
+    archive_name: &'static str,
+    binary_name: &'static str,
+    download_url: &'static str,
+    sha256: &'static str,
+}
 
 /// 单个aria2进程实例
 #[derive(Debug)]
@@ -485,154 +488,217 @@ impl Aria2Downloader {
         Ok(())
     }
 
-    async fn get_embedded_aria2_binary() -> Result<&'static Vec<u8>> {
-        if let Some(bytes) = ARIA2_BINARY_DECOMPRESSED.get() {
-            return Ok(bytes);
+    fn install_lock() -> &'static Mutex<()> {
+        ARIA2_INSTALL_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    fn current_package() -> Option<Aria2Package> {
+        Some(Aria2Package {
+            target_key: "windows-x86_64",
+            archive_name: "aria2-1.37.0-win-64bit-build1.zip",
+            binary_name: "aria2c.exe",
+            download_url: "https://r2d.dnof.net/file/mn643mzqukqji5fj",
+            sha256: "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
+        })
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn current_package() -> Option<Aria2Package> {
+        Some(Aria2Package {
+            target_key: "linux-x86_64",
+            archive_name: "aria2-x86_64-linux-musl_static.zip",
+            binary_name: "aria2c",
+            download_url: "https://r2d.dnof.net/file/mn643m2nnkg455f9",
+            sha256: "f6133e102916dc55f3aa0ba47fa134aec959928cc433c255ca63beceeee49965",
+        })
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    fn current_package() -> Option<Aria2Package> {
+        Some(Aria2Package {
+            target_key: "linux-aarch64",
+            archive_name: "aria2-aarch64-linux-musl_static.zip",
+            binary_name: "aria2c",
+            download_url: "https://r2d.dnof.net/file/mn643lqvfbxj2rp4",
+            sha256: "01cb29433cc2d7f039d6621ebaf4bf4d9891a8efacd8a54e5ff4c244d839421c",
+        })
+    }
+
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64")
+    )))]
+    fn current_package() -> Option<Aria2Package> {
+        None
+    }
+
+    fn cache_dir(package: Aria2Package) -> PathBuf {
+        CONFIG_DIR
+            .join("tools")
+            .join("aria2")
+            .join(ARIA2_VERSION)
+            .join(package.target_key)
+    }
+
+    /// 解析缓存或按需下载 aria2，失败时回退到系统 aria2
+    async fn extract_aria2_binary() -> Result<PathBuf> {
+        let Some(package) = Self::current_package() else {
+            debug!("当前平台没有预置 aria2 下载包，尝试使用系统 aria2");
+            return Self::find_system_aria2().await;
+        };
+
+        let cache_dir = Self::cache_dir(package);
+        let binary_path = cache_dir.join(package.binary_name);
+
+        if Self::is_valid_aria2_binary(&binary_path).await {
+            return Ok(binary_path);
         }
 
-        let bytes = tokio::task::spawn_blocking(|| -> Result<Vec<u8>> {
-            let mut decoder = GzDecoder::new(ARIA2_BINARY_GZ);
-            let mut out = Vec::new();
-            decoder.read_to_end(&mut out).context("解压内置 aria2 二进制失败")?;
-            Ok(out)
+        if let Ok(system_path) = Self::find_system_aria2().await {
+            return Ok(system_path);
+        }
+
+        let _guard = Self::install_lock().lock().await;
+
+        if Self::is_valid_aria2_binary(&binary_path).await {
+            return Ok(binary_path);
+        }
+
+        if let Ok(system_path) = Self::find_system_aria2().await {
+            return Ok(system_path);
+        }
+
+        Self::download_and_install_aria2(package).await
+    }
+
+    async fn download_and_install_aria2(package: Aria2Package) -> Result<PathBuf> {
+        let cache_dir = Self::cache_dir(package);
+        let archive_path = cache_dir.join(package.archive_name);
+        let binary_path = cache_dir.join(package.binary_name);
+
+        tokio::fs::create_dir_all(&cache_dir)
+            .await
+            .with_context(|| format!("创建 aria2 缓存目录失败: {}", cache_dir.display()))?;
+
+        info!(
+            "开始按需下载 aria2 二进制: version={}, target={}, url={}",
+            ARIA2_VERSION, package.target_key, package.download_url
+        );
+
+        let download_client = ReqwestClient::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(ARIA2_DOWNLOAD_TIMEOUT)
+            .build()
+            .context("创建 aria2 下载客户端失败")?;
+
+        let response = download_client
+            .get(package.download_url)
+            .send()
+            .await
+            .with_context(|| format!("下载 aria2 包失败: {}", package.download_url))?
+            .error_for_status()
+            .with_context(|| format!("下载 aria2 包返回错误状态: {}", package.download_url))?;
+
+        let archive_bytes = response.bytes().await.context("读取 aria2 下载内容失败")?;
+        Self::verify_archive_checksum(archive_bytes.as_ref(), package.sha256)?;
+
+        tokio::fs::write(&archive_path, archive_bytes.as_ref())
+            .await
+            .with_context(|| format!("写入 aria2 压缩包失败: {}", archive_path.display()))?;
+
+        Self::extract_binary_from_zip(&archive_path, &binary_path, package.binary_name).await?;
+        Self::set_executable_permissions(&binary_path).await?;
+
+        if Self::is_valid_aria2_binary(&binary_path).await {
+            info!("aria2 已缓存到本地: {}", binary_path.display());
+            return Ok(binary_path);
+        }
+
+        let _ = tokio::fs::remove_file(&binary_path).await;
+        bail!("aria2 安装完成后校验失败: {}", binary_path.display())
+    }
+
+    fn verify_archive_checksum(bytes: &[u8], expected_sha256: &str) -> Result<()> {
+        let actual_sha256 = hex::encode(Sha256::digest(bytes));
+        if actual_sha256 != expected_sha256 {
+            bail!(
+                "aria2 压缩包校验失败: expected={}, actual={}",
+                expected_sha256,
+                actual_sha256
+            );
+        }
+        Ok(())
+    }
+
+    async fn extract_binary_from_zip(archive_path: &Path, binary_path: &Path, binary_name: &str) -> Result<()> {
+        let archive_path = archive_path.to_path_buf();
+        let binary_path = binary_path.to_path_buf();
+        let binary_name = binary_name.to_string();
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let archive_file = std::fs::File::open(&archive_path)
+                .with_context(|| format!("打开 aria2 压缩包失败: {}", archive_path.display()))?;
+            let mut archive = ZipArchive::new(archive_file).context("解析 aria2 zip 压缩包失败")?;
+
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i).context("读取 aria2 zip 条目失败")?;
+                let entry_name = entry.name().to_string();
+                let Some(file_name) = Path::new(&entry_name).file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+
+                if file_name != binary_name {
+                    continue;
+                }
+
+                if let Some(parent) = binary_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("创建 aria2 解压目录失败: {}", parent.display()))?;
+                }
+
+                let mut output = std::fs::File::create(&binary_path)
+                    .with_context(|| format!("创建 aria2 可执行文件失败: {}", binary_path.display()))?;
+                std::io::copy(&mut entry, &mut output)
+                    .with_context(|| format!("写入 aria2 可执行文件失败: {}", binary_path.display()))?;
+                return Ok(());
+            }
+
+            bail!(
+                "aria2 压缩包中未找到目标文件: {} ({})",
+                binary_name,
+                archive_path.display()
+            )
         })
         .await
-        .context("解压内置 aria2 二进制失败")??;
+        .context("解压 aria2 压缩包失败")??;
 
-        Ok(ARIA2_BINARY_DECOMPRESSED.get_or_init(|| bytes))
+        Ok(())
     }
 
-    /// 提取嵌入的aria2二进制文件到临时目录，失败时回退到系统aria2
-    async fn extract_aria2_binary() -> Result<PathBuf> {
-        // 使用配置文件夹存储aria2二进制文件，而不是临时目录
-        let binary_name = if cfg!(target_os = "windows") {
-            "aria2c.exe"
-        } else {
-            "aria2c"
-        };
-        let binary_path = CONFIG_DIR.join(binary_name);
+    async fn set_executable_permissions(binary_path: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
 
-        // 确保配置目录存在
-        if let Err(e) = tokio::fs::create_dir_all(&*CONFIG_DIR).await {
-            warn!("创建配置目录失败: {}, 将使用临时目录", e);
-            let temp_dir = std::env::temp_dir();
-            return Self::extract_aria2_binary_to_temp(temp_dir, binary_name).await;
+            let metadata = tokio::fs::metadata(binary_path)
+                .await
+                .with_context(|| format!("读取 aria2 文件元数据失败: {}", binary_path.display()))?;
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o755);
+            tokio::fs::set_permissions(binary_path, permissions)
+                .await
+                .with_context(|| format!("设置 aria2 执行权限失败: {}", binary_path.display()))?;
         }
 
-        // 如果文件已存在且可执行，直接返回
-        if binary_path.exists() {
-            // 验证文件是否为有效的aria2可执行文件
-            if Self::is_valid_aria2_binary(&binary_path).await {
-                return Ok(binary_path);
-            } else {
-                // 如果是无效的文件（如占位文件），删除它
-                let _ = tokio::fs::remove_file(&binary_path).await;
-            }
+        #[cfg(not(unix))]
+        {
+            let _ = binary_path;
         }
 
-        // 尝试写入嵌入的二进制文件（gzip 压缩内嵌，运行时解压写出）
-        debug!("尝试提取aria2二进制文件到配置目录: {}", binary_path.display());
-        let embedded_bytes = Self::get_embedded_aria2_binary().await?;
-        match tokio::fs::write(&binary_path, embedded_bytes).await {
-            Ok(_) => {
-                debug!("aria2二进制文件写入配置目录成功，大小: {} bytes", embedded_bytes.len());
-
-                // 在Unix系统上设置执行权限
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(metadata) = tokio::fs::metadata(&binary_path).await {
-                        let mut perms = metadata.permissions();
-                        perms.set_mode(0o755);
-                        match tokio::fs::set_permissions(&binary_path, perms).await {
-                            Ok(_) => {
-                                debug!("已设置aria2二进制文件执行权限");
-                            }
-                            Err(e) => {
-                                warn!("无法设置aria2执行权限: {}，可能是挂载目录权限限制，将尝试临时目录", e);
-                                // 权限设置失败，删除文件并尝试其他位置
-                                let _ = tokio::fs::remove_file(&binary_path).await;
-                                // 尝试使用临时目录
-                                let temp_dir = std::env::temp_dir();
-                                return Self::extract_aria2_binary_to_temp(temp_dir, binary_name).await;
-                            }
-                        }
-                    }
-                }
-
-                // 验证提取的文件是否有效
-                debug!("开始验证提取到配置目录的aria2二进制文件...");
-                if Self::is_valid_aria2_binary(&binary_path).await {
-                    info!("aria2二进制文件已提取到配置目录: {}", binary_path.display());
-                    return Ok(binary_path);
-                } else {
-                    warn!("配置目录中的aria2二进制文件无效，尝试使用系统aria2");
-                    let _ = tokio::fs::remove_file(&binary_path).await;
-                }
-            }
-            Err(e) => {
-                warn!("提取aria2二进制文件到配置目录失败: {}, 尝试使用系统aria2", e);
-            }
-        }
-
-        // 回退到系统安装的aria2
-        Self::find_system_aria2().await
-    }
-
-    /// 备用方案：提取到临时目录
-    async fn extract_aria2_binary_to_temp(temp_dir: PathBuf, binary_name: &str) -> Result<PathBuf> {
-        let binary_path = temp_dir.join(format!("bili-sync-{}", binary_name));
-
-        debug!("尝试提取aria2二进制文件到临时目录: {}", binary_path.display());
-
-        // 如果文件已存在且可执行，直接返回
-        if binary_path.exists() {
-            if Self::is_valid_aria2_binary(&binary_path).await {
-                return Ok(binary_path);
-            } else {
-                let _ = tokio::fs::remove_file(&binary_path).await;
-            }
-        }
-
-        // 尝试写入嵌入的二进制文件（gzip 压缩内嵌，运行时解压写出）
-        let embedded_bytes = Self::get_embedded_aria2_binary().await?;
-        match tokio::fs::write(&binary_path, embedded_bytes).await {
-            Ok(_) => {
-                debug!("aria2二进制文件写入临时目录成功，大小: {} bytes", embedded_bytes.len());
-
-                // 在Unix系统上设置执行权限
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(metadata) = tokio::fs::metadata(&binary_path).await {
-                        let mut perms = metadata.permissions();
-                        perms.set_mode(0o755);
-                        if let Err(e) = tokio::fs::set_permissions(&binary_path, perms).await {
-                            warn!("临时目录中无法设置aria2执行权限: {}，将回退到系统aria2", e);
-                            let _ = tokio::fs::remove_file(&binary_path).await;
-                            return Self::find_system_aria2().await;
-                        } else {
-                            debug!("已设置临时目录中aria2二进制文件执行权限");
-                        }
-                    }
-                }
-
-                // 验证提取的文件是否有效
-                if Self::is_valid_aria2_binary(&binary_path).await {
-                    info!("aria2二进制文件已提取到临时目录: {}", binary_path.display());
-                    return Ok(binary_path);
-                } else {
-                    warn!("临时目录中的aria2二进制文件无效");
-                    let _ = tokio::fs::remove_file(&binary_path).await;
-                }
-            }
-            Err(e) => {
-                warn!("提取aria2二进制文件到临时目录失败: {}", e);
-            }
-        }
-
-        // 最终回退到系统安装的aria2
-        Self::find_system_aria2().await
+        Ok(())
     }
 
     /// 验证aria2二进制文件是否有效
