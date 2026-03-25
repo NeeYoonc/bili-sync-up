@@ -35,6 +35,20 @@ fn parse_time_or_min(time_str: Option<&str>) -> NaiveDateTime {
     })
 }
 
+fn format_wbi_fetch_failure_message(err: &anyhow::Error) -> String {
+    let error_text = format!("{:#}", err);
+    let lower = error_text.to_lowercase();
+
+    if lower.contains("operation timed out")
+        || lower.contains("timed out")
+        || lower.contains("deadline has elapsed")
+    {
+        "获取B站签名信息失败：请求超时，可能与当前登录状态或网络环境有关，可尝试重新登录B站账号".to_string()
+    } else {
+        format!("获取B站签名信息失败: {}", error_text)
+    }
+}
+
 fn calc_submission_next_delay_secs(base_interval_secs: u64, streak: i32, max_hours: u64) -> u64 {
     let multipliers: [u64; 5] = [1, 3, 9, 36, 72];
     let idx = (streak.max(0) as usize).min(multipliers.len() - 1);
@@ -617,7 +631,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             match bili_client.wbi_img().await.map(|wbi_img| wbi_img.into()) {
                 Ok(Some(mixin_key)) => bilibili::set_global_mixin_key(mixin_key),
                 Ok(_) => {
-                    error!("解析 mixin key 失败，等待下一轮执行");
+                    error!("获取B站签名信息失败：未能解析签名参数，等待下一轮执行");
                     // 扫描失败，标记扫描结束
                     TASK_CONTROLLER.set_scanning(false);
                     crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
@@ -636,7 +650,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                                     bilibili::set_global_mixin_key(mixin_key);
                                 }
                                 Ok(_) => {
-                                    error!("自动续登后仍无法解析 mixin key，等待下一轮执行");
+                                    error!("自动续登后仍无法获取B站签名信息，等待下一轮执行");
                                     crate::api::handler::add_log_entry(
                                         crate::api::handler::LogLevel::Warn,
                                         "自动续登后仍无法恢复登录状态，请检查认证信息".to_string(),
@@ -671,11 +685,12 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             }
                         }
                     } else {
-                        error!("解析 mixin key 失败: {:#}", e);
+                        let friendly_message = format_wbi_fetch_failure_message(&e);
+                        error!("{}", friendly_message);
 
                         crate::api::handler::add_log_entry(
                             crate::api::handler::LogLevel::Error,
-                            format!("解析 mixin key 失败: {:#}", e),
+                            friendly_message,
                             Some("bili_sync::task::video_downloader".to_string()),
                         );
 
