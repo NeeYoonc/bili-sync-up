@@ -1,50 +1,50 @@
 name: Build and Push Docker Image
 
 on:
-  workflow_dispatch:  # 仅手动触发
+  workflow_dispatch:
     inputs:
       custom_tags:
-        description: '自定义镜像标签 (用逗号分隔多个标签，例如: v2.7.1,latest,stable)'
+        description: Custom image tags, separated by commas
         required: false
         default: ''
         type: string
       tag_prefix:
-        description: '标签前缀'
+        description: Prefix used when generating tags automatically
         required: false
-        default: 'manual'
+        default: manual
         type: choice
         options:
-          - 'manual'
-          - 'test'
-          - 'debug'
-          - 'dev'
-          - 'staging'
-          - 'hotfix'
-          - 'feature'
+          - manual
+          - test
+          - debug
+          - dev
+          - staging
+          - hotfix
+          - feature
       include_beta_tags:
-        description: '是否包含默认通道标签（stable=latest / beta=beta,beta-latest / dev=dev,dev-latest）'
+        description: Include default channel tags
         required: false
         default: true
         type: boolean
       push_to_dockerhub:
-        description: '推送到 Docker Hub'
+        description: Push to Docker Hub
         required: false
         default: true
         type: boolean
       push_to_cnb:
-        description: '推送到 CNB.Cool'
+        description: Push to CNB.Cool
         required: false
         default: true
         type: boolean
       platforms:
-        description: '构建平台'
+        description: Docker platforms to build
         required: false
-        default: 'linux/amd64,linux/arm64'
+        default: linux/amd64,linux/arm64
         type: choice
         options:
-          - 'linux/amd64,linux/arm64'
-          - 'linux/amd64'
-          - 'linux/arm64'
+          - linux/amd64,linux/arm64
+          - linux/amd64
+          - linux/arm64
 
 env:
   REGISTRY: docker.io
@@ -53,395 +53,341 @@ env:
   CNB_IMAGE_NAME: sviplk.com/docker/bili-sync
 
 jobs:
-  # 构建二进制文件
-  build-binaries:
-    name: Build Linux Binaries
-    runs-on: ubuntu-latest
+  prepare_release:
+    name: Determine release channel
+    runs-on: ubuntu-24.04
+    outputs:
+      release_channel: ${{ steps.release_channel.outputs.release_channel }}
+    steps:
+      - name: Determine release channel
+        id: release_channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel=""
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.custom_tags }}" ]]; then
+            tags_raw="${{ github.event.inputs.custom_tags }}"
+            has_stable=0
+            has_beta=0
+            has_dev=0
+
+            IFS=',' read -ra tags <<< "$tags_raw"
+            for tag in "${tags[@]}"; do
+              tag="$(echo "$tag" | xargs | tr '[:upper:]' '[:lower:]')"
+              [[ -z "$tag" ]] && continue
+              case "$tag" in
+                latest|stable) has_stable=1 ;;
+              esac
+              [[ "$tag" == *beta* ]] && has_beta=1
+              [[ "$tag" == *dev* ]] && has_dev=1
+            done
+
+            count=$((has_stable + has_beta + has_dev))
+            if [[ "$count" -gt 1 ]]; then
+              echo "custom_tags cannot mix stable, beta, and dev channels in one build" >&2
+              exit 1
+            fi
+
+            [[ "$has_stable" -eq 1 ]] && channel="stable"
+            [[ "$has_beta" -eq 1 ]] && channel="beta"
+            [[ "$has_dev" -eq 1 ]] && channel="dev"
+          fi
+
+          if [[ -z "$channel" ]]; then
+            if [[ "${GITHUB_REF_TYPE}" == "branch" ]]; then
+              case "${GITHUB_REF_NAME}" in
+                dev) channel="dev" ;;
+                beta) channel="beta" ;;
+                main|master) channel="stable" ;;
+                *) channel="beta" ;;
+              esac
+            else
+              if [[ "${GITHUB_REF_NAME}" == *beta* ]]; then
+                channel="beta"
+              else
+                channel="stable"
+              fi
+            fi
+          fi
+
+          echo "release_channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "Release channel: $channel"
+
+  build_frontend:
+    name: Build frontend
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: web-build
+          path: web/build
+
+  build_binaries:
+    name: Build Linux binaries
+    needs:
+      - prepare_release
+      - build_frontend
+    runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
-        include:
+        platform:
           - target: x86_64-unknown-linux-musl
             name: Linux-x86_64-musl
+            bin: bili-sync-rs
             archive_name: bili-sync-rs-Linux-x86_64-musl.tar.gz
           - target: aarch64-unknown-linux-musl
             name: Linux-aarch64-musl
+            bin: bili-sync-rs
             archive_name: bili-sync-rs-Linux-aarch64-musl.tar.gz
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-    - name: Determine release channel
-      id: release_channel
-      run: |
-        set -euo pipefail
-        CHANNEL=""
+      - name: Reset frontend build output
+        shell: bash
+        run: |
+          rm -rf web/build
+          mkdir -p web/build
 
-        # workflow_dispatch: 尝试从 custom_tags 推断通道（避免 stable/beta 混推导致通道识别错误）
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.custom_tags }}" ]]; then
-          TAGS_RAW="${{ github.event.inputs.custom_tags }}"
-          HAS_STABLE=0
-          HAS_BETA=0
-          HAS_DEV=0
-          IFS=',' read -ra TAGS <<< "$TAGS_RAW"
-          for tag in "${TAGS[@]}"; do
-            tag="$(echo "$tag" | xargs | tr '[:upper:]' '[:lower:]')"
-            [[ -z "$tag" ]] && continue
-            case "$tag" in
-              latest|stable) HAS_STABLE=1 ;;
-            esac
-            [[ "$tag" == *beta* ]] && HAS_BETA=1
-            [[ "$tag" == *dev* ]] && HAS_DEV=1
-          done
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: web-build
+          path: web/build
 
-          COUNT=$((HAS_STABLE + HAS_BETA + HAS_DEV))
-          if [[ "$COUNT" -gt 1 ]]; then
-            echo "错误: custom_tags 同时包含 stable/beta/dev，无法在一次构建里生成多通道镜像。请分开执行。" >&2
-            exit 1
-          fi
+      - name: Read Rust toolchain version
+        id: read_rust_toolchain
+        shell: bash
+        run: |
+          channel=$(grep '^channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')
+          echo "value=$channel" >> "$GITHUB_OUTPUT"
 
-          [[ "$HAS_STABLE" -eq 1 ]] && CHANNEL="stable"
-          [[ "$HAS_BETA" -eq 1 ]] && CHANNEL="beta"
-          [[ "$HAS_DEV" -eq 1 ]] && CHANNEL="dev"
-        fi
+      - name: Install unzip on Linux runners
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip
 
-        # 兜底：按 ref 推断
-        if [[ -z "$CHANNEL" ]]; then
-          if [[ "${GITHUB_REF_TYPE}" == "branch" ]]; then
-            case "${GITHUB_REF_NAME}" in
-              dev) CHANNEL="dev" ;;
-              beta) CHANNEL="beta" ;;
-              main|master) CHANNEL="stable" ;;
-              *) CHANNEL="beta" ;;
-            esac
-          else
-            # tag：包含 beta 视为 beta，否则 stable
-            if [[ "${GITHUB_REF_NAME}" == *beta* ]]; then
-              CHANNEL="beta"
-            else
-              CHANNEL="stable"
-            fi
-          fi
-        fi
-        echo "release_channel=$CHANNEL" >> $GITHUB_OUTPUT
-        echo "构建通道: $CHANNEL"
+      - name: Build binary
+        uses: houseabsolute/actions-rust-cross@v1
+        env:
+          BILI_SYNC_RELEASE_CHANNEL: ${{ needs.prepare_release.outputs.release_channel }}
+        with:
+          command: build
+          target: ${{ matrix.platform.target }}
+          toolchain: ${{ steps.read_rust_toolchain.outputs.value }}
+          args: "--locked --release -p bili_sync"
+          strip: true
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v6
-      with:
-        node-version: '20'
+      - name: Package archive
+        shell: bash
+        run: |
+          cd target/${{ matrix.platform.target }}/release
+          tar czf "../../../${{ matrix.platform.archive_name }}" "${{ matrix.platform.bin }}"
 
-    - name: Install frontend dependencies
-      run: |
-        cd web
-        npm install
+      - name: Upload binary archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.platform.archive_name }}
+          path: ${{ github.workspace }}/${{ matrix.platform.archive_name }}
 
-    - name: Build frontend
-      run: |
-        cd web
-        npm run build
-
-    - name: Setup Rust
-      uses: dtolnay/rust-toolchain@1.93.1
-      with:
-        targets: ${{ matrix.target }}
-      env:
-        # 设置更长的超时时间
-        RUSTUP_IO_THREADS: "1"
-      # 添加重试机制
-      continue-on-error: true
-      
-    - name: Setup Rust (Retry)
-      if: failure()
-      uses: dtolnay/rust-toolchain@1.93.1
-      with:
-        targets: ${{ matrix.target }}
-      env:
-        RUSTUP_IO_THREADS: "1"
-
-    - name: Cache Rust dependencies
-      uses: Swatinem/rust-cache@v2
-      with:
-        key: ${{ matrix.target }}
-
-    - name: Install cross (for Linux ARM64)
-      if: matrix.target == 'aarch64-unknown-linux-musl'
-      run: cargo install cross --git https://github.com/cross-rs/cross
-
-    - name: Install musl tools (for Linux x86_64)
-      if: matrix.target == 'x86_64-unknown-linux-musl'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y musl-tools
-
-    - name: Install aria2 and unzip
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y aria2 unzip
-        echo "Aria2 version:"
-        aria2c --version | head -1
-
-    - name: Build binary
-      env:
-        BILI_SYNC_RELEASE_CHANNEL: ${{ steps.release_channel.outputs.release_channel }}
-      run: |
-        if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
-          cross build --release --target ${{ matrix.target }} -p bili_sync
-        else
-          cargo build --release --target ${{ matrix.target }} -p bili_sync
-        fi
-
-    - name: Prepare binary
-      run: |
-        mkdir -p release
-        cp target/${{ matrix.target }}/release/bili-sync-rs release/bili-sync-rs
-
-    - name: Create release archive
-      run: |
-        cd release
-        tar -czf ${{ matrix.archive_name }} bili-sync-rs
-
-    - name: Upload binary archive
-      uses: actions/upload-artifact@v6
-      with:
-        name: ${{ matrix.archive_name }}
-        path: release/${{ matrix.archive_name }}
-
-  build-and-push:
+  build_and_push:
     name: Build and Push Docker Image
-    runs-on: ubuntu-latest
-    needs: build-binaries
-    
+    needs:
+      - prepare_release
+      - build_binaries
+    runs-on: ubuntu-24.04
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
 
-    - name: Download Linux x86_64 binary
-      uses: actions/download-artifact@v8
-      with:
-        name: bili-sync-rs-Linux-x86_64-musl.tar.gz
-        path: ./
+      - name: Download Linux x86_64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: bili-sync-rs-Linux-x86_64-musl.tar.gz
+          path: ./
 
-    - name: Download Linux ARM64 binary
-      uses: actions/download-artifact@v8
-      with:
-        name: bili-sync-rs-Linux-aarch64-musl.tar.gz
-        path: ./
+      - name: Download Linux ARM64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: bili-sync-rs-Linux-aarch64-musl.tar.gz
+          path: ./
 
-    - name: List downloaded files
-      run: |
-        echo "Downloaded files:"
-        ls -la *.tar.gz
+      - name: List downloaded files
+        run: ls -la *.tar.gz
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
-    - name: Log in to Docker Hub
-      if: github.event_name != 'pull_request'
-      uses: docker/login-action@v4
-      with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Log in to CNB.Cool Registry
-      if: github.event_name != 'pull_request'
-      uses: docker/login-action@v4
-      with:
-        registry: docker.cnb.cool
-        username: cnb
-        password: ${{ secrets.CNB_PASSWORD }}
+      - name: Log in to CNB.Cool Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: docker.cnb.cool
+          username: cnb
+          password: ${{ secrets.CNB_PASSWORD }}
 
-    - name: Determine release channel
-      id: release_channel
-      run: |
-        set -euo pipefail
-        CHANNEL=""
+      - name: Prepare Docker tags
+        id: tags
+        shell: bash
+        run: |
+          dockerhub_tags=""
+          cnb_tags=""
+          channel="${{ needs.prepare_release.outputs.release_channel }}"
 
-        # workflow_dispatch: 尝试从 custom_tags 推断通道（避免 stable/beta 混推导致通道识别错误）
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.custom_tags }}" ]]; then
-          TAGS_RAW="${{ github.event.inputs.custom_tags }}"
-          HAS_STABLE=0
-          HAS_BETA=0
-          HAS_DEV=0
-          IFS=',' read -ra TAGS <<< "$TAGS_RAW"
-          for tag in "${TAGS[@]}"; do
-            tag="$(echo "$tag" | xargs | tr '[:upper:]' '[:lower:]')"
-            [[ -z "$tag" ]] && continue
-            case "$tag" in
-              latest|stable) HAS_STABLE=1 ;;
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" ]] || [[ "${{ github.event.inputs.include_beta_tags }}" == "true" ]]; then
+            case "$channel" in
+              stable)
+                dockerhub_tags="${{ env.IMAGE_NAME }}:latest"
+                cnb_tags="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:latest"
+                ;;
+              beta)
+                dockerhub_tags="${{ env.IMAGE_NAME }}:beta,${{ env.IMAGE_NAME }}:beta-latest"
+                cnb_tags="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:beta,docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:beta-latest"
+                ;;
+              dev)
+                dockerhub_tags="${{ env.IMAGE_NAME }}:dev,${{ env.IMAGE_NAME }}:dev-latest"
+                cnb_tags="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:dev,docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:dev-latest"
+                ;;
+              *)
+                echo "Unknown release channel: $channel" >&2
+                exit 1
+                ;;
             esac
-            [[ "$tag" == *beta* ]] && HAS_BETA=1
-            [[ "$tag" == *dev* ]] && HAS_DEV=1
-          done
+          fi
 
-          COUNT=$((HAS_STABLE + HAS_BETA + HAS_DEV))
-          if [[ "$COUNT" -gt 1 ]]; then
-            echo "错误: custom_tags 同时包含 stable/beta/dev，无法在一次构建里生成多通道镜像。请分开执行。" >&2
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            prefix="${{ github.event.inputs.tag_prefix }}"
+            if [[ -n "${{ github.event.inputs.custom_tags }}" ]]; then
+              IFS=',' read -ra custom_tags <<< "${{ github.event.inputs.custom_tags }}"
+              for tag in "${custom_tags[@]}"; do
+                tag="$(echo "$tag" | xargs)"
+                [[ -z "$tag" ]] && continue
+                if [[ -n "$dockerhub_tags" ]]; then
+                  dockerhub_tags="$dockerhub_tags,${{ env.IMAGE_NAME }}:$tag"
+                  cnb_tags="$cnb_tags,docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:$tag"
+                else
+                  dockerhub_tags="${{ env.IMAGE_NAME }}:$tag"
+                  cnb_tags="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:$tag"
+                fi
+              done
+            else
+              timestamp=$(date +%Y%m%d-%H%M%S)
+              if [[ -n "$dockerhub_tags" ]]; then
+                dockerhub_tags="$dockerhub_tags,${{ env.IMAGE_NAME }}:$prefix-$timestamp"
+                cnb_tags="$cnb_tags,docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:$prefix-$timestamp"
+              else
+                dockerhub_tags="${{ env.IMAGE_NAME }}:$prefix-$timestamp"
+                cnb_tags="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:$prefix-$timestamp"
+              fi
+            fi
+          fi
+
+          if [[ -z "$dockerhub_tags" && -z "$cnb_tags" ]]; then
+            echo "No image tags were generated" >&2
             exit 1
           fi
 
-          [[ "$HAS_STABLE" -eq 1 ]] && CHANNEL="stable"
-          [[ "$HAS_BETA" -eq 1 ]] && CHANNEL="beta"
-          [[ "$HAS_DEV" -eq 1 ]] && CHANNEL="dev"
-        fi
+          echo "dockerhub_tags=$dockerhub_tags" >> "$GITHUB_OUTPUT"
+          echo "cnb_tags=$cnb_tags" >> "$GITHUB_OUTPUT"
 
-        # 兜底：按 ref 推断
-        if [[ -z "$CHANNEL" ]]; then
-          if [[ "${GITHUB_REF_TYPE}" == "branch" ]]; then
-            case "${GITHUB_REF_NAME}" in
-              dev) CHANNEL="dev" ;;
-              beta) CHANNEL="beta" ;;
-              main|master) CHANNEL="stable" ;;
-              *) CHANNEL="beta" ;;
-            esac
-          else
-            # tag：包含 beta 视为 beta，否则 stable
-            if [[ "${GITHUB_REF_NAME}" == *beta* ]]; then
-              CHANNEL="beta"
-            else
-              CHANNEL="stable"
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAME }}
+            docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Combine all tags for single build
+        id: all_tags
+        shell: bash
+        run: |
+          all_tags=""
+
+          if [[ "${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_dockerhub == 'true' }}" == "true" ]]; then
+            if [[ -n "${{ steps.tags.outputs.dockerhub_tags }}" ]]; then
+              all_tags="${{ steps.tags.outputs.dockerhub_tags }}"
             fi
           fi
-        fi
 
-        echo "release_channel=$CHANNEL" >> $GITHUB_OUTPUT
-        echo "构建通道: $CHANNEL"
-
-    - name: Prepare Docker tags
-      id: tags
-      run: |
-        # 初始化标签数组
-        DOCKERHUB_TAGS=""
-        CNB_TAGS=""
-        CHANNEL="${{ steps.release_channel.outputs.release_channel }}"
-        
-        # 默认通道标签（避免 stable/beta 混推）
-        if [[ "${{ github.event_name }}" != "workflow_dispatch" ]] || [[ "${{ github.event.inputs.include_beta_tags }}" == "true" ]]; then
-          case "$CHANNEL" in
-            stable)
-              DOCKERHUB_TAGS="${{ env.IMAGE_NAME }}:latest"
-              CNB_TAGS="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:latest"
-              ;;
-            beta)
-              DOCKERHUB_TAGS="${{ env.IMAGE_NAME }}:beta,${{ env.IMAGE_NAME }}:beta-latest"
-              CNB_TAGS="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:beta,docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:beta-latest"
-              ;;
-            dev)
-              DOCKERHUB_TAGS="${{ env.IMAGE_NAME }}:dev,${{ env.IMAGE_NAME }}:dev-latest"
-              CNB_TAGS="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:dev,docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:dev-latest"
-              ;;
-            *)
-              echo "未知构建通道: $CHANNEL" >&2
-              exit 1
-              ;;
-          esac
-        fi
-        
-        # 手动触发时的自定义标签
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-          PREFIX="${{ github.event.inputs.tag_prefix }}"
-          
-          # 如果有自定义标签，使用自定义标签
-          if [[ -n "${{ github.event.inputs.custom_tags }}" ]]; then
-            IFS=',' read -ra CUSTOM_TAGS <<< "${{ github.event.inputs.custom_tags }}"
-            for tag in "${CUSTOM_TAGS[@]}"; do
-              tag=$(echo "$tag" | xargs)  # 去除空格
-              if [[ -n "$DOCKERHUB_TAGS" ]]; then
-                DOCKERHUB_TAGS="$DOCKERHUB_TAGS,${{ env.IMAGE_NAME }}:$tag"
-                CNB_TAGS="$CNB_TAGS,docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:$tag"
+          if [[ "${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_cnb == 'true' }}" == "true" ]]; then
+            if [[ -n "${{ steps.tags.outputs.cnb_tags }}" ]]; then
+              if [[ -n "$all_tags" ]]; then
+                all_tags="$all_tags,${{ steps.tags.outputs.cnb_tags }}"
               else
-                DOCKERHUB_TAGS="${{ env.IMAGE_NAME }}:$tag"
-                CNB_TAGS="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:$tag"
+                all_tags="${{ steps.tags.outputs.cnb_tags }}"
               fi
-            done
+            fi
+          fi
+
+          if [[ -z "$all_tags" ]]; then
+            echo "No enabled image tags were generated for the selected registries" >&2
+            exit 1
+          fi
+
+          echo "all_tags=$all_tags" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push to all registries
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}
+          push: true
+          tags: ${{ steps.all_tags.outputs.all_tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BILI_SYNC_RELEASE_CHANNEL=${{ needs.prepare_release.outputs.release_channel }}
+
+      - name: Test Docker image
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          first_tag=$(echo "${{ steps.all_tags.outputs.all_tags }}" | cut -d',' -f1)
+          if [[ -n "$first_tag" ]]; then
+            docker run --rm "$first_tag" --help | head -5 || echo "Docker image test completed"
           else
-            # 使用前缀生成标签
-            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            if [[ -n "$DOCKERHUB_TAGS" ]]; then
-              DOCKERHUB_TAGS="$DOCKERHUB_TAGS,${{ env.IMAGE_NAME }}:$PREFIX-$TIMESTAMP"
-              CNB_TAGS="$CNB_TAGS,docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:$PREFIX-$TIMESTAMP"
-            else
-              DOCKERHUB_TAGS="${{ env.IMAGE_NAME }}:$PREFIX-$TIMESTAMP"
-              CNB_TAGS="docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:$PREFIX-$TIMESTAMP"
-            fi
+            echo "No tags to test"
           fi
-        fi
-
-        # 至少要有一个 tag，否则 build-push 会失败
-        if [[ -z "$DOCKERHUB_TAGS" && -z "$CNB_TAGS" ]]; then
-          echo "错误: 未生成任何镜像标签，请检查 workflow_dispatch 参数（custom_tags/include_beta_tags/push_to_*）。" >&2
-          exit 1
-        fi
-        
-        echo "dockerhub_tags=$DOCKERHUB_TAGS" >> $GITHUB_OUTPUT
-        echo "cnb_tags=$CNB_TAGS" >> $GITHUB_OUTPUT
-        echo "推送到 Docker Hub 的标签: $DOCKERHUB_TAGS"
-        echo "推送到 CNB.Cool 的标签: $CNB_TAGS"
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: |
-          ${{ env.IMAGE_NAME }}
-          docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=raw,value=latest,enable={{is_default_branch}}
-
-    - name: Combine all tags for single build
-      id: all_tags
-      run: |
-        ALL_TAGS=""
-        
-        # 添加 Docker Hub 标签
-        if [[ "${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_dockerhub == 'true' }}" == "true" ]]; then
-          if [[ -n "${{ steps.tags.outputs.dockerhub_tags }}" ]]; then
-            ALL_TAGS="${{ steps.tags.outputs.dockerhub_tags }}"
-          fi
-        fi
-        
-        # 添加 CNB.Cool 标签
-        if [[ "${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_to_cnb == 'true' }}" == "true" ]]; then
-          if [[ -n "${{ steps.tags.outputs.cnb_tags }}" ]]; then
-            if [[ -n "$ALL_TAGS" ]]; then
-              ALL_TAGS="$ALL_TAGS,${{ steps.tags.outputs.cnb_tags }}"
-            else
-              ALL_TAGS="${{ steps.tags.outputs.cnb_tags }}"
-            fi
-          fi
-        fi
-        
-        echo "all_tags=$ALL_TAGS" >> $GITHUB_OUTPUT
-        echo "合并后的标签: $ALL_TAGS"
-
-    - name: Build and push to all registries
-      if: github.event_name != 'pull_request'
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        platforms: ${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}
-        push: true
-        tags: ${{ steps.all_tags.outputs.all_tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        build-args: |
-          BUILDKIT_INLINE_CACHE=1
-          BILI_SYNC_RELEASE_CHANNEL=${{ steps.release_channel.outputs.release_channel }}
-
-    - name: Test Docker image
-      if: github.event_name != 'pull_request'
-      run: |
-        echo "Testing Docker image..."
-        # 获取第一个推送的标签进行测试
-        FIRST_TAG=$(echo "${{ steps.all_tags.outputs.all_tags }}" | cut -d',' -f1)
-        if [[ -n "$FIRST_TAG" ]]; then
-          echo "Testing image: $FIRST_TAG"
-          docker run --rm $FIRST_TAG --help | head -5 || echo "Docker image test completed"
-        else
-          echo "No tags to test"
-        fi
