@@ -28,6 +28,7 @@
 	let submissionTotalCount = 0;
 	let submissionSearchQuery = '';
 	let filteredSubmissionVideos: SubmissionVideoInfo[] = [];
+	let searchedSubmissionVideos: SubmissionVideoInfo[] | null = null;
 
 	// 已下载视频的BVID列表
 	let downloadedBvids: Set<string> = new Set();
@@ -83,6 +84,7 @@
 		submissionTotalCount = 0;
 		submissionSearchQuery = '';
 		filteredSubmissionVideos = [];
+		searchedSubmissionVideos = null;
 		currentLoadedPage = 0;
 		hasMoreVideos = true;
 		showLoadMoreButton = false;
@@ -90,9 +92,8 @@
 
 		// 并行加载已下载视频和UP主投稿
 		await Promise.all([loadDownloadedVideos(), loadSubmissionVideos()]);
-
-		// 两个请求都完成后，再更新过滤列表
 		updateFilteredVideos();
+
 	}
 
 	// 加载该投稿源已下载的视频BVID列表
@@ -181,26 +182,30 @@
 
 		hasMoreVideos = submissionVideos.length < submissionTotalCount;
 		loadingProgress = '';
-
-		// 更新过滤后的视频列表
 		updateFilteredVideos();
+
 	}
 
 	// 更新过滤后的视频列表（排除已下载的）
-	function updateFilteredVideos() {
-		if (submissionSearchQuery.trim()) {
-			return;
-		}
-		// 如果还在加载已下载视频列表，跳过过滤（等待resetAndLoad最后统一调用）
-		if (loadingDownloaded) {
-			return;
-		}
-		// 排除已下载的视频
-		filteredSubmissionVideos = submissionVideos.filter((video) => !downloadedBvids.has(video.bvid));
 
-		// 如果过滤后的视频很少（少于10个）但还有更多视频可加载，显示"加载更多"按钮
-		if (filteredSubmissionVideos.length < 10 && hasMoreVideos && !isLoadingMore) {
+	function updateFilteredVideos() {
+		const baseVideos = submissionSearchQuery.trim()
+			? searchedSubmissionVideos ?? []
+			: submissionVideos;
+		filteredSubmissionVideos = baseVideos.filter((video) => !downloadedBvids.has(video.bvid));
+
+		if (
+			!submissionSearchQuery.trim() &&
+			!submissionLoading &&
+			!loadingDownloaded &&
+			!isLoadingMore &&
+			hasMoreVideos &&
+			submissionVideos.length > 0 &&
+			filteredSubmissionVideos.length < 10
+		) {
 			showLoadMoreButton = true;
+		} else if (submissionSearchQuery.trim() || !hasMoreVideos) {
+			showLoadMoreButton = false;
 		}
 	}
 
@@ -217,6 +222,7 @@
 
 	async function handleSearchChange() {
 		if (!submissionSearchQuery.trim()) {
+			searchedSubmissionVideos = null;
 			updateFilteredVideos();
 			return;
 		}
@@ -231,22 +237,19 @@
 			});
 
 			if (response.data && response.data.videos) {
-				// 排除已下载的视频
-				filteredSubmissionVideos = response.data.videos.filter(
-					(video) => !downloadedBvids.has(video.bvid)
-				);
+				// 先保存搜索结果，再统一过滤已下载的视频
+				searchedSubmissionVideos = response.data.videos;
 			} else {
-				filteredSubmissionVideos = [];
+				searchedSubmissionVideos = [];
 			}
 		} catch (error) {
 			console.error('搜索视频失败:', error);
 			toast.error('搜索失败', { description: '请稍后重试' });
-			filteredSubmissionVideos = submissionVideos
-				.filter((video) => !downloadedBvids.has(video.bvid))
-				.filter((video) =>
-					video.title.toLowerCase().includes(submissionSearchQuery.toLowerCase().trim())
-				);
+			searchedSubmissionVideos = submissionVideos.filter((video) =>
+				video.title.toLowerCase().includes(submissionSearchQuery.toLowerCase().trim())
+			);
 		} finally {
+			updateFilteredVideos();
 			isSearching = false;
 		}
 	}
@@ -512,15 +515,17 @@
 								/>
 							</svg>
 							<p class="text-sm">
-								{#if hasMoreVideos}
+								{#if submissionSearchQuery.trim()}
+									没有找到匹配的未下载视频
+								{:else if hasMoreVideos && submissionVideos.length > 0 && notDownloadedCount === 0}
 									当前加载的 {submissionVideos.length} 个视频都已下载
 								{:else if downloadedBvids.size > 0 && notDownloadedCount === 0}
 									所有历史投稿已下载完成
 								{:else}
-									没有找到未下载的视频
+									暂无可选视频，请稍后重试
 								{/if}
 							</p>
-							{#if hasMoreVideos}
+							{#if hasMoreVideos && !submissionSearchQuery.trim()}
 								<button
 									type="button"
 									class="mt-4 rounded-md border border-transparent bg-blue-600 px-6 py-2 text-sm font-medium text-white hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
