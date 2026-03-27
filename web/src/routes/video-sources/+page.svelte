@@ -20,6 +20,7 @@
 	import KeywordFilterDialog from '$lib/components/keyword-filter-dialog.svelte';
 	import AiPromptDialog from '$lib/components/ai-prompt-dialog.svelte';
 	import AiRenameHistoryDialog from '$lib/components/ai-rename-history-dialog.svelte';
+	import type { VideoSourcesResponse } from '$lib/types';
 
 	// 图标导入
 	import PlusIcon from '@lucide/svelte/icons/plus';
@@ -121,6 +122,10 @@
 		renameParentDir: false
 	};
 
+	const QUEUED_DELETE_POLL_INTERVAL_MS = 2000;
+	const QUEUED_DELETE_MAX_ATTEMPTS = 30;
+	const queuedDeletePollKeys = new Set<string>();
+
 	async function loadVideoSources() {
 		const response = await runRequest(() => api.getVideoSources(), {
 			setLoading: (value) => (loading = value),
@@ -128,6 +133,50 @@
 		});
 		if (!response) return;
 		setVideoSources(response.data);
+	}
+
+	function sourceStillExists(
+		sources: VideoSourcesResponse,
+		sourceType: VideoSourceType,
+		sourceId: number
+	): boolean {
+		return sources[sourceType]?.some((source) => source.id === sourceId) ?? false;
+	}
+
+	async function pollQueuedSourceDeletion(
+		sourceType: VideoSourceType,
+		sourceId: number,
+		sourceName: string
+	) {
+		const pollKey = `${sourceType}:${sourceId}`;
+		if (queuedDeletePollKeys.has(pollKey)) return;
+		queuedDeletePollKeys.add(pollKey);
+
+		try {
+			for (let attempt = 0; attempt < QUEUED_DELETE_MAX_ATTEMPTS; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, QUEUED_DELETE_POLL_INTERVAL_MS));
+
+				try {
+					const response = await api.getVideoSources();
+					setVideoSources(response.data);
+
+					if (!sourceStillExists(response.data, sourceType, sourceId)) {
+						toast.success('删除完成', {
+							description: `视频源「${sourceName}」已从列表移除`
+						});
+						return;
+					}
+				} catch (error) {
+					console.warn('轮询删除视频源状态失败:', error);
+				}
+			}
+
+			toast.info('删除任务仍在处理中', {
+				description: `视频源「${sourceName}」暂未从列表移除，可稍后手动刷新确认`
+			});
+		} finally {
+			queuedDeletePollKeys.delete(pollKey);
+		}
 	}
 
 	// 投稿源扫描策略配置（分批/自适应）
@@ -730,7 +779,14 @@
 					};
 				},
 				applyLocalUpdate: (data) => {
-					if (isQueuedMessage(data.message)) return;
+					if (isQueuedMessage(data.message)) {
+						void pollQueuedSourceDeletion(
+							deleteSourceInfo.type as VideoSourceType,
+							deleteSourceInfo.id,
+							deleteSourceInfo.name
+						);
+						return;
+					}
 					removeSourceFromStore(deleteSourceInfo.type, deleteSourceInfo.id);
 				}
 			}
