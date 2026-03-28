@@ -9,6 +9,7 @@ pub mod file_logger;
 pub mod filenamify;
 pub mod format_arg;
 pub mod keyword_filter;
+pub mod live_updates;
 pub mod model;
 pub mod nfo;
 pub mod notification;

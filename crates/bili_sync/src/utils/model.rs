@@ -9,6 +9,7 @@ use tracing::{debug, info};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
 use crate::bilibili::{PageInfo, VideoInfo};
+use crate::utils::live_updates::notify_videos_changed;
 use crate::utils::status::STATUS_COMPLETED;
 
 /// 从 VideoInfo 中提取 BVID
@@ -1031,6 +1032,7 @@ pub async fn update_videos_model(videos: Vec<video::ActiveModel>, connection: &D
         .exec(connection)
         .await?;
 
+    notify_videos_changed();
     Ok(())
 }
 
@@ -1043,5 +1045,6 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
     );
     query.exec(connection).await?;
 
+    notify_videos_changed();
     Ok(())
 }

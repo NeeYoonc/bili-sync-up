@@ -4,6 +4,7 @@ pub mod video_downloader;
 pub use http_server::http_server;
 pub use video_downloader::video_downloader;
 
+use crate::utils::live_updates::notify_videos_changed;
 use crate::utils::time_format::now_standard_string;
 use anyhow::Result;
 use bili_sync_entity::task_queue::{self, Entity as TaskQueueEntity, TaskStatus, TaskType};
@@ -791,6 +792,7 @@ async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -> Re
     }
 
     info!("视频已成功删除: ID={}, 名称={}", video_id, video.name);
+    notify_videos_changed();
 
     Ok(())
 }

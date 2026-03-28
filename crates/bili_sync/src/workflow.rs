@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::utils::time_format::{now_naive, now_standard_string, parse_time_string};
+use crate::utils::live_updates::{notify_video_sources_changed, notify_videos_changed};
 
 // 全局番剧季度标题缓存
 lazy_static::lazy_static! {
@@ -1282,6 +1283,7 @@ pub async fn fetch_video_details(
                 video_active_model.tags = Set(Some(serde_json::Value::Array(vec![])));
                 video_active_model.save(&txn).await?;
                 txn.commit().await?;
+                notify_videos_changed();
             }
         }
     }
@@ -1396,6 +1398,7 @@ pub async fn fetch_video_details(
                                 }
 
                                 txn.commit().await?;
+                                notify_videos_changed();
                             } else {
                                 // 非404错误发送通知（404是视频被删除的正常情况）
                                 let video_name = video_model.name.clone();
@@ -1670,6 +1673,7 @@ pub async fn fetch_video_details(
 
                             video_active_model.save(&txn).await?;
                             txn.commit().await?;
+                            notify_videos_changed();
                         }
                     };
                     Ok::<_, anyhow::Error>(())
@@ -2807,6 +2811,7 @@ pub async fn download_video_pages(
                         "回填投稿UGC合集集序成功: video_id={}, bvid={}, episode_number={}",
                         final_video_model.id, final_video_model.bvid, episode_number
                     );
+                    notify_videos_changed();
                 }
             }
             Err(e) => {
@@ -2845,6 +2850,7 @@ pub async fn download_video_pages(
                         "回填投稿多P集序成功: video_id={}, bvid={}, episode_number={}",
                         final_video_model.id, final_video_model.bvid, episode_number
                     );
+                    notify_videos_changed();
                 }
             }
             Err(e) => {
@@ -3379,6 +3385,7 @@ pub async fn download_video_pages(
                 "已提前持久化 video.path: video_id={}, old='{}', new='{}'",
                 final_video_model.id, final_video_model.path, path_to_save
             );
+            notify_videos_changed();
         }
     }
 
@@ -4810,6 +4817,7 @@ pub async fn download_video_pages(
             .exec(&txn)
             .await?;
         txn.commit().await?;
+        notify_videos_changed();
     }
 
     status.update_status(&main_results);
@@ -8554,6 +8562,7 @@ async fn process_bangumi_video(
     video_active_model.save(&txn).await?;
 
     txn.commit().await?;
+    notify_videos_changed();
 
     Ok(())
 }
@@ -8662,6 +8671,7 @@ pub async fn auto_reset_risk_control_failures(connection: &DatabaseConnection) -
     }
 
     txn.commit().await?;
+    notify_videos_changed();
 
     if resetted_videos > 0 || resetted_pages > 0 {
         info!(
@@ -10113,6 +10123,9 @@ async fn backfill_submission_collection_membership(
     }
 
     txn.commit().await?;
+    if updated_rows > 0 {
+        notify_videos_changed();
+    }
     Ok(updated_rows)
 }
 
@@ -10543,6 +10556,9 @@ async fn refresh_collection_video_episode_numbers(
             .await?;
     }
     info!("已更新合集 {} 中 {} 个视频的集数序号", collection_id, order_map.len());
+    if !order_map.is_empty() {
+        notify_videos_changed();
+    }
 
     Ok(order_map)
 }
@@ -11044,6 +11060,7 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
 
     // 7. 提交事务
     txn.commit().await?;
+    notify_video_sources_changed();
 
     // 8. 最终验证
     let final_check: i64 = connection

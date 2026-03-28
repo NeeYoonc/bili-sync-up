@@ -22,7 +22,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
 use tracing::{debug, error, info, warn};
 use utoipa::OpenApi;
 
@@ -45,6 +45,9 @@ use crate::api::response::{
     VideoResponse, VideoSource, VideoSourcesResponse, VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
+use crate::utils::live_updates::{
+    notify_video_sources_changed, notify_videos_changed, subscribe_video_sources_changed, subscribe_videos_changed,
+};
 use crate::utils::status::{PageStatus, VideoStatus};
 
 // 全局静态的扫码登录服务实例
@@ -1582,34 +1585,25 @@ pub async fn stream_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<VideosRequest>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    const SSE_EVENT_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
+
     let stream = async_stream::stream! {
         yield Ok(Event::default().event("ready").data("connected"));
 
-        let mut interval = tokio::time::interval(StdDuration::from_secs(1));
+        let mut receiver = subscribe_videos_changed();
         let mut last_snapshot = String::new();
 
-        loop {
-            interval.tick().await;
+        if let Some(event) = build_videos_sse_event(db.clone(), params.clone(), &mut last_snapshot).await {
+            yield Ok(event);
+        }
 
-            match get_videos(Extension(db.clone()), Query(params.clone())).await {
-                Ok(response) => {
-                    let payload = response.into_data();
-                    match serde_json::to_string(&payload) {
-                        Ok(snapshot) => {
-                            if snapshot != last_snapshot {
-                                last_snapshot = snapshot;
-                                match Event::default().event("videos").json_data(&payload) {
-                                    Ok(event) => yield Ok(event),
-                                    Err(err) => warn!("构建视频实时推送事件失败: {}", err),
-                                }
-                            }
-                        }
-                        Err(err) => warn!("序列化视频实时推送数据失败: {}", err),
-                    }
-                }
-                Err(err) => {
-                    warn!("视频管理页实时刷新失败: {:?}", err);
-                }
+        loop {
+            if !wait_for_batched_change(&mut receiver, SSE_EVENT_DEBOUNCE).await {
+                break;
+            }
+
+            if let Some(event) = build_videos_sse_event(db.clone(), params.clone(), &mut last_snapshot).await {
+                yield Ok(event);
             }
         }
     };
@@ -1621,39 +1615,119 @@ pub async fn stream_videos(
 pub async fn stream_video_sources(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    const SSE_EVENT_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
+
     let stream = async_stream::stream! {
         yield Ok(Event::default().event("ready").data("connected"));
 
-        let mut interval = tokio::time::interval(StdDuration::from_secs(1));
+        let mut receiver = subscribe_video_sources_changed();
         let mut last_snapshot = String::new();
 
-        loop {
-            interval.tick().await;
+        if let Some(event) = build_video_sources_sse_event(db.clone(), &mut last_snapshot).await {
+            yield Ok(event);
+        }
 
-            match get_video_sources(Extension(db.clone())).await {
-                Ok(response) => {
-                    let payload = response.into_data();
-                    match serde_json::to_string(&payload) {
-                        Ok(snapshot) => {
-                            if snapshot != last_snapshot {
-                                last_snapshot = snapshot;
-                                match Event::default().event("sources").json_data(&payload) {
-                                    Ok(event) => yield Ok(event),
-                                    Err(err) => warn!("构建视频源实时推送事件失败: {}", err),
-                                }
-                            }
-                        }
-                        Err(err) => warn!("序列化视频源实时推送数据失败: {}", err),
-                    }
-                }
-                Err(err) => {
-                    warn!("视频源管理页实时刷新失败: {:?}", err);
-                }
+        loop {
+            if !wait_for_batched_change(&mut receiver, SSE_EVENT_DEBOUNCE).await {
+                break;
+            }
+
+            if let Some(event) = build_video_sources_sse_event(db.clone(), &mut last_snapshot).await {
+                yield Ok(event);
             }
         }
     };
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keep-alive"))
+}
+
+async fn wait_for_batched_change(receiver: &mut watch::Receiver<u64>, debounce: StdDuration) -> bool {
+    if receiver.changed().await.is_err() {
+        return false;
+    }
+
+    loop {
+        let debounce_sleep = tokio::time::sleep(debounce);
+        tokio::pin!(debounce_sleep);
+
+        tokio::select! {
+            _ = &mut debounce_sleep => return true,
+            changed = receiver.changed() => {
+                if changed.is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+async fn build_videos_sse_event(
+    db: Arc<DatabaseConnection>,
+    params: VideosRequest,
+    last_snapshot: &mut String,
+) -> Option<Event> {
+    match get_videos(Extension(db), Query(params)).await {
+        Ok(response) => {
+            let payload = response.into_data();
+            match serde_json::to_string(&payload) {
+                Ok(snapshot) => {
+                    if snapshot == *last_snapshot {
+                        return None;
+                    }
+                    *last_snapshot = snapshot;
+                    match Event::default().event("videos").json_data(&payload) {
+                        Ok(event) => Some(event),
+                        Err(err) => {
+                            warn!("构建视频实时推送事件失败: {}", err);
+                            None
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("序列化视频实时推送数据失败: {}", err);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            warn!("视频管理页实时刷新失败: {:?}", err);
+            None
+        }
+    }
+}
+
+async fn build_video_sources_sse_event(
+    db: Arc<DatabaseConnection>,
+    last_snapshot: &mut String,
+) -> Option<Event> {
+    match get_video_sources(Extension(db)).await {
+        Ok(response) => {
+            let payload = response.into_data();
+            match serde_json::to_string(&payload) {
+                Ok(snapshot) => {
+                    if snapshot == *last_snapshot {
+                        return None;
+                    }
+                    *last_snapshot = snapshot;
+                    match Event::default().event("sources").json_data(&payload) {
+                        Ok(event) => Some(event),
+                        Err(err) => {
+                            warn!("构建视频源实时推送事件失败: {}", err);
+                            None
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("序列化视频源实时推送数据失败: {}", err);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            warn!("视频源管理页实时刷新失败: {:?}", err);
+            None
+        }
+    }
 }
 
 #[utoipa::path(
@@ -1879,6 +1953,7 @@ pub async fn reset_video(
         }
 
         txn.commit().await?;
+        notify_videos_changed();
     }
 
     // 获取所有分页信息（包括未重置的）
@@ -2141,6 +2216,7 @@ pub async fn reset_all_videos(
         }
 
         txn.commit().await?;
+        notify_videos_changed();
 
         // 开启这些视频的自动下载，避免被过滤（与 scan 流程对齐）
         if !resetted_videos_info.is_empty() {
@@ -2469,6 +2545,7 @@ pub async fn reset_specific_tasks(
         }
 
         txn.commit().await?;
+        notify_videos_changed();
     }
 
     // 重置视频封面时，同步删除根目录 poster.jpg / folder.jpg，
@@ -2740,6 +2817,7 @@ pub async fn update_video_status(
         }
 
         txn.commit().await?;
+        notify_videos_changed();
     }
 
     // 触发立即扫描（缩短等待）
@@ -3213,6 +3291,7 @@ pub async fn add_video_source_internal(
             if let Some(merge_target_id) = params.merge_to_source_id {
                 let result = handle_bangumi_merge_to_existing(&txn, params, merge_target_id).await?;
                 txn.commit().await?;
+                notify_video_sources_changed();
                 return Ok(result);
             }
 
@@ -3601,6 +3680,7 @@ pub async fn add_video_source_internal(
     std::fs::create_dir_all(&params.path).map_err(|e| anyhow!("创建目录失败: {}", e))?;
 
     txn.commit().await?;
+    notify_video_sources_changed();
 
     Ok(result)
 }
@@ -3838,6 +3918,7 @@ pub async fn update_video_source_enabled_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
     Ok(result)
 }
 
@@ -4192,6 +4273,7 @@ pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -
     }
 
     info!("视频已成功删除: ID={}, 名称={}", video_id, video.name);
+    notify_videos_changed();
 
     Ok(())
 }
@@ -5090,6 +5172,8 @@ pub async fn delete_video_source_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
+    notify_videos_changed();
 
     // 事务提交后，清除断点信息（如果是删除投稿源）
     if let Some(upper_id) = upper_id_to_clear {
@@ -5273,6 +5357,7 @@ pub async fn update_video_source_scan_deleted_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
     Ok(result)
 }
 
@@ -5723,6 +5808,7 @@ pub async fn update_video_source_download_options_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
     Ok(result)
 }
 
@@ -6138,6 +6224,7 @@ pub async fn update_submission_selected_videos(
     submission::Entity::update(update_model).exec(&txn).await?;
 
     txn.commit().await?;
+    notify_video_sources_changed();
 
     let mut backfill_targets = newly_selected_videos.clone();
     if !selection_changed && !reselected_deleted_videos.is_empty() {
@@ -6628,6 +6715,8 @@ pub async fn reset_video_source_path_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
+    notify_videos_changed();
     Ok(result)
 }
 
@@ -15414,6 +15503,7 @@ pub async fn update_video_source_keyword_filters(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
 
     if let Some((submission_record, whitelist_keywords, has_complex_regex)) = submission_whitelist_backfill_job {
         if whitelist_keywords.iter().any(|k| !k.trim().is_empty()) {
@@ -15966,16 +16056,19 @@ pub async fn ai_rename_history(
     .await;
 
     match result {
-        Ok(batch_result) => Ok(ApiResponse::ok(crate::api::response::BatchRenameResponse {
-            success: true,
-            renamed_count: batch_result.renamed_count,
-            skipped_count: batch_result.skipped_count,
-            failed_count: batch_result.failed_count,
-            message: format!(
-                "批量重命名完成：重命名 {} 个，跳过 {} 个，失败 {} 个",
-                batch_result.renamed_count, batch_result.skipped_count, batch_result.failed_count
-            ),
-        })),
+        Ok(batch_result) => {
+            notify_videos_changed();
+            Ok(ApiResponse::ok(crate::api::response::BatchRenameResponse {
+                success: true,
+                renamed_count: batch_result.renamed_count,
+                skipped_count: batch_result.skipped_count,
+                failed_count: batch_result.failed_count,
+                message: format!(
+                    "批量重命名完成：重命名 {} 个，跳过 {} 个，失败 {} 个",
+                    batch_result.renamed_count, batch_result.skipped_count, batch_result.failed_count
+                ),
+            }))
+        }
         Err(e) => {
             error!("[{}] 批量重命名失败: {}", source_key, e);
             Ok(ApiResponse::ok(crate::api::response::BatchRenameResponse {
