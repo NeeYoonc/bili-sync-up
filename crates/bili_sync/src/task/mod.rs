@@ -4,7 +4,7 @@ pub mod video_downloader;
 pub use http_server::http_server;
 pub use video_downloader::video_downloader;
 
-use crate::utils::live_updates::notify_videos_changed;
+use crate::utils::live_updates::{notify_queue_status_changed, notify_videos_changed};
 use crate::utils::time_format::now_standard_string;
 use anyhow::Result;
 use bili_sync_entity::task_queue::{self, Entity as TaskQueueEntity, TaskStatus, TaskType};
@@ -246,6 +246,7 @@ impl DeleteTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -253,7 +254,11 @@ impl DeleteTaskQueue {
     /// 从队列中取出下一个任务
     pub async fn dequeue_task(&self) -> Option<DeleteVideoSourceTask> {
         let mut queue = self.queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 标记任务为已完成（更新数据库状态）
@@ -341,6 +346,7 @@ impl DeleteTaskQueue {
             .exec(connection)
             .await?;
 
+        notify_queue_status_changed();
         Ok(true)
     }
 
@@ -352,6 +358,7 @@ impl DeleteTaskQueue {
     /// 设置处理状态
     pub fn set_processing(&self, is_processing: bool) {
         self.is_processing.store(is_processing, Ordering::SeqCst);
+        notify_queue_status_changed();
     }
 
     /// 设置当前正在执行的删除任务
@@ -524,6 +531,7 @@ impl VideoDeleteTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -531,7 +539,11 @@ impl VideoDeleteTaskQueue {
     /// 从队列中取出下一个任务
     pub async fn dequeue_task(&self) -> Option<DeleteVideoTask> {
         let mut queue = self.queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 标记任务为已完成（更新数据库状态）
@@ -613,6 +625,7 @@ impl VideoDeleteTaskQueue {
             .exec(connection)
             .await?;
 
+        notify_queue_status_changed();
         Ok(true)
     }
 
@@ -630,6 +643,7 @@ impl VideoDeleteTaskQueue {
     /// 设置处理状态
     pub fn set_processing(&self, is_processing: bool) {
         self.is_processing.store(is_processing, Ordering::SeqCst);
+        notify_queue_status_changed();
     }
 
     /// 处理队列中的所有视频删除任务
@@ -1410,6 +1424,7 @@ impl AddTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -1417,7 +1432,11 @@ impl AddTaskQueue {
     /// 从队列中取出下一个任务
     pub async fn dequeue_task(&self) -> Option<AddVideoSourceTask> {
         let mut queue = self.queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 标记任务为已完成（更新数据库状态）
@@ -1499,6 +1518,7 @@ impl AddTaskQueue {
             .exec(connection)
             .await?;
 
+        notify_queue_status_changed();
         Ok(true)
     }
 
@@ -1510,6 +1530,7 @@ impl AddTaskQueue {
     /// 设置处理状态
     pub fn set_processing(&self, is_processing: bool) {
         self.is_processing.store(is_processing, Ordering::SeqCst);
+        notify_queue_status_changed();
     }
 
     /// 处理队列中的所有添加任务
@@ -1645,6 +1666,7 @@ impl ConfigTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -1673,6 +1695,7 @@ impl ConfigTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -1680,13 +1703,21 @@ impl ConfigTaskQueue {
     /// 从更新配置队列中取出下一个任务
     pub async fn dequeue_update_task(&self) -> Option<UpdateConfigTask> {
         let mut queue = self.update_queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 从重载配置队列中取出下一个任务
     pub async fn dequeue_reload_task(&self) -> Option<ReloadConfigTask> {
         let mut queue = self.reload_queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 标记更新配置任务为已完成（更新数据库状态）
@@ -1836,6 +1867,7 @@ impl ConfigTaskQueue {
                 .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
                 .exec(connection)
                 .await?;
+            notify_queue_status_changed();
             return Ok(true);
         }
 
@@ -1856,6 +1888,7 @@ impl ConfigTaskQueue {
                 .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
                 .exec(connection)
                 .await?;
+            notify_queue_status_changed();
             return Ok(true);
         }
 
@@ -1870,6 +1903,7 @@ impl ConfigTaskQueue {
     /// 设置处理状态
     pub fn set_processing(&self, is_processing: bool) {
         self.is_processing.store(is_processing, Ordering::SeqCst);
+        notify_queue_status_changed();
     }
 
     /// 查询数据库中待处理的更新配置任务数量

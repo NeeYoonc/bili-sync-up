@@ -41,7 +41,8 @@ pub async fn auth(headers: HeaderMap, request: Request, next: Next) -> Result<Re
 
     if (path.starts_with("/api/logs/stream")
         || path.starts_with("/api/videos/live")
-        || path.starts_with("/api/video-sources/live"))
+        || path.starts_with("/api/video-sources/live")
+        || path.starts_with("/api/queue/live"))
         && request
             .uri()
             .query()

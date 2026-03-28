@@ -30,7 +30,8 @@
 	let queueStatus: QueueStatusResponse | null = null;
 	let loading = true;
 	let error: string | null = null;
-	let refreshInterval: ReturnType<typeof setInterval> | null = null;
+	let queueEventSource: EventSource | null = null;
+	let currentQueueStreamUrl: string | null = null;
 	let cancellingTaskIds: Record<string, boolean> = {};
 
 	// 设置面包屑
@@ -54,6 +55,49 @@
 
 		queueStatus = response.data;
 		error = null;
+	}
+
+	function buildQueueStreamUrl(): string | null {
+		const token = localStorage.getItem('auth_token');
+		if (!token) return null;
+
+		const params = new URLSearchParams();
+		params.append('token', token);
+		return `/api/queue/live?${params.toString()}`;
+	}
+
+	function stopQueueStream() {
+		if (queueEventSource) {
+			queueEventSource.close();
+			queueEventSource = null;
+		}
+		currentQueueStreamUrl = null;
+	}
+
+	function startQueueStream() {
+		const streamUrl = buildQueueStreamUrl();
+		if (!streamUrl) return;
+		if (queueEventSource && currentQueueStreamUrl === streamUrl) return;
+
+		stopQueueStream();
+		currentQueueStreamUrl = streamUrl;
+
+		const eventSource = new EventSource(streamUrl);
+		queueEventSource = eventSource;
+
+		eventSource.addEventListener('queue', (event) => {
+			try {
+				queueStatus = JSON.parse((event as MessageEvent).data) as QueueStatusResponse;
+				error = null;
+				loading = false;
+			} catch (err) {
+				console.error('解析任务队列实时更新失败:', err);
+			}
+		});
+
+		eventSource.onerror = () => {
+			if (queueEventSource !== eventSource) return;
+		};
 	}
 
 	// 手动刷新
@@ -114,7 +158,6 @@
 			toast.success('任务已取消', {
 				description: response.data.message
 			});
-			await fetchQueueStatus();
 		} finally {
 			const { [taskId]: _removed, ...rest } = cancellingTaskIds;
 			cancellingTaskIds = rest;
@@ -142,14 +185,11 @@
 		fetchQueueStatus().finally(() => {
 			loading = false;
 		});
-		// 每5秒自动刷新一次
-		refreshInterval = setInterval(fetchQueueStatus, 5000);
+		startQueueStream();
 	});
 
 	onDestroy(() => {
-		if (refreshInterval) {
-			clearInterval(refreshInterval);
-		}
+		stopQueueStream();
 	});
 </script>
 

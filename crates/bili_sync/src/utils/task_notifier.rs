@@ -2,6 +2,8 @@ use std::sync::{Arc, LazyLock};
 
 use serde::Serialize;
 
+use crate::utils::live_updates::notify_queue_status_changed;
+
 pub static TASK_STATUS_NOTIFIER: LazyLock<TaskStatusNotifier> = LazyLock::new(TaskStatusNotifier::new);
 
 #[derive(Serialize, Clone, Default)]
@@ -31,6 +33,7 @@ impl TaskStatusNotifier {
             last_finish: None,
             next_run: None,
         }));
+        notify_queue_status_changed();
     }
 
     /// 简单的结束运行方法，不需要锁
@@ -50,6 +53,7 @@ impl TaskStatusNotifier {
             last_finish: Some(now),
             next_run: now.checked_add_signed(chrono::Duration::seconds(interval_seconds)),
         }));
+        notify_queue_status_changed();
     }
 
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Arc<TaskStatus>> {

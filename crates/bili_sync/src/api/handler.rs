@@ -46,7 +46,8 @@ use crate::api::response::{
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::utils::live_updates::{
-    notify_video_sources_changed, notify_videos_changed, subscribe_video_sources_changed, subscribe_videos_changed,
+    notify_video_sources_changed, notify_videos_changed, subscribe_queue_status_changed,
+    subscribe_video_sources_changed, subscribe_videos_changed,
 };
 use crate::utils::status::{PageStatus, VideoStatus};
 
@@ -1641,6 +1642,34 @@ pub async fn stream_video_sources(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keep-alive"))
 }
 
+/// 实时推送任务队列状态变更
+pub async fn stream_queue_status() -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    const SSE_EVENT_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
+
+    let stream = async_stream::stream! {
+        yield Ok(Event::default().event("ready").data("connected"));
+
+        let mut receiver = subscribe_queue_status_changed();
+        let mut last_snapshot = String::new();
+
+        if let Some(event) = build_queue_status_sse_event(&mut last_snapshot).await {
+            yield Ok(event);
+        }
+
+        loop {
+            if !wait_for_batched_change(&mut receiver, SSE_EVENT_DEBOUNCE).await {
+                break;
+            }
+
+            if let Some(event) = build_queue_status_sse_event(&mut last_snapshot).await {
+                yield Ok(event);
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keep-alive"))
+}
+
 async fn wait_for_batched_change(receiver: &mut watch::Receiver<u64>, debounce: StdDuration) -> bool {
     if receiver.changed().await.is_err() {
         return false;
@@ -1725,6 +1754,29 @@ async fn build_video_sources_sse_event(
         }
         Err(err) => {
             warn!("视频源管理页实时刷新失败: {:?}", err);
+            None
+        }
+    }
+}
+
+async fn build_queue_status_sse_event(last_snapshot: &mut String) -> Option<Event> {
+    let payload = load_queue_status_response().await;
+    match serde_json::to_string(&payload) {
+        Ok(snapshot) => {
+            if snapshot == *last_snapshot {
+                return None;
+            }
+            *last_snapshot = snapshot;
+            match Event::default().event("queue").json_data(&payload) {
+                Ok(event) => Some(event),
+                Err(err) => {
+                    warn!("构建队列状态实时推送事件失败: {}", err);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            warn!("序列化队列状态实时推送数据失败: {}", err);
             None
         }
     }
@@ -10568,6 +10620,10 @@ pub struct CancelQueueTaskResponse {
     )
 )]
 pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiError> {
+    Ok(ApiResponse::ok(load_queue_status_response().await))
+}
+
+async fn load_queue_status_response() -> QueueStatusResponse {
     use crate::task::{ADD_TASK_QUEUE, CONFIG_TASK_QUEUE, DELETE_TASK_QUEUE, TASK_CONTROLLER, VIDEO_DELETE_TASK_QUEUE};
 
     // 获取扫描状态
@@ -10644,7 +10700,7 @@ pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiE
         })
         .collect();
 
-    let response = QueueStatusResponse {
+    QueueStatusResponse {
         is_scanning,
         delete_queue: QueueInfo {
             length: delete_queue_length,
@@ -10668,9 +10724,7 @@ pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiE
             update_tasks: config_update_tasks,
             reload_tasks: config_reload_tasks,
         },
-    };
-
-    Ok(ApiResponse::ok(response))
+    }
 }
 
 /// 取消队列中的待处理任务
