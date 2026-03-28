@@ -409,6 +409,8 @@ mod tests {
             show_season_type: None,
             actors: None,
             auto_download: false,
+            is_charge_video: false,
+            charge_can_play: false,
         };
 
         // 测试使用API标题的情况

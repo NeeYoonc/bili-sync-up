@@ -771,6 +771,311 @@ mod cleanup_tests {
     }
 }
 
+#[cfg(test)]
+mod queue_sse_tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::Router;
+    use bili_sync_migration::{Migrator, MigratorTrait};
+    use serde_json::Value;
+    use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+    use sea_orm::{ActiveModelTrait, Set, SqlxSqliteConnector};
+    use std::fs;
+    use std::path::PathBuf;
+    use tokio::net::TcpListener;
+    use tokio::time::{timeout, Duration};
+
+    async fn read_next_sse_block(response: &mut reqwest::Response) -> anyhow::Result<String> {
+        let mut buffer = String::new();
+
+        loop {
+            let chunk = timeout(Duration::from_secs(3), response.chunk())
+                .await
+                .context("等待 SSE 数据超时")??;
+            let Some(chunk) = chunk else {
+                return Err(anyhow::anyhow!("SSE 连接在收到完整事件前已关闭"));
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            if let Some(index) = buffer.find("\r\n\r\n").or_else(|| buffer.find("\n\n")) {
+                return Ok(buffer[..index].replace("\r\n", "\n"));
+            }
+        }
+    }
+
+    fn parse_sse_json(block: &str) -> Value {
+        let data = block
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim_start)
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::from_str(&data).expect("SSE data 应为合法 JSON")
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-{}-{}", prefix, uuid::Uuid::new_v4()));
+        dir
+    }
+
+    async fn create_test_db(prefix: &str) -> Arc<DatabaseConnection> {
+        let dir = unique_temp_dir(prefix);
+        fs::create_dir_all(&dir).expect("应能创建临时数据库目录");
+        let db_path = dir.join("data.sqlite");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("应能连接测试数据库");
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+
+        Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        Arc::new(db)
+    }
+
+    async fn insert_test_submission(db: &DatabaseConnection, id: i32, upper_name: &str) {
+        submission::ActiveModel {
+            id: Set(id),
+            upper_id: Set(1000 + i64::from(id)),
+            upper_name: Set(upper_name.to_string()),
+            path: Set(format!("/tmp/submission-{id}")),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            latest_row_at: Set("2026-03-28 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            selected_videos: Set(None),
+            keyword_filters: Set(None),
+            keyword_filter_mode: Set(None),
+            blacklist_keywords: Set(None),
+            whitelist_keywords: Set(None),
+            keyword_case_sensitive: Set(false),
+            min_duration_seconds: Set(None),
+            max_duration_seconds: Set(None),
+            published_after: Set(None),
+            published_before: Set(None),
+            audio_only: Set(false),
+            audio_only_m4a_only: Set(false),
+            flat_folder: Set(false),
+            download_danmaku: Set(true),
+            download_subtitle: Set(true),
+            ai_rename: Set(false),
+            ai_rename_video_prompt: Set(String::new()),
+            ai_rename_audio_prompt: Set(String::new()),
+            ai_rename_enable_multi_page: Set(false),
+            ai_rename_enable_collection: Set(false),
+            ai_rename_enable_bangumi: Set(false),
+            ai_rename_rename_parent_dir: Set(false),
+            use_dynamic_api: Set(false),
+            dynamic_api_full_synced: Set(false),
+            last_scan_at: Set(None),
+            next_scan_at: Set(None),
+            no_update_streak: Set(0),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试投稿源");
+    }
+
+    async fn insert_test_video(db: &DatabaseConnection, id: i32, title: &str) {
+        let test_time = chrono::DateTime::from_timestamp(1_640_995_200, 0)
+            .unwrap()
+            .naive_utc();
+
+        video::ActiveModel {
+            id: Set(id),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(Some(1)),
+            source_id: Set(None),
+            source_type: Set(Some(4)),
+            upper_id: Set(2000 + i64::from(id)),
+            upper_name: Set("测试UP".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set(title.to_string()),
+            path: Set(format!("/tmp/video-{id}")),
+            category: Set(1),
+            bvid: Set(format!("BV{id:010}")),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(test_time),
+            pubtime: Set(test_time),
+            favtime: Set(test_time),
+            download_status: Set(0),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(false),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试视频");
+    }
+
+    #[tokio::test]
+    async fn test_queue_sse_pushes_new_snapshot_after_state_change() {
+        crate::task::ADD_TASK_QUEUE.set_processing(false);
+
+        let app = Router::new().route("/queue/live", get(stream_queue_status));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut response = reqwest::Client::new()
+            .get(format!("http://{addr}/queue/live"))
+            .send()
+            .await
+            .expect("应能建立 SSE 连接");
+
+        assert!(response.status().is_success(), "SSE 应返回 200");
+
+        let ready_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            ready_block.contains("event: ready"),
+            "建立连接后的首帧应为 ready 事件，实际内容: {ready_block}"
+        );
+
+        let first_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            first_block.contains("event: queue"),
+            "ready 之后应立即收到 queue 快照，实际内容: {first_block}"
+        );
+        let first_payload = parse_sse_json(&first_block);
+        assert_eq!(first_payload["add_queue"]["is_processing"], false);
+
+        crate::task::ADD_TASK_QUEUE.set_processing(true);
+
+        let second_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            second_block.contains("event: queue"),
+            "状态变化后应继续推送 queue 事件，实际内容: {second_block}"
+        );
+        let second_payload = parse_sse_json(&second_block);
+        assert_eq!(second_payload["add_queue"]["is_processing"], true);
+
+        crate::task::ADD_TASK_QUEUE.set_processing(false);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_video_sources_sse_pushes_new_snapshot_after_insert() {
+        let db = create_test_db("sources-sse").await;
+        let app = Router::new().route("/video-sources/live", get(stream_video_sources)).layer(Extension(db.clone()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut response = reqwest::Client::new()
+            .get(format!("http://{addr}/video-sources/live"))
+            .send()
+            .await
+            .expect("应能建立视频源 SSE 连接");
+
+        let ready_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(ready_block.contains("event: ready"), "视频源 SSE 首帧应为 ready，实际内容: {ready_block}");
+
+        let first_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            first_block.contains("event: sources"),
+            "ready 之后应立即收到 sources 快照，实际内容: {first_block}"
+        );
+        let first_payload = parse_sse_json(&first_block);
+        assert_eq!(
+            first_payload["submission"].as_array().map(|items| items.len()),
+            Some(0),
+            "初始投稿源列表应为空"
+        );
+
+        insert_test_submission(db.as_ref(), 1, "测试投稿源").await;
+        notify_video_sources_changed();
+
+        let second_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            second_block.contains("event: sources"),
+            "插入投稿源后应收到新的 sources 事件，实际内容: {second_block}"
+        );
+        let second_payload = parse_sse_json(&second_block);
+        let submissions = second_payload["submission"].as_array().expect("submission 应为数组");
+        assert_eq!(submissions.len(), 1, "应推送新增后的投稿源列表");
+        assert_eq!(submissions[0]["name"], "测试投稿源");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_videos_sse_pushes_new_snapshot_after_insert() {
+        let db = create_test_db("videos-sse").await;
+        let app = Router::new()
+            .route("/videos/live", get(stream_videos))
+            .layer(Extension(db.clone()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut response = reqwest::Client::new()
+            .get(format!("http://{addr}/videos/live"))
+            .send()
+            .await
+            .expect("应能建立视频 SSE 连接");
+
+        let ready_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(ready_block.contains("event: ready"), "视频 SSE 首帧应为 ready，实际内容: {ready_block}");
+
+        let first_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            first_block.contains("event: videos"),
+            "ready 之后应立即收到 videos 快照，实际内容: {first_block}"
+        );
+        let first_payload = parse_sse_json(&first_block);
+        assert_eq!(first_payload["total_count"], 0, "初始视频总数应为 0");
+
+        insert_test_video(db.as_ref(), 1, "测试视频").await;
+        notify_videos_changed();
+
+        let second_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            second_block.contains("event: videos"),
+            "插入视频后应收到新的 videos 事件，实际内容: {second_block}"
+        );
+        let second_payload = parse_sse_json(&second_block);
+        assert_eq!(second_payload["total_count"], 1, "应推送新增后的视频总数");
+        let videos = second_payload["videos"].as_array().expect("videos 应为数组");
+        assert_eq!(videos.len(), 1, "应推送新增后的视频列表");
+        assert_eq!(videos[0]["name"], "测试视频");
+
+        server.abort();
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(get_video_sources, get_videos, get_video, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
@@ -1211,17 +1516,9 @@ pub async fn get_video_sources(
     }))
 }
 
-async fn resolve_collection_aggregate_season_number(
-    up_id: i64,
-    s_id: i64,
-    collection_type: i32,
-) -> Option<i32> {
-    match crate::utils::collection_aggregate::fetch_absolute_collection_season_number(
-        up_id,
-        s_id,
-        collection_type,
-    )
-    .await
+async fn resolve_collection_aggregate_season_number(up_id: i64, s_id: i64, collection_type: i32) -> Option<i32> {
+    match crate::utils::collection_aggregate::fetch_absolute_collection_season_number(up_id, s_id, collection_type)
+        .await
     {
         Ok(Some(season_number)) => Some(season_number.max(1)),
         Ok(None) => {
@@ -1394,7 +1691,7 @@ pub async fn get_videos(
     let (page, page_size) = if let (Some(page), Some(page_size)) = (params.page, params.page_size) {
         (page, page_size)
     } else {
-        (1, 10)
+        (0, 10)
     };
 
     // 处理排序参数
@@ -1725,10 +2022,7 @@ async fn build_videos_sse_event(
     }
 }
 
-async fn build_video_sources_sse_event(
-    db: Arc<DatabaseConnection>,
-    last_snapshot: &mut String,
-) -> Option<Event> {
+async fn build_video_sources_sse_event(db: Arc<DatabaseConnection>, last_snapshot: &mut String) -> Option<Event> {
     match get_video_sources(Extension(db)).await {
         Ok(response) => {
             let payload = response.into_data();
@@ -1826,8 +2120,20 @@ pub async fn get_video(
         .one(db.as_ref())
         .await?;
 
-    let Some((_id, bvid, name, upper_name, path, category, download_status, cover, valid, is_charge_video, season_id, source_type)) =
-        raw_video
+    let Some((
+        _id,
+        bvid,
+        name,
+        upper_name,
+        path,
+        category,
+        download_status,
+        cover,
+        valid,
+        is_charge_video,
+        season_id,
+        source_type,
+    )) = raw_video
     else {
         return Err(InnerApiError::NotFound(id).into());
     };
@@ -3175,11 +3481,7 @@ pub async fn add_video_source_internal(
                     .map(|cred| {
                         format!(
                             "SESSDATA={};bili_jct={};buvid3={};DedeUserID={};ac_time_value={}",
-                            cred.sessdata,
-                            cred.bili_jct,
-                            cred.buvid3,
-                            cred.dedeuserid,
-                            cred.ac_time_value
+                            cred.sessdata, cred.bili_jct, cred.buvid3, cred.dedeuserid, cred.ac_time_value
                         )
                     })
                     .unwrap_or_default();
@@ -4109,10 +4411,7 @@ pub async fn delete_video_source(
                     task_id,
                 };
                 crate::task::enqueue_delete_task(delete_task, &db).await?;
-                info!(
-                    "直删遇到数据库锁，已自动回退为队列处理: {} ID={}",
-                    source_type, id
-                );
+                info!("直删遇到数据库锁，已自动回退为队列处理: {} ID={}", source_type, id);
                 if !crate::task::DELETE_TASK_QUEUE.is_processing() {
                     let db_clone = db.clone();
                     tokio::spawn(async move {
@@ -4426,10 +4725,7 @@ async fn cleanup_empty_season_dirs(
     }
 }
 
-async fn cleanup_root_metadata_if_no_media(
-    root_dir: &std::path::Path,
-    deleted_count: &mut usize,
-) {
+async fn cleanup_root_metadata_if_no_media(root_dir: &std::path::Path, deleted_count: &mut usize) {
     if !root_dir.exists() || dir_has_media_files_recursive(root_dir) {
         return;
     }
@@ -5464,13 +5760,9 @@ pub async fn update_video_source_download_options_internal(
                 if params.collection_aggregate_enabled == Some(true)
                     || collection.aggregate_season_number.unwrap_or(0) <= 0
                 {
-                    resolve_collection_aggregate_season_number(
-                        collection.m_id,
-                        collection.s_id,
-                        collection.r#type,
-                    )
-                    .await
-                    .or(collection.aggregate_season_number)
+                    resolve_collection_aggregate_season_number(collection.m_id, collection.s_id, collection.r#type)
+                        .await
+                        .or(collection.aggregate_season_number)
                 } else {
                     collection.aggregate_season_number
                 }
@@ -10256,11 +10548,7 @@ pub async fn stream_logs(
         }
     };
 
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(StdDuration::from_secs(15))
-            .text("keepalive"),
-    )
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keepalive"))
 }
 
 /// 获取历史日志
@@ -11024,9 +11312,7 @@ pub async fn proxy_image(
     let now = Utc::now();
     maybe_cleanup_proxy_image_cache(db.as_ref(), now).await;
 
-    if let Some((cached_content_type, cached_etag)) =
-        load_proxy_image_cache_meta(db.as_ref(), &url, now).await
-    {
+    if let Some((cached_content_type, cached_etag)) = load_proxy_image_cache_meta(db.as_ref(), &url, now).await {
         if if_none_match_hit(&headers, &cached_etag) {
             debug!(
                 "图片代理返回304(缓存命中): url={}, etag={}",
@@ -14551,7 +14837,12 @@ pub async fn test_notification_handler(
     let mut config = crate::config::reload_config().notification;
 
     // 应用临时测试覆盖参数（仅本次请求生效，不写入数据库）
-    if let Some(active_channel) = request.active_channel.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(active_channel) = request
+        .active_channel
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         config.active_channel = active_channel.to_string();
     }
     if let Some(serverchan_key) = request.serverchan_key.as_ref() {
@@ -14570,7 +14861,12 @@ pub async fn test_notification_handler(
         let v = wecom_webhook_url.trim();
         config.wecom_webhook_url = if v.is_empty() { None } else { Some(v.to_string()) };
     }
-    if let Some(wecom_msgtype) = request.wecom_msgtype.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(wecom_msgtype) = request
+        .wecom_msgtype
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         config.wecom_msgtype = wecom_msgtype.to_string();
     }
     if let Some(wecom_mention_all) = request.wecom_mention_all {
@@ -14593,7 +14889,12 @@ pub async fn test_notification_handler(
         let v = webhook_bearer_token.trim();
         config.webhook_bearer_token = if v.is_empty() { None } else { Some(v.to_string()) };
     }
-    if let Some(webhook_format) = request.webhook_format.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(webhook_format) = request
+        .webhook_format
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         config.webhook_format = webhook_format.to_ascii_lowercase();
     }
     if let Some(webhook_custom_body) = request.webhook_custom_body.as_ref() {
@@ -15281,12 +15582,10 @@ pub async fn update_video_source_keyword_filters(
         .map(str::to_string);
 
     if let Some(ref date) = published_after {
-        NaiveDate::parse_from_str(date, "%Y-%m-%d")
-            .map_err(|_| anyhow!("投稿起始日期格式无效，必须为 YYYY-MM-DD"))?;
+        NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| anyhow!("投稿起始日期格式无效，必须为 YYYY-MM-DD"))?;
     }
     if let Some(ref date) = published_before {
-        NaiveDate::parse_from_str(date, "%Y-%m-%d")
-            .map_err(|_| anyhow!("投稿截止日期格式无效，必须为 YYYY-MM-DD"))?;
+        NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| anyhow!("投稿截止日期格式无效，必须为 YYYY-MM-DD"))?;
     }
     if let (Some(ref start), Some(ref end)) = (published_after.as_ref(), published_before.as_ref()) {
         if start > end {
