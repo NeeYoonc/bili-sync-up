@@ -39,7 +39,9 @@ pub async fn auth(headers: HeaderMap, request: Request, next: Next) -> Result<Re
     let current_config = crate::config::reload_config();
     let token = current_config.auth_token.as_deref().unwrap_or("");
 
-    if (path.starts_with("/api/logs/stream") || path.starts_with("/api/videos/live"))
+    if (path.starts_with("/api/logs/stream")
+        || path.starts_with("/api/videos/live")
+        || path.starts_with("/api/video-sources/live"))
         && request
             .uri()
             .query()

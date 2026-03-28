@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Badge } from '$lib/components/ui/badge/index.js';
@@ -44,6 +44,12 @@
 
 	let loading = false;
 	let bulkUpdating = false;
+	let sourcesEventSource: EventSource | null = null;
+	let currentSourcesStreamUrl: string | null = null;
+	const queuedDeleteNoticeMap = new Map<
+		string,
+		{ sourceType: VideoSourceType; sourceId: number; sourceName: string }
+	>();
 
 	// 响应式相关
 	const isMobileQuery = new IsMobile();
@@ -122,10 +128,6 @@
 		renameParentDir: false
 	};
 
-	const QUEUED_DELETE_POLL_INTERVAL_MS = 2000;
-	const QUEUED_DELETE_MAX_ATTEMPTS = 30;
-	const queuedDeletePollKeys = new Set<string>();
-
 	async function loadVideoSources() {
 		const response = await runRequest(() => api.getVideoSources(), {
 			setLoading: (value) => (loading = value),
@@ -133,6 +135,16 @@
 		});
 		if (!response) return;
 		setVideoSources(response.data);
+	}
+
+	function buildVideoSourcesStreamUrl(): string | null {
+		if (typeof localStorage === 'undefined') return null;
+		const token = localStorage.getItem('auth_token');
+		if (!token) return null;
+
+		const searchParams = new URLSearchParams();
+		searchParams.append('token', token);
+		return `/api/video-sources/live?${searchParams.toString()}`;
 	}
 
 	function sourceStillExists(
@@ -143,40 +155,70 @@
 		return sources[sourceType]?.some((source) => source.id === sourceId) ?? false;
 	}
 
-	async function pollQueuedSourceDeletion(
+	function markQueuedDeletePending(
 		sourceType: VideoSourceType,
 		sourceId: number,
 		sourceName: string
 	) {
-		const pollKey = `${sourceType}:${sourceId}`;
-		if (queuedDeletePollKeys.has(pollKey)) return;
-		queuedDeletePollKeys.add(pollKey);
+		queuedDeleteNoticeMap.set(`${sourceType}:${sourceId}`, {
+			sourceType,
+			sourceId,
+			sourceName
+		});
+	}
 
-		try {
-			for (let attempt = 0; attempt < QUEUED_DELETE_MAX_ATTEMPTS; attempt++) {
-				await new Promise((resolve) => setTimeout(resolve, QUEUED_DELETE_POLL_INTERVAL_MS));
-
-				try {
-					const response = await api.getVideoSources();
-					setVideoSources(response.data);
-
-					if (!sourceStillExists(response.data, sourceType, sourceId)) {
-						toast.success('删除完成', {
-							description: `视频源「${sourceName}」已从列表移除`
-						});
-						return;
-					}
-				} catch (error) {
-					console.warn('轮询删除视频源状态失败:', error);
-				}
+	function notifyCompletedQueuedDeletions(sources: VideoSourcesResponse) {
+		for (const [key, pendingDelete] of queuedDeleteNoticeMap.entries()) {
+			if (sourceStillExists(sources, pendingDelete.sourceType, pendingDelete.sourceId)) {
+				continue;
 			}
 
-			toast.info('删除任务仍在处理中', {
-				description: `视频源「${sourceName}」暂未从列表移除，可稍后手动刷新确认`
+			queuedDeleteNoticeMap.delete(key);
+			toast.success('删除完成', {
+				description: `视频源「${pendingDelete.sourceName}」已从列表移除`
 			});
-		} finally {
-			queuedDeletePollKeys.delete(pollKey);
 		}
+	}
+
+	function stopVideoSourcesStream() {
+		if (sourcesEventSource) {
+			sourcesEventSource.close();
+			sourcesEventSource = null;
+		}
+		currentSourcesStreamUrl = null;
+	}
+
+	function startVideoSourcesStream() {
+		const streamUrl = buildVideoSourcesStreamUrl();
+		if (!streamUrl) {
+			stopVideoSourcesStream();
+			return;
+		}
+
+		if (sourcesEventSource && currentSourcesStreamUrl === streamUrl) {
+			return;
+		}
+
+		stopVideoSourcesStream();
+		currentSourcesStreamUrl = streamUrl;
+
+		const eventSource = new EventSource(streamUrl);
+		sourcesEventSource = eventSource;
+
+		eventSource.addEventListener('sources', (event) => {
+			try {
+				const payload = JSON.parse((event as MessageEvent).data) as VideoSourcesResponse;
+				notifyCompletedQueuedDeletions(payload);
+				setVideoSources(payload);
+			} catch (error) {
+				console.error('解析视频源实时更新失败:', error);
+			}
+		});
+
+		eventSource.onerror = () => {
+			if (sourcesEventSource !== eventSource) return;
+			console.warn('视频源实时更新连接异常，等待浏览器自动重连');
+		};
 	}
 
 	// 投稿源扫描策略配置（分批/自适应）
@@ -780,7 +822,7 @@
 				},
 				applyLocalUpdate: (data) => {
 					if (isQueuedMessage(data.message)) {
-						void pollQueuedSourceDeletion(
+						markQueuedDeletePending(
 							deleteSourceInfo.type as VideoSourceType,
 							deleteSourceInfo.id,
 							deleteSourceInfo.name
@@ -970,7 +1012,12 @@
 	onMount(() => {
 		setBreadcrumb([{ label: '视频源管理' }]);
 		loadVideoSources();
+		startVideoSourcesStream();
 		loadSubmissionScanConfig();
+	});
+
+	onDestroy(() => {
+		stopVideoSourcesStream();
 	});
 </script>
 

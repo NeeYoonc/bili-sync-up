@@ -1617,6 +1617,45 @@ pub async fn stream_videos(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keep-alive"))
 }
 
+/// 实时推送视频源列表变更
+pub async fn stream_video_sources(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
+        yield Ok(Event::default().event("ready").data("connected"));
+
+        let mut interval = tokio::time::interval(StdDuration::from_secs(1));
+        let mut last_snapshot = String::new();
+
+        loop {
+            interval.tick().await;
+
+            match get_video_sources(Extension(db.clone())).await {
+                Ok(response) => {
+                    let payload = response.into_data();
+                    match serde_json::to_string(&payload) {
+                        Ok(snapshot) => {
+                            if snapshot != last_snapshot {
+                                last_snapshot = snapshot;
+                                match Event::default().event("sources").json_data(&payload) {
+                                    Ok(event) => yield Ok(event),
+                                    Err(err) => warn!("构建视频源实时推送事件失败: {}", err),
+                                }
+                            }
+                        }
+                        Err(err) => warn!("序列化视频源实时推送数据失败: {}", err),
+                    }
+                }
+                Err(err) => {
+                    warn!("视频源管理页实时刷新失败: {:?}", err);
+                }
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keep-alive"))
+}
+
 #[utoipa::path(
     get,
     path = "/api/videos/{id}",
