@@ -31,6 +31,7 @@ pub struct Model {
     pub selected_seasons: Option<String>,
     pub enabled: bool,
     pub scan_deleted_videos: bool,
+    pub scan_deleted_videos_once: bool,
     pub cached_episodes: Option<String>,
     pub cache_updated_at: Option<String>,
     pub keyword_filters: Option<String>,

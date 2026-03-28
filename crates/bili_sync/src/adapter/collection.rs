@@ -12,8 +12,7 @@ use sea_orm::{DatabaseConnection, Unchanged};
 
 use crate::adapter::{VideoSource, VideoSourceEnum, _ActiveModel};
 use crate::bilibili::{
-    BiliClient, Collection, CollectionEpisodeOrderStrategy, CollectionItem, CollectionType,
-    VideoInfo,
+    BiliClient, Collection, CollectionEpisodeOrderStrategy, CollectionItem, CollectionType, VideoInfo,
 };
 
 impl VideoSource for collection::Model {
@@ -85,7 +84,7 @@ impl VideoSource for collection::Model {
     }
 
     fn scan_deleted_videos(&self) -> bool {
-        self.scan_deleted_videos
+        self.scan_deleted_videos || self.scan_deleted_videos_once
     }
 
     fn source_type_display(&self) -> String {
@@ -206,6 +205,7 @@ pub(super) async fn collection_from<'a>(
         latest_row_at: Set("1970-01-01 00:00:00".to_string()),
         enabled: Set(true),
         scan_deleted_videos: Set(false),
+        scan_deleted_videos_once: Set(false),
         episode_order_strategy: Set(CollectionEpisodeOrderStrategy::SeasonHeadTailOldestFirst.into()),
         ..Default::default()
     })

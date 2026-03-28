@@ -56,7 +56,7 @@ impl VideoSource for submission::Model {
 
         // 开启“扫描已删除视频”后，必须全量拉取投稿列表，
         // 否则较早的已删除视频会在增量截断阶段被直接跳过，无法恢复。
-        if self.scan_deleted_videos {
+        if self.scan_deleted_videos || self.scan_deleted_videos_once {
             return true;
         }
 
@@ -126,6 +126,11 @@ impl VideoSource for submission::Model {
             info!("开始断点恢复「{}」投稿扫描..", self.upper_name);
         } else if self.scan_deleted_videos {
             info!("开始全量扫描「{}」投稿（已启用扫描已删除视频）..", self.upper_name);
+        } else if self.scan_deleted_videos_once {
+            info!(
+                "开始全量扫描「{}」投稿（本轮临时启用扫描已删除视频）..",
+                self.upper_name
+            );
         } else if self.selected_videos.is_some() {
             // 选择性下载模式
             let is_first_scan = self.latest_row_at == "1970-01-01 00:00:00" || self.latest_row_at.is_empty();
@@ -175,7 +180,7 @@ impl VideoSource for submission::Model {
     }
 
     fn scan_deleted_videos(&self) -> bool {
-        self.scan_deleted_videos
+        self.scan_deleted_videos || self.scan_deleted_videos_once
     }
 
     fn get_selected_videos(&self) -> Option<Vec<String>> {
@@ -316,6 +321,7 @@ pub(super) async fn submission_from<'a>(
         latest_row_at: Set("1970-01-01 00:00:00".to_string()),
         enabled: Set(true),
         scan_deleted_videos: Set(false),
+        scan_deleted_videos_once: Set(false),
         use_dynamic_api: Set(false),
         dynamic_api_full_synced: Set(false),
         ..Default::default()

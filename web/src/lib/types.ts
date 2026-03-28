@@ -38,6 +38,7 @@ export interface VideoSource {
 	enabled: boolean;
 	path: string;
 	scan_deleted_videos: boolean;
+	scan_deleted_videos_once: boolean;
 	// 类型特有的ID字段
 	f_id?: number; // 收藏夹ID
 	s_id?: number; // 合集ID
@@ -704,7 +705,8 @@ export interface UpdateVideoSourceEnabledResponse {
 
 // 更新视频源扫描已删除视频设置请求类型
 export interface UpdateVideoSourceScanDeletedRequest {
-	scan_deleted_videos: boolean;
+	scan_deleted_videos?: boolean;
+	scan_deleted_videos_once?: boolean;
 }
 
 // 更新视频源扫描已删除视频设置响应类型
@@ -713,6 +715,7 @@ export interface UpdateVideoSourceScanDeletedResponse {
 	source_id: number;
 	source_type: string;
 	scan_deleted_videos: boolean;
+	scan_deleted_videos_once: boolean;
 	message: string;
 }
 

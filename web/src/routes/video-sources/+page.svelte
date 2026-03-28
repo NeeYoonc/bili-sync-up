@@ -532,12 +532,39 @@
 			{
 				successToast: () => ({
 					title: '设置更新成功',
-					description: newScanDeleted ? '已启用扫描已删除视频' : '已禁用扫描已删除视频'
+					description: newScanDeleted ? '已持续启用扫描已删除视频' : '已关闭持续扫描已删除视频'
 				}),
 				applyLocalUpdate: (data) => {
 					updateSourceInStore(sourceType, sourceId, (source) => ({
 						...source,
-						scan_deleted_videos: data.scan_deleted_videos
+						scan_deleted_videos: data.scan_deleted_videos,
+						scan_deleted_videos_once: data.scan_deleted_videos_once
+					}));
+				}
+			}
+		);
+	}
+
+	async function handleToggleScanDeletedOnce(
+		sourceType: string,
+		sourceId: number,
+		currentScanDeletedOnce: boolean
+	) {
+		const newScanDeletedOnce = !currentScanDeletedOnce;
+		await updateAndApply(
+			() => api.updateVideoSourceScanDeletedOnce(sourceType, sourceId, newScanDeletedOnce),
+			{
+				successToast: () => ({
+					title: '设置更新成功',
+					description: newScanDeletedOnce
+						? '已启用本轮扫描已删除视频，本轮成功扫描后会自动关闭'
+						: '已取消本轮扫描已删除视频'
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						scan_deleted_videos: data.scan_deleted_videos,
+						scan_deleted_videos_once: data.scan_deleted_videos_once
 					}));
 				}
 			}
@@ -1236,7 +1263,11 @@
 													{/if}
 												</div>
 												{#if source.scan_deleted_videos}
-													<div class="mt-1 text-xs text-blue-600">扫描删除视频已启用</div>
+													<div class="mt-1 text-xs text-blue-600">扫描删除视频已持续启用</div>
+												{:else if source.scan_deleted_videos_once}
+													<div class="mt-1 text-xs text-orange-600">
+														本轮扫描删除视频已启用
+													</div>
 												{/if}
 												{#if source.keyword_filters && source.keyword_filters.length > 0}
 													<div class="mt-1 text-xs text-purple-600">
@@ -1345,12 +1376,33 @@
 															source.id,
 															source.scan_deleted_videos
 														)}
-													title={source.scan_deleted_videos ? '禁用扫描已删除' : '启用扫描已删除'}
+													title={source.scan_deleted_videos ? '关闭持续扫描已删除' : '持续启用扫描已删除'}
 													class="h-8 w-8 p-0"
 												>
 													<RotateCcwIcon
 														class="h-4 w-4 {source.scan_deleted_videos
 															? 'text-blue-600'
+															: 'text-gray-400'}"
+													/>
+												</Button>
+
+												<Button
+													size="sm"
+													variant="ghost"
+													onclick={() =>
+														handleToggleScanDeletedOnce(
+															sourceConfig.type,
+															source.id,
+															source.scan_deleted_videos_once
+														)}
+													title={source.scan_deleted_videos_once
+														? '取消本轮扫描已删除'
+														: '本轮扫描已删除一次'}
+													class="h-8 w-8 p-0"
+												>
+													<HistoryIcon
+														class="h-4 w-4 {source.scan_deleted_videos_once
+															? 'text-orange-600'
 															: 'text-gray-400'}"
 													/>
 												</Button>

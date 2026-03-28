@@ -777,9 +777,9 @@ mod queue_sse_tests {
     use axum::routing::get;
     use axum::Router;
     use bili_sync_migration::{Migrator, MigratorTrait};
-    use serde_json::Value;
     use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
     use sea_orm::{ActiveModelTrait, Set, SqlxSqliteConnector};
+    use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
     use tokio::net::TcpListener;
@@ -850,6 +850,7 @@ mod queue_sse_tests {
             latest_row_at: Set("2026-03-28 00:00:00".to_string()),
             enabled: Set(true),
             scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
             selected_videos: Set(None),
             keyword_filters: Set(None),
             keyword_filter_mode: Set(None),
@@ -884,9 +885,7 @@ mod queue_sse_tests {
     }
 
     async fn insert_test_video(db: &DatabaseConnection, id: i32, title: &str) {
-        let test_time = chrono::DateTime::from_timestamp(1_640_995_200, 0)
-            .unwrap()
-            .naive_utc();
+        let test_time = chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc();
 
         video::ActiveModel {
             id: Set(id),
@@ -985,7 +984,9 @@ mod queue_sse_tests {
     #[tokio::test]
     async fn test_video_sources_sse_pushes_new_snapshot_after_insert() {
         let db = create_test_db("sources-sse").await;
-        let app = Router::new().route("/video-sources/live", get(stream_video_sources)).layer(Extension(db.clone()));
+        let app = Router::new()
+            .route("/video-sources/live", get(stream_video_sources))
+            .layer(Extension(db.clone()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -999,7 +1000,10 @@ mod queue_sse_tests {
             .expect("应能建立视频源 SSE 连接");
 
         let ready_block = read_next_sse_block(&mut response).await.unwrap();
-        assert!(ready_block.contains("event: ready"), "视频源 SSE 首帧应为 ready，实际内容: {ready_block}");
+        assert!(
+            ready_block.contains("event: ready"),
+            "视频源 SSE 首帧应为 ready，实际内容: {ready_block}"
+        );
 
         let first_block = read_next_sse_block(&mut response).await.unwrap();
         assert!(
@@ -1048,7 +1052,10 @@ mod queue_sse_tests {
             .expect("应能建立视频 SSE 连接");
 
         let ready_block = read_next_sse_block(&mut response).await.unwrap();
-        assert!(ready_block.contains("event: ready"), "视频 SSE 首帧应为 ready，实际内容: {ready_block}");
+        assert!(
+            ready_block.contains("event: ready"),
+            "视频 SSE 首帧应为 ready，实际内容: {ready_block}"
+        );
 
         let first_block = read_next_sse_block(&mut response).await.unwrap();
         assert!(
@@ -1074,11 +1081,67 @@ mod queue_sse_tests {
 
         server.abort();
     }
+
+    #[tokio::test]
+    async fn test_enable_persistent_scan_deleted_clears_once_flag() {
+        let db = create_test_db("scan-deleted-persistent").await;
+        insert_test_submission(db.as_ref(), 1, "测试投稿源").await;
+
+        let once_response =
+            update_video_source_scan_deleted_internal(db.clone(), "submission".to_string(), 1, None, Some(true))
+                .await
+                .expect("应能启用本轮扫描");
+        assert!(!once_response.scan_deleted_videos);
+        assert!(once_response.scan_deleted_videos_once);
+
+        let persistent_response =
+            update_video_source_scan_deleted_internal(db.clone(), "submission".to_string(), 1, Some(true), None)
+                .await
+                .expect("应能启用持续扫描");
+        assert!(persistent_response.scan_deleted_videos);
+        assert!(!persistent_response.scan_deleted_videos_once);
+
+        let submission = submission::Entity::find_by_id(1)
+            .one(db.as_ref())
+            .await
+            .expect("查询应成功")
+            .expect("投稿源应存在");
+        assert!(submission.scan_deleted_videos);
+        assert!(!submission.scan_deleted_videos_once);
+    }
+
+    #[tokio::test]
+    async fn test_enable_once_scan_deleted_clears_persistent_flag() {
+        let db = create_test_db("scan-deleted-once").await;
+        insert_test_submission(db.as_ref(), 1, "测试投稿源").await;
+
+        let persistent_response =
+            update_video_source_scan_deleted_internal(db.clone(), "submission".to_string(), 1, Some(true), None)
+                .await
+                .expect("应能启用持续扫描");
+        assert!(persistent_response.scan_deleted_videos);
+        assert!(!persistent_response.scan_deleted_videos_once);
+
+        let once_response =
+            update_video_source_scan_deleted_internal(db.clone(), "submission".to_string(), 1, None, Some(true))
+                .await
+                .expect("应能启用本轮扫描");
+        assert!(!once_response.scan_deleted_videos);
+        assert!(once_response.scan_deleted_videos_once);
+
+        let submission = submission::Entity::find_by_id(1)
+            .one(db.as_ref())
+            .await
+            .expect("查询应成功")
+            .expect("投稿源应存在");
+        assert!(!submission.scan_deleted_videos);
+        assert!(submission.scan_deleted_videos_once);
+    }
 }
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -1215,6 +1278,7 @@ pub async fn get_video_sources(
                 enabled: model.enabled,
                 path: model.path,
                 scan_deleted_videos: model.scan_deleted_videos,
+                scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
                 s_id: Some(model.s_id),
                 m_id: Some(model.m_id),
@@ -1274,6 +1338,7 @@ pub async fn get_video_sources(
                 enabled: model.enabled,
                 path: model.path,
                 scan_deleted_videos: model.scan_deleted_videos,
+                scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: Some(model.f_id),
                 s_id: None,
                 m_id: None,
@@ -1333,6 +1398,7 @@ pub async fn get_video_sources(
                 enabled: model.enabled,
                 path: model.path,
                 scan_deleted_videos: model.scan_deleted_videos,
+                scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
                 s_id: None,
                 m_id: None,
@@ -1392,6 +1458,7 @@ pub async fn get_video_sources(
                 enabled: model.enabled,
                 path: model.path,
                 scan_deleted_videos: model.scan_deleted_videos,
+                scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
                 s_id: None,
                 m_id: None,
@@ -1470,6 +1537,7 @@ pub async fn get_video_sources(
                 enabled: model.enabled,
                 path: model.path,
                 scan_deleted_videos: model.scan_deleted_videos,
+                scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
                 s_id: None,
                 m_id: None,
@@ -3413,6 +3481,7 @@ pub async fn add_video_source_internal(
                 latest_row_at: sea_orm::Set("1970-01-01 00:00:00".to_string()),
                 enabled: sea_orm::Set(true),
                 scan_deleted_videos: sea_orm::Set(false),
+                scan_deleted_videos_once: sea_orm::Set(false),
                 cover: sea_orm::Set(cover_url),
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
@@ -3517,6 +3586,7 @@ pub async fn add_video_source_internal(
                 latest_row_at: sea_orm::Set("1970-01-01 00:00:00".to_string()),
                 enabled: sea_orm::Set(true),
                 scan_deleted_videos: sea_orm::Set(false),
+                scan_deleted_videos_once: sea_orm::Set(false),
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
                 blacklist_keywords: sea_orm::Set(None),
@@ -3591,6 +3661,7 @@ pub async fn add_video_source_internal(
                 latest_row_at: sea_orm::Set("1970-01-01 00:00:00".to_string()),
                 enabled: sea_orm::Set(true),
                 scan_deleted_videos: sea_orm::Set(false),
+                scan_deleted_videos_once: sea_orm::Set(false),
                 last_scan_at: sea_orm::Set(None),
                 next_scan_at: sea_orm::Set(None),
                 no_update_streak: sea_orm::Set(0),
@@ -3917,6 +3988,8 @@ pub async fn add_video_source_internal(
                     season_id: sea_orm::Set(Some(params.source_id.clone())),
                     media_id: sea_orm::Set(params.media_id),
                     ep_id: sea_orm::Set(params.ep_id),
+                    scan_deleted_videos: sea_orm::Set(false),
+                    scan_deleted_videos_once: sea_orm::Set(false),
                     download_all_seasons: sea_orm::Set(Some(download_all_seasons)),
                     selected_seasons: sea_orm::Set(selected_seasons_json),
                     keyword_filters: sea_orm::Set(keyword_filters_json),
@@ -3993,6 +4066,7 @@ pub async fn add_video_source_internal(
                 latest_row_at: sea_orm::Set(crate::utils::time_format::now_standard_string()),
                 enabled: sea_orm::Set(true),
                 scan_deleted_videos: sea_orm::Set(false),
+                scan_deleted_videos_once: sea_orm::Set(false),
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
                 blacklist_keywords: sea_orm::Set(None),
@@ -5555,9 +5629,88 @@ pub async fn update_video_source_scan_deleted(
     Path((source_type, id)): Path<(String, i32)>,
     axum::Json(params): axum::Json<crate::api::request::UpdateVideoSourceScanDeletedRequest>,
 ) -> Result<ApiResponse<crate::api::response::UpdateVideoSourceScanDeletedResponse>, ApiError> {
-    update_video_source_scan_deleted_internal(db, source_type, id, params.scan_deleted_videos)
+    if params.scan_deleted_videos_once.is_some() {
+        return Err(anyhow!("请使用本轮扫描接口更新临时扫描状态").into());
+    }
+
+    update_video_source_scan_deleted_internal(db, source_type, id, params.scan_deleted_videos, None)
         .await
         .map(ApiResponse::ok)
+}
+
+/// 更新视频源本轮扫描已删除视频设置
+#[utoipa::path(
+    put,
+    path = "/api/video-sources/{source_type}/{id}/scan-deleted-once",
+    params(
+        ("source_type" = String, Path, description = "视频源类型"),
+        ("id" = i32, Path, description = "视频源ID"),
+    ),
+    request_body = crate::api::request::UpdateVideoSourceScanDeletedRequest,
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::UpdateVideoSourceScanDeletedResponse>),
+    )
+)]
+pub async fn update_video_source_scan_deleted_once(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path((source_type, id)): Path<(String, i32)>,
+    axum::Json(params): axum::Json<crate::api::request::UpdateVideoSourceScanDeletedRequest>,
+) -> Result<ApiResponse<crate::api::response::UpdateVideoSourceScanDeletedResponse>, ApiError> {
+    if params.scan_deleted_videos.is_some() {
+        return Err(anyhow!("请使用持续扫描接口更新持久扫描状态").into());
+    }
+
+    update_video_source_scan_deleted_internal(db, source_type, id, None, params.scan_deleted_videos_once)
+        .await
+        .map(ApiResponse::ok)
+}
+
+fn resolve_scan_deleted_modes(
+    current_scan_deleted_videos: bool,
+    current_scan_deleted_videos_once: bool,
+    requested_scan_deleted_videos: Option<bool>,
+    requested_scan_deleted_videos_once: Option<bool>,
+) -> Result<(bool, bool)> {
+    match (requested_scan_deleted_videos, requested_scan_deleted_videos_once) {
+        (Some(scan_deleted_videos), None) => Ok((
+            scan_deleted_videos,
+            if scan_deleted_videos {
+                false
+            } else {
+                current_scan_deleted_videos_once
+            },
+        )),
+        (None, Some(scan_deleted_videos_once)) => Ok((
+            if scan_deleted_videos_once {
+                false
+            } else {
+                current_scan_deleted_videos
+            },
+            scan_deleted_videos_once,
+        )),
+        (Some(_), Some(_)) => Err(anyhow!("不能同时更新持续扫描和本轮扫描状态")),
+        (None, None) => Err(anyhow!("缺少需要更新的扫描状态")),
+    }
+}
+
+fn build_scan_deleted_message(
+    source_label: &str,
+    source_name: Option<&str>,
+    requested_scan_deleted_videos: Option<bool>,
+    requested_scan_deleted_videos_once: Option<bool>,
+) -> String {
+    let target = match source_name {
+        Some(name) => format!("{} {}", source_label, name),
+        None => source_label.to_string(),
+    };
+
+    match (requested_scan_deleted_videos, requested_scan_deleted_videos_once) {
+        (Some(true), None) => format!("{target} 已持续启用扫描已删除视频"),
+        (Some(false), None) => format!("{target} 已关闭持续扫描已删除视频"),
+        (None, Some(true)) => format!("{target} 已启用本轮扫描已删除视频，本轮成功扫描后会自动关闭"),
+        (None, Some(false)) => format!("{target} 已取消本轮扫描已删除视频"),
+        _ => format!("{target} 的扫描已删除视频设置已更新"),
+    }
 }
 
 /// 内部更新视频源扫描已删除视频设置函数
@@ -5565,10 +5718,9 @@ pub async fn update_video_source_scan_deleted_internal(
     db: Arc<DatabaseConnection>,
     source_type: String,
     id: i32,
-    scan_deleted_videos: bool,
+    requested_scan_deleted_videos: Option<bool>,
+    requested_scan_deleted_videos_once: Option<bool>,
 ) -> Result<crate::api::response::UpdateVideoSourceScanDeletedResponse, ApiError> {
-    // 使用主数据库连接
-
     let txn = db.begin().await?;
 
     let result = match source_type.as_str() {
@@ -5578,9 +5730,17 @@ pub async fn update_video_source_scan_deleted_internal(
                 .await?
                 .ok_or_else(|| anyhow!("未找到指定的合集"))?;
 
+            let (scan_deleted_videos, scan_deleted_videos_once) = resolve_scan_deleted_modes(
+                collection.scan_deleted_videos,
+                collection.scan_deleted_videos_once,
+                requested_scan_deleted_videos,
+                requested_scan_deleted_videos_once,
+            )?;
+
             collection::Entity::update(collection::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
                 scan_deleted_videos: sea_orm::Set(scan_deleted_videos),
+                scan_deleted_videos_once: sea_orm::Set(scan_deleted_videos_once),
                 ..Default::default()
             })
             .exec(&txn)
@@ -5591,10 +5751,12 @@ pub async fn update_video_source_scan_deleted_internal(
                 source_id: id,
                 source_type: "collection".to_string(),
                 scan_deleted_videos,
-                message: format!(
-                    "合集 {} 的扫描已删除视频设置已{}",
-                    collection.name,
-                    if scan_deleted_videos { "启用" } else { "禁用" }
+                scan_deleted_videos_once,
+                message: build_scan_deleted_message(
+                    "合集",
+                    Some(&collection.name),
+                    requested_scan_deleted_videos,
+                    requested_scan_deleted_videos_once,
                 ),
             }
         }
@@ -5604,9 +5766,17 @@ pub async fn update_video_source_scan_deleted_internal(
                 .await?
                 .ok_or_else(|| anyhow!("未找到指定的收藏夹"))?;
 
+            let (scan_deleted_videos, scan_deleted_videos_once) = resolve_scan_deleted_modes(
+                favorite.scan_deleted_videos,
+                favorite.scan_deleted_videos_once,
+                requested_scan_deleted_videos,
+                requested_scan_deleted_videos_once,
+            )?;
+
             favorite::Entity::update(favorite::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
                 scan_deleted_videos: sea_orm::Set(scan_deleted_videos),
+                scan_deleted_videos_once: sea_orm::Set(scan_deleted_videos_once),
                 ..Default::default()
             })
             .exec(&txn)
@@ -5617,10 +5787,12 @@ pub async fn update_video_source_scan_deleted_internal(
                 source_id: id,
                 source_type: "favorite".to_string(),
                 scan_deleted_videos,
-                message: format!(
-                    "收藏夹 {} 的扫描已删除视频设置已{}",
-                    favorite.name,
-                    if scan_deleted_videos { "启用" } else { "禁用" }
+                scan_deleted_videos_once,
+                message: build_scan_deleted_message(
+                    "收藏夹",
+                    Some(&favorite.name),
+                    requested_scan_deleted_videos,
+                    requested_scan_deleted_videos_once,
                 ),
             }
         }
@@ -5630,9 +5802,17 @@ pub async fn update_video_source_scan_deleted_internal(
                 .await?
                 .ok_or_else(|| anyhow!("未找到指定的UP主投稿"))?;
 
+            let (scan_deleted_videos, scan_deleted_videos_once) = resolve_scan_deleted_modes(
+                submission.scan_deleted_videos,
+                submission.scan_deleted_videos_once,
+                requested_scan_deleted_videos,
+                requested_scan_deleted_videos_once,
+            )?;
+
             submission::Entity::update(submission::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
                 scan_deleted_videos: sea_orm::Set(scan_deleted_videos),
+                scan_deleted_videos_once: sea_orm::Set(scan_deleted_videos_once),
                 ..Default::default()
             })
             .exec(&txn)
@@ -5643,22 +5823,32 @@ pub async fn update_video_source_scan_deleted_internal(
                 source_id: id,
                 source_type: "submission".to_string(),
                 scan_deleted_videos,
-                message: format!(
-                    "UP主投稿 {} 的扫描已删除视频设置已{}",
-                    submission.upper_name,
-                    if scan_deleted_videos { "启用" } else { "禁用" }
+                scan_deleted_videos_once,
+                message: build_scan_deleted_message(
+                    "UP主投稿",
+                    Some(&submission.upper_name),
+                    requested_scan_deleted_videos,
+                    requested_scan_deleted_videos_once,
                 ),
             }
         }
         "watch_later" => {
-            let _watch_later = watch_later::Entity::find_by_id(id)
+            let watch_later = watch_later::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
                 .ok_or_else(|| anyhow!("未找到指定的稍后观看"))?;
 
+            let (scan_deleted_videos, scan_deleted_videos_once) = resolve_scan_deleted_modes(
+                watch_later.scan_deleted_videos,
+                watch_later.scan_deleted_videos_once,
+                requested_scan_deleted_videos,
+                requested_scan_deleted_videos_once,
+            )?;
+
             watch_later::Entity::update(watch_later::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
                 scan_deleted_videos: sea_orm::Set(scan_deleted_videos),
+                scan_deleted_videos_once: sea_orm::Set(scan_deleted_videos_once),
                 ..Default::default()
             })
             .exec(&txn)
@@ -5669,9 +5859,12 @@ pub async fn update_video_source_scan_deleted_internal(
                 source_id: id,
                 source_type: "watch_later".to_string(),
                 scan_deleted_videos,
-                message: format!(
-                    "稍后观看的扫描已删除视频设置已{}",
-                    if scan_deleted_videos { "启用" } else { "禁用" }
+                scan_deleted_videos_once,
+                message: build_scan_deleted_message(
+                    "稍后再看",
+                    None,
+                    requested_scan_deleted_videos,
+                    requested_scan_deleted_videos_once,
                 ),
             }
         }
@@ -5681,9 +5874,17 @@ pub async fn update_video_source_scan_deleted_internal(
                 .await?
                 .ok_or_else(|| anyhow!("未找到指定的番剧"))?;
 
+            let (scan_deleted_videos, scan_deleted_videos_once) = resolve_scan_deleted_modes(
+                video_source.scan_deleted_videos,
+                video_source.scan_deleted_videos_once,
+                requested_scan_deleted_videos,
+                requested_scan_deleted_videos_once,
+            )?;
+
             video_source::Entity::update(video_source::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
                 scan_deleted_videos: sea_orm::Set(scan_deleted_videos),
+                scan_deleted_videos_once: sea_orm::Set(scan_deleted_videos_once),
                 ..Default::default()
             })
             .exec(&txn)
@@ -5694,10 +5895,12 @@ pub async fn update_video_source_scan_deleted_internal(
                 source_id: id,
                 source_type: "bangumi".to_string(),
                 scan_deleted_videos,
-                message: format!(
-                    "番剧 {} 的扫描已删除视频设置已{}",
-                    video_source.name,
-                    if scan_deleted_videos { "启用" } else { "禁用" }
+                scan_deleted_videos_once,
+                message: build_scan_deleted_message(
+                    "番剧",
+                    Some(&video_source.name),
+                    requested_scan_deleted_videos,
+                    requested_scan_deleted_videos_once,
                 ),
             }
         }

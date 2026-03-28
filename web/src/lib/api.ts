@@ -25,6 +25,7 @@ import type {
 	QueueStatusResponse,
 	CancelQueueTaskResponse,
 	UpdateVideoSourceEnabledResponse,
+	UpdateVideoSourceScanDeletedResponse,
 	ResetVideoSourcePathRequest,
 	ResetVideoSourcePathResponse,
 	UpdateSubmissionSelectedVideosResponse,
@@ -344,10 +345,27 @@ class ApiClient {
 		sourceType: string,
 		id: number,
 		scanDeleted: boolean
-	): Promise<ApiResponse<UpdateVideoSourceEnabledResponse>> {
-		return this.put<UpdateVideoSourceEnabledResponse>(
+	): Promise<ApiResponse<UpdateVideoSourceScanDeletedResponse>> {
+		return this.put<UpdateVideoSourceScanDeletedResponse>(
 			`/video-sources/${sourceType}/${id}/scan-deleted`,
 			{ scan_deleted_videos: scanDeleted }
+		);
+	}
+
+	/**
+	 * 更新视频源一次性扫描已删除视频设置
+	 * @param sourceType 视频源类型
+	 * @param id 视频源ID
+	 * @param scanDeletedOnce 是否本轮临时扫描已删除视频
+	 */
+	async updateVideoSourceScanDeletedOnce(
+		sourceType: string,
+		id: number,
+		scanDeletedOnce: boolean
+	): Promise<ApiResponse<UpdateVideoSourceScanDeletedResponse>> {
+		return this.put<UpdateVideoSourceScanDeletedResponse>(
+			`/video-sources/${sourceType}/${id}/scan-deleted-once`,
+			{ scan_deleted_videos_once: scanDeletedOnce }
 		);
 	}
 
@@ -1102,6 +1120,15 @@ export const api = {
 	 */
 	updateVideoSourceScanDeleted: (sourceType: string, id: number, scanDeleted: boolean) =>
 		apiClient.updateVideoSourceScanDeleted(sourceType, id, scanDeleted),
+
+	/**
+	 * 更新视频源本轮扫描已删除视频设置
+	 */
+	updateVideoSourceScanDeletedOnce: (
+		sourceType: string,
+		id: number,
+		scanDeletedOnce: boolean
+	) => apiClient.updateVideoSourceScanDeletedOnce(sourceType, id, scanDeletedOnce),
 
 	/**
 	 * 更新视频源下载选项

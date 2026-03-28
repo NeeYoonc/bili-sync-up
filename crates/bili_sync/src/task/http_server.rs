@@ -40,7 +40,6 @@ use crate::api::handler::{
     get_latest_ingests,
     get_log_files,
     get_logs,
-    stream_logs,
     get_notification_config,
     get_notification_status,
     get_queue_status,
@@ -57,9 +56,6 @@ use crate::api::handler::{
     get_video_source_keyword_filters,
     get_video_sources,
     get_videos,
-    stream_queue_status,
-    stream_video_sources,
-    stream_videos,
     migrate_config_schema,
     pause_scanning_endpoint,
     poll_qr_status,
@@ -75,6 +71,10 @@ use crate::api::handler::{
     resume_scanning_endpoint,
     search_bilibili,
     setup_auth_token,
+    stream_logs,
+    stream_queue_status,
+    stream_video_sources,
+    stream_videos,
     test_notification_handler,
     test_risk_control_handler,
     update_config,
@@ -86,6 +86,7 @@ use crate::api::handler::{
     update_video_source_enabled,
     update_video_source_keyword_filters,
     update_video_source_scan_deleted,
+    update_video_source_scan_deleted_once,
     update_video_status,
     validate_config,
     validate_favorite,
@@ -166,6 +167,10 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route(
             "/api/video-sources/{source_type}/{id}/scan-deleted",
             put(update_video_source_scan_deleted),
+        )
+        .route(
+            "/api/video-sources/{source_type}/{id}/scan-deleted-once",
+            put(update_video_source_scan_deleted_once),
         )
         .route(
             "/api/video-sources/{source_type}/{id}/download-options",

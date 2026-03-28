@@ -42,7 +42,7 @@ impl VideoSource for favorite::Model {
     fn should_take(&self, release_datetime: &chrono::DateTime<Utc>, latest_row_at_string: &str) -> bool {
         // 收藏夹接口按收藏时间（fav_time）从新到旧排序，可以做增量截断。
         // 但当开启“扫描已删除视频”时，需要全量拉取以确保正确性。
-        if self.scan_deleted_videos {
+        if self.scan_deleted_videos || self.scan_deleted_videos_once {
             return true;
         }
 
@@ -86,7 +86,7 @@ impl VideoSource for favorite::Model {
     }
 
     fn scan_deleted_videos(&self) -> bool {
-        self.scan_deleted_videos
+        self.scan_deleted_videos || self.scan_deleted_videos_once
     }
 
     fn source_type_display(&self) -> String {
@@ -205,6 +205,7 @@ pub(super) async fn favorite_from<'a>(
         latest_row_at: Set("1970-01-01 00:00:00".to_string()),
         enabled: Set(true),
         scan_deleted_videos: Set(false),
+        scan_deleted_videos_once: Set(false),
         ..Default::default()
     })
     .on_conflict(

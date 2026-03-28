@@ -116,6 +116,7 @@ pub struct UpdateVideoSourceScanDeletedResponse {
     pub source_id: i32,
     pub source_type: String,
     pub scan_deleted_videos: bool,
+    pub scan_deleted_videos_once: bool,
     pub message: String,
 }
 
@@ -191,6 +192,7 @@ pub struct VideoSource {
     pub enabled: bool,
     pub path: String,
     pub scan_deleted_videos: bool,
+    pub scan_deleted_videos_once: bool,
     // 类型特有的ID字段
     pub f_id: Option<i64>, // 收藏夹ID
     pub s_id: Option<i64>, // 合集ID
@@ -335,7 +337,18 @@ impl From<(i32, String, String, String, String, i32, u32, String, bool)> for Vid
             bool,
         ),
     ) -> Self {
-        Self::from((id, bvid, name, upper_name, path, category, download_status, cover, valid, false))
+        Self::from((
+            id,
+            bvid,
+            name,
+            upper_name,
+            path,
+            category,
+            download_status,
+            cover,
+            valid,
+            false,
+        ))
     }
 }
 
@@ -351,8 +364,19 @@ impl From<(i32, String, String, String, String, i32, u32, String)> for VideoInfo
             u32,
             String,
         ),
-        ) -> Self {
-        Self::from((id, bvid, name, upper_name, path, category, download_status, cover, true, false))
+    ) -> Self {
+        Self::from((
+            id,
+            bvid,
+            name,
+            upper_name,
+            path,
+            category,
+            download_status,
+            cover,
+            true,
+            false,
+        ))
     }
 }
 
@@ -945,9 +969,9 @@ pub struct GetKeywordFiltersResponse {
     pub success: bool,
     pub source_id: i32,
     pub source_type: String,
-    pub blacklist_keywords: Vec<String>, // 黑名单关键词列表
-    pub whitelist_keywords: Vec<String>, // 白名单关键词列表
-    pub case_sensitive: bool,            // 是否区分大小写
+    pub blacklist_keywords: Vec<String>,   // 黑名单关键词列表
+    pub whitelist_keywords: Vec<String>,   // 白名单关键词列表
+    pub case_sensitive: bool,              // 是否区分大小写
     pub min_duration_seconds: Option<i32>, // 最短时长（秒）
     pub max_duration_seconds: Option<i32>, // 最长时长（秒）
     pub published_after: Option<String>,   // 投稿起始日期（YYYY-MM-DD，含当天）

@@ -30,6 +30,7 @@ pub struct BangumiSource {
     pub page_name_template: Option<String>,
     pub selected_seasons: Option<Vec<String>>,
     pub scan_deleted_videos: bool,
+    pub scan_deleted_videos_once: bool,
     pub keyword_filters: Option<String>,
     pub keyword_filter_mode: Option<String>,
     pub blacklist_keywords: Option<String>,
@@ -407,7 +408,7 @@ impl VideoSourceTrait for BangumiSource {
     }
 
     fn scan_deleted_videos(&self) -> bool {
-        self.scan_deleted_videos
+        self.scan_deleted_videos || self.scan_deleted_videos_once
     }
 
     fn filter_expr(&self) -> SimpleExpr {
@@ -494,7 +495,7 @@ impl VideoSource for BangumiSource {
     }
 
     fn scan_deleted_videos(&self) -> bool {
-        self.scan_deleted_videos
+        self.scan_deleted_videos || self.scan_deleted_videos_once
     }
 
     fn source_type_display(&self) -> String {

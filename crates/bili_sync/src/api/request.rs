@@ -105,7 +105,8 @@ pub struct UpdateVideoSourceEnabledRequest {
 // 更新视频源扫描已删除视频设置的请求结构体
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateVideoSourceScanDeletedRequest {
-    pub scan_deleted_videos: bool,
+    pub scan_deleted_videos: Option<bool>,
+    pub scan_deleted_videos_once: Option<bool>,
 }
 
 // 更新视频源下载选项的请求结构体

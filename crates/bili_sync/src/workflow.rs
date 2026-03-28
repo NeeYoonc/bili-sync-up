@@ -19,8 +19,8 @@ use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::utils::time_format::{now_naive, now_standard_string, parse_time_string};
 use crate::utils::live_updates::{notify_video_sources_changed, notify_videos_changed};
+use crate::utils::time_format::{now_naive, now_standard_string, parse_time_string};
 
 // 全局番剧季度标题缓存
 lazy_static::lazy_static! {
@@ -1110,8 +1110,7 @@ pub async fn refresh_video_source<'a>(
                 .one(connection)
                 .await?
             {
-                match get_collection_video_episode_number(connection, collection_source.id, &any_video.bvid).await
-                {
+                match get_collection_video_episode_number(connection, collection_source.id, &any_video.bvid).await {
                     Ok(_) => {
                         info!("合集「{}」的视频集数序号已更新", collection_source.name);
                     }
@@ -1123,12 +1122,82 @@ pub async fn refresh_video_source<'a>(
         }
     }
 
+    if !(token.is_cancelled() || crate::task::TASK_CONTROLLER.is_paused())
+        && clear_scan_deleted_videos_once_if_needed(video_source, connection).await?
+    {
+        notify_video_sources_changed();
+    }
+
     // 注意：投稿源分季映射在运行中不再执行“全量归一化重排”，
     // 避免下载过程中旧视频插入导致已有季号漂移（例如 Season 03 被重排到 Season 540）。
 
     video_source.log_refresh_video_end(count);
     debug!("workflow返回: count={}, new_videos.len()={}", count, new_videos.len());
     Ok((count, new_videos))
+}
+
+async fn clear_scan_deleted_videos_once_if_needed(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    let cleared = match video_source {
+        VideoSourceEnum::Collection(source) if source.scan_deleted_videos_once => {
+            collection::Entity::update_many()
+                .col_expr(collection::Column::ScanDeletedVideosOnce, false.into())
+                .filter(collection::Column::Id.eq(source.id))
+                .exec(connection)
+                .await?
+                .rows_affected
+                > 0
+        }
+        VideoSourceEnum::Favorite(source) if source.scan_deleted_videos_once => {
+            favorite::Entity::update_many()
+                .col_expr(favorite::Column::ScanDeletedVideosOnce, false.into())
+                .filter(favorite::Column::Id.eq(source.id))
+                .exec(connection)
+                .await?
+                .rows_affected
+                > 0
+        }
+        VideoSourceEnum::Submission(source) if source.scan_deleted_videos_once => {
+            submission::Entity::update_many()
+                .col_expr(submission::Column::ScanDeletedVideosOnce, false.into())
+                .filter(submission::Column::Id.eq(source.id))
+                .exec(connection)
+                .await?
+                .rows_affected
+                > 0
+        }
+        VideoSourceEnum::WatchLater(source) if source.scan_deleted_videos_once => {
+            watch_later::Entity::update_many()
+                .col_expr(watch_later::Column::ScanDeletedVideosOnce, false.into())
+                .filter(watch_later::Column::Id.eq(source.id))
+                .exec(connection)
+                .await?
+                .rows_affected
+                > 0
+        }
+        VideoSourceEnum::BangumiSource(source) if source.id > 0 && source.scan_deleted_videos_once => {
+            video_source::Entity::update_many()
+                .col_expr(video_source::Column::ScanDeletedVideosOnce, false.into())
+                .filter(video_source::Column::Id.eq(source.id))
+                .exec(connection)
+                .await?
+                .rows_affected
+                > 0
+        }
+        _ => false,
+    };
+
+    if cleared {
+        info!(
+            "{}「{}」的本轮扫描已删除视频已自动关闭",
+            video_source.source_type_display(),
+            video_source.source_name_display()
+        );
+    }
+
+    Ok(cleared)
 }
 
 /// 筛选出所有未获取到全部信息的视频，尝试补充其详细信息
@@ -1602,10 +1671,12 @@ pub async fn fetch_video_details(
                                     if ugc.mid == Some(video_model_mut.upper_id) {
                                         if let Some(id_value) = ugc.id.as_ref() {
                                             if let Some(collection_key) = ugc_season_id_to_membership_key(id_value) {
-                                                let episode_number =
-                                                    pick_episode_number_from_ugc_episodes(&ugc.episodes, &video_model_mut.bvid)
-                                                        .unwrap_or(1)
-                                                        .max(1);
+                                                let episode_number = pick_episode_number_from_ugc_episodes(
+                                                    &ugc.episodes,
+                                                    &video_model_mut.bvid,
+                                                )
+                                                .unwrap_or(1)
+                                                .max(1);
                                                 let mut membership = submission_collection_membership
                                                     .lock()
                                                     .unwrap_or_else(|e| e.into_inner());
@@ -1728,8 +1799,12 @@ pub async fn fetch_video_details(
                     submission_source.upper_name,
                     detail_membership_map.len()
                 );
-                match backfill_submission_collection_membership(connection, submission_source.id, &detail_membership_map)
-                    .await
+                match backfill_submission_collection_membership(
+                    connection,
+                    submission_source.id,
+                    &detail_membership_map,
+                )
+                .await
                 {
                     Ok(updated) if updated > 0 => {
                         info!("投稿源归属回填完成：本轮修正 {} 条历史视频归属", updated);
@@ -1785,7 +1860,10 @@ pub async fn fetch_video_details(
             )
             .await
             {
-                warn!("写入投稿归属状态到video表失败（upper_id={}）: {}", submission_source.upper_id, err);
+                warn!(
+                    "写入投稿归属状态到video表失败（upper_id={}）: {}",
+                    submission_source.upper_id, err
+                );
             } else if unresolved_bvids.is_empty() {
                 info!("投稿未归属持久标记已清空（upper_id={}）", submission_source.upper_id);
             } else {
@@ -3438,9 +3516,7 @@ pub async fn download_video_pages(
             // 合集启用Season结构时，使用合集名称作为文件名前缀
             match video_source {
                 VideoSourceEnum::Collection(collection_source) => {
-                    if config.collection_folder_mode.as_ref() == "up_seasonal"
-                        || collection_source.aggregate_enabled
-                    {
+                    if config.collection_folder_mode.as_ref() == "up_seasonal" || collection_source.aggregate_enabled {
                         if let Some(season_folder_name) = season_folder.as_ref() {
                             // up_seasonal 下合集源与投稿源统一：按 SeasonXX 命名根封面
                             let season_name = if let Some(raw_no) = season_folder_name.strip_prefix("Season ") {
@@ -4037,8 +4113,8 @@ pub async fn download_video_pages(
     };
 
     // 合集根目录封面、季级封面缺失时，都需要优先准备合集列表接口返回的 collection.cover。
-    let should_prepare_collection_cover = is_collection
-        && (should_download_season_poster || should_backfill_collection_root_assets);
+    let should_prepare_collection_cover =
+        is_collection && (should_download_season_poster || should_backfill_collection_root_assets);
 
     // 预先获取合集封面URL（如果需要）
     let collection_cover_url = if should_prepare_collection_cover {
@@ -4053,50 +4129,48 @@ pub async fn download_video_pages(
                             info!("合集「{}」使用数据库保存的封面: {}", fresh_collection.name, cover_url);
                             Some(cover_url.clone())
                         }
-                        _ => {
-                            match bili_client.get_user_collections(fresh_collection.m_id, 1, 50).await {
-                                Ok(collections_response) => {
-                                    let fetched_cover = collections_response
-                                        .collections
-                                        .iter()
-                                        .find(|item| item.sid.parse::<i64>().ok() == Some(fresh_collection.s_id))
-                                        .and_then(|item| {
-                                            let cover = item.cover.trim();
-                                            if cover.is_empty() {
-                                                None
-                                            } else {
-                                                Some(cover.to_string())
-                                            }
-                                        });
+                        _ => match bili_client.get_user_collections(fresh_collection.m_id, 1, 50).await {
+                            Ok(collections_response) => {
+                                let fetched_cover = collections_response
+                                    .collections
+                                    .iter()
+                                    .find(|item| item.sid.parse::<i64>().ok() == Some(fresh_collection.s_id))
+                                    .and_then(|item| {
+                                        let cover = item.cover.trim();
+                                        if cover.is_empty() {
+                                            None
+                                        } else {
+                                            Some(cover.to_string())
+                                        }
+                                    });
 
-                                    if let Some(ref cover_url) = fetched_cover {
-                                        info!("合集「{}」运行时回查封面成功: {}", fresh_collection.name, cover_url);
-                                        let mut active_model: collection::ActiveModel = fresh_collection.clone().into();
-                                        active_model.cover = Set(Some(cover_url.clone()));
-                                        if let Err(err) = active_model.update(connection).await {
-                                            warn!(
+                                if let Some(ref cover_url) = fetched_cover {
+                                    info!("合集「{}」运行时回查封面成功: {}", fresh_collection.name, cover_url);
+                                    let mut active_model: collection::ActiveModel = fresh_collection.clone().into();
+                                    active_model.cover = Set(Some(cover_url.clone()));
+                                    if let Err(err) = active_model.update(connection).await {
+                                        warn!(
                                                 "回写合集封面到数据库失败（将继续使用本次结果）: collection_id={}, sid={}, err={}",
                                                 collection_source.id, collection_source.s_id, err
                                             );
-                                        }
-                                    } else {
-                                        info!(
+                                    }
+                                } else {
+                                    info!(
                                             "合集「{}」数据库和API中都没有稳定封面；若由非首集补封面，将不再回退为当前分集封面",
                                             fresh_collection.name
                                         );
-                                    }
-
-                                    fetched_cover
                                 }
-                                Err(err) => {
-                                    warn!(
+
+                                fetched_cover
+                            }
+                            Err(err) => {
+                                warn!(
                                         "运行时回查合集封面失败（将避免使用分集封面作为季封面）: collection_id={}, sid={}, err={}",
                                         collection_source.id, collection_source.s_id, err
                                     );
-                                    None
-                                }
+                                None
                             }
-                        }
+                        },
                     },
                     Ok(None) => {
                         warn!("合集ID {} 在数据库中不存在", collection_source.id);
@@ -4834,7 +4908,7 @@ pub async fn download_video_pages(
     let season_poster_compat_result = if !is_bangumi
         && season_folder.is_some()
         && video_base_name.starts_with("Season")
-        && (((!is_single_page && current_config.multi_page_use_season_structure))
+        && ((!is_single_page && current_config.multi_page_use_season_structure)
             || (is_collection && collection_use_season_structure))
     {
         let root_dir = base_path.parent().unwrap_or(&base_path);
@@ -4867,9 +4941,9 @@ pub async fn download_video_pages(
         Ok(season_nfo_result.unwrap_or(ExecutionStatus::Skipped)),
         Ok(season_images_result.unwrap_or(ExecutionStatus::Skipped)),
         season_poster_compat_result, // UGC Seasonxx-poster.jpg（复用Seasonxx-thumb.jpg）
-        res_2,              // 番剧/多P/合集根目录 poster.jpg 的结果（Emby兼容）
-        res_folder,         // 番剧/多P/合集根目录 folder.jpg 的结果（Emby优先识别）
-        staff_faces_result, // staff成员头像下载结果
+        res_2,                       // 番剧/多P/合集根目录 poster.jpg 的结果（Emby兼容）
+        res_folder,                  // 番剧/多P/合集根目录 folder.jpg 的结果（Emby优先识别）
+        staff_faces_result,          // staff成员头像下载结果
     ]
     .into_iter()
     .map(Into::into)
@@ -6584,8 +6658,7 @@ fn is_charge_video_locked(video_model: &video::Model) -> bool {
 
 fn is_charge_permission_error(err: &anyhow::Error) -> bool {
     let classified = crate::error::ErrorClassifier::classify_error(err);
-    classified.error_type == crate::error::ErrorType::Permission
-        && classified.message.contains("充电专享视频")
+    classified.error_type == crate::error::ErrorType::Permission && classified.message.contains("充电专享视频")
 }
 
 async fn persist_charge_video_state(
@@ -6736,9 +6809,7 @@ pub async fn fetch_page_video(
                 if is_charge_permission_error(&e) {
                     info!(
                         "检测到充电专享视频播放权限限制，改为创建占位文件: 视频「{}」第{}页 {}",
-                        &video_model.name,
-                        page_info_for_download.page,
-                        &page_info_for_download.name
+                        &video_model.name, page_info_for_download.page, &page_info_for_download.name
                     );
                     persist_charge_video_state(connection, video_model.id, true, false).await;
                     return create_charge_video_placeholder(page_path, video_model, &page_info_for_download).await;
@@ -10537,9 +10608,7 @@ async fn refresh_collection_video_episode_numbers(
     };
     let collection = Collection::new(&bili_client, &collection_item);
 
-    let strategy = crate::bilibili::CollectionEpisodeOrderStrategy::from(
-        collection_model.episode_order_strategy,
-    );
+    let strategy = crate::bilibili::CollectionEpisodeOrderStrategy::from(collection_model.episode_order_strategy);
     let order_map = collection.get_video_order_map(strategy).await?;
     debug!(
         "从API获取合集 {} 的视频顺序，共 {} 个视频",
@@ -10896,9 +10965,9 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
 
         info!("已标记 {} 个video为已删除（排除了已修复的记录）", disabled_count);
 
-        // 6.5 自动为涉及的源启用 scan_deleted_videos
+        // 6.5 自动为涉及的源启用本轮 scan_deleted_videos
         if disabled_count > 0 {
-            info!("检测到视频被标记为已删除，正在自动启用相关源的'扫描已删除视频'功能...");
+            info!("检测到视频被标记为已删除，正在自动启用相关源的'本轮扫描已删除视频'功能...");
 
             // 查询刚刚被标记为已删除的视频的源信息
             let deleted_videos_sources = txn
@@ -10951,7 +11020,7 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
                 }
             }
 
-            // 批量更新各个源表的scan_deleted_videos字段
+            // 批量更新各个源表的 scan_deleted_videos_once 字段
             let mut enabled_sources = vec![];
 
             // UP主投稿
@@ -10961,8 +11030,8 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
                     .execute(Statement::from_sql_and_values(
                         DatabaseBackend::Sqlite,
                         format!(
-                            "UPDATE submission SET scan_deleted_videos = 1 
-                             WHERE id IN ({}) AND scan_deleted_videos = 0",
+                            "UPDATE submission SET scan_deleted_videos_once = 1
+                             WHERE id IN ({}) AND scan_deleted_videos = 0 AND scan_deleted_videos_once = 0",
                             placeholders
                         ),
                         submission_ids.iter().map(|id| (*id).into()).collect::<Vec<_>>(),
@@ -10980,8 +11049,8 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
                     .execute(Statement::from_sql_and_values(
                         DatabaseBackend::Sqlite,
                         format!(
-                            "UPDATE collection SET scan_deleted_videos = 1 
-                             WHERE id IN ({}) AND scan_deleted_videos = 0",
+                            "UPDATE collection SET scan_deleted_videos_once = 1
+                             WHERE id IN ({}) AND scan_deleted_videos = 0 AND scan_deleted_videos_once = 0",
                             placeholders
                         ),
                         collection_ids.iter().map(|id| (*id).into()).collect::<Vec<_>>(),
@@ -10999,8 +11068,8 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
                     .execute(Statement::from_sql_and_values(
                         DatabaseBackend::Sqlite,
                         format!(
-                            "UPDATE favorite SET scan_deleted_videos = 1 
-                             WHERE id IN ({}) AND scan_deleted_videos = 0",
+                            "UPDATE favorite SET scan_deleted_videos_once = 1
+                             WHERE id IN ({}) AND scan_deleted_videos = 0 AND scan_deleted_videos_once = 0",
                             placeholders
                         ),
                         favorite_ids.iter().map(|id| (*id).into()).collect::<Vec<_>>(),
@@ -11018,8 +11087,8 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
                     .execute(Statement::from_sql_and_values(
                         DatabaseBackend::Sqlite,
                         format!(
-                            "UPDATE watch_later SET scan_deleted_videos = 1 
-                             WHERE id IN ({}) AND scan_deleted_videos = 0",
+                            "UPDATE watch_later SET scan_deleted_videos_once = 1
+                             WHERE id IN ({}) AND scan_deleted_videos = 0 AND scan_deleted_videos_once = 0",
                             placeholders
                         ),
                         watch_later_ids.iter().map(|id| (*id).into()).collect::<Vec<_>>(),
@@ -11037,8 +11106,8 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
                     .execute(Statement::from_sql_and_values(
                         DatabaseBackend::Sqlite,
                         format!(
-                            "UPDATE video_source SET scan_deleted_videos = 1 
-                             WHERE id IN ({}) AND scan_deleted_videos = 0",
+                            "UPDATE video_source SET scan_deleted_videos_once = 1
+                             WHERE id IN ({}) AND scan_deleted_videos = 0 AND scan_deleted_videos_once = 0",
                             placeholders
                         ),
                         bangumi_source_ids.iter().map(|id| (*id).into()).collect::<Vec<_>>(),
@@ -11051,7 +11120,7 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
 
             if !enabled_sources.is_empty() {
                 info!(
-                    "已自动启用以下视频源的'扫描已删除视频'功能: {}",
+                    "已自动启用以下视频源的'本轮扫描已删除视频'功能: {}",
                     enabled_sources.join(", ")
                 );
             }
@@ -11398,10 +11467,94 @@ pub fn generate_unique_folder_name(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use bili_sync_entity::submission;
+    use bili_sync_migration::{Migrator, MigratorTrait};
     use handlebars::handlebars_helper;
+    use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+    use sea_orm::{ActiveModelTrait, DatabaseConnection, Set, SqlxSqliteConnector};
     use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
 
+    use crate::adapter::VideoSourceEnum;
     use crate::config::PathSafeTemplate;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-workflow-{}-{}", prefix, uuid::Uuid::new_v4()));
+        dir
+    }
+
+    async fn create_test_db(prefix: &str) -> DatabaseConnection {
+        let dir = unique_temp_dir(prefix);
+        fs::create_dir_all(&dir).expect("应能创建临时数据库目录");
+        let db_path = dir.join("data.sqlite");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("应能连接测试数据库");
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+
+        Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        db
+    }
+
+    async fn insert_test_submission(
+        db: &DatabaseConnection,
+        id: i32,
+        scan_deleted_videos: bool,
+        scan_deleted_videos_once: bool,
+    ) {
+        submission::ActiveModel {
+            id: Set(id),
+            upper_id: Set(1000 + i64::from(id)),
+            upper_name: Set(format!("测试UP{id}")),
+            path: Set(format!("/tmp/submission-{id}")),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            latest_row_at: Set("2026-03-28 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(scan_deleted_videos),
+            scan_deleted_videos_once: Set(scan_deleted_videos_once),
+            selected_videos: Set(None),
+            keyword_filters: Set(None),
+            keyword_filter_mode: Set(None),
+            blacklist_keywords: Set(None),
+            whitelist_keywords: Set(None),
+            keyword_case_sensitive: Set(false),
+            min_duration_seconds: Set(None),
+            max_duration_seconds: Set(None),
+            published_after: Set(None),
+            published_before: Set(None),
+            audio_only: Set(false),
+            audio_only_m4a_only: Set(false),
+            flat_folder: Set(false),
+            download_danmaku: Set(true),
+            download_subtitle: Set(true),
+            ai_rename: Set(false),
+            ai_rename_video_prompt: Set(String::new()),
+            ai_rename_audio_prompt: Set(String::new()),
+            ai_rename_enable_multi_page: Set(false),
+            ai_rename_enable_collection: Set(false),
+            ai_rename_enable_bangumi: Set(false),
+            ai_rename_rename_parent_dir: Set(false),
+            use_dynamic_api: Set(false),
+            dynamic_api_full_synced: Set(false),
+            last_scan_at: Set(None),
+            next_scan_at: Set(None),
+            no_update_streak: Set(0),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试投稿源");
+    }
 
     #[test]
     fn test_template_usage() {
@@ -11466,6 +11619,58 @@ mod tests {
                 .unwrap(),
             "哈哈，你说得对，但是 Rust 是由 Mozilla 自主研发的一"
         );
+    }
+
+    #[tokio::test]
+    async fn test_clear_scan_deleted_once_after_successful_scan() {
+        let db = create_test_db("clear-once").await;
+        insert_test_submission(&db, 1, false, true).await;
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("查询应成功")
+            .expect("投稿源应存在");
+        let video_source = VideoSourceEnum::Submission(submission_source);
+
+        let cleared = clear_scan_deleted_videos_once_if_needed(&video_source, &db)
+            .await
+            .expect("清理本轮标记应成功");
+        assert!(cleared, "本轮标记应被自动关闭");
+
+        let updated_submission = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("查询应成功")
+            .expect("投稿源应存在");
+        assert!(!updated_submission.scan_deleted_videos);
+        assert!(!updated_submission.scan_deleted_videos_once);
+    }
+
+    #[tokio::test]
+    async fn test_persistent_scan_deleted_is_not_cleared_by_once_cleanup() {
+        let db = create_test_db("keep-persistent").await;
+        insert_test_submission(&db, 1, true, false).await;
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("查询应成功")
+            .expect("投稿源应存在");
+        let video_source = VideoSourceEnum::Submission(submission_source);
+
+        let cleared = clear_scan_deleted_videos_once_if_needed(&video_source, &db)
+            .await
+            .expect("检查应成功");
+        assert!(!cleared, "持续模式不应被本轮清理逻辑误清除");
+
+        let updated_submission = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("查询应成功")
+            .expect("投稿源应存在");
+        assert!(updated_submission.scan_deleted_videos);
+        assert!(!updated_submission.scan_deleted_videos_once);
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测
