@@ -340,6 +340,7 @@ pub struct UpdateNotificationConfigRequest {
     pub wecom_mentioned_list: Option<Vec<String>>,
     pub webhook_url: Option<String>,
     pub webhook_bearer_token: Option<String>,
+    pub webhook_custom_headers: Option<String>,
     pub webhook_format: Option<String>,
     pub webhook_custom_body: Option<String>,
     pub enable_scan_notifications: Option<bool>,
@@ -363,6 +364,7 @@ pub struct TestNotificationRequest {
     pub wecom_mentioned_list: Option<Vec<String>>,
     pub webhook_url: Option<String>,
     pub webhook_bearer_token: Option<String>,
+    pub webhook_custom_headers: Option<String>,
     pub webhook_format: Option<String>,
     pub webhook_custom_body: Option<String>,
 }

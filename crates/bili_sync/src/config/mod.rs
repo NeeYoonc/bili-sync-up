@@ -310,6 +310,8 @@ pub struct NotificationConfig {
     pub webhook_url: Option<String>,
     #[serde(default)]
     pub webhook_bearer_token: Option<String>,
+    #[serde(default)]
+    pub webhook_custom_headers: Option<String>,
     #[serde(default = "default_webhook_format")]
     pub webhook_format: String, // "auto", "generic", "opensend"
     #[serde(default)]
@@ -363,6 +365,7 @@ impl Default for NotificationConfig {
             wecom_mentioned_list: None,
             webhook_url: None,
             webhook_bearer_token: None,
+            webhook_custom_headers: None,
             webhook_format: default_webhook_format(),
             webhook_custom_body: None,
             enable_scan_notifications: false,
@@ -487,12 +490,18 @@ impl NotificationConfig {
                         return Err(format!("Webhook格式不支持: {}", self.webhook_format));
                     }
                     if self.webhook_format == "custom"
-                        && self
-                            .webhook_custom_body
-                            .as_ref()
-                            .is_none_or(|v| v.trim().is_empty())
+                        && self.webhook_custom_body.as_ref().is_none_or(|v| v.trim().is_empty())
                     {
                         return Err("已选择自定义 JSON 但未配置 POST Body".to_string());
+                    }
+                    if let Some(custom_headers) = self
+                        .webhook_custom_headers
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                    {
+                        crate::utils::notification::NotificationClient::validate_custom_webhook_headers(custom_headers)
+                            .map_err(|e| format!("Webhook 自定义 Headers 配置无效: {}", e))?;
                     }
                 }
                 _ => {}

@@ -883,6 +883,7 @@ class ApiClient {
 			wecom_mentioned_list?: string[];
 			webhook_url?: string;
 			webhook_bearer_token?: string;
+			webhook_custom_headers?: string;
 			webhook_format?: string;
 			webhook_custom_body?: string;
 			notification_min_videos: number;
@@ -902,6 +903,7 @@ class ApiClient {
 			wecom_mentioned_list?: string[];
 			webhook_url?: string;
 			webhook_bearer_token?: string;
+			webhook_custom_headers?: string;
 			webhook_format?: string;
 			webhook_custom_body?: string;
 			notification_min_videos: number;
@@ -925,6 +927,7 @@ class ApiClient {
 		wecom_mentioned_list?: string[];
 		webhook_url?: string;
 		webhook_bearer_token?: string;
+		webhook_custom_headers?: string;
 		webhook_format?: string;
 		webhook_custom_body?: string;
 		notification_min_videos?: number;
@@ -947,6 +950,7 @@ class ApiClient {
 		wecom_mentioned_list?: string[];
 		webhook_url?: string;
 		webhook_bearer_token?: string;
+		webhook_custom_headers?: string;
 		webhook_format?: string;
 		webhook_custom_body?: string;
 	}): Promise<
@@ -1334,7 +1338,9 @@ export const api = {
 		wecom_mentioned_list?: string[];
 		webhook_url?: string;
 		webhook_bearer_token?: string;
+		webhook_custom_headers?: string;
 		webhook_format?: string;
+		webhook_custom_body?: string;
 		notification_min_videos?: number;
 	}) => apiClient.updateNotificationConfig(config),
 
@@ -1353,7 +1359,9 @@ export const api = {
 		wecom_mentioned_list?: string[];
 		webhook_url?: string;
 		webhook_bearer_token?: string;
+		webhook_custom_headers?: string;
 		webhook_format?: string;
+		webhook_custom_body?: string;
 	}) => apiClient.testNotification(params),
 
 	/**

@@ -894,6 +894,7 @@ pub struct NotificationConfigResponse {
     pub wecom_mentioned_list: Option<Vec<String>>,
     pub webhook_url: Option<String>,
     pub webhook_bearer_token: Option<String>,
+    pub webhook_custom_headers: Option<String>,
     pub webhook_format: String,
     pub webhook_custom_body: Option<String>,
     pub enable_scan_notifications: bool,

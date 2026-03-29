@@ -7624,6 +7624,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
             wecom_mentioned_list: config.notification.wecom_mentioned_list.clone(),
             webhook_url: config.notification.webhook_url.clone(),
             webhook_bearer_token: config.notification.webhook_bearer_token.clone(),
+            webhook_custom_headers: config.notification.webhook_custom_headers.clone(),
             webhook_format: config.notification.webhook_format.clone(),
             webhook_custom_body: config.notification.webhook_custom_body.clone(),
             enable_scan_notifications: config.notification.enable_scan_notifications,
@@ -15172,6 +15173,16 @@ pub async fn test_notification_handler(
         let v = webhook_bearer_token.trim();
         config.webhook_bearer_token = if v.is_empty() { None } else { Some(v.to_string()) };
     }
+    if let Some(webhook_custom_headers) = request.webhook_custom_headers.as_ref() {
+        let v = webhook_custom_headers.trim();
+        if v.is_empty() {
+            config.webhook_custom_headers = None;
+        } else {
+            crate::utils::notification::NotificationClient::validate_custom_webhook_headers(v)
+                .map_err(ApiError::from)?;
+            config.webhook_custom_headers = Some(v.to_string());
+        }
+    }
     if let Some(webhook_format) = request
         .webhook_format
         .as_ref()
@@ -15308,6 +15319,7 @@ pub async fn get_notification_config() -> Result<ApiResponse<crate::api::respons
         wecom_mentioned_list: config.wecom_mentioned_list,
         webhook_url: config.webhook_url,
         webhook_bearer_token: config.webhook_bearer_token,
+        webhook_custom_headers: config.webhook_custom_headers,
         webhook_format: config.webhook_format,
         webhook_custom_body: config.webhook_custom_body,
         enable_scan_notifications: config.enable_scan_notifications,
@@ -15418,6 +15430,19 @@ pub async fn update_notification_config(
             notification_config.webhook_bearer_token = None;
         } else {
             notification_config.webhook_bearer_token = Some(bearer_token.trim().to_string());
+        }
+        updated = true;
+    }
+
+    if let Some(ref webhook_custom_headers) = request.webhook_custom_headers {
+        if webhook_custom_headers.trim().is_empty() {
+            notification_config.webhook_custom_headers = None;
+        } else {
+            crate::utils::notification::NotificationClient::validate_custom_webhook_headers(
+                webhook_custom_headers.trim(),
+            )
+            .map_err(ApiError::from)?;
+            notification_config.webhook_custom_headers = Some(webhook_custom_headers.trim().to_string());
         }
         updated = true;
     }

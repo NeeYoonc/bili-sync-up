@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -396,20 +396,8 @@ impl NotificationClient {
 
         let webhook_format = Self::resolve_webhook_format(self.config.webhook_format.as_str(), url);
         let is_open_send = webhook_format == "opensend";
-        let mut req = self.client.post(url).header(CONTENT_TYPE, "application/json");
-
-        if let Some(token) = self
-            .config
-            .webhook_bearer_token
-            .as_ref()
-            .filter(|v| !v.trim().is_empty())
-        {
-            if is_open_send {
-                // openSend 网关使用 apikey 鉴权
-                req = req.header("apikey", token.trim());
-            }
-            req = req.header(AUTHORIZATION, format!("Bearer {}", token.trim()));
-        }
+        let headers = self.build_webhook_headers(is_open_send)?;
+        let req = self.client.post(url).headers(headers);
 
         let resp = if is_open_send {
             // openSend 兼容请求体：仅发送文档要求字段，避免字段校验导致误报
@@ -466,6 +454,69 @@ impl NotificationClient {
                 }
             }
         }
+    }
+
+    fn build_webhook_headers(&self, is_open_send: bool) -> Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        if let Some(token) = self
+            .config
+            .webhook_bearer_token
+            .as_ref()
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            if is_open_send {
+                headers.insert("apikey", HeaderValue::from_str(token)?);
+            }
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token))?);
+        }
+
+        if let Some(custom_headers) = self
+            .config
+            .webhook_custom_headers
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            for (name, value) in Self::parse_custom_webhook_headers(custom_headers)? {
+                headers.insert(name, value);
+            }
+        }
+
+        Ok(headers)
+    }
+
+    fn parse_custom_webhook_headers(raw: &str) -> Result<Vec<(HeaderName, HeaderValue)>> {
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|e| anyhow!("自定义 Headers JSON 解析失败: {}", e))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow!("自定义 Headers 必须是 JSON 对象，例如 {{\"Authorization\":\"Bearer xxx\"}}"))?;
+
+        let mut headers = Vec::with_capacity(object.len());
+        for (name, value) in object {
+            let header_name = name.trim();
+            if header_name.is_empty() {
+                return Err(anyhow!("自定义 Header 名称不能为空"));
+            }
+            let header_value = value
+                .as_str()
+                .ok_or_else(|| anyhow!("自定义 Header '{}' 的值必须是字符串", header_name))?
+                .trim();
+            let header_name = HeaderName::from_bytes(header_name.as_bytes())
+                .map_err(|e| anyhow!("自定义 Header '{}' 名称无效: {}", header_name, e))?;
+            let header_value = HeaderValue::from_str(header_value)
+                .map_err(|e| anyhow!("自定义 Header '{}' 的值无效: {}", header_name, e))?;
+            headers.push((header_name, header_value));
+        }
+
+        Ok(headers)
+    }
+
+    pub fn validate_custom_webhook_headers(raw: &str) -> Result<()> {
+        Self::parse_custom_webhook_headers(raw).map(|_| ())
     }
 
     fn webhook_response_indicates_success(body: &str) -> bool {
@@ -556,10 +607,7 @@ impl NotificationClient {
             serde_json::Value::String(text) => {
                 let trimmed = text.trim();
                 if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
-                    let key = trimmed
-                        .trim_start_matches("{{")
-                        .trim_end_matches("}}")
-                        .trim();
+                    let key = trimmed.trim_start_matches("{{").trim_end_matches("}}").trim();
                     if let Some(value) = context.get(key) {
                         return value.clone();
                     }
@@ -593,8 +641,8 @@ impl NotificationClient {
     }
 
     fn render_custom_webhook_body(template: &str, payload: &GenericWebhookRequest) -> Result<serde_json::Value> {
-        let parsed: serde_json::Value = serde_json::from_str(template)
-            .map_err(|e| anyhow!("自定义 POST Body 不是有效 JSON: {}", e))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(template).map_err(|e| anyhow!("自定义 POST Body 不是有效 JSON: {}", e))?;
         let context = Self::build_custom_webhook_context(payload);
         Ok(Self::apply_template_placeholders(parsed, &context))
     }
@@ -1303,5 +1351,17 @@ mod tests {
 
         assert!(truncated.len() <= 4096);
         assert!(truncated.contains("内容过长，已截断"));
+    }
+
+    #[test]
+    fn test_validate_custom_webhook_headers() {
+        assert!(NotificationClient::validate_custom_webhook_headers(
+            r#"{"Authorization":"Bearer test","X-Channel":"clawbot"}"#
+        )
+        .is_ok());
+
+        assert!(NotificationClient::validate_custom_webhook_headers(r#"[]"#).is_err());
+        assert!(NotificationClient::validate_custom_webhook_headers(r#"{"Authorization":123}"#).is_err());
+        assert!(NotificationClient::validate_custom_webhook_headers(r#"{"Bad Header":"value"}"#).is_err());
     }
 }

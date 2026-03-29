@@ -251,6 +251,7 @@
 	let wecomMentionedList = '';
 	let webhookUrl = '';
 	let webhookBearerToken = '';
+	let webhookCustomHeaders = '';
 	let webhookFormat: 'auto' | 'generic' | 'opensend' | 'custom' = 'auto';
 	let webhookCustomBody = '';
 	let notificationMinVideos = 1;
@@ -1013,6 +1014,7 @@
 			if (webhookBearerToken.trim()) {
 				config.webhook_bearer_token = webhookBearerToken.trim();
 			}
+			config.webhook_custom_headers = webhookCustomHeaders.trim();
 			config.webhook_format = webhookFormat;
 			config.webhook_custom_body = webhookCustomBody.trim();
 		}
@@ -1145,6 +1147,7 @@
 		// 加载通用Webhook配置（如果有）
 		webhookUrl = response.data.webhook_url || '';
 		webhookBearerToken = response.data.webhook_bearer_token || '';
+		webhookCustomHeaders = response.data.webhook_custom_headers || '';
 		webhookFormat =
 			(response.data.webhook_format as 'auto' | 'generic' | 'opensend' | 'custom' | undefined) ||
 			'auto';
@@ -1174,6 +1177,7 @@
 		} else if (activeNotificationChannel === 'webhook') {
 			request.webhook_url = webhookUrl.trim();
 			request.webhook_bearer_token = webhookBearerToken.trim();
+			request.webhook_custom_headers = webhookCustomHeaders.trim();
 			request.webhook_format = webhookFormat;
 			request.webhook_custom_body = webhookCustomBody.trim();
 		}
@@ -3242,6 +3246,22 @@
 						<p class="text-muted-foreground text-sm">
 							留空则不附带认证头；openSend 模式下该值也会作为 apikey 发送
 						</p>
+					</div>
+
+					<div class="space-y-2">
+						<Label for="generic-webhook-custom-headers">自定义 Headers（可选）</Label>
+						<Textarea
+							id="generic-webhook-custom-headers"
+							bind:value={webhookCustomHeaders}
+							rows={6}
+							placeholder={`{\n  "Authorization": "Bearer your-token",\n  "X-Channel": "clawbot"\n}`}
+							class="font-mono text-xs"
+						/>
+						<div class="text-muted-foreground space-y-1 text-sm">
+							<p>请填写 JSON 对象，键和值都必须是字符串。</p>
+							<p>例如：<code>{'{"Authorization":"Bearer your-token","X-Channel":"clawbot"}'}</code></p>
+							<p>如与自动附带的 Bearer Token 或 openSend 的 apikey 同名，自定义 Headers 会覆盖默认值。</p>
+						</div>
 					</div>
 
 					{#if webhookFormat === 'custom'}
