@@ -13,6 +13,7 @@ use crate::initialization;
 use crate::task::TASK_CONTROLLER;
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::file_logger;
+use crate::utils::live_updates::notify_video_sources_changed;
 use crate::utils::scan_collector::ScanCollector;
 use crate::utils::scan_id_tracker::{
     get_last_scanned_ids, group_sources_by_new_old, update_last_scanned_ids, LastScannedIds, MaxIdRecorder, SourceType,
@@ -245,6 +246,29 @@ async fn try_disable_invalid_collection_source(
     active.update(connection).await?;
 
     Ok(Some((source_name, "合集已失效".to_string())))
+}
+
+async fn try_disable_empty_watch_later_source(
+    connection: &DatabaseConnection,
+    source: &VideoSourceWithId,
+    err: &anyhow::Error,
+) -> Result<Option<String>> {
+    if source.source_type != SourceType::WatchLater || !is_watch_later_empty_error(err) {
+        return Ok(None);
+    }
+
+    let Some(model) = entities::watch_later::Entity::find_by_id(source.id)
+        .one(connection)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    let mut active: entities::watch_later::ActiveModel = model.into();
+    active.enabled = Set(false);
+    active.update(connection).await?;
+
+    Ok(Some("稍后再看".to_string()))
 }
 
 /// 从数据库加载所有视频源的函数
@@ -944,20 +968,27 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                         // mmap自动处理数据持久化，不需要手动同步
                     }
                     Err(e) => {
-                        if source.source_type == SourceType::WatchLater && is_watch_later_empty_error(&e) {
-                            processed_sources += 1;
-                            last_successful_source = Some(source);
-                            info!("稍后再看该源为空，已跳过本轮扫描并发送通知");
-                            send_source_status_notification(
-                                "视频源为空",
-                                "稍后再看该源为空",
-                                Some("该源当前没有任何视频，已跳过本轮扫描。"),
-                            )
-                            .await;
-                            continue;
-                        }
-
                         let classified_error = crate::error::ErrorClassifier::classify_error(&e);
+
+                        match try_disable_empty_watch_later_source(&optimized_connection, source, &e).await {
+                            Ok(Some(source_name)) => {
+                                processed_sources += 1;
+                                last_successful_source = Some(source);
+                                notify_video_sources_changed();
+                                info!("检测到空的稍后再看源「{}」，已自动停用该源", source_name);
+                                send_source_status_notification(
+                                    "视频源自动停用",
+                                    &format!("{}源已自动停用", source_name),
+                                    Some("检测到该源当前没有任何视频，已自动停用该源。后续如需继续同步，请在源管理中手动重新启用。"),
+                                )
+                                .await;
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(disable_err) => {
+                                warn!("自动停用空的稍后再看源失败 (ID: {}): {}", source.id, disable_err);
+                            }
+                        }
 
                         match try_disable_cancelled_submission_source(
                             &optimized_connection,
@@ -970,6 +1001,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             Ok(Some((source_name, disable_reason))) => {
                                 processed_sources += 1;
                                 last_successful_source = Some(source);
+                                notify_video_sources_changed();
                                 info!("检测到不可扫描UP主投稿源「{}」（{}），已自动停用该源", source_name, disable_reason);
                                 let notification_context =
                                     format!("检测到账号已注销、已封禁或无视频投稿（{}）。", disable_reason);
@@ -991,6 +1023,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             Ok(Some((source_name, disable_reason))) => {
                                 processed_sources += 1;
                                 last_successful_source = Some(source);
+                                notify_video_sources_changed();
                                 info!("检测到不可扫描合集源「{}」（{}），已自动停用该源", source_name, disable_reason);
                                 send_source_status_notification(
                                     "视频源自动停用",
@@ -1183,5 +1216,101 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                 debug!("距离下一轮扫描还有 {} 秒", remaining_time);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bili_sync_migration::MigratorTrait;
+    use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+    use sea_orm::SqlxSqliteConnector;
+    use std::fs;
+
+    async fn create_test_db(prefix: &str) -> DatabaseConnection {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-watch-later-{}-{}", prefix, uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("应能创建临时数据库目录");
+        let db_path = dir.join("data.sqlite");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("应能连接测试数据库");
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+
+        bili_sync_migration::Migrator::up(&db, None)
+            .await
+            .expect("应能完成测试数据库迁移");
+        db
+    }
+
+    async fn insert_test_watch_later(db: &DatabaseConnection, id: i32, enabled: bool) {
+        entities::watch_later::ActiveModel {
+            id: Set(id),
+            path: Set(format!("/tmp/watch-later-{id}")),
+            created_at: Set("2026-03-30 00:00:00".to_string()),
+            latest_row_at: Set("2026-03-30 00:00:00".to_string()),
+            enabled: Set(enabled),
+            scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
+            keyword_filters: Set(None),
+            keyword_filter_mode: Set(None),
+            blacklist_keywords: Set(None),
+            whitelist_keywords: Set(None),
+            keyword_case_sensitive: Set(false),
+            min_duration_seconds: Set(None),
+            max_duration_seconds: Set(None),
+            published_after: Set(None),
+            published_before: Set(None),
+            audio_only: Set(false),
+            audio_only_m4a_only: Set(false),
+            flat_folder: Set(false),
+            download_danmaku: Set(true),
+            download_subtitle: Set(true),
+            ai_rename: Set(false),
+            ai_rename_video_prompt: Set(String::new()),
+            ai_rename_audio_prompt: Set(String::new()),
+            ai_rename_enable_multi_page: Set(false),
+            ai_rename_enable_collection: Set(false),
+            ai_rename_enable_bangumi: Set(false),
+            ai_rename_rename_parent_dir: Set(false),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试稍后再看源");
+    }
+
+    #[tokio::test]
+    async fn disable_empty_watch_later_source_turns_off_source() {
+        let db = create_test_db("disable-empty-watch-later").await;
+        insert_test_watch_later(&db, 1, true).await;
+
+        let source = VideoSourceWithId {
+            id: 1,
+            args: Args::WatchLater,
+            path: PathBuf::from("/tmp/watch-later-1"),
+            source_type: SourceType::WatchLater,
+        };
+        let err = anyhow::anyhow!("No videos found in watch later list");
+
+        let disabled_name = try_disable_empty_watch_later_source(&db, &source, &err)
+            .await
+            .expect("应能执行自动停用逻辑");
+
+        assert_eq!(disabled_name.as_deref(), Some("稍后再看"));
+
+        let model = entities::watch_later::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能读取稍后再看源")
+            .expect("稍后再看源应存在");
+        assert!(!model.enabled, "空的稍后再看源应被自动停用");
     }
 }
