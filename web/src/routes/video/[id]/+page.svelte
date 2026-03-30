@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import api from '$lib/api';
@@ -24,7 +23,7 @@
 	import PlayIcon from '@lucide/svelte/icons/play';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
 	import XIcon from '@lucide/svelte/icons/x';
-	import { onDestroy, onMount, tick } from 'svelte';
+	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { get } from 'svelte/store';
 
@@ -37,250 +36,48 @@
 	let statusEditorLoading = false;
 	let showVideoPlayer = false;
 	let currentPlayingPageIndex = 0;
-	let onlinePlayMode = false; // false: 本地播放, true: 在线播放
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	let onlinePlayInfo: any = null;
-	let loadingPlayInfo = false;
-	let onlinePlayRefreshRetried = false;
-	let onlinePlayRefreshRetrying = false;
-	let onlinePlaybackErrorMessage: string | null = null;
-	let isFullscreen = false; // 是否全屏模式
+	let onlinePlayMode = false; // false: 本地播放, true: B站内嵌播放
 	let deleteDialogOpen = false;
 	let deleting = false;
-	let videoElement: HTMLVideoElement | null = null;
-	let flvTransmuxFallbackUrl: string | null = null;
 	let safePlayingPageIndex = 0;
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	let flvPlayer: any = null;
-	let flvPlayerUrl: string | null = null;
-	let flvAttachedElement: HTMLVideoElement | null = null;
-	let flvSetupToken = 0;
-	let flvScriptPromise: Promise<any> | null = null;
 	let videoDetailLoadToken = 0;
-	let onlinePlayLoadToken = 0;
 	let lastPlaybackNoticeKey: string | null = null;
-	let chargeLockedDisplayMode: 'local' | 'online' | null = null;
+	let chargeLockedDisplayMode: 'local' | null = null;
 
-	function isFlvUrl(url: string): boolean {
-		const lower = url.toLowerCase();
-		return lower.includes('.flv') || lower.includes('format=flv');
-	}
-
-	function getOnlineVideoStream() {
-		if (!onlinePlayMode || !onlinePlayInfo) return null;
-		const streams = onlinePlayInfo.video_streams;
-		if (!streams || streams.length === 0) return null;
-		return streams[0] ?? null;
-	}
-
-	function abortFlvSetup() {
-		flvSetupToken += 1;
-	}
-
-	function loadFlvJs(): Promise<any> {
-		if (!browser) return Promise.reject(new Error('not in browser'));
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const existing = (window as any).flvjs;
-		if (existing) return Promise.resolve(existing);
-		if (flvScriptPromise) return flvScriptPromise;
-
-		flvScriptPromise = new Promise((resolve, reject) => {
-			const script = document.createElement('script');
-			script.src = '/vendor/flvjs/flv.min.js';
-			script.async = true;
-			script.onload = () => {
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-				const loaded = (window as any).flvjs;
-				if (loaded) {
-					resolve(loaded);
-				} else {
-					reject(new Error('flv.js loaded but global not found'));
-				}
-			};
-			script.onerror = () => reject(new Error('failed to load flv.js'));
-			document.head.appendChild(script);
-		});
-
-		return flvScriptPromise;
-	}
-
-	function destroyFlvPlayer() {
-		if (!flvPlayer) return;
-		try {
-			if (typeof flvPlayer.pause === 'function') flvPlayer.pause();
-			if (typeof flvPlayer.unload === 'function') flvPlayer.unload();
-			if (typeof flvPlayer.detachMediaElement === 'function') flvPlayer.detachMediaElement();
-			if (typeof flvPlayer.destroy === 'function') flvPlayer.destroy();
-		} catch (error) {
-			console.warn('flv.js 清理失败:', error);
-		} finally {
-			flvPlayer = null;
-			flvPlayerUrl = null;
-			flvAttachedElement = null;
-		}
-	}
-
-	async function ensureFlvPlayer() {
-		if (!browser) return;
-
-		const stream = getOnlineVideoStream();
-		const rawUrl = stream?.url ?? null;
-		const container = typeof stream?.container === 'string' ? stream.container.toLowerCase() : '';
-		const isFlvStream = container === 'flv' || (!container && rawUrl && isFlvUrl(rawUrl));
-		if (flvTransmuxFallbackUrl && rawUrl && flvTransmuxFallbackUrl !== rawUrl) {
-			flvTransmuxFallbackUrl = null;
-		}
-
-		const wantsFlv =
-			showVideoPlayer &&
-			onlinePlayMode &&
-			!loadingPlayInfo &&
-			rawUrl &&
-			isFlvStream &&
-			!isDashSeparatedStream();
-
-		if (!wantsFlv || flvTransmuxFallbackUrl === rawUrl || !videoElement) {
-			abortFlvSetup();
-			destroyFlvPlayer();
-			return;
-		}
-
-		const proxyUrl = api.getProxyStreamUrl(rawUrl);
-		if (flvPlayer && flvPlayerUrl === proxyUrl && flvAttachedElement === videoElement) return;
-
-		const token = ++flvSetupToken;
-		destroyFlvPlayer();
-
-		try {
-			const flvjs = await loadFlvJs();
-
-			if (!flvjs?.isSupported?.()) {
-				abortFlvSetup();
-				destroyFlvPlayer();
-				if (flvTransmuxFallbackUrl !== rawUrl) {
-					flvTransmuxFallbackUrl = rawUrl;
-					toast.warning('当前浏览器不支持 FLV 直接播放，已启用兼容模式');
-				}
-				return;
-			}
-
-			await tick();
-			if (token !== flvSetupToken) return;
-			if (!videoElement) return;
-
-			const player = flvjs.createPlayer(
-				{ type: 'flv', url: proxyUrl, isLive: false },
-				{
-					enableWorker: false,
-					enableStashBuffer: false,
-					accurateSeek: true,
-					seekType: 'range',
-					autoCleanupSourceBuffer: true,
-					autoCleanupMaxBackwardDuration: 60,
-					autoCleanupMinBackwardDuration: 30
-				}
-			);
-
-			if (flvjs?.Events?.ERROR) {
-				player.on(flvjs.Events.ERROR, (type: string, detail: string, info: unknown) => {
-					console.warn('flv.js 播放错误:', type, detail, info);
-					if (rawUrl && flvTransmuxFallbackUrl !== rawUrl) {
-						flvTransmuxFallbackUrl = rawUrl;
-						toast.error('FLV 播放失败，已切换兼容模式');
-					}
-					destroyFlvPlayer();
-				});
-			}
-
-			player.attachMediaElement(videoElement);
-			player.load();
-			if (typeof player.play === 'function') {
-				void player.play();
-			}
-
-			flvPlayer = player;
-			flvPlayerUrl = proxyUrl;
-			flvAttachedElement = videoElement;
-		} catch (error) {
-			console.error('flv.js 初始化失败:', error);
-			abortFlvSetup();
-			destroyFlvPlayer();
-			if (rawUrl && flvTransmuxFallbackUrl !== rawUrl) {
-				flvTransmuxFallbackUrl = rawUrl;
-				toast.error('FLV 播放初始化失败，已启用兼容模式', {
-					description: (error as Error)?.message ?? String(error)
-				});
-			}
-		}
-	}
-
-	$: {
-		showVideoPlayer;
-		onlinePlayMode;
-		loadingPlayInfo;
-		onlinePlayInfo;
-		videoElement;
-		flvTransmuxFallbackUrl;
-		currentPlayingPageIndex;
-		void ensureFlvPlayer();
-	}
-
-	onDestroy(() => {
-		abortFlvSetup();
-		destroyFlvPlayer();
-	});
-
-	function isChargeLockedMessage(message?: string | null): boolean {
-		if (!message) return false;
-		return (
-			message.includes('充电视频未充电') ||
-			message.includes('充电专享视频') ||
-			message.includes('需要为UP主充电才能观看') ||
-			message.includes('视频需要充电才能观看') ||
-			message.includes('status code: 87007') ||
-			message.includes('status code: 87008')
-		);
-	}
-
-	function showChargeLockedToast(mode: 'local' | 'online') {
+	function showChargeLockedToast(mode: 'local') {
 		const noticeKey = `${currentVideoId}-${safePlayingPageIndex}-${mode}-charge-locked`;
 		if (lastPlaybackNoticeKey === noticeKey) return;
 		lastPlaybackNoticeKey = noticeKey;
 		toast.error('充电视频未充电');
 	}
 
-	function isUnavailableOnlinePlayMessage(message?: string | null): boolean {
-		if (!message) return false;
-		return (
-			message.includes('403 Forbidden') ||
-			message.includes('视频已被删除或不存在') ||
-			message.includes('视频不存在') ||
-			message.includes('视频已失效') ||
-			message.includes('status code: -404') ||
-			message.includes('啥都木有') ||
-			message.includes('无权限访问')
-		);
+	function getCurrentPageInfo() {
+		if (!videoData?.pages?.length) return null;
+		return videoData.pages[safePlayingPageIndex] ?? null;
 	}
 
-	function setOnlinePlaybackError(message?: string | null) {
-		onlinePlayInfo = null;
-		loadingPlayInfo = false;
-		onlinePlaybackErrorMessage = isUnavailableOnlinePlayMessage(message)
-			? '该视频已失效，无法在线播放'
-			: '当前视频无法在线播放';
+	function getEmbeddedBilibiliPlayerUrl() {
+		const bvid = videoData?.video.bvid;
+		if (!bvid) return null;
+		const currentPage = getCurrentPageInfo();
+		const pageNumber = currentPage?.pid && currentPage.pid > 0 ? currentPage.pid : 1;
+		const params = new URLSearchParams({
+			bvid,
+			p: String(pageNumber),
+			autoplay: '1'
+		});
+		return `https://player.bilibili.com/player.html?${params.toString()}`;
+	}
+
+	function getEmbeddedPlayerTitle() {
+		const currentPage = getCurrentPageInfo();
+		if (!currentPage) {
+			return videoData?.video.name ? `B站内嵌播放器 - ${videoData.video.name}` : 'B站内嵌播放器';
+		}
+		return `B站内嵌播放器 - P${currentPage.pid} ${currentPage.name}`;
 	}
 
 	function resetPlaybackState(options?: { keepPlayerVisible?: boolean; keepPlayMode?: boolean }) {
-		onlinePlayLoadToken += 1;
-		abortFlvSetup();
-		destroyFlvPlayer();
-		flvTransmuxFallbackUrl = null;
-		onlinePlayInfo = null;
-		loadingPlayInfo = false;
-		onlinePlayRefreshRetried = false;
-		onlinePlayRefreshRetrying = false;
-		onlinePlaybackErrorMessage = null;
-		videoElement = null;
 		lastPlaybackNoticeKey = null;
 		chargeLockedDisplayMode = null;
 		if (!options?.keepPlayerVisible) {
@@ -453,14 +250,6 @@
 				if (loadToken !== videoDetailLoadToken) return;
 			}
 
-			if (showVideoPlayer && onlinePlayMode) {
-				await tick();
-				if (loadToken !== videoDetailLoadToken) return;
-				const playVideoId = getPlayVideoId();
-				if (playVideoId) {
-					void loadOnlinePlayInfo(playVideoId);
-				}
-			}
 		} catch (error) {
 			if (loadToken !== videoDetailLoadToken) return;
 			console.error('加载视频详情失败:', error);
@@ -567,113 +356,20 @@
 		}
 	}
 
-	// 获取在线播放信息
-	async function loadOnlinePlayInfo(
-		videoId: string | number,
-		options?: { refresh?: boolean; silentError?: boolean; autoResume?: boolean }
-	): Promise<boolean> {
-		const loadToken = ++onlinePlayLoadToken;
-		loadingPlayInfo = true;
-		onlinePlaybackErrorMessage = null;
-		try {
-			const result = await api.getVideoPlayInfo(videoId, { refresh: options?.refresh === true });
-			if (loadToken !== onlinePlayLoadToken) return false;
-			onlinePlayInfo = result.data;
-			chargeLockedDisplayMode = null;
-			console.log('在线播放信息:', onlinePlayInfo);
-			if (!onlinePlayInfo?.success) {
-				if (!options?.silentError && isChargeLockedMessage(onlinePlayInfo?.message)) {
-					chargeLockedDisplayMode = 'online';
-					showChargeLockedToast('online');
-				} else if (isUnavailableOnlinePlayMessage(onlinePlayInfo?.message)) {
-					setOnlinePlaybackError(onlinePlayInfo?.message);
-				} else if (!options?.silentError) {
-					toast.error('获取在线播放信息失败', {
-						description: onlinePlayInfo?.message || '请稍后重试'
-					});
-				}
-				if (!onlinePlaybackErrorMessage) {
-					onlinePlayInfo = null;
-				}
-				return false;
-			}
-
-			if (options?.autoResume && onlinePlayMode) {
-				await tick();
-				const player = videoElement ?? (document.querySelector('video') as HTMLVideoElement | null);
-				if (player) {
-					try {
-						player.load();
-						await player.play();
-					} catch (e) {
-						console.warn('刷新播放信息后自动恢复播放失败:', e);
-					}
-				}
-			}
-			return true;
-		} catch (error) {
-			if (loadToken !== onlinePlayLoadToken) return false;
-			console.error('获取播放信息失败:', error);
-			const message = (error as ApiError).message;
-			if (!options?.silentError && isChargeLockedMessage(message)) {
-				chargeLockedDisplayMode = 'online';
-				showChargeLockedToast('online');
-			} else if (isUnavailableOnlinePlayMessage(message)) {
-				setOnlinePlaybackError(message);
-			} else if (!options?.silentError) {
-				toast.error('获取在线播放信息失败', {
-					description: message
-				});
-			}
-			if (!onlinePlaybackErrorMessage) {
-				onlinePlayInfo = null;
-			}
-			return false;
-		} finally {
-			if (loadToken === onlinePlayLoadToken) {
-				loadingPlayInfo = false;
-			}
-		}
-	}
-
-	async function retryOnlinePlayWithRefresh() {
-		if (!onlinePlayMode || onlinePlayRefreshRetried || onlinePlayRefreshRetrying) return;
-
-		const playVideoId = getPlayVideoId();
-		if (!playVideoId) return;
-
-		onlinePlayRefreshRetried = true;
-		onlinePlayRefreshRetrying = true;
-		toast.info('播放地址可能已失效，正在刷新后重试...');
-
-		const refreshed = await loadOnlinePlayInfo(playVideoId, {
-			refresh: true,
-			silentError: true,
-			autoResume: true
-		});
-
-		onlinePlayRefreshRetrying = false;
-		if (!refreshed) {
-			if (!onlinePlaybackErrorMessage) {
-				setOnlinePlaybackError();
-			}
-			toast.error(onlinePlaybackErrorMessage ?? '当前视频无法在线播放');
-		}
-	}
-
 	// 打开B站页面
 	async function openBilibiliPage() {
 		try {
 			const videoId = getPlayVideoId();
-			const result = await api.getVideoPlayInfo(videoId);
+			const result = await api.getVideoBvid(videoId);
 			const bilibiliUrl = result.data.bilibili_url;
 
 			if (bilibiliUrl) {
 				console.log('获取到B站链接:', bilibiliUrl);
 				window.open(bilibiliUrl, '_blank');
-			} else if (result.data.video_bvid) {
-				// 如果没有bilibili_url但有bvid，手动构建链接
-				const manualUrl = `https://www.bilibili.com/video/${result.data.video_bvid}`;
+			} else if (result.data.bvid) {
+				const currentPage = getCurrentPageInfo();
+				const pageQuery = currentPage?.pid && currentPage.pid > 1 ? `?p=${currentPage.pid}` : '';
+				const manualUrl = `https://www.bilibili.com/video/${result.data.bvid}${pageQuery}`;
 				console.log('手动构建B站链接:', manualUrl);
 				window.open(manualUrl, '_blank');
 			} else {
@@ -690,103 +386,14 @@
 	// 切换播放模式
 	function togglePlayMode() {
 		onlinePlayMode = !onlinePlayMode;
-		if (onlinePlayMode && !onlinePlayInfo) {
-			onlinePlayRefreshRetried = false;
-			onlinePlayRefreshRetrying = false;
-			chargeLockedDisplayMode = null;
-			onlinePlaybackErrorMessage = null;
-			const videoId = getPlayVideoId();
-			loadOnlinePlayInfo(videoId);
-		}
+		chargeLockedDisplayMode = null;
 	}
 
 	// 获取视频播放源
 	function getVideoSource() {
-		if (onlinePlayMode) {
-			if (!onlinePlayInfo) return undefined;
-
-			const stream = getOnlineVideoStream();
-			const rawUrl = stream?.url ?? null;
-			if (!rawUrl) return undefined;
-
-			const container = typeof stream?.container === 'string' ? stream.container.toLowerCase() : '';
-			const isFlvStream = container === 'flv' || (!container && isFlvUrl(rawUrl));
-			if (!isDashSeparatedStream() && isFlvStream) {
-				if (flvTransmuxFallbackUrl === rawUrl) {
-					return api.getProxyStreamUrl(rawUrl, { transmux: true });
-				}
-				return undefined;
-			}
-
-			return api.getProxyStreamUrl(rawUrl);
-		}
-
 		const videoId = getPlayVideoId();
 		return videoId ? `/api/videos/stream/${videoId}` : undefined;
 	}
-
-	// 获取音频播放源
-	function getAudioSource() {
-		if (
-			onlinePlayMode &&
-			onlinePlayInfo &&
-			onlinePlayInfo.audio_streams &&
-			onlinePlayInfo.audio_streams.length > 0
-		) {
-			const audioStream = onlinePlayInfo.audio_streams[0];
-			return api.getProxyStreamUrl(audioStream.url);
-		}
-		return '';
-	}
-
-	// 检查是否是DASH分离流
-	function isDashSeparatedStream() {
-		return (
-			onlinePlayMode &&
-			onlinePlayInfo &&
-			onlinePlayInfo.audio_streams &&
-			onlinePlayInfo.audio_streams.length > 0 &&
-			onlinePlayInfo.video_streams &&
-			onlinePlayInfo.video_streams.length > 0
-		);
-	}
-
-	// 初始化音频同步
-	function initAudioSync() {
-		if (isDashSeparatedStream()) {
-			setTimeout(() => {
-				const audio = document.querySelector('#sync-audio') as HTMLAudioElement;
-				if (audio) {
-					audio.volume = 1.0; // 固定100%音量
-					audio.muted = false;
-				}
-			}, 100);
-		}
-	}
-
-	// 监听全屏变化事件
-	function handleFullscreenChange() {
-		isFullscreen = !!(
-			document.fullscreenElement ||
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			(document as any).webkitFullscreenElement ||
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			(document as any).mozFullScreenElement
-		);
-	}
-
-	// 组件挂载时添加全屏事件监听
-	onMount(() => {
-		document.addEventListener('fullscreenchange', handleFullscreenChange);
-		document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
-		document.addEventListener('mozfullscreenchange', handleFullscreenChange);
-
-		return () => {
-			document.removeEventListener('fullscreenchange', handleFullscreenChange);
-			document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
-			document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
-		};
-	});
 
 	// 删除视频
 	async function handleDeleteVideo() {
@@ -989,6 +596,8 @@
 					category: videoData.video.category,
 					cover: videoData.video.cover || '',
 					download_status: videoData.video.download_status,
+					valid: videoData.video.valid,
+					is_charge_video: videoData.video.is_charge_video,
 					bangumi_title: videoData.video.bangumi_title
 				}}
 				mode="detail"
@@ -1045,7 +654,9 @@
 										path: '',
 										category: 0,
 										cover: '',
-										download_status: pageInfo.download_status
+										download_status: pageInfo.download_status,
+										valid: true,
+										is_charge_video: videoData.video.is_charge_video
 									}}
 									mode="page"
 									showActions={false}
@@ -1078,20 +689,16 @@
 										size="sm"
 										variant="outline"
 										class="flex-1"
-										title="在线播放"
+										title="B站内嵌播放（清晰度由B站控制）"
 										onclick={() => {
 											currentPlayingPageIndex = index;
 											onlinePlayMode = true;
-											onlinePlayRefreshRetried = false;
-											onlinePlayRefreshRetrying = false;
 											chargeLockedDisplayMode = null;
 											showVideoPlayer = true;
-											const videoId = getPlayVideoId();
-											loadOnlinePlayInfo(videoId);
 										}}
 									>
 										<PlayIcon class="mr-2 h-4 w-4" />
-										在线播放
+										B站内嵌
 									</Button>
 								</div>
 
@@ -1136,25 +743,12 @@
 											? 'bg-blue-100 text-blue-700'
 											: 'bg-gray-100 text-gray-700'}"
 									>
-										{onlinePlayMode ? '在线播放' : '本地播放'}
+										{onlinePlayMode ? 'B站内嵌播放' : '本地播放'}
 									</span>
-									{#if onlinePlayMode && onlinePlayInfo}
-										<span class="text-xs text-gray-500">
-											{onlinePlayInfo.video_quality_description}
-										</span>
-										{#if isDashSeparatedStream()}
-											<span class="text-xs text-green-600"> 视频+音频同步播放 </span>
-										{/if}
-									{/if}
 								</div>
 								<div class="flex items-center gap-2">
-									<Button
-										size="sm"
-										variant="ghost"
-										onclick={togglePlayMode}
-										disabled={loadingPlayInfo}
-									>
-										{onlinePlayMode ? '切换到本地' : '切换到在线'}
+									<Button size="sm" variant="ghost" onclick={togglePlayMode}>
+										{onlinePlayMode ? '切换到本地' : '切换到B站内嵌'}
 									</Button>
 									<Button size="sm" variant="outline" onclick={() => (showVideoPlayer = false)}>
 										<XIcon class="mr-2 h-4 w-4" />
@@ -1171,135 +765,58 @@
 									].name}
 								</div>
 							{/if}
+							{#if onlinePlayMode}
+								<div class="mb-3 text-sm text-gray-500">
+									当前为 B 站内嵌播放，清晰度和码率由 B 站播放器控制，不继承 bili-sync 的清晰度设置。
+								</div>
+							{/if}
 
 							<div class="overflow-hidden rounded-lg bg-black">
-								{#if loadingPlayInfo && onlinePlayMode}
-									<div class="flex h-64 items-center justify-center text-white">
-										<div>加载播放信息中...</div>
-									</div>
-								{:else if onlinePlaybackErrorMessage && onlinePlayMode}
-									<div class="flex h-64 items-center justify-center text-white">
-										<div>{onlinePlaybackErrorMessage}</div>
-									</div>
-								{:else if chargeLockedDisplayMode === 'online' && onlinePlayMode}
+								{#if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
 									<div class="flex h-64 items-center justify-center text-white">
 										<div>充电视频未充电</div>
 									</div>
-								{:else if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
-									<div class="flex h-64 items-center justify-center text-white">
-										<div>充电视频未充电</div>
-									</div>
+								{:else if onlinePlayMode}
+									{#if getEmbeddedBilibiliPlayerUrl()}
+										{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
+											<iframe
+												class="embedded-player-frame block h-auto w-full border-0"
+												style="aspect-ratio: 16/9; max-height: 70vh;"
+												src={getEmbeddedBilibiliPlayerUrl() ?? undefined}
+												title={getEmbeddedPlayerTitle()}
+												allow="autoplay; fullscreen"
+												referrerpolicy="strict-origin-when-cross-origin"
+											></iframe>
+										{/key}
+									{:else}
+										<div class="flex h-64 items-center justify-center text-white">
+											<div>当前视频缺少B站标识，无法内嵌播放</div>
+										</div>
+									{/if}
 								{:else}
 									{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
-										<div
-											class="video-container relative {onlinePlayMode ? 'online-mode' : ''}"
-											role="group"
-										>
+										<div class="video-container relative" role="group">
 											<video
 												controls
 												autoplay
 												class="h-auto w-full"
 												style="aspect-ratio: 16/9; max-height: 70vh;"
-												bind:this={videoElement}
 												src={getVideoSource()}
-												crossorigin="anonymous"
-												onerror={(e) => {
-													console.warn('视频加载错误:', e);
-													if (onlinePlayMode) {
-														if (!onlinePlayRefreshRetried) {
-															void retryOnlinePlayWithRefresh();
-														} else {
-															setOnlinePlaybackError();
-															toast.error(onlinePlaybackErrorMessage ?? '当前视频无法在线播放');
-														}
-													} else if (videoData?.video.is_charge_video) {
-														chargeLockedDisplayMode = 'local';
-														showChargeLockedToast('local');
+											onerror={(event) => {
+												console.warn('视频加载错误:', event);
+												if (videoData?.video.is_charge_video) {
+													chargeLockedDisplayMode = 'local';
+													showChargeLockedToast('local');
 													}
 												}}
 												onloadstart={() => {
 													console.log('开始加载视频:', getVideoSource());
 												}}
-												onplay={() => {
-													// 同步播放音频
-													if (isDashSeparatedStream()) {
-														const audio = document.querySelector(
-															'#sync-audio'
-														) as HTMLAudioElement | null;
-														if (audio) audio.play();
-													}
-												}}
-												onpause={() => {
-													// 同步暂停音频
-													if (isDashSeparatedStream()) {
-														const audio = document.querySelector(
-															'#sync-audio'
-														) as HTMLAudioElement | null;
-														if (audio) audio.pause();
-													}
-												}}
-												onseeked={(e) => {
-													// 同步音频时间
-													if (isDashSeparatedStream()) {
-														const video = e.currentTarget as HTMLVideoElement;
-														const audio = document.querySelector('#sync-audio') as HTMLAudioElement;
-														if (video && audio) audio.currentTime = video.currentTime;
-													}
-												}}
-												onvolumechange={(e) => {
-													// 同步音量控制 - 固定100%音量
-													if (isDashSeparatedStream()) {
-														const video = e.currentTarget as HTMLVideoElement;
-														const audio = document.querySelector('#sync-audio') as HTMLAudioElement;
-														if (video && audio) {
-															audio.volume = 1.0;
-															audio.muted = video.muted;
-														}
-													}
-												}}
-												onloadedmetadata={(e) => {
-													// 初始化时同步音量设置 - 固定100%音量
-													if (isDashSeparatedStream()) {
-														const video = e.currentTarget as HTMLVideoElement;
-														const audio = document.querySelector('#sync-audio') as HTMLAudioElement;
-														if (video && audio) {
-															audio.volume = 1.0;
-															audio.muted = video.muted;
-														}
-														// 初始化音频同步
-														initAudioSync();
-													}
-												}}
 											>
 												<!-- 默认空字幕轨道用于无障碍功能 -->
 												<track kind="captions" srclang="zh" label="无字幕" default />
-												{#if onlinePlayMode && onlinePlayInfo && onlinePlayInfo.subtitle_streams}
-													{#each onlinePlayInfo.subtitle_streams as subtitle (subtitle.language)}
-														<track
-															kind="subtitles"
-															srclang={subtitle.language}
-															label={subtitle.language_doc}
-															src={subtitle.url}
-														/>
-													{/each}
-												{/if}
 												您的浏览器不支持视频播放。
 											</video>
-
-											<!-- 隐藏的音频元素用于DASH分离流 -->
-											{#if isDashSeparatedStream()}
-												<audio
-													id="sync-audio"
-													src={getAudioSource()}
-													crossorigin="anonymous"
-													style="display: none;"
-													onerror={() => {
-														if (onlinePlayMode && !onlinePlayRefreshRetried) {
-															void retryOnlinePlayWithRefresh();
-														}
-													}}
-												></audio>
-											{/if}
 										</div>
 									{/key}
 								{/if}
@@ -1311,21 +828,15 @@
 									<div class="text-sm font-medium text-gray-700">选择分页:</div>
 									<div class="grid max-h-60 grid-cols-2 gap-2 overflow-y-auto">
 										{#each videoData.pages as page, index (page.id)}
-											{#if page.download_status[1] === 7}
+											{#if onlinePlayMode || page.download_status[1] === 7}
 												<Button
 													size="sm"
 													variant={currentPlayingPageIndex === index ? 'default' : 'outline'}
 													class="justify-start text-left"
 													onclick={() => {
 														currentPlayingPageIndex = index;
-														// 如果是在线播放模式，需要重新获取播放信息
-														if (onlinePlayMode) {
-															onlinePlayRefreshRetried = false;
-															onlinePlayRefreshRetrying = false;
-															chargeLockedDisplayMode = null;
-															const videoId = getPlayVideoId();
-															loadOnlinePlayInfo(videoId);
-														} else {
+														chargeLockedDisplayMode = null;
+														if (!onlinePlayMode) {
 															chargeLockedDisplayMode = null;
 															// 本地播放模式：强制重新加载视频
 															setTimeout(() => {
@@ -1406,21 +917,11 @@
 {/if}
 
 <style>
-	/* 在线播放时隐藏原生音量控制 */
-	.video-container.online-mode video::-webkit-media-controls-volume-control-container {
-		display: none !important;
-	}
-
-	.video-container.online-mode video::-webkit-media-controls-mute-button {
-		display: none !important;
-	}
-
-	.video-container.online-mode video::-moz-volume-control {
-		display: none !important;
-	}
-
-	/* 视频容器 */
 	.video-container {
 		position: relative;
+	}
+
+	.embedded-player-frame {
+		background: #000;
 	}
 </style>
