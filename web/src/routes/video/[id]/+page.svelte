@@ -81,13 +81,18 @@
 		const rawUrl = stream?.url ?? null;
 		if (!rawUrl) return false;
 
+		// B站常见 DASH 分离流（video m4s + audio m4s）直连时容易被上游防盗链拦截，
+		// 浏览器无法补上 bilibili Referer，这类流继续走原代理更稳定。
+		if (isDashSeparatedStream()) return false;
+
 		const container = typeof stream?.container === 'string' ? stream.container.toLowerCase() : '';
 		const isFlvStream = container === 'flv' || (!container && isFlvUrl(rawUrl));
-		return isDashSeparatedStream() || !isFlvStream;
+		return !isFlvStream;
 	}
 
 	function getOnlineMediaSourceUrl(rawUrl: string) {
-		return onlinePlayForceProxy
+		const shouldUseProxyOnly = onlinePlayForceProxy || !canUseDirectOnlinePlayback();
+		return shouldUseProxyOnly
 			? api.getProxyStreamUrl(rawUrl)
 			: api.getProxyStreamUrl(rawUrl, { redirect: true });
 	}
