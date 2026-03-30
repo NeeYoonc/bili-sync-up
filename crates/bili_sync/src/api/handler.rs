@@ -13448,16 +13448,32 @@ fn get_video_codecs_description(codecs: crate::bilibili::VideoCodecs) -> String 
     }
 }
 
+fn build_stream_redirect_response(stream_url: &str) -> Result<axum::response::Response> {
+    use axum::body::Body;
+    use axum::http::{header, HeaderValue, StatusCode};
+
+    let location = HeaderValue::from_str(stream_url).context("无效的视频流重定向地址")?;
+
+    let mut response = axum::response::Response::new(Body::empty());
+    *response.status_mut() = StatusCode::FOUND;
+    let headers = response.headers_mut();
+    headers.insert(header::LOCATION, location);
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
 /// 代理B站视频流（解决跨域和防盗链）
 #[utoipa::path(
     get,
     path = "/api/videos/proxy-stream",
     params(
         ("url" = String, Query, description = "要代理的视频流URL"),
-        ("referer" = Option<String>, Query, description = "可选的Referer头")
+        ("referer" = Option<String>, Query, description = "可选的Referer头"),
+        ("redirect" = Option<bool>, Query, description = "是否返回302重定向而不是代理转发")
     ),
     responses(
         (status = 200, description = "视频流代理成功"),
+        (status = 302, description = "302重定向到上游视频流地址"),
         (status = 400, description = "参数错误"),
         (status = 500, description = "代理失败")
     )
@@ -13480,6 +13496,49 @@ pub async fn proxy_video_stream(
         }
     };
 
+    fn looks_like_flv_url(url: &str) -> bool {
+        let lower = url.to_ascii_lowercase();
+        lower.contains(".flv") || lower.contains("format=flv")
+    }
+
+    fn parse_bool_query(params: &std::collections::HashMap<String, String>, key: &str) -> bool {
+        params.get(key).is_some_and(|v| {
+            matches!(
+                v.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "enable" | "enabled"
+            )
+        })
+    }
+
+    let transmux_enabled = parse_bool_query(&params, "transmux");
+    let redirect_enabled = parse_bool_query(&params, "redirect");
+
+    debug!(
+        "代理视频流请求: url={}, raw_url_len={}, range={:?}, transmux={}, redirect={}, is_flv={}",
+        summarize_stream_url(stream_url),
+        stream_url.len(),
+        headers.get(header::RANGE).and_then(|h| h.to_str().ok()),
+        transmux_enabled,
+        redirect_enabled,
+        looks_like_flv_url(stream_url)
+    );
+
+    if redirect_enabled && !transmux_enabled {
+        match build_stream_redirect_response(stream_url) {
+            Ok(response) => {
+                debug!(
+                    "在线播放改为302直连: url={}, raw_url_len={}",
+                    summarize_stream_url(stream_url),
+                    stream_url.len()
+                );
+                return response.into_response();
+            }
+            Err(error) => {
+                warn!("构建视频在线播放302响应失败，回退为代理转发: {:#}", error);
+            }
+        }
+    }
+
     // 检查认证信息
     let config = crate::config::reload_config();
     let credential = config.credential.load();
@@ -13500,20 +13559,6 @@ pub async fn proxy_video_stream(
 
     // 检查Range请求
     let range_header = headers.get(header::RANGE).and_then(|h| h.to_str().ok());
-
-    fn looks_like_flv_url(url: &str) -> bool {
-        let lower = url.to_ascii_lowercase();
-        lower.contains(".flv") || lower.contains("format=flv")
-    }
-
-    fn parse_bool_query(params: &std::collections::HashMap<String, String>, key: &str) -> bool {
-        params.get(key).is_some_and(|v| {
-            matches!(
-                v.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "enable" | "enabled"
-            )
-        })
-    }
 
     async fn transmux_flv_to_mp4(stream_url: &str) -> Result<Response, anyhow::Error> {
         use axum::http::{header, HeaderValue};
@@ -13635,15 +13680,6 @@ pub async fn proxy_video_stream(
     // B站网页端老视频常用 flv.js 通过 Range 拉流实现可拖动播放。
     // 服务端默认直接代理原始流，前端若识别为 FLV 将使用 flv.js 播放，从而支持拖动。
     // 如需强制在服务端转封装为 mp4（用于不支持 flv.js/MSE 的环境），可传参 transmux=1。
-    let transmux_enabled = parse_bool_query(&params, "transmux");
-    debug!(
-        "代理视频流请求: url={}, raw_url_len={}, range={:?}, transmux={}, is_flv={}",
-        summarize_stream_url(stream_url),
-        stream_url.len(),
-        range_header,
-        transmux_enabled,
-        looks_like_flv_url(stream_url)
-    );
     if transmux_enabled && looks_like_flv_url(stream_url) {
         match transmux_flv_to_mp4(stream_url).await {
             Ok(resp) => return resp,
@@ -13768,6 +13804,34 @@ pub async fn proxy_video_stream(
         range_header.is_some()
     );
     proxy_response
+}
+
+#[cfg(test)]
+mod proxy_stream_tests {
+    use super::*;
+    use axum::http::{header, StatusCode};
+
+    #[test]
+    fn build_stream_redirect_response_returns_302_and_location() {
+        let stream_url = "https://upos-sz-mirrorcosov.bilivideo.com/example/test.mp4?token=abc";
+        let response = build_stream_redirect_response(stream_url).expect("应能构造302重定向响应");
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some(stream_url)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
 }
 
 /// 四步法安全重命名目录，避免父子目录冲突

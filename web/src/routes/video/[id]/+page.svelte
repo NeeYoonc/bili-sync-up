@@ -44,6 +44,7 @@
 	let onlinePlayRefreshRetried = false;
 	let onlinePlayRefreshRetrying = false;
 	let onlinePlaybackErrorMessage: string | null = null;
+	let onlinePlayForceProxy = false;
 	let isFullscreen = false; // 是否全屏模式
 	let deleteDialogOpen = false;
 	let deleting = false;
@@ -71,6 +72,44 @@
 		const streams = onlinePlayInfo.video_streams;
 		if (!streams || streams.length === 0) return null;
 		return streams[0] ?? null;
+	}
+
+	function canUseDirectOnlinePlayback() {
+		if (!onlinePlayMode || !onlinePlayInfo) return false;
+
+		const stream = getOnlineVideoStream();
+		const rawUrl = stream?.url ?? null;
+		if (!rawUrl) return false;
+
+		const container = typeof stream?.container === 'string' ? stream.container.toLowerCase() : '';
+		const isFlvStream = container === 'flv' || (!container && isFlvUrl(rawUrl));
+		return isDashSeparatedStream() || !isFlvStream;
+	}
+
+	function getOnlineMediaSourceUrl(rawUrl: string) {
+		return onlinePlayForceProxy
+			? api.getProxyStreamUrl(rawUrl)
+			: api.getProxyStreamUrl(rawUrl, { redirect: true });
+	}
+
+	async function fallbackOnlinePlaybackToProxy(): Promise<boolean> {
+		if (onlinePlayForceProxy || !canUseDirectOnlinePlayback()) return false;
+
+		onlinePlayForceProxy = true;
+		await tick();
+
+		const player = videoElement ?? (document.querySelector('video') as HTMLVideoElement | null);
+		if (player) {
+			try {
+				player.load();
+				await player.play();
+			} catch (error) {
+				console.warn('切换到代理播放后自动恢复失败:', error);
+			}
+		}
+
+		toast.warning('在线播放直连失败，已切换为代理模式重试');
+		return true;
 	}
 
 	function abortFlvSetup() {
@@ -280,6 +319,7 @@
 		onlinePlayRefreshRetried = false;
 		onlinePlayRefreshRetrying = false;
 		onlinePlaybackErrorMessage = null;
+		onlinePlayForceProxy = false;
 		videoElement = null;
 		lastPlaybackNoticeKey = null;
 		chargeLockedDisplayMode = null;
@@ -693,6 +733,7 @@
 		if (onlinePlayMode && !onlinePlayInfo) {
 			onlinePlayRefreshRetried = false;
 			onlinePlayRefreshRetrying = false;
+			onlinePlayForceProxy = false;
 			chargeLockedDisplayMode = null;
 			onlinePlaybackErrorMessage = null;
 			const videoId = getPlayVideoId();
@@ -718,7 +759,7 @@
 				return undefined;
 			}
 
-			return api.getProxyStreamUrl(rawUrl);
+			return getOnlineMediaSourceUrl(rawUrl);
 		}
 
 		const videoId = getPlayVideoId();
@@ -734,7 +775,7 @@
 			onlinePlayInfo.audio_streams.length > 0
 		) {
 			const audioStream = onlinePlayInfo.audio_streams[0];
-			return api.getProxyStreamUrl(audioStream.url);
+			return getOnlineMediaSourceUrl(audioStream.url);
 		}
 		return '';
 	}
@@ -1066,6 +1107,7 @@
 										onclick={() => {
 											currentPlayingPageIndex = index;
 											onlinePlayMode = false;
+											onlinePlayForceProxy = false;
 											chargeLockedDisplayMode = null;
 											showVideoPlayer = true;
 										}}
@@ -1084,6 +1126,7 @@
 											onlinePlayMode = true;
 											onlinePlayRefreshRetried = false;
 											onlinePlayRefreshRetrying = false;
+											onlinePlayForceProxy = false;
 											chargeLockedDisplayMode = null;
 											showVideoPlayer = true;
 											const videoId = getPlayVideoId();
@@ -1190,7 +1233,7 @@
 										<div>充电视频未充电</div>
 									</div>
 								{:else}
-									{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
+									{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}-${onlinePlayForceProxy}`}
 										<div
 											class="video-container relative {onlinePlayMode ? 'online-mode' : ''}"
 											role="group"
@@ -1203,9 +1246,12 @@
 												bind:this={videoElement}
 												src={getVideoSource()}
 												crossorigin="anonymous"
-												onerror={(e) => {
+												onerror={async (e) => {
 													console.warn('视频加载错误:', e);
 													if (onlinePlayMode) {
+														if (await fallbackOnlinePlaybackToProxy()) {
+															return;
+														}
 														if (!onlinePlayRefreshRetried) {
 															void retryOnlinePlayWithRefresh();
 														} else {
@@ -1293,7 +1339,10 @@
 													src={getAudioSource()}
 													crossorigin="anonymous"
 													style="display: none;"
-													onerror={() => {
+													onerror={async () => {
+														if (onlinePlayMode && (await fallbackOnlinePlaybackToProxy())) {
+															return;
+														}
 														if (onlinePlayMode && !onlinePlayRefreshRetried) {
 															void retryOnlinePlayWithRefresh();
 														}
@@ -1322,6 +1371,7 @@
 														if (onlinePlayMode) {
 															onlinePlayRefreshRetried = false;
 															onlinePlayRefreshRetrying = false;
+															onlinePlayForceProxy = false;
 															chargeLockedDisplayMode = null;
 															const videoId = getPlayVideoId();
 															loadOnlinePlayInfo(videoId);

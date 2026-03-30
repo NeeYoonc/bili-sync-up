@@ -796,10 +796,11 @@ class ApiClient {
 	 * 获取代理视频流URL
 	 * @param streamUrl 原始视频流URL
 	 */
-	getProxyStreamUrl(streamUrl: string, options?: { transmux?: boolean }): string {
+	getProxyStreamUrl(streamUrl: string, options?: { transmux?: boolean; redirect?: boolean }): string {
 		const encodedUrl = encodeURIComponent(streamUrl);
 		const transmuxParam = options?.transmux ? '&transmux=1' : '';
-		return `${this.baseURL}/videos/proxy-stream?url=${encodedUrl}${transmuxParam}`;
+		const redirectParam = options?.redirect ? '&redirect=1' : '';
+		return `${this.baseURL}/videos/proxy-stream?url=${encodedUrl}${transmuxParam}${redirectParam}`;
 	}
 
 	/**
@@ -1290,7 +1291,7 @@ export const api = {
 	/**
 	 * 获取代理视频流URL
 	 */
-	getProxyStreamUrl: (streamUrl: string, options?: { transmux?: boolean }) =>
+	getProxyStreamUrl: (streamUrl: string, options?: { transmux?: boolean; redirect?: boolean }) =>
 		apiClient.getProxyStreamUrl(streamUrl, options),
 
 	/**
