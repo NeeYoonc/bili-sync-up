@@ -59,12 +59,14 @@ impl MigrationTrait for Migration {
 
         conn.execute(Statement::from_string(
             backend,
-            "CREATE INDEX IF NOT EXISTS idx_image_proxy_cache_expires_at ON image_proxy_cache(expires_at_unix)".to_string(),
+            "CREATE INDEX IF NOT EXISTS idx_image_proxy_cache_expires_at ON image_proxy_cache(expires_at_unix)"
+                .to_string(),
         ))
         .await?;
         conn.execute(Statement::from_string(
             backend,
-            "CREATE INDEX IF NOT EXISTS idx_image_proxy_cache_updated_at ON image_proxy_cache(updated_at_unix)".to_string(),
+            "CREATE INDEX IF NOT EXISTS idx_image_proxy_cache_updated_at ON image_proxy_cache(updated_at_unix)"
+                .to_string(),
         ))
         .await?;
 
@@ -88,11 +90,7 @@ impl MigrationTrait for Migration {
     }
 }
 
-async fn table_has_column(
-    manager: &SchemaManager<'_>,
-    table_name: &str,
-    column_name: &str,
-) -> Result<bool, DbErr> {
+async fn table_has_column(manager: &SchemaManager<'_>, table_name: &str, column_name: &str) -> Result<bool, DbErr> {
     let backend = manager.get_connection().get_database_backend();
     let sql = format!(
         "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'",

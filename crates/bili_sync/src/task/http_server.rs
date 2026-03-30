@@ -9,6 +9,7 @@ use axum::{middleware, Extension, Router, ServiceExt};
 use reqwest::StatusCode;
 use rust_embed::Embed;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use tracing::{debug, error, info, warn};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
@@ -98,6 +99,7 @@ use crate::api::video_stream::stream_video;
 use crate::api::wrapper::ApiResponse;
 use crate::api::ws;
 use crate::bilibili::{get_captcha_info, serve_captcha_page, submit_captcha_result};
+use crate::utils::model::queue_missing_video_file_size_backfill;
 // CONFIG导入已移除 - 现在使用动态配置
 
 #[derive(Embed)]
@@ -319,6 +321,15 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
             } else {
                 debug!("数据库连接健康检查通过");
             }
+        }
+    });
+
+    let file_size_backfill_connection = optimized_connection.clone();
+    tokio::spawn(async move {
+        match queue_missing_video_file_size_backfill(file_size_backfill_connection).await {
+            Ok(queued) if queued > 0 => info!("已启动后台文件大小统计，待处理视频 {} 条", queued),
+            Ok(_) => debug!("没有需要后台统计文件大小的视频"),
+            Err(error) => warn!("启动后台文件大小统计失败: {error:#}"),
         }
     });
 

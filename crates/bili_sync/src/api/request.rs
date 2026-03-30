@@ -17,7 +17,7 @@ pub struct VideosRequest {
     pub max_height: Option<u32>,
     pub resolution: Option<u32>,
     pub force: Option<bool>,
-    pub sort_by: Option<String>,    // "id", "name", "upper_name", "created_at", "updated_at"
+    pub sort_by: Option<String>,    // "id", "name", "pubtime", "is_charge_video", "file_size"
     pub sort_order: Option<String>, // "asc", "desc"
 }
 

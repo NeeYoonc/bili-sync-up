@@ -113,8 +113,7 @@ async fn auto_compact_image_proxy_cache(connection: &DatabaseConnection) -> Resu
     const MIN_FREE_RATIO_FOR_VACUUM: f64 = 0.20;
 
     let backend = connection.get_database_backend();
-    let table_exists_sql =
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='image_proxy_cache'";
+    let table_exists_sql = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='image_proxy_cache'";
     let table_exists = connection
         .query_one(sea_orm::Statement::from_string(backend, table_exists_sql))
         .await?
@@ -135,10 +134,7 @@ async fn auto_compact_image_proxy_cache(connection: &DatabaseConnection) -> Resu
     }
 
     let freelist_count = connection
-        .query_one(sea_orm::Statement::from_string(
-            backend,
-            "PRAGMA freelist_count",
-        ))
+        .query_one(sea_orm::Statement::from_string(backend, "PRAGMA freelist_count"))
         .await?
         .and_then(|row| row.try_get_by_index::<i64>(0).ok())
         .unwrap_or(0);
@@ -178,10 +174,7 @@ async fn auto_compact_image_proxy_cache(connection: &DatabaseConnection) -> Resu
         reclaimable_mb
     );
 
-    if let Err(e) = connection
-        .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE)")
-        .await
-    {
+    if let Err(e) = connection.execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE)").await {
         debug!("自动VACUUM前WAL checkpoint失败（继续尝试VACUUM）: {}", e);
     }
 
@@ -194,11 +187,7 @@ async fn auto_compact_image_proxy_cache(connection: &DatabaseConnection) -> Resu
     Ok(())
 }
 
-async fn sqlite_table_has_column(
-    connection: &DatabaseConnection,
-    table_name: &str,
-    column_name: &str,
-) -> Result<bool> {
+async fn sqlite_table_has_column(connection: &DatabaseConnection, table_name: &str, column_name: &str) -> Result<bool> {
     let backend = connection.get_database_backend();
     let sql = format!(
         "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'",

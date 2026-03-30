@@ -63,6 +63,7 @@ mod m20260308_000001_add_collection_episode_order_strategy;
 mod m20260308_000002_add_video_charge_flags;
 mod m20260314_000001_clear_image_proxy_image_data;
 mod m20260328_000001_add_scan_deleted_videos_once_field;
+mod m20260330_000001_add_video_file_size_fields;
 
 pub struct Migrator;
 
@@ -133,6 +134,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260308_000002_add_video_charge_flags::Migration),
             Box::new(m20260314_000001_clear_image_proxy_image_data::Migration),
             Box::new(m20260328_000001_add_scan_deleted_videos_once_field::Migration),
+            Box::new(m20260330_000001_add_video_file_size_fields::Migration),
         ]
     }
 }

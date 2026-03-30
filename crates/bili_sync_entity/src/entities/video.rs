@@ -48,6 +48,7 @@ pub struct Model {
     pub is_charge_video: bool,
     #[sea_orm(default_value = "false")]
     pub charge_can_play: bool,
+    pub total_file_size_bytes: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

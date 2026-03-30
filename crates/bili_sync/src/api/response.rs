@@ -22,6 +22,7 @@ pub struct VideoSourcesResponse {
 pub struct VideosResponse {
     pub videos: Vec<VideoInfo>,
     pub total_count: u64,
+    pub file_size_stats_pending: bool,
 }
 
 #[derive(Serialize, ToSchema)]
