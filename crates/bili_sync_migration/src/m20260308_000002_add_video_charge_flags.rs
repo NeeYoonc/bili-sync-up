@@ -35,23 +35,9 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        drop_column_if_exists(
-            manager,
-            "video",
-            Video::Table,
-            "charge_can_play",
-            Video::ChargeCanPlay,
-        )
-        .await?;
+        drop_column_if_exists(manager, "video", Video::Table, "charge_can_play", Video::ChargeCanPlay).await?;
 
-        drop_column_if_exists(
-            manager,
-            "video",
-            Video::Table,
-            "is_charge_video",
-            Video::IsChargeVideo,
-        )
-        .await
+        drop_column_if_exists(manager, "video", Video::Table, "is_charge_video", Video::IsChargeVideo).await
     }
 }
 
@@ -94,11 +80,7 @@ where
     Ok(())
 }
 
-async fn table_has_column(
-    manager: &SchemaManager<'_>,
-    table_name: &str,
-    column_name: &str,
-) -> Result<bool, DbErr> {
+async fn table_has_column(manager: &SchemaManager<'_>, table_name: &str, column_name: &str) -> Result<bool, DbErr> {
     let backend = manager.get_connection().get_database_backend();
     let sql = format!(
         "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'",

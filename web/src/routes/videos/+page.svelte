@@ -137,7 +137,14 @@
 		if (value === 'upper_name') return 'id';
 		// 兼容旧参数（created_at 等同于添加时间）
 		if (value === 'created_at') return 'id';
-		if (value === 'id' || value === 'pubtime' || value === 'name' || value === 'is_charge_video') return value;
+		if (
+			value === 'id' ||
+			value === 'pubtime' ||
+			value === 'name' ||
+			value === 'is_charge_video' ||
+			value === 'file_size'
+		)
+			return value;
 		return 'id';
 	}
 
@@ -346,7 +353,7 @@
 	function patchCurrentPageVideos(current: VideosResponse, next: VideosResponse): VideosResponse {
 		const nextById = new Map(next.videos.map((video) => [video.id, video]));
 		return {
-			...current,
+			...next,
 			videos: current.videos.map((video) => nextById.get(video.id) ?? video)
 		};
 	}
@@ -921,6 +928,8 @@
 							<option value="pubtime_desc">发布时间 (最新)</option>
 							<option value="pubtime_asc">发布时间 (最早)</option>
 							<option value="is_charge_video_desc">充电视频在前</option>
+							<option value="file_size_desc">文件大小 (最大)</option>
+							<option value="file_size_asc">文件大小 (最小)</option>
 							<option value="name_asc">名称 (A-Z)</option>
 							<option value="name_desc">名称 (Z-A)</option>
 						</select>
@@ -1198,6 +1207,11 @@
 				{/if}
 			</Badge>
 		</div>
+		{#if currentSortBy === 'file_size' && videosData.file_size_stats_pending}
+			<div class="text-muted-foreground mt-2 text-sm">
+				文件大小统计中，首次按文件大小排序时会在后台逐步补全旧文件大小。
+			</div>
+		{/if}
 		{#if $appStateStore.currentPage > 0 && pendingInsertedCount > 0}
 			<div class="mt-2">
 				<Button variant="outline" size="sm" onclick={handlePendingInsertedClick}>

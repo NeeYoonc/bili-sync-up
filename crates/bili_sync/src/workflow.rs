@@ -264,7 +264,7 @@ use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
     create_pages, create_videos, filter_unfilled_videos, filter_unhandled_video_pages,
-    get_failed_videos_in_current_cycle, update_pages_model, update_videos_model,
+    get_failed_videos_in_current_cycle, recompute_video_total_file_sizes, update_pages_model, update_videos_model,
 };
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
@@ -2999,6 +2999,9 @@ pub async fn download_video_pages(
                 height: None,
                 duration: 0,
                 path: None,
+                file_size_bytes: None,
+                video_stream_size_bytes: None,
+                audio_stream_size_bytes: None,
                 image: None,
                 download_status: 0,
                 created_at: now_standard_string(),
@@ -4442,7 +4445,7 @@ pub async fn download_video_pages(
             && (base_name.ends_with("合集") || base_name.ends_with("合輯") || base_name.ends_with("Collection"))
     };
 
-    let (res_1, res_2, res_folder, res_3, res_4, res_5) = tokio::join!(
+    let res_1_fut = Box::pin(
         // 下载视频封面（番剧和普通视频采用不同策略）
         fetch_video_poster(
             if is_bangumi {
@@ -4564,6 +4567,8 @@ pub async fn download_video_pages(
             },
             allow_collection_asset_video_cover_fallback,
         ),
+    );
+    let res_2_fut = Box::pin(
         // 下载番剧/多P/合集根目录的 poster.jpg（Emby兼容性）
         fetch_bangumi_poster(
             {
@@ -4620,6 +4625,8 @@ pub async fn download_video_pages(
             },
             allow_collection_asset_video_cover_fallback,
         ),
+    );
+    let res_folder_fut = Box::pin(
         // 下载番剧/多P/合集根目录的 folder.jpg（Emby兼容性，优先级最高）
         fetch_bangumi_poster(
             {
@@ -4676,6 +4683,8 @@ pub async fn download_video_pages(
             },
             allow_collection_asset_video_cover_fallback,
         ),
+    );
+    let res_3_fut = Box::pin(
         // 下载 Up 主头像（番剧跳过，因为番剧没有UP主信息）
         fetch_upper_face(
             separate_status[2] && should_download_upper && !is_bangumi,
@@ -4684,12 +4693,16 @@ pub async fn download_video_pages(
             base_upper_path.join("folder.jpg"),
             token.clone(),
         ),
+    );
+    let res_4_fut = Box::pin(
         // 生成 Up 主信息的 nfo（番剧跳过，因为番剧没有UP主信息）
         generate_upper_nfo(
             separate_status[3] && should_download_upper && !is_bangumi,
             &final_video_model,
             base_upper_path.join("person.nfo"),
         ),
+    );
+    let res_5_fut = Box::pin(
         // 分发并执行分 P 下载的任务
         dispatch_download_page(
             DownloadPageArgs {
@@ -4702,9 +4715,12 @@ pub async fn download_video_pages(
                 downloader,
                 base_path: &base_path,
             },
-            token.clone()
-        )
+            token.clone(),
+        ),
     );
+
+    let (res_1, res_2, res_folder, res_3, res_4, res_5) =
+        tokio::join!(res_1_fut, res_2_fut, res_folder_fut, res_3_fut, res_4_fut, res_5_fut);
 
     // 兼容命名：根目录补充“根目录名-thumb/fanart”，例如：
     // - 投稿源同UP合集分季：浅影阿_合集-thumb.jpg / 浅影阿_合集-fanart.jpg（使用 UP 头像）
@@ -5183,22 +5199,30 @@ pub async fn download_video_pages(
 
     // 重新从数据库读取最新的 video.path，因为 download_page 中可能进行了 AI 重命名
     // 这样可以确保返回的 video_active_model 包含正确的路径，不会被外部的 update_videos_model 覆盖
-    let final_path = match video::Entity::find_by_id(ingest_video_id).one(connection).await {
-        Ok(Some(latest_video)) => {
+    let latest_video_snapshot = video::Entity::find_by_id(ingest_video_id)
+        .one(connection)
+        .await
+        .ok()
+        .flatten();
+    let final_path = match latest_video_snapshot.as_ref() {
+        Some(latest_video) => {
             if !latest_video.path.is_empty() && latest_video.path != path_to_save {
                 debug!(
                     "检测到 AI 重命名后的路径变化: video_id={}, 原路径='{}', 新路径='{}'",
                     ingest_video_id, path_to_save, latest_video.path
                 );
-                latest_video.path
+                latest_video.path.clone()
             } else {
                 path_to_save
             }
         }
-        _ => path_to_save,
+        None => path_to_save,
     };
 
     video_active_model.path = Set(final_path);
+    video_active_model.total_file_size_bytes = Set(latest_video_snapshot
+        .as_ref()
+        .and_then(|latest_video| latest_video.total_file_size_bytes));
     Ok(video_active_model)
 }
 
@@ -5245,6 +5269,7 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
     let (mut download_aborted, mut target_status) = (false, STATUS_OK);
     let mut cancelled_by_user = false;
     let mut failed_pages: Vec<String> = Vec::new(); // 收集失败的分页信息
+    let mut has_page_updates = false;
     let mut stream = tasks;
     while let Some((res, page_pid, page_name)) = stream.next().await {
         match res {
@@ -5262,6 +5287,7 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
                     target_status = target_status.min(status);
                 }
                 update_pages_model(vec![model], args.connection).await?;
+                has_page_updates = true;
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -5344,6 +5370,10 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
                 }
             }
         }
+    }
+
+    if has_page_updates {
+        recompute_video_total_file_sizes(&[args.video_model.id], args.connection).await?;
     }
 
     if download_aborted {
@@ -5976,62 +6006,71 @@ pub async fn download_page(
         dimension,
         ..Default::default()
     };
-    // 使用 tokio::join! 替代装箱的 Future，零分配并行执行
-    let (res_1, res_2, res_3, res_4, res_5) = tokio::join!(
-        fetch_page_poster(
-            separate_status[0],
-            video_model,
-            &page_model,
-            downloader,
-            poster_path,
-            fanart_path,
-            token.clone(),
+    let res_1_fut = Box::pin(fetch_page_poster(
+        separate_status[0],
+        video_model,
+        &page_model,
+        downloader,
+        poster_path,
+        fanart_path,
+        token.clone(),
+    ));
+    let res_2_fut = Box::pin(fetch_page_video(
+        separate_status[1],
+        bili_client,
+        video_model,
+        connection,
+        page_model.id,
+        downloader,
+        &page_info,
+        &video_path,
+        audio_only,
+        token.clone(),
+    ));
+    let res_3_fut = Box::pin(generate_page_nfo(
+        separate_status[2],
+        video_model,
+        &page_model,
+        nfo_path,
+        connection,
+        if matches!(video_source, VideoSourceEnum::Collection(_))
+            || is_submission_collection_video
+            || is_submission_up_seasonal_multipage
+        {
+            Some(collection_season_number)
+        } else {
+            None
+        },
+        collection_page_episode_number.or(submission_page_episode_number),
+    ));
+    let res_4_fut = Box::pin(fetch_page_danmaku(
+        separate_status[3],
+        bili_client,
+        video_model,
+        &page_info,
+        danmaku_path,
+        token.clone(),
+    ));
+    let res_5_fut = Box::pin(fetch_page_subtitle(
+        separate_status[4],
+        bili_client,
+        video_model,
+        &page_info,
+        &subtitle_path,
+        token.clone(),
+    ));
+
+    let (res_1, res_2, res_3, res_4, res_5) = tokio::join!(res_1_fut, res_2_fut, res_3_fut, res_4_fut, res_5_fut);
+
+    let (res_2, page_file_size_bytes, page_video_stream_size_bytes, page_audio_stream_size_bytes) = match res_2 {
+        Ok(video_result) => (
+            Ok(video_result.status),
+            video_result.file_size_bytes,
+            video_result.video_stream_size_bytes,
+            video_result.audio_stream_size_bytes,
         ),
-        fetch_page_video(
-            separate_status[1],
-            bili_client,
-            video_model,
-            connection,
-            page_model.id,
-            downloader,
-            &page_info,
-            &video_path,
-            audio_only,
-            token.clone(),
-        ),
-        generate_page_nfo(
-            separate_status[2],
-            video_model,
-            &page_model,
-            nfo_path,
-            connection,
-            if matches!(video_source, VideoSourceEnum::Collection(_))
-                || is_submission_collection_video
-                || is_submission_up_seasonal_multipage
-            {
-                Some(collection_season_number)
-            } else {
-                None
-            },
-            collection_page_episode_number.or(submission_page_episode_number),
-        ),
-        fetch_page_danmaku(
-            separate_status[3],
-            bili_client,
-            video_model,
-            &page_info,
-            danmaku_path,
-            token.clone(),
-        ),
-        fetch_page_subtitle(
-            separate_status[4],
-            bili_client,
-            video_model,
-            &page_info,
-            &subtitle_path,
-            token.clone(),
-        )
-    );
+        Err(err) => (Err(err), None, None, None),
+    };
 
     let results = [res_1, res_2, res_3, res_4, res_5]
         .into_iter()
@@ -6154,9 +6193,11 @@ pub async fn download_page(
             }
         });
     // 检查下载视频时是否触发风控
-    match results.into_iter().nth(1).context("video download result not found")? {
+    match results.get(1).context("video download result not found")? {
         ExecutionStatus::Failed(e) => {
-            if let Ok(BiliError::RiskControlOccurred) = e.downcast::<BiliError>() {
+            if e.downcast_ref::<BiliError>()
+                .is_some_and(|bili_error| matches!(bili_error, BiliError::RiskControlOccurred))
+            {
                 bail!(DownloadAbortError());
             }
         }
@@ -6336,6 +6377,15 @@ pub async fn download_page(
     let mut page_active_model: page::ActiveModel = page_model.into();
     page_active_model.download_status = Set(status.into());
     page_active_model.path = Set(Some(final_video_path_str));
+    if let Some(file_size_bytes) = page_file_size_bytes {
+        page_active_model.file_size_bytes = Set(Some(file_size_bytes));
+    }
+    if let Some(video_stream_size_bytes) = page_video_stream_size_bytes {
+        page_active_model.video_stream_size_bytes = Set(Some(video_stream_size_bytes));
+    }
+    if let Some(audio_stream_size_bytes) = page_audio_stream_size_bytes {
+        page_active_model.audio_stream_size_bytes = Set(Some(audio_stream_size_bytes));
+    }
     Ok(page_active_model)
 }
 
@@ -6725,7 +6775,18 @@ async fn create_charge_video_placeholder(
     Ok(ExecutionStatus::Succeeded)
 }
 
-pub async fn fetch_page_video(
+struct PageVideoFetchResult {
+    status: ExecutionStatus,
+    file_size_bytes: Option<i64>,
+    video_stream_size_bytes: Option<i64>,
+    audio_stream_size_bytes: Option<i64>,
+}
+
+fn to_db_file_size(size: u64) -> i64 {
+    i64::try_from(size).unwrap_or(i64::MAX)
+}
+
+async fn fetch_page_video(
     should_run: bool,
     bili_client: &BiliClient,
     video_model: &video::Model,
@@ -6736,13 +6797,28 @@ pub async fn fetch_page_video(
     page_path: &Path,
     audio_only: bool,
     token: CancellationToken,
-) -> Result<ExecutionStatus> {
+) -> Result<PageVideoFetchResult> {
     if !should_run {
-        return Ok(ExecutionStatus::Skipped);
+        return Ok(PageVideoFetchResult {
+            status: ExecutionStatus::Skipped,
+            file_size_bytes: None,
+            video_stream_size_bytes: None,
+            audio_stream_size_bytes: None,
+        });
     }
 
     if is_charge_video_locked(video_model) {
-        return create_charge_video_placeholder(page_path, video_model, page_info).await;
+        create_charge_video_placeholder(page_path, video_model, page_info).await?;
+        let placeholder_size = tokio::fs::metadata(page_path)
+            .await
+            .map(|metadata| to_db_file_size(metadata.len()))
+            .ok();
+        return Ok(PageVideoFetchResult {
+            status: ExecutionStatus::Succeeded,
+            file_size_bytes: placeholder_size,
+            video_stream_size_bytes: None,
+            audio_stream_size_bytes: placeholder_size,
+        });
     }
 
     let bili_video = Video::new(bili_client, video_model.bvid.clone());
@@ -6812,7 +6888,17 @@ pub async fn fetch_page_video(
                         &video_model.name, page_info_for_download.page, &page_info_for_download.name
                     );
                     persist_charge_video_state(connection, video_model.id, true, false).await;
-                    return create_charge_video_placeholder(page_path, video_model, &page_info_for_download).await;
+                    create_charge_video_placeholder(page_path, video_model, &page_info_for_download).await?;
+                    let placeholder_size = tokio::fs::metadata(page_path)
+                        .await
+                        .map(|metadata| to_db_file_size(metadata.len()))
+                        .ok();
+                    return Ok(PageVideoFetchResult {
+                        status: ExecutionStatus::Succeeded,
+                        file_size_bytes: placeholder_size,
+                        video_stream_size_bytes: None,
+                        audio_stream_size_bytes: placeholder_size,
+                    });
                 }
                 return Err(e);
             }
@@ -6929,14 +7015,15 @@ pub async fn fetch_page_video(
     debug!("=== 流选择结束 ===");
 
     // 音频模式：只下载音频流
-    let total_bytes = if audio_only {
+    let (total_bytes, video_stream_size_bytes, audio_stream_size_bytes) = if audio_only {
         debug!("音频模式：仅下载音频流，输出 M4A 格式");
         match best_stream_result {
             BestStream::Mixed(mix_stream) => {
                 // 混合流无法提取纯音频，警告并使用混合流
                 warn!("混合流不支持纯音频提取，将下载完整内容");
                 let urls = mix_stream.urls();
-                download_stream(downloader, video_model.id, &urls, page_path).await?
+                let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
             BestStream::VideoAudio {
                 audio: Some(audio_stream),
@@ -6944,7 +7031,8 @@ pub async fn fetch_page_video(
             } => {
                 // 直接下载音频流
                 let audio_urls = audio_stream.urls();
-                download_stream(downloader, video_model.id, &audio_urls, page_path).await?
+                let downloaded_size = download_stream(downloader, video_model.id, &audio_urls, page_path).await?;
+                (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
             BestStream::VideoAudio {
                 audio: None,
@@ -6953,7 +7041,8 @@ pub async fn fetch_page_video(
                 // 没有独立音频流，警告并使用视频流（可能包含音频）
                 warn!("未找到独立音频流，将下载视频流");
                 let urls = video_stream.urls();
-                download_stream(downloader, video_model.id, &urls, page_path).await?
+                let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
             }
         }
     } else {
@@ -6966,8 +7055,7 @@ pub async fn fetch_page_video(
                         let tmp_mix_path = page_path.with_extension("tmp_flv");
                         let urls = mix_stream.urls();
                         let downloaded_size = download_stream(downloader, video_model.id, &urls, &tmp_mix_path).await?;
-
-                        match crate::downloader::remux_with_ffmpeg(&tmp_mix_path, page_path).await {
+                        let final_size = match crate::downloader::remux_with_ffmpeg(&tmp_mix_path, page_path).await {
                             Ok(()) => {
                                 let _ = fs::remove_file(&tmp_mix_path).await;
                                 tokio::fs::metadata(page_path)
@@ -6984,11 +7072,14 @@ pub async fn fetch_page_video(
                                 fs::rename(&tmp_mix_path, page_path).await?;
                                 downloaded_size
                             }
-                        }
+                        };
+
+                        (final_size, Some(to_db_file_size(downloaded_size)), None)
                     }
                     _ => {
                         let urls = mix_stream.urls();
-                        download_stream(downloader, video_model.id, &urls, page_path).await?
+                        let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                        (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
                     }
                 }
             }
@@ -6997,7 +7088,8 @@ pub async fn fetch_page_video(
                 audio: None,
             } => {
                 let urls = video_stream.urls();
-                download_stream(downloader, video_model.id, &urls, page_path).await?
+                let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
             }
             BestStream::VideoAudio {
                 video: video_stream,
@@ -7084,10 +7176,16 @@ pub async fn fetch_page_video(
                 let _ = fs::remove_file(tmp_audio_path).await;
 
                 // 获取合并后文件大小，如果失败则使用视频和音频大小之和
-                tokio::fs::metadata(page_path)
+                let final_size = tokio::fs::metadata(page_path)
                     .await
                     .map(|metadata| metadata.len())
-                    .unwrap_or(video_size + audio_size)
+                    .unwrap_or(video_size + audio_size);
+
+                (
+                    final_size,
+                    Some(to_db_file_size(video_size)),
+                    Some(to_db_file_size(audio_size)),
+                )
             }
         }
     };
@@ -7117,7 +7215,12 @@ pub async fn fetch_page_video(
         );
     }
 
-    Ok(ExecutionStatus::Succeeded)
+    Ok(PageVideoFetchResult {
+        status: ExecutionStatus::Succeeded,
+        file_size_bytes: Some(to_db_file_size(total_bytes)),
+        video_stream_size_bytes,
+        audio_stream_size_bytes,
+    })
 }
 
 pub async fn fetch_page_danmaku(

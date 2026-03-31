@@ -2403,7 +2403,11 @@ impl<'a> Season<'a> {
 
         if let Some(name) = collection_name {
             let normalized_name = name.trim_start_matches("合集·").trim();
-            let normalized_name = if normalized_name.is_empty() { name } else { normalized_name };
+            let normalized_name = if normalized_name.is_empty() {
+                name
+            } else {
+                normalized_name
+            };
             season.name = normalized_name;
             season.original_title = normalized_name;
             season.sorttitle = Some(format!("{} 第{:02}季", normalized_name, safe_season));
@@ -3363,13 +3367,8 @@ mod tests {
             ..Default::default()
         };
 
-        let mut season = Season::from_video_with_collection(
-            &video,
-            Some("合集·童年动漫主题曲翻唱合集"),
-            None,
-            1,
-            Some(8),
-        );
+        let mut season =
+            Season::from_video_with_collection(&video, Some("合集·童年动漫主题曲翻唱合集"), None, 1, Some(8));
         season.suppress_season_label_in_title = true;
         let season_nfo = NFO::Season(season).generate_nfo().await.unwrap();
 

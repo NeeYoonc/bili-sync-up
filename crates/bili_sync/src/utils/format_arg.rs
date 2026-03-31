@@ -411,6 +411,7 @@ mod tests {
             auto_download: false,
             is_charge_video: false,
             charge_can_play: false,
+            total_file_size_bytes: None,
         };
 
         // 测试使用API标题的情况

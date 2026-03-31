@@ -25,11 +25,7 @@ impl MigrationTrait for Migration {
     }
 }
 
-async fn add_filter_columns<T>(
-    manager: &SchemaManager<'_>,
-    table_name: &str,
-    table: T,
-) -> Result<(), DbErr>
+async fn add_filter_columns<T>(manager: &SchemaManager<'_>, table_name: &str, table: T) -> Result<(), DbErr>
 where
     T: IntoIden + Clone + 'static,
 {
@@ -79,11 +75,7 @@ where
     .await
 }
 
-async fn drop_filter_columns<T>(
-    manager: &SchemaManager<'_>,
-    table_name: &str,
-    table: T,
-) -> Result<(), DbErr>
+async fn drop_filter_columns<T>(manager: &SchemaManager<'_>, table_name: &str, table: T) -> Result<(), DbErr>
 where
     T: IntoIden + Clone + 'static,
 {
@@ -160,11 +152,7 @@ where
     Ok(())
 }
 
-async fn table_has_column(
-    manager: &SchemaManager<'_>,
-    table_name: &str,
-    column_name: &str,
-) -> Result<bool, DbErr> {
+async fn table_has_column(manager: &SchemaManager<'_>, table_name: &str, column_name: &str) -> Result<bool, DbErr> {
     let backend = manager.get_connection().get_database_backend();
     let sql = format!(
         "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'",

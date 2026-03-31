@@ -40,10 +40,7 @@ fn format_wbi_fetch_failure_message(err: &anyhow::Error) -> String {
     let error_text = format!("{:#}", err);
     let lower = error_text.to_lowercase();
 
-    if lower.contains("operation timed out")
-        || lower.contains("timed out")
-        || lower.contains("deadline has elapsed")
-    {
+    if lower.contains("operation timed out") || lower.contains("timed out") || lower.contains("deadline has elapsed") {
         "获取B站签名信息失败：请求超时，可能与当前登录状态或网络环境有关，可尝试重新登录B站账号".to_string()
     } else {
         format!("获取B站签名信息失败: {}", error_text)
@@ -179,7 +176,10 @@ async fn try_disable_cancelled_submission_source(
     };
 
     if disable_reason.is_none() {
-        match Submission::new(bili_client, upper_id.clone()).get_account_status().await {
+        match Submission::new(bili_client, upper_id.clone())
+            .get_account_status()
+            .await
+        {
             Ok(status) => {
                 resolved_name = status.name;
                 if resolved_name == "账号已注销" {
@@ -700,7 +700,8 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                                 warn!("检测到登录状态过期或未登录，自动续登失败: {:#}", refresh_err);
                                 crate::api::handler::add_log_entry(
                                     crate::api::handler::LogLevel::Warn,
-                                    "检测到登录状态过期或未登录，自动续登失败，请更新配置文件中的SESSDATA等认证信息".to_string(),
+                                    "检测到登录状态过期或未登录，自动续登失败，请更新配置文件中的SESSDATA等认证信息"
+                                        .to_string(),
                                     Some("bili_sync::task::video_downloader".to_string()),
                                 );
                                 TASK_CONTROLLER.set_scanning(false);
@@ -935,7 +936,10 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             let filtered_count = filtered_videos.len();
                             let original_count = new_video_count;
                             if filtered_count < original_count {
-                                info!("过滤待删除中的视频: 原始 {} 个，过滤后 {} 个", original_count, filtered_count);
+                                info!(
+                                    "过滤待删除中的视频: 原始 {} 个，过滤后 {} 个",
+                                    original_count, filtered_count
+                                );
                             }
 
                             if !filtered_videos.is_empty() {
@@ -948,7 +952,10 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                                 )
                                 .await
                                 {
-                                    debug!("向scan_collector添加 {} 个新视频信息（已过滤待删除中的视频）", filtered_videos.len());
+                                    debug!(
+                                        "向scan_collector添加 {} 个新视频信息（已过滤待删除中的视频）",
+                                        filtered_videos.len()
+                                    );
                                     scan_collector.add_new_videos(&video_source, filtered_videos);
                                 } else {
                                     warn!("无法获取视频源信息，跳过添加新视频到收集器");
@@ -990,19 +997,17 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             }
                         }
 
-                        match try_disable_cancelled_submission_source(
-                            &optimized_connection,
-                            &bili_client,
-                            source,
-                            &e,
-                        )
-                        .await
+                        match try_disable_cancelled_submission_source(&optimized_connection, &bili_client, source, &e)
+                            .await
                         {
                             Ok(Some((source_name, disable_reason))) => {
                                 processed_sources += 1;
                                 last_successful_source = Some(source);
                                 notify_video_sources_changed();
-                                info!("检测到不可扫描UP主投稿源「{}」（{}），已自动停用该源", source_name, disable_reason);
+                                info!(
+                                    "检测到不可扫描UP主投稿源「{}」（{}），已自动停用该源",
+                                    source_name, disable_reason
+                                );
                                 let notification_context =
                                     format!("检测到账号已注销、已封禁或无视频投稿（{}）。", disable_reason);
                                 send_source_status_notification(
@@ -1024,7 +1029,10 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                                 processed_sources += 1;
                                 last_successful_source = Some(source);
                                 notify_video_sources_changed();
-                                info!("检测到不可扫描合集源「{}」（{}），已自动停用该源", source_name, disable_reason);
+                                info!(
+                                    "检测到不可扫描合集源「{}」（{}），已自动停用该源",
+                                    source_name, disable_reason
+                                );
                                 send_source_status_notification(
                                     "视频源自动停用",
                                     &format!("合集源「{}」已自动停用", source_name),

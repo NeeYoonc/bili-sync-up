@@ -911,10 +911,7 @@ async fn cleanup_empty_season_dirs_task(
     }
 }
 
-async fn cleanup_root_metadata_if_no_media_task(
-    root_dir: &std::path::Path,
-    deleted_count: &mut usize,
-) {
+async fn cleanup_root_metadata_if_no_media_task(root_dir: &std::path::Path, deleted_count: &mut usize) {
     if !root_dir.exists() || dir_has_media_files_recursive_task(root_dir) {
         return;
     }
@@ -1368,7 +1365,10 @@ async fn delete_video_files_from_pages_task(
                                                 deleted_count += 1;
                                             }
                                             Err(e) => {
-                                                warn!("删除Season结构根目录元数据文件失败: {:?} - {}", metadata_path, e);
+                                                warn!(
+                                                    "删除Season结构根目录元数据文件失败: {:?} - {}",
+                                                    metadata_path, e
+                                                );
                                             }
                                         }
                                     }
@@ -2436,16 +2436,22 @@ pub async fn process_add_tasks(db: Arc<DatabaseConnection>) -> Result<u32, anyho
 
 /// 添加更新配置任务到队列的便捷函数
 pub async fn enqueue_update_task(task: UpdateConfigTask, connection: &DatabaseConnection) -> Result<()> {
-    timeout(TASK_ENQUEUE_TIMEOUT, CONFIG_TASK_QUEUE.enqueue_update_task(task, connection))
-        .await
-        .map_err(|_| anyhow::anyhow!("更新配置任务加入队列超时，请稍后重试"))?
+    timeout(
+        TASK_ENQUEUE_TIMEOUT,
+        CONFIG_TASK_QUEUE.enqueue_update_task(task, connection),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("更新配置任务加入队列超时，请稍后重试"))?
 }
 
 /// 添加重载配置任务到队列的便捷函数
 pub async fn enqueue_reload_task(task: ReloadConfigTask, connection: &DatabaseConnection) -> Result<()> {
-    timeout(TASK_ENQUEUE_TIMEOUT, CONFIG_TASK_QUEUE.enqueue_reload_task(task, connection))
-        .await
-        .map_err(|_| anyhow::anyhow!("重载配置任务加入队列超时，请稍后重试"))?
+    timeout(
+        TASK_ENQUEUE_TIMEOUT,
+        CONFIG_TASK_QUEUE.enqueue_reload_task(task, connection),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("重载配置任务加入队列超时，请稍后重试"))?
 }
 
 /// 处理所有配置任务的便捷函数
@@ -2455,9 +2461,12 @@ pub async fn process_config_tasks(db: Arc<DatabaseConnection>) -> Result<u32, an
 
 /// 添加视频删除任务到队列的便捷函数
 pub async fn enqueue_video_delete_task(task: DeleteVideoTask, connection: &DatabaseConnection) -> Result<()> {
-    timeout(TASK_ENQUEUE_TIMEOUT, VIDEO_DELETE_TASK_QUEUE.enqueue_task(task, connection))
-        .await
-        .map_err(|_| anyhow::anyhow!("删除视频任务加入队列超时，请稍后重试"))?
+    timeout(
+        TASK_ENQUEUE_TIMEOUT,
+        VIDEO_DELETE_TASK_QUEUE.enqueue_task(task, connection),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("删除视频任务加入队列超时，请稍后重试"))?
 }
 
 /// 处理所有视频删除任务的便捷函数

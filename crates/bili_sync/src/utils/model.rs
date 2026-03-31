@@ -1,11 +1,15 @@
 use anyhow::{Context, Result};
 use bili_sync_entity::*;
 use chrono::{DateTime, Utc};
+use once_cell::sync::Lazy;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{OnConflict, SimpleExpr};
 use sea_orm::DatabaseTransaction;
-use std::collections::HashSet;
-use tracing::{debug, info};
+use sea_orm::{QuerySelect, Set, TransactionTrait, Unchanged};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tracing::{debug, info, warn};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
 use crate::bilibili::{PageInfo, VideoInfo};
@@ -969,6 +973,7 @@ pub async fn create_pages(
             single_page: Set(Some(false)),
             download_status: Set(0),   // 重置下载状态，让视频重新进入下载流程
             path: Set("".to_string()), // 清空路径，因为目录结构会变化
+            total_file_size_bytes: Set(None),
             ..Default::default()
         };
         update_video.save(connection).await?;
@@ -984,6 +989,9 @@ pub async fn create_pages(
             id: Unchanged(original_page.id),
             download_status: Set(0), // 重置下载状态
             path: Set(None),         // 清空路径
+            file_size_bytes: Set(None),
+            video_stream_size_bytes: Set(None),
+            audio_stream_size_bytes: Set(None),
             ..Default::default()
         };
         update_page.save(connection).await?;
@@ -1026,7 +1034,11 @@ pub async fn update_videos_model(videos: Vec<video::ActiveModel>, connection: &D
     video::Entity::insert_many(videos)
         .on_conflict(
             OnConflict::column(video::Column::Id)
-                .update_columns([video::Column::DownloadStatus, video::Column::Path])
+                .update_columns([
+                    video::Column::DownloadStatus,
+                    video::Column::Path,
+                    video::Column::TotalFileSizeBytes,
+                ])
                 .to_owned(),
         )
         .exec(connection)
@@ -1038,13 +1050,476 @@ pub async fn update_videos_model(videos: Vec<video::ActiveModel>, connection: &D
 
 /// 更新视频页 model 的下载状态
 pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &DatabaseConnection) -> Result<()> {
+    if pages.is_empty() {
+        return Ok(());
+    }
+
+    let affected_page_ids: Vec<i32> = pages
+        .iter()
+        .filter_map(|page| match &page.id {
+            sea_orm::ActiveValue::Set(id) | sea_orm::ActiveValue::Unchanged(id) => Some(*id),
+            sea_orm::ActiveValue::NotSet => None,
+        })
+        .collect();
+
     let query = page::Entity::insert_many(pages).on_conflict(
         OnConflict::column(page::Column::Id)
-            .update_columns([page::Column::DownloadStatus, page::Column::Path])
+            .update_columns([
+                page::Column::DownloadStatus,
+                page::Column::Path,
+                page::Column::FileSizeBytes,
+                page::Column::VideoStreamSizeBytes,
+                page::Column::AudioStreamSizeBytes,
+            ])
             .to_owned(),
     );
     query.exec(connection).await?;
 
+    let affected_video_ids = resolve_video_ids_by_page_ids(&affected_page_ids, connection).await?;
+    recompute_video_total_file_sizes(&affected_video_ids, connection).await?;
+
     notify_videos_changed();
     Ok(())
+}
+
+fn dedup_ids(ids: &[i32]) -> Vec<i32> {
+    let mut unique_ids = ids.iter().copied().filter(|id| *id > 0).collect::<Vec<_>>();
+    unique_ids.sort_unstable();
+    unique_ids.dedup();
+    unique_ids
+}
+
+fn file_size_to_i64(size: u64) -> i64 {
+    i64::try_from(size).unwrap_or(i64::MAX)
+}
+
+const VIDEO_FILE_SIZE_BACKFILL_BATCH_SIZE: usize = 200;
+
+static VIDEO_FILE_SIZE_BACKFILL_QUEUE: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static VIDEO_FILE_SIZE_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
+
+fn take_video_file_size_backfill_batch(limit: usize) -> Vec<i32> {
+    let mut queue = VIDEO_FILE_SIZE_BACKFILL_QUEUE
+        .lock()
+        .expect("video file size backfill queue lock poisoned");
+    let mut batch = queue.iter().copied().collect::<Vec<_>>();
+    batch.sort_unstable();
+    batch.truncate(limit);
+    for video_id in &batch {
+        queue.remove(video_id);
+    }
+    batch
+}
+
+pub fn is_video_file_size_backfill_pending() -> bool {
+    VIDEO_FILE_SIZE_BACKFILL_RUNNING.load(Ordering::Acquire)
+        || !VIDEO_FILE_SIZE_BACKFILL_QUEUE
+            .lock()
+            .expect("video file size backfill queue lock poisoned")
+            .is_empty()
+}
+
+fn spawn_video_file_size_backfill_worker(connection: Arc<DatabaseConnection>) {
+    if VIDEO_FILE_SIZE_BACKFILL_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    tokio::spawn(async move {
+        loop {
+            let batch = take_video_file_size_backfill_batch(VIDEO_FILE_SIZE_BACKFILL_BATCH_SIZE);
+            if batch.is_empty() {
+                VIDEO_FILE_SIZE_BACKFILL_RUNNING.store(false, Ordering::Release);
+                if !VIDEO_FILE_SIZE_BACKFILL_QUEUE
+                    .lock()
+                    .expect("video file size backfill queue lock poisoned")
+                    .is_empty()
+                    && VIDEO_FILE_SIZE_BACKFILL_RUNNING
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    continue;
+                }
+                break;
+            }
+
+            match backfill_video_file_sizes(&batch, connection.as_ref()).await {
+                Ok(()) => {
+                    debug!("后台文件大小回填完成一批视频，共 {} 条", batch.len());
+                    notify_videos_changed();
+                }
+                Err(error) => {
+                    warn!("后台文件大小回填失败，本批 {} 条视频已跳过: {error:#}", batch.len());
+                }
+            }
+        }
+    });
+}
+
+pub fn queue_video_file_size_backfill(video_ids: &[i32], connection: Arc<DatabaseConnection>) -> usize {
+    let video_ids = dedup_ids(video_ids);
+    if video_ids.is_empty() {
+        return 0;
+    }
+
+    let queued_count = {
+        let mut queue = VIDEO_FILE_SIZE_BACKFILL_QUEUE
+            .lock()
+            .expect("video file size backfill queue lock poisoned");
+        for video_id in &video_ids {
+            queue.insert(*video_id);
+        }
+        queue.len()
+    };
+
+    spawn_video_file_size_backfill_worker(connection);
+    queued_count
+}
+
+pub async fn queue_missing_video_file_size_backfill(connection: Arc<DatabaseConnection>) -> Result<usize> {
+    let missing_video_ids = video::Entity::find()
+        .select_only()
+        .column(video::Column::Id)
+        .filter(video::Column::TotalFileSizeBytes.is_null())
+        .into_tuple::<(i32,)>()
+        .all(connection.as_ref())
+        .await?
+        .into_iter()
+        .map(|(id,)| id)
+        .collect::<Vec<_>>();
+
+    Ok(queue_video_file_size_backfill(&missing_video_ids, connection))
+}
+
+async fn resolve_video_ids_by_page_ids(page_ids: &[i32], connection: &DatabaseConnection) -> Result<Vec<i32>> {
+    let page_ids = dedup_ids(page_ids);
+    if page_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows: Vec<(i32,)> = page::Entity::find()
+        .select_only()
+        .column(page::Column::VideoId)
+        .filter(page::Column::Id.is_in(page_ids))
+        .into_tuple::<(i32,)>()
+        .all(connection)
+        .await?;
+
+    Ok(dedup_ids(
+        &rows.into_iter().map(|(video_id,)| video_id).collect::<Vec<_>>(),
+    ))
+}
+
+pub async fn recompute_video_total_file_sizes(video_ids: &[i32], connection: &DatabaseConnection) -> Result<()> {
+    let video_ids = dedup_ids(video_ids);
+    if video_ids.is_empty() {
+        return Ok(());
+    }
+
+    let page_sizes: Vec<(i32, Option<i64>)> = page::Entity::find()
+        .select_only()
+        .column(page::Column::VideoId)
+        .column(page::Column::FileSizeBytes)
+        .filter(page::Column::VideoId.is_in(video_ids.clone()))
+        .into_tuple::<(i32, Option<i64>)>()
+        .all(connection)
+        .await?;
+
+    let mut total_sizes = HashMap::<i32, i64>::new();
+    for (video_id, file_size_bytes) in page_sizes {
+        let size = file_size_bytes.unwrap_or(0).max(0);
+        total_sizes
+            .entry(video_id)
+            .and_modify(|total| *total = total.saturating_add(size))
+            .or_insert(size);
+    }
+
+    let txn = connection.begin().await?;
+    for video_id in video_ids {
+        video::Entity::update(video::ActiveModel {
+            id: Unchanged(video_id),
+            total_file_size_bytes: Set(Some(total_sizes.get(&video_id).copied().unwrap_or(0))),
+            ..Default::default()
+        })
+        .exec(&txn)
+        .await?;
+    }
+    txn.commit().await?;
+
+    Ok(())
+}
+
+pub async fn backfill_video_file_sizes(video_ids: &[i32], connection: &DatabaseConnection) -> Result<()> {
+    let video_ids = dedup_ids(video_ids);
+    if video_ids.is_empty() {
+        return Ok(());
+    }
+
+    let page_rows: Vec<(i32, i32, Option<String>)> = page::Entity::find()
+        .select_only()
+        .column(page::Column::Id)
+        .column(page::Column::VideoId)
+        .column(page::Column::Path)
+        .filter(page::Column::VideoId.is_in(video_ids.clone()))
+        .into_tuple::<(i32, i32, Option<String>)>()
+        .all(connection)
+        .await?;
+
+    let (page_sizes, total_sizes) = tokio::task::spawn_blocking(move || {
+        let mut page_sizes = HashMap::<i32, i64>::new();
+        let mut total_sizes = HashMap::<i32, i64>::new();
+
+        for (page_id, video_id, path) in page_rows {
+            let file_size = path
+                .as_deref()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let file_size = file_size_to_i64(file_size);
+            page_sizes.insert(page_id, file_size);
+            total_sizes
+                .entry(video_id)
+                .and_modify(|total| *total = total.saturating_add(file_size))
+                .or_insert(file_size);
+        }
+
+        (page_sizes, total_sizes)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("回填视频文件大小任务失败: {e}"))?;
+
+    let txn = connection.begin().await?;
+    for (page_id, file_size_bytes) in page_sizes {
+        page::Entity::update(page::ActiveModel {
+            id: Unchanged(page_id),
+            file_size_bytes: Set(Some(file_size_bytes)),
+            ..Default::default()
+        })
+        .exec(&txn)
+        .await?;
+    }
+
+    for video_id in video_ids {
+        video::Entity::update(video::ActiveModel {
+            id: Unchanged(video_id),
+            total_file_size_bytes: Set(Some(total_sizes.get(&video_id).copied().unwrap_or(0))),
+            ..Default::default()
+        })
+        .exec(&txn)
+        .await?;
+    }
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bili_sync_migration::{Migrator, MigratorTrait};
+    use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+    use sea_orm::{
+        ActiveModelTrait, ActiveValue::NotSet, ConnectionTrait, DbBackend, QueryOrder, SqlxSqliteConnector, Statement,
+    };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-model-{}-{}", prefix, uuid::Uuid::new_v4()));
+        dir
+    }
+
+    async fn create_test_db(prefix: &str) -> DatabaseConnection {
+        let dir = unique_temp_dir(prefix);
+        fs::create_dir_all(&dir).expect("应能创建临时数据库目录");
+        let db_path = dir.join("data.sqlite");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("应能连接测试数据库");
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+
+        Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "ALTER TABLE page ADD COLUMN ai_renamed INTEGER".to_string(),
+        ))
+        .await
+        .ok();
+        db
+    }
+
+    async fn insert_test_video(db: &DatabaseConnection, id: i32, title: &str) {
+        let test_time = chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc();
+
+        video::ActiveModel {
+            id: Set(id),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(Some(1)),
+            source_id: Set(None),
+            source_type: Set(Some(4)),
+            upper_id: Set(2000 + i64::from(id)),
+            upper_name: Set("测试UP".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set(title.to_string()),
+            path: Set(format!("/tmp/video-{id}")),
+            category: Set(1),
+            bvid: Set(format!("BV{id:010}")),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(test_time),
+            pubtime: Set(test_time),
+            favtime: Set(test_time),
+            download_status: Set(0),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-03-30 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(false),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试视频");
+    }
+
+    async fn insert_test_page(db: &DatabaseConnection, id: i32, video_id: i32, path: Option<String>) {
+        page::ActiveModel {
+            id: Set(id),
+            video_id: Set(video_id),
+            cid: Set(1000 + i64::from(id)),
+            pid: Set(id),
+            name: Set(format!("P{id}")),
+            width: Set(Some(1920)),
+            height: Set(Some(1080)),
+            duration: Set(120),
+            path: Set(path),
+            file_size_bytes: Set(None),
+            video_stream_size_bytes: Set(None),
+            audio_stream_size_bytes: Set(None),
+            image: Set(None),
+            download_status: Set(0),
+            created_at: Set("2026-03-30 00:00:00".to_string()),
+            play_video_streams: Set(None),
+            play_audio_streams: Set(None),
+            play_subtitle_streams: Set(None),
+            play_streams_updated_at: Set(None),
+            ai_renamed: NotSet,
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试分页");
+    }
+
+    fn create_file_with_size(root: &Path, name: &str, size: usize) -> String {
+        let path = root.join(name);
+        fs::write(&path, vec![b'x'; size]).expect("应能写入测试文件");
+        path.to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn backfill_video_file_sizes_persists_page_and_video_totals() {
+        let db = create_test_db("backfill-size").await;
+        insert_test_video(&db, 1, "测试视频").await;
+
+        let root = unique_temp_dir("backfill-files");
+        fs::create_dir_all(&root).expect("应能创建测试文件目录");
+        let page_one = create_file_with_size(&root, "page-1.m4s", 11);
+        let page_two = create_file_with_size(&root, "page-2.m4s", 7);
+
+        insert_test_page(&db, 1, 1, Some(page_one)).await;
+        insert_test_page(&db, 2, 1, Some(page_two)).await;
+
+        backfill_video_file_sizes(&[1], &db).await.expect("回填文件大小应成功");
+
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.eq(1))
+            .order_by_asc(page::Column::Id)
+            .all(&db)
+            .await
+            .expect("应能查询分页");
+        assert_eq!(
+            pages.iter().map(|page| page.file_size_bytes).collect::<Vec<_>>(),
+            vec![Some(11), Some(7)]
+        );
+
+        let video = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询视频")
+            .expect("视频应存在");
+        assert_eq!(video.total_file_size_bytes, Some(18));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn update_pages_model_recomputes_video_total_file_size_bytes() {
+        let db = create_test_db("update-page-sizes").await;
+        insert_test_video(&db, 1, "测试视频").await;
+        insert_test_page(&db, 1, 1, Some("/tmp/page-1.m4s".to_string())).await;
+        insert_test_page(&db, 2, 1, Some("/tmp/page-2.m4s".to_string())).await;
+
+        let mut page_one: page::ActiveModel = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询第一个分页")
+            .expect("第一个分页应存在")
+            .into();
+        page_one.download_status = Set(7);
+        page_one.path = Set(Some("/tmp/page-1.m4s".to_string()));
+        page_one.file_size_bytes = Set(Some(32));
+        page_one.video_stream_size_bytes = Set(Some(20));
+        page_one.audio_stream_size_bytes = Set(Some(12));
+
+        let mut page_two: page::ActiveModel = page::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("应能查询第二个分页")
+            .expect("第二个分页应存在")
+            .into();
+        page_two.download_status = Set(7);
+        page_two.path = Set(Some("/tmp/page-2.m4s".to_string()));
+        page_two.file_size_bytes = Set(Some(18));
+        page_two.video_stream_size_bytes = Set(Some(10));
+        page_two.audio_stream_size_bytes = Set(Some(8));
+
+        update_pages_model(vec![page_one, page_two], &db)
+            .await
+            .expect("更新分页状态应成功");
+
+        let video = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询视频")
+            .expect("视频应存在");
+        assert_eq!(video.total_file_size_bytes, Some(50));
+    }
 }

@@ -247,10 +247,7 @@ impl<'a> Collection<'a> {
     /// - SeasonHeadTailOldestFirst：对 season 合集取网页默认顺序后，只比较首尾投稿时间，
     ///   若首个视频更新于末尾视频，则整体反转，确保 E01 位于更旧的一端。
     /// 返回 bvid -> episode_number 的映射
-    pub async fn get_video_order_map(
-        &self,
-        strategy: CollectionEpisodeOrderStrategy,
-    ) -> Result<HashMap<String, i32>> {
+    pub async fn get_video_order_map(&self, strategy: CollectionEpisodeOrderStrategy) -> Result<HashMap<String, i32>> {
         let mut order_map = HashMap::new();
         let mut ordered_videos = self.get_video_order_entries(strategy).await?;
         if self.collection.collection_type == CollectionType::Season
@@ -282,10 +279,7 @@ impl<'a> Collection<'a> {
         Ok(order_map)
     }
 
-    async fn get_video_order_entries(
-        &self,
-        strategy: CollectionEpisodeOrderStrategy,
-    ) -> Result<Vec<(String, i64)>> {
+    async fn get_video_order_entries(&self, strategy: CollectionEpisodeOrderStrategy) -> Result<Vec<(String, i64)>> {
         let mut ordered_videos = Vec::new();
         let mut page = 1;
 

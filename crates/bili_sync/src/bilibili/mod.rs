@@ -60,11 +60,9 @@ fn parse_duration_to_seconds(raw: &str) -> Option<i32> {
     let parts: Vec<&str> = normalized.split(':').collect();
     match parts.as_slice() {
         [minutes, seconds] => Some(minutes.parse::<i32>().ok()? * 60 + seconds.parse::<i32>().ok()?),
-        [hours, minutes, seconds] => Some(
-            hours.parse::<i32>().ok()? * 3600
-                + minutes.parse::<i32>().ok()? * 60
-                + seconds.parse::<i32>().ok()?,
-        ),
+        [hours, minutes, seconds] => {
+            Some(hours.parse::<i32>().ok()? * 3600 + minutes.parse::<i32>().ok()? * 60 + seconds.parse::<i32>().ok()?)
+        }
         _ => None,
     }
 }
@@ -241,7 +239,11 @@ pub enum VideoInfo {
         cover: String,
         #[serde(rename = "created", with = "ts_seconds")]
         ctime: DateTime<Utc>,
-        #[serde(rename = "length", default, deserialize_with = "deserialize_optional_duration_seconds")]
+        #[serde(
+            rename = "length",
+            default,
+            deserialize_with = "deserialize_optional_duration_seconds"
+        )]
         duration: Option<i32>,
         /// 投稿列表接口中的合集/系列ID（存在时用于UP源合集识别）
         #[serde(default)]

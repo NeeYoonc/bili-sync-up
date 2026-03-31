@@ -6,7 +6,7 @@ export interface ApiResponse<T> {
 }
 
 // 排序字段枚举
-export type SortBy = 'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime' | 'is_charge_video';
+export type SortBy = 'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime' | 'is_charge_video' | 'file_size';
 
 // 排序顺序枚举
 export type SortOrder = 'asc' | 'desc';
@@ -106,6 +106,7 @@ export interface VideoInfo {
 export interface VideosResponse {
 	videos: VideoInfo[];
 	total_count: number;
+	file_size_stats_pending: boolean;
 }
 
 // 分页信息类型

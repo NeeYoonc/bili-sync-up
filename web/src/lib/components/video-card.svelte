@@ -291,7 +291,10 @@
 
 			{#if video.is_charge_video}
 				<div class="absolute top-2 {selectionMode ? 'left-10' : 'left-2'} z-20">
-					<Badge class="bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500">
+					<Badge
+						class="bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500"
+						title="充电专属视频，播放前需先为 UP 主充电"
+					>
 						充电视频
 					</Badge>
 				</div>
@@ -319,7 +322,10 @@
 				/>
 			{/if}
 			{#if (!video.cover || mode !== 'default') && video.is_charge_video}
-				<Badge class="mt-0.5 shrink-0 bg-amber-500 text-xs text-white hover:bg-amber-500">
+				<Badge
+					class="mt-0.5 shrink-0 bg-amber-500 text-xs text-white hover:bg-amber-500"
+					title="充电专属视频，播放前需先为 UP 主充电"
+				>
 					充电视频
 				</Badge>
 			{/if}

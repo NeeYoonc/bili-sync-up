@@ -9,24 +9,44 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         add_column_if_missing(
             manager,
-            "collection",
-            Collection::Table,
-            "aggregate_enabled",
-            ColumnDef::new(Collection::AggregateEnabled)
-                .boolean()
-                .not_null()
-                .default(false)
+            "page",
+            Page::Table,
+            "file_size_bytes",
+            ColumnDef::new(Page::FileSizeBytes).big_integer().null().to_owned(),
+        )
+        .await?;
+
+        add_column_if_missing(
+            manager,
+            "page",
+            Page::Table,
+            "video_stream_size_bytes",
+            ColumnDef::new(Page::VideoStreamSizeBytes)
+                .big_integer()
+                .null()
                 .to_owned(),
         )
         .await?;
 
         add_column_if_missing(
             manager,
-            "collection",
-            Collection::Table,
-            "aggregate_season_number",
-            ColumnDef::new(Collection::AggregateSeasonNumber)
-                .integer()
+            "page",
+            Page::Table,
+            "audio_stream_size_bytes",
+            ColumnDef::new(Page::AudioStreamSizeBytes)
+                .big_integer()
+                .null()
+                .to_owned(),
+        )
+        .await?;
+
+        add_column_if_missing(
+            manager,
+            "video",
+            Video::Table,
+            "total_file_size_bytes",
+            ColumnDef::new(Video::TotalFileSizeBytes)
+                .big_integer()
                 .null()
                 .to_owned(),
         )
@@ -36,21 +56,32 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         drop_column_if_exists(
             manager,
-            "collection",
-            Collection::Table,
-            "aggregate_season_number",
-            Collection::AggregateSeasonNumber,
+            "video",
+            Video::Table,
+            "total_file_size_bytes",
+            Video::TotalFileSizeBytes,
         )
         .await?;
 
         drop_column_if_exists(
             manager,
-            "collection",
-            Collection::Table,
-            "aggregate_enabled",
-            Collection::AggregateEnabled,
+            "page",
+            Page::Table,
+            "audio_stream_size_bytes",
+            Page::AudioStreamSizeBytes,
         )
-        .await
+        .await?;
+
+        drop_column_if_exists(
+            manager,
+            "page",
+            Page::Table,
+            "video_stream_size_bytes",
+            Page::VideoStreamSizeBytes,
+        )
+        .await?;
+
+        drop_column_if_exists(manager, "page", Page::Table, "file_size_bytes", Page::FileSizeBytes).await
     }
 }
 
@@ -108,8 +139,15 @@ async fn table_has_column(manager: &SchemaManager<'_>, table_name: &str, column_
 }
 
 #[derive(Iden, Clone)]
-enum Collection {
+enum Page {
     Table,
-    AggregateEnabled,
-    AggregateSeasonNumber,
+    FileSizeBytes,
+    VideoStreamSizeBytes,
+    AudioStreamSizeBytes,
+}
+
+#[derive(Iden, Clone)]
+enum Video {
+    Table,
+    TotalFileSizeBytes,
 }
