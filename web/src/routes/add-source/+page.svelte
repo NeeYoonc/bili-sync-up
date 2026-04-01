@@ -241,6 +241,17 @@
 		}
 	}
 
+	$: currentQuickSubscriptionTemplate =
+		sourceType === 'favorite'
+			? favoriteQuickSubscribePathTemplate.trim()
+			: sourceType === 'collection'
+				? collectionQuickSubscribePathTemplate.trim()
+				: sourceType === 'submission'
+					? submissionQuickSubscribePathTemplate.trim()
+					: sourceType === 'bangumi'
+						? bangumiQuickSubscribePathTemplate.trim()
+						: '';
+
 	function sanitizeQuickSubscriptionName(value: string): string {
 		return value.trim().replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '_');
 	}
@@ -2087,6 +2098,15 @@
 			: '';
 	}
 
+	$: batchSelectedTemplate = (() => {
+		const selectedSourceType = getBatchSelectedSourceType();
+		if (selectedSourceType === 'favorite') return favoriteQuickSubscribePathTemplate.trim();
+		if (selectedSourceType === 'collection') return collectionQuickSubscribePathTemplate.trim();
+		if (selectedSourceType === 'submission') return submissionQuickSubscribePathTemplate.trim();
+		if (selectedSourceType === 'bangumi') return bangumiQuickSubscribePathTemplate.trim();
+		return '';
+	})();
+
 	function getBatchPathForItem(item: BatchSelectedItem): string {
 		const customPathOrTemplate = batchBasePath.trim();
 		const fallbackTemplate = getQuickSubscriptionTemplate(
@@ -2106,11 +2126,11 @@
 	}
 
 	function canStartBatchAdd(): boolean {
-		return !!getBatchSelectedTemplate() || !!batchBasePath.trim();
+		return !!batchSelectedTemplate || !!batchBasePath.trim();
 	}
 
 	function openBatchDialog() {
-		const defaultTemplate = getBatchSelectedTemplate();
+		const defaultTemplate = batchSelectedTemplate;
 		if (!batchBasePath.trim() || batchBasePath === '/Downloads') {
 			batchBasePath = defaultTemplate || '/Downloads';
 		}
@@ -2867,7 +2887,7 @@
 										</div>
 									</div>
 								</div>
-								{#if getQuickSubscriptionTemplate(sourceType).trim() && !batchMode}
+								{#if currentQuickSubscriptionTemplate && !batchMode}
 									<Button
 										type="button"
 										size="sm"
@@ -2896,7 +2916,7 @@
 							{:else}
 								<div class="space-y-1">
 									<p class="text-muted-foreground text-sm">请输入绝对路径</p>
-									{#if getQuickSubscriptionTemplate(sourceType).trim() && !batchMode}
+									{#if currentQuickSubscriptionTemplate && !batchMode}
 										<p class="text-muted-foreground text-xs">
 											已配置快捷路径模板，支持 <code>{'{{name}}'}</code> 变量。选择源后会自动带入，也可继续手动修改。
 										</p>
@@ -5089,13 +5109,13 @@
 				<div>
 					<div class="mb-2 flex items-center justify-between gap-3">
 						<Label for="batch-base-path">本次保存路径 / 路径模板</Label>
-						{#if getBatchSelectedTemplate()}
+						{#if batchSelectedTemplate}
 							<Button
 								type="button"
 								size="sm"
 								variant="outline"
 								onclick={() => {
-									batchBasePath = getBatchSelectedTemplate();
+									batchBasePath = batchSelectedTemplate;
 								}}
 							>
 								恢复快捷模板
@@ -5105,10 +5125,10 @@
 					<Input
 						id="batch-base-path"
 						bind:value={batchBasePath}
-						placeholder={getBatchSelectedTemplate() || '/Downloads'}
+						placeholder={batchSelectedTemplate || '/Downloads'}
 						class="mt-1"
 					/>
-					{#if getBatchSelectedTemplate()}
+					{#if batchSelectedTemplate}
 						<div class="mt-2 space-y-1 rounded-md border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-950/30">
 							<p class="text-xs text-blue-700 dark:text-blue-300">
 								已从当前源类型的快捷订阅路径模板带入默认值，本次批量添加可临时改成任意路径或任意模板。
