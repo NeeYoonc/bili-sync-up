@@ -16,6 +16,7 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::{DatabaseBackend, Statement, TransactionTrait};
 use tokio::fs;
 use tokio::sync::{Mutex as TokioMutex, Semaphore};
+use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -271,12 +272,89 @@ use crate::utils::notification::NewVideoInfo;
 use crate::utils::scan_collector::create_new_video_info;
 use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK};
 
-fn is_bili_request_failed_404(err: &anyhow::Error) -> bool {
+const DB_LOCK_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
+
+fn is_bili_request_failed_with_codes(err: &anyhow::Error, codes: &[i64]) -> bool {
     err.chain().any(|cause| {
-        cause
-            .downcast_ref::<BiliError>()
-            .is_some_and(|e| matches!(e, BiliError::RequestFailed(-404, _)))
+        cause.downcast_ref::<BiliError>().is_some_and(|e| match e {
+            BiliError::RequestFailed(code, _) => codes.contains(code),
+            _ => false,
+        })
     })
+}
+
+fn is_bili_request_failed_inaccessible(err: &anyhow::Error) -> bool {
+    is_bili_request_failed_with_codes(err, &[-404, 62002])
+}
+
+fn is_database_locked_error(err: &anyhow::Error) -> bool {
+    let err_text = format!("{:#}", err);
+    err_text.contains("database is locked") || err_text.contains("Database is locked")
+}
+
+async fn update_videos_model_with_lock_retry(
+    videos: Vec<video::ActiveModel>,
+    connection: &DatabaseConnection,
+) -> Result<()> {
+    let mut attempt = 0usize;
+    loop {
+        match update_videos_model(videos.clone(), connection).await {
+            Ok(()) => return Ok(()),
+            Err(err) if is_database_locked_error(&err) && attempt < DB_LOCK_RETRY_DELAYS_MS.len() => {
+                let delay_ms = DB_LOCK_RETRY_DELAYS_MS[attempt];
+                warn!(
+                    "更新视频状态遇到数据库锁，{}ms 后重试（第 {}/{} 次）: {}",
+                    delay_ms,
+                    attempt + 1,
+                    DB_LOCK_RETRY_DELAYS_MS.len(),
+                    err
+                );
+                sleep(Duration::from_millis(delay_ms)).await;
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+async fn persist_video_path_with_lock_retry(
+    video_id: i32,
+    old_path: &str,
+    new_path: &str,
+    connection: &DatabaseConnection,
+) -> Result<()> {
+    let mut attempt = 0usize;
+    loop {
+        match video::Entity::update(video::ActiveModel {
+            id: Set(video_id),
+            path: Set(new_path.to_string()),
+            ..Default::default()
+        })
+        .exec(connection)
+        .await
+        {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                let anyhow_err = anyhow!(err.to_string());
+                if is_database_locked_error(&anyhow_err) && attempt < DB_LOCK_RETRY_DELAYS_MS.len() {
+                    let delay_ms = DB_LOCK_RETRY_DELAYS_MS[attempt];
+                    warn!(
+                        "提前持久化 video.path 遇到数据库锁，{}ms 后重试（video_id={}, 第 {}/{} 次）: old='{}', new='{}'",
+                        delay_ms,
+                        video_id,
+                        attempt + 1,
+                        DB_LOCK_RETRY_DELAYS_MS.len(),
+                        old_path,
+                        new_path
+                    );
+                    sleep(Duration::from_millis(delay_ms)).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(anyhow!(err));
+            }
+        }
+    }
 }
 
 fn normalize_upper_face_bucket(name: &str) -> String {
@@ -1402,14 +1480,21 @@ pub async fn fetch_video_details(
                                 "获取视频 {} - {} 的详细信息失败，错误为：{:#}",
                                 &video_model.bvid, &video_model.name, e
                             );
-                            if is_bili_request_failed_404(&e) {
-                                // 404：视频已被删除/不可访问
+                            if is_bili_request_failed_inaccessible(&e) {
+                                // 404 / 62002：视频已被删除、不可访问或稿件不可见
                                 // 若这是“重置详情”导致的回填（数据库里已有 page.path），则需要：
                                 // - 跳过本次重置
                                 // - 恢复为未重置（把状态置为完成，避免每轮都重复尝试）
                                 // - 提醒用户
                                 use sea_orm::sea_query::Expr;
                                 use sea_orm::{Set, Unchanged};
+
+                                let is_invisible = is_bili_request_failed_with_codes(&e, &[62002]);
+                                let inaccessible_reason = if is_invisible {
+                                    "稿件不可见"
+                                } else {
+                                    "已在B站删除/不可访问"
+                                };
 
                                 let video_id = video_model.id;
                                 let (pages_total, pages_with_path) = tokio::try_join!(
@@ -1439,8 +1524,10 @@ pub async fn fetch_video_details(
 
                                 if should_restore_unreset {
                                     warn!(
-                                        "视频「{}」({}) 已在B站删除/不可访问，已跳过重置并恢复为未重置状态",
-                                        &video_model.name, &video_model.bvid
+                                        "视频「{}」({}) {}，已跳过重置并恢复为未重置状态",
+                                        &video_model.name,
+                                        &video_model.bvid,
+                                        inaccessible_reason
                                     );
 
                                     let ok_video_status: u32 = VideoStatus::from([STATUS_OK; 5]).into();
@@ -1461,8 +1548,10 @@ pub async fn fetch_video_details(
                                         .await?;
                                 } else {
                                     warn!(
-                                        "视频「{}」({}) 已在B站删除/不可访问，已标记为无效并跳过处理",
-                                        &video_model.name, &video_model.bvid
+                                        "视频「{}」({}) {}，已标记为无效并跳过处理",
+                                        &video_model.name,
+                                        &video_model.bvid,
+                                        inaccessible_reason
                                     );
                                 }
 
@@ -1985,7 +2074,7 @@ pub async fn download_unprocessed_videos(
                     info!("下载任务未完成（可能因用户暂停/取消），不计入成功: {}", video_name);
                 }
                 // 任务成功完成，更新数据库
-                if let Err(db_err) = update_videos_model(vec![model.clone()], connection).await {
+                if let Err(db_err) = update_videos_model_with_lock_retry(vec![model.clone()], connection).await {
                     error!("更新数据库失败: {:#}", db_err);
 
                     // 发送数据库错误通知（异步执行，不阻塞主流程）
@@ -2643,7 +2732,7 @@ pub async fn retry_failed_videos_once(
                     continue;
                 }
                 retry_success_count += 1;
-                if let Err(db_err) = update_videos_model(vec![model.clone()], connection).await {
+                if let Err(db_err) = update_videos_model_with_lock_retry(vec![model.clone()], connection).await {
                     error!("重试后更新数据库失败: {:#}", db_err);
 
                     // 发送数据库错误通知（异步执行，不阻塞主流程）
@@ -3449,12 +3538,12 @@ pub async fn download_video_pages(
     };
 
     if !path_to_save.is_empty() && final_video_model.path != path_to_save {
-        if let Err(e) = video::Entity::update(video::ActiveModel {
-            id: Set(final_video_model.id),
-            path: Set(path_to_save.clone()),
-            ..Default::default()
-        })
-        .exec(connection)
+        if let Err(e) = persist_video_path_with_lock_retry(
+            final_video_model.id,
+            &final_video_model.path,
+            &path_to_save,
+            connection,
+        )
         .await
         {
             warn!(
@@ -4867,20 +4956,20 @@ pub async fn download_video_pages(
         .map(Into::into)
         .collect::<Vec<_>>();
 
-    // 若重置后遇到 B站-404（视频被删除/不可访问），将本次重置视为无效：
+    // 若重置后遇到 B站-404/62002（视频被删除、不可访问或稿件不可见），将本次重置视为无效：
     // - 把需要执行的任务全部标记为 Skipped（等同于“恢复为未重置”）
     // - 更新数据库：video.valid=false，pages.download_status=OK（避免分页仍显示未完成）
-    let hit_bili_404 = main_results.iter().any(|r| match r {
-        ExecutionStatus::Ignored(e) => is_bili_request_failed_404(e),
+    let hit_bili_inaccessible = main_results.iter().any(|r| match r {
+        ExecutionStatus::Ignored(e) => is_bili_request_failed_inaccessible(e),
         _ => false,
     });
 
-    if hit_bili_404 && has_existing_page_paths {
+    if hit_bili_inaccessible && has_existing_page_paths {
         use sea_orm::sea_query::Expr;
         use sea_orm::{Set, Unchanged};
 
         warn!(
-            "视频「{}」({}) 已在B站删除/不可访问，已跳过本次重置并恢复为未重置状态",
+            "视频「{}」({}) 已在B站删除、不可访问或稿件不可见，已跳过本次重置并恢复为未重置状态",
             &final_video_model.name, &final_video_model.bvid
         );
 
@@ -11774,6 +11863,26 @@ mod tests {
             .expect("投稿源应存在");
         assert!(updated_submission.scan_deleted_videos);
         assert!(!updated_submission.scan_deleted_videos_once);
+    }
+
+    #[test]
+    fn test_is_bili_request_failed_inaccessible_matches_404_and_62002() {
+        let deleted_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-404, "not found".to_string()));
+        let invisible_err = anyhow!(crate::bilibili::BiliError::RequestFailed(62002, "稿件不可见".to_string()));
+        let other_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-352, "风控".to_string()));
+
+        assert!(is_bili_request_failed_inaccessible(&deleted_err));
+        assert!(is_bili_request_failed_inaccessible(&invisible_err));
+        assert!(!is_bili_request_failed_inaccessible(&other_err));
+    }
+
+    #[test]
+    fn test_is_database_locked_error_detects_sqlite_lock_text() {
+        let locked_err = anyhow!("Execution Error: error returned from database: (code: 5) database is locked");
+        let other_err = anyhow!("some other error");
+
+        assert!(is_database_locked_error(&locked_err));
+        assert!(!is_database_locked_error(&other_err));
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测
