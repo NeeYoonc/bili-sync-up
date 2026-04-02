@@ -788,6 +788,51 @@ mod cleanup_tests {
 }
 
 #[cfg(test)]
+mod reset_path_tests {
+    use super::*;
+
+    #[test]
+    fn remap_page_path_preserves_multipage_subdirectories_and_extension() {
+        let old_video_path = "/downloads/收藏夹/合集A";
+        let new_video_path = "/new-base/收藏夹/合集A";
+        let old_page_path = "/downloads/收藏夹/合集A/Season 01/S01E001 - 测试页.m4s";
+
+        let remapped =
+            remap_page_path_with_video_prefix(old_page_path, old_video_path, new_video_path);
+
+        assert_eq!(
+            remapped.as_deref(),
+            Some("/new-base/收藏夹/合集A/Season 01/S01E001 - 测试页.m4s")
+        );
+    }
+
+    #[test]
+    fn remap_page_path_returns_none_when_page_path_is_outside_video_dir() {
+        let remapped = remap_page_path_with_video_prefix(
+            "/other-root/合集A/S01E001 - 测试页.mp4",
+            "/downloads/收藏夹/合集A",
+            "/new-base/收藏夹/合集A",
+        );
+
+        assert_eq!(remapped, None);
+    }
+
+    #[test]
+    fn remap_page_path_supports_windows_style_paths() {
+        let remapped = remap_page_path_with_video_prefix(
+            r"F:\downloads\收藏夹\合集A\Season 01\S01E001 - 测试页.m4a",
+            r"F:\downloads\收藏夹\合集A",
+            r"G:\library\收藏夹\合集A",
+        );
+
+        assert_eq!(
+            remapped.as_deref(),
+            Some(r"G:\library\收藏夹\合集A\Season 01\S01E001 - 测试页.m4a")
+        );
+    }
+}
+
+#[cfg(test)]
 mod queue_sse_tests {
     use super::*;
     use axum::routing::get;
@@ -7535,6 +7580,51 @@ async fn move_video_files_to_new_path(
     Ok((moved_count, cleaned_count))
 }
 
+fn remap_page_path_with_video_prefix(
+    current_page_path: &str,
+    old_video_path: &str,
+    new_video_path: &str,
+) -> Option<String> {
+    let candidate_prefixes = [
+        (old_video_path.to_string(), new_video_path.to_string()),
+        (
+            old_video_path.replace('/', "\\"),
+            new_video_path.replace('/', "\\"),
+        ),
+        (
+            old_video_path.replace('\\', "/"),
+            new_video_path.replace('\\', "/"),
+        ),
+    ];
+
+    for (old_prefix, new_prefix) in candidate_prefixes {
+        if current_page_path == old_prefix {
+            return Some(new_prefix);
+        }
+
+        let old_prefix_with_sep = if old_prefix.ends_with('\\') || old_prefix.ends_with('/') {
+            old_prefix.clone()
+        } else if old_prefix.contains('\\') {
+            format!("{old_prefix}\\")
+        } else {
+            format!("{old_prefix}/")
+        };
+
+        if let Some(relative_path) = current_page_path.strip_prefix(&old_prefix_with_sep) {
+            let new_page_path = if new_prefix.ends_with('\\') || new_prefix.ends_with('/') {
+                format!("{new_prefix}{relative_path}")
+            } else if new_prefix.contains('\\') {
+                format!("{new_prefix}\\{relative_path}")
+            } else {
+                format!("{new_prefix}/{relative_path}")
+            };
+            return Some(new_page_path);
+        }
+    }
+
+    None
+}
+
 /// 正确重新生成视频和分页路径（基于新的基础路径重新计算完整路径）
 async fn regenerate_video_and_page_paths_correctly(
     txn: &sea_orm::DatabaseTransaction,
@@ -7548,6 +7638,7 @@ async fn regenerate_video_and_page_paths_correctly(
         .one(txn)
         .await?
         .ok_or_else(|| anyhow!("未找到视频记录"))?;
+    let old_video_path = video.path.clone();
 
     // 重新生成视频路径
     let new_video_path = crate::config::with_config(|bundle| {
@@ -7575,20 +7666,28 @@ async fn regenerate_video_and_page_paths_correctly(
         .await?;
 
     for page_model in pages {
-        // 重新生成分页路径
-        let new_page_path = crate::config::with_config(|bundle| {
-            let page_args = crate::utils::format_arg::page_format_args(&video, &page_model);
-            bundle.render_page_template(&page_args)
-        })
-        .map_err(|e| anyhow!("分页路径模板渲染失败: {}", e))?;
-
-        let full_new_page_path = full_new_video_path.join(format!("{}.mp4", new_page_path));
+        let full_new_page_path = match page_model.path.as_deref() {
+            Some(current_page_path) if !current_page_path.is_empty() => {
+                if let Some(remapped_path) = remap_page_path_with_video_prefix(
+                    current_page_path,
+                    &old_video_path,
+                    &full_new_video_path.to_string_lossy(),
+                ) {
+                    Some(remapped_path)
+                } else {
+                    Path::new(current_page_path)
+                        .file_name()
+                        .map(|file_name| full_new_video_path.join(file_name).to_string_lossy().to_string())
+                }
+            }
+            _ => None,
+        };
 
         page::Entity::update_many()
             .filter(page::Column::Id.eq(page_model.id))
             .col_expr(
                 page::Column::Path,
-                Expr::value(Some(full_new_page_path.to_string_lossy().to_string())),
+                Expr::value(full_new_page_path),
             )
             .exec(txn)
             .await?;
