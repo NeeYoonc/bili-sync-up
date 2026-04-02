@@ -1173,6 +1173,11 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             debug!("任务已暂停，跳过后处理阶段");
         }
 
+        if TASK_CONTROLLER.take_just_resumed() {
+            info!("检测到任务刷新信号，跳过等待并立即开始新一轮扫描");
+            continue;
+        }
+
         // ========== 等待阶段 ==========
         // 安全时机：扫描任务已完成，可以安全地检测配置更新并决定是否立即开始下一轮
         // 智能等待：支持配置更新的间隔等待
@@ -1200,8 +1205,12 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             }
 
             let sleep_duration = remaining_time.min(check_frequency);
-            tokio::time::sleep(tokio::time::Duration::from_secs(sleep_duration)).await;
-            remaining_time = remaining_time.saturating_sub(sleep_duration);
+            let woke_by_signal = TASK_CONTROLLER
+                .wait_for_scan_signal_or_timeout(tokio::time::Duration::from_secs(sleep_duration))
+                .await;
+            if !woke_by_signal {
+                remaining_time = remaining_time.saturating_sub(sleep_duration);
+            }
 
             // 检查是否刚刚恢复，如果是则立即开始新扫描
             if TASK_CONTROLLER.take_just_resumed() {

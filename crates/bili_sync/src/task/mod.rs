@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -2249,6 +2249,8 @@ pub struct TaskController {
     pub cancellation_token: Arc<Mutex<CancellationToken>>,
     /// 下载器的引用，用于暂停时停止下载
     pub downloader: Arc<Mutex<Option<Arc<crate::unified_downloader::UnifiedDownloader>>>>,
+    /// 用于唤醒等待中的下一轮扫描
+    pub scan_now_notify: Notify,
 }
 
 impl TaskController {
@@ -2259,6 +2261,7 @@ impl TaskController {
             just_resumed: AtomicBool::new(false),
             cancellation_token: Arc::new(Mutex::new(CancellationToken::new())),
             downloader: Arc::new(Mutex::new(None)),
+            scan_now_notify: Notify::new(),
         }
     }
 
@@ -2316,12 +2319,22 @@ impl TaskController {
             *downloader_guard = None;
         }
 
+        self.scan_now_notify.notify_waiters();
         info!("定时扫描任务已恢复，将立即开始新一轮扫描");
     }
 
     /// 触发立即扫描（不等待定时器）
     pub fn trigger_scan_now(&self) {
         self.just_resumed.store(true, Ordering::SeqCst);
+        self.scan_now_notify.notify_waiters();
+    }
+
+    /// 等待扫描信号或超时
+    pub async fn wait_for_scan_signal_or_timeout(&self, duration: Duration) -> bool {
+        tokio::select! {
+            _ = tokio::time::sleep(duration) => false,
+            _ = self.scan_now_notify.notified() => true,
+        }
     }
 
     /// 检查是否暂停
@@ -2408,6 +2421,35 @@ pub fn resume_scanning() {
 /// 检查是否正在扫描的便捷函数
 pub fn is_scanning() -> bool {
     TASK_CONTROLLER.is_scanning()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn trigger_scan_now_wakes_waiting_loop_immediately() {
+        let controller = Arc::new(TaskController::new());
+        let wait_controller = controller.clone();
+
+        let waiter = tokio::spawn(async move { wait_controller.wait_for_scan_signal_or_timeout(Duration::from_secs(5)).await });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        controller.trigger_scan_now();
+
+        let woke_by_signal = waiter.await.expect("等待任务应正常返回");
+
+        assert!(woke_by_signal, "立即刷新应唤醒等待中的扫描循环");
+        assert!(controller.take_just_resumed(), "立即刷新后应保留待消费的刷新标记");
+    }
+
+    #[test]
+    fn trigger_scan_now_preserves_resume_flag_before_wait_loop() {
+        let controller = TaskController::new();
+        controller.trigger_scan_now();
+
+        assert!(controller.take_just_resumed(), "立即刷新后应保留待消费的刷新标记");
+    }
 }
 
 /// 添加删除任务到队列的便捷函数

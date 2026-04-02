@@ -12870,6 +12870,7 @@ pub async fn refresh_scanning_endpoint(
     } else {
         crate::task::TASK_CONTROLLER.trigger_scan_now();
     }
+    crate::utils::task_notifier::TASK_STATUS_NOTIFIER.mark_refresh_requested();
 
     Ok(ApiResponse::ok(crate::api::response::TaskControlResponse {
         success: true,

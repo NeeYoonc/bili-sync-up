@@ -56,6 +56,22 @@ impl TaskStatusNotifier {
         notify_queue_status_changed();
     }
 
+    /// 标记已请求立即刷新，清空下一次运行时间，避免前端继续显示旧的等待时间
+    pub fn mark_refresh_requested(&self) {
+        let last_status = self.tx.borrow();
+        let last_run = last_status.last_run;
+        let last_finish = last_status.last_finish;
+        drop(last_status);
+
+        let _ = self.tx.send(Arc::new(TaskStatus {
+            is_running: false,
+            last_run,
+            last_finish,
+            next_run: Some(chrono::Local::now()),
+        }));
+        notify_queue_status_changed();
+    }
+
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Arc<TaskStatus>> {
         self.rx.clone()
     }
