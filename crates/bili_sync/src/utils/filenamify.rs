@@ -39,15 +39,11 @@ pub fn filenamify_with_options<S: AsRef<str>>(input: S, preserve_template_separa
     // 全角字符映射
     let fullwidth_colon = regex!("："); // 全角冒号 → 半角冒号
     let fullwidth_space = regex!("　"); // 全角空格 → 半角空格
-    let angle_brackets = regex!("[《》]"); // 角括号 → 方括号
-
-    // 其他可能有问题的字符
-    let problematic_chars = regex!("[★☆♪♫♬♩♭♮♯※〈〉〔〕【】『』〖〗‖§¶°±×÷≈≠≤≥∞∴∵∠⊥∥∧∨∩∪⊂⊃⊆⊇∈∉∃∀]");
+    // 其他可能有问题的字符（保留中文括号/书名号，避免过度清洗）
+    let problematic_chars = regex!("[★☆♪♫♬♩♭♮♯※‖§¶°±×÷≈≠≤≥∞∴∵∠⊥∥∧∨∩∪⊂⊃⊆⊇∈∉∃∀]");
 
     let replacement = "_";
     let space_replacement = " ";
-    let bracket_replacement_left = "[";
-    let bracket_replacement_right = "]";
     let paren_replacement_left = "(";
     let paren_replacement_right = ")";
     let colon_replacement = "-";
@@ -55,11 +51,7 @@ pub fn filenamify_with_options<S: AsRef<str>>(input: S, preserve_template_separa
     // 1. 处理全角字符映射
     input = fullwidth_colon.replace_all(&input, colon_replacement).into_owned();
     input = fullwidth_space.replace_all(&input, space_replacement).into_owned();
-    input = angle_brackets.replace_all(&input, replacement).into_owned();
-
     // 2. 处理全角括号
-    input = input.replace('「', bracket_replacement_left);
-    input = input.replace('」', bracket_replacement_right);
     input = input.replace('（', paren_replacement_left);
     input = input.replace('）', paren_replacement_right);
 
@@ -135,7 +127,7 @@ mod tests {
         let result = filenamify_with_options(input, true);
 
         // 期望结果：模板分隔符保留，但内容中的斜杠被处理
-        assert_eq!(result, "ZHY2020__UNIX_SEP___𝟒𝐊 𝐇𝐢𝐑𝐞𝐬_[分身_ドッペルゲンガー]");
+        assert_eq!(result, "ZHY2020__UNIX_SEP__【𝟒𝐊 𝐇𝐢𝐑𝐞𝐬】「分身_ドッペルゲンガー」");
     }
 
     #[test]
@@ -191,13 +183,22 @@ mod tests {
         // 测试用户问题中的场景：标题中包含分隔符
         assert_eq!(
             filenamify_with_options("【𝟒𝐊 𝐇𝐢𝐑𝐞𝐬】「分身/ドッペルゲンガー」", false),
-            "_𝟒𝐊 𝐇𝐢𝐑𝐞𝐬_[分身_ドッペルゲンガー]"
+            "【𝟒𝐊 𝐇𝐢𝐑𝐞𝐬】「分身_ドッペルゲンガー」"
         );
 
         // 测试模板和内容的组合情况
         assert_eq!(
             filenamify_with_options("UP主名__UNIX_SEP__「分身/ドッペルゲンガー」", true),
-            "UP主名__UNIX_SEP__[分身_ドッペルゲンガー]"
+            "UP主名__UNIX_SEP__「分身_ドッペルゲンガー」"
         );
+    }
+
+    #[test]
+    fn test_preserve_cjk_brackets_and_quotes() {
+        assert_eq!(
+            filenamify("〖周深｜MV〗《异人之下之决战！碧游村》主题曲《冰凌花》MV正式上线！"),
+            "〖周深｜MV〗《异人之下之决战！碧游村》主题曲《冰凌花》MV正式上线！"
+        );
+        assert_eq!(filenamify("【合集】『标题』〔测试〕〈特别篇〉"), "【合集】『标题』〔测试〕〈特别篇〉");
     }
 }
