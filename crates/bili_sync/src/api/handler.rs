@@ -17,7 +17,7 @@ use bili_sync_migration::Expr;
 use reqwest;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, FromQueryResult, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait, Unchanged,
+    QueryFilter, QueryOrder, QuerySelect, Set, Statement, Unchanged,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -2540,7 +2540,7 @@ pub async fn reset_video(
     let resetted = video_resetted || !resetted_pages_info.is_empty();
 
     if resetted {
-        let txn = db.begin().await?;
+        let txn = crate::database::begin_traced_transaction(&db, "api.handler.reset_video_status_by_id").await?;
 
         if video_resetted {
             video::Entity::update(video::ActiveModel {
@@ -2798,7 +2798,7 @@ pub async fn reset_all_videos(
     let resetted = !(resetted_videos_info.is_empty() && resetted_pages_info.is_empty());
 
     if resetted {
-        let txn = db.begin().await?;
+        let txn = crate::database::begin_traced_transaction(&db, "api.handler.reset_videos_by_ids").await?;
 
         // 批量更新视频状态 + 开启自动下载
         if !resetted_videos_info.is_empty() {
@@ -3128,7 +3128,7 @@ pub async fn reset_specific_tasks(
     let resetted = !(resetted_videos_info.is_empty() && resetted_pages_info.is_empty());
 
     if resetted {
-        let txn = db.begin().await?;
+        let txn = crate::database::begin_traced_transaction(&db, "api.handler.reset_all_videos").await?;
 
         // 批量更新视频状态
         if !resetted_videos_info.is_empty() {
@@ -3403,7 +3403,7 @@ pub async fn update_video_status(
     let has_page_updates = !updated_pages_info.is_empty();
 
     if has_video_updates || has_page_updates {
-        let txn = db.begin().await?;
+        let txn = crate::database::begin_traced_transaction(&db, "api.handler.update_video_status").await?;
 
         if has_video_updates {
             video::Entity::update(video::ActiveModel {
@@ -3558,7 +3558,7 @@ pub async fn add_video_source_internal(
 ) -> Result<AddVideoSourceResponse, ApiError> {
     // 使用主数据库连接
 
-    let txn = db.begin().await?;
+    let txn = crate::database::begin_traced_transaction(&db, "api.handler.add_video_source").await?;
 
     let result = match params.source_type.as_str() {
         "collection" => {
@@ -4411,7 +4411,7 @@ pub async fn update_video_source_enabled_internal(
     enabled: bool,
 ) -> Result<crate::api::response::UpdateVideoSourceEnabledResponse, ApiError> {
     // 使用主数据库连接
-    let txn = db.begin().await?;
+    let txn = crate::database::begin_traced_transaction(&db, "api.handler.update_video_source_enabled").await?;
     let result = match source_type.as_str() {
         "collection" => {
             let collection = collection::Entity::find_by_id(id)
@@ -5449,7 +5449,7 @@ pub async fn delete_video_source_internal(
     let mut cleanup_plan: Option<LocalSourceCleanupPlan> = None;
 
     // 使用主数据库连接
-    let txn = db.begin().await?;
+    let txn = crate::database::begin_traced_transaction(&db, "api.handler.delete_video_source").await?;
 
     // 根据不同类型的视频源执行不同的删除操作
     let result = match source_type.as_str() {
@@ -5908,7 +5908,7 @@ pub async fn update_video_source_scan_deleted_internal(
     requested_scan_deleted_videos: Option<bool>,
     requested_scan_deleted_videos_once: Option<bool>,
 ) -> Result<crate::api::response::UpdateVideoSourceScanDeletedResponse, ApiError> {
-    let txn = db.begin().await?;
+    let txn = crate::database::begin_traced_transaction(&db, "api.handler.update_video_source_scan_deleted").await?;
 
     let result = match source_type.as_str() {
         "collection" => {
@@ -6129,7 +6129,7 @@ pub async fn update_video_source_download_options_internal(
     id: i32,
     params: crate::api::request::UpdateVideoSourceDownloadOptionsRequest,
 ) -> Result<crate::api::response::UpdateVideoSourceDownloadOptionsResponse, ApiError> {
-    let txn = db.begin().await?;
+    let txn = crate::database::begin_traced_transaction(&db, "api.handler.update_video_source_download_options").await?;
 
     let result = match source_type.as_str() {
         "collection" => {
@@ -6894,7 +6894,7 @@ pub async fn update_submission_selected_videos(
     Path(id): Path<i32>,
     axum::Json(params): axum::Json<crate::api::request::UpdateSubmissionSelectedVideosRequest>,
 ) -> Result<ApiResponse<crate::api::response::UpdateSubmissionSelectedVideosResponse>, ApiError> {
-    let txn = db.begin().await?;
+    let txn = crate::database::begin_traced_transaction(&db, "api.handler.update_submission_selected_videos").await?;
 
     // 查找投稿源
     let submission_record = submission::Entity::find_by_id(id)
@@ -7167,7 +7167,7 @@ pub async fn reset_video_source_path_internal(
     // 使用主数据库连接
 
     // 在开始操作前进行安全验证
-    let txn = db.begin().await?;
+    let txn = crate::database::begin_traced_transaction(&db, "api.handler.reset_video_source_path").await?;
     validate_path_reset_safety(&txn, &source_type, id, &request.new_path).await?;
     let mut moved_files_count = 0;
     let mut updated_videos_count = 0;
@@ -15146,7 +15146,7 @@ async fn reset_nfo_tasks_for_config_change(db: Arc<DatabaseConnection>) -> Resul
     let resetted = !(resetted_videos_info.is_empty() && resetted_pages_info.is_empty());
 
     if resetted {
-        let txn = db.begin().await?;
+        let txn = crate::database::begin_traced_transaction(&db, "api.handler.reset_videos_by_source").await?;
 
         // 批量更新视频状态
         if !resetted_videos_info.is_empty() {
@@ -16151,7 +16151,7 @@ pub async fn update_video_source_keyword_filters(
         }
     }
 
-    let txn = db.begin().await?;
+    let txn = crate::database::begin_traced_transaction(&db, "api.handler.update_submission_keyword_filter").await?;
     let mut submission_whitelist_backfill_job: Option<(submission::Model, Vec<String>, bool)> = None;
 
     // 处理黑名单

@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{OnConflict, SimpleExpr};
 use sea_orm::DatabaseTransaction;
-use sea_orm::{QuerySelect, Set, TransactionTrait, Unchanged};
+use sea_orm::{QuerySelect, Set, Unchanged};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1031,18 +1031,25 @@ pub async fn create_pages(
 
 /// 更新视频 model 的下载状态
 pub async fn update_videos_model(videos: Vec<video::ActiveModel>, connection: &DatabaseConnection) -> Result<()> {
-    video::Entity::insert_many(videos)
-        .on_conflict(
-            OnConflict::column(video::Column::Id)
-                .update_columns([
-                    video::Column::DownloadStatus,
-                    video::Column::Path,
-                    video::Column::TotalFileSizeBytes,
-                ])
-                .to_owned(),
-        )
-        .exec(connection)
-        .await?;
+    let affected_count = videos.len();
+    crate::database::run_traced_db_operation(
+        format!("utils.model.update_videos_model(count={affected_count})"),
+        async {
+            video::Entity::insert_many(videos)
+                .on_conflict(
+                    OnConflict::column(video::Column::Id)
+                        .update_columns([
+                            video::Column::DownloadStatus,
+                            video::Column::Path,
+                            video::Column::TotalFileSizeBytes,
+                        ])
+                        .to_owned(),
+                )
+                .exec(connection)
+                .await
+        },
+    )
+    .await?;
 
     notify_videos_changed();
     Ok(())
@@ -1062,18 +1069,25 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         })
         .collect();
 
-    let query = page::Entity::insert_many(pages).on_conflict(
-        OnConflict::column(page::Column::Id)
-            .update_columns([
-                page::Column::DownloadStatus,
-                page::Column::Path,
-                page::Column::FileSizeBytes,
-                page::Column::VideoStreamSizeBytes,
-                page::Column::AudioStreamSizeBytes,
-            ])
-            .to_owned(),
-    );
-    query.exec(connection).await?;
+    let affected_count = affected_page_ids.len();
+    crate::database::run_traced_db_operation(
+        format!("utils.model.update_pages_model(count={affected_count})"),
+        async {
+            let query = page::Entity::insert_many(pages).on_conflict(
+                OnConflict::column(page::Column::Id)
+                    .update_columns([
+                        page::Column::DownloadStatus,
+                        page::Column::Path,
+                        page::Column::FileSizeBytes,
+                        page::Column::VideoStreamSizeBytes,
+                        page::Column::AudioStreamSizeBytes,
+                    ])
+                    .to_owned(),
+            );
+            query.exec(connection).await
+        },
+    )
+    .await?;
 
     let affected_video_ids = resolve_video_ids_by_page_ids(&affected_page_ids, connection).await?;
     recompute_video_total_file_sizes(&affected_video_ids, connection).await?;
@@ -1236,7 +1250,7 @@ pub async fn recompute_video_total_file_sizes(video_ids: &[i32], connection: &Da
             .or_insert(size);
     }
 
-    let txn = connection.begin().await?;
+    let txn = crate::database::begin_traced_transaction(connection, "utils.model.recompute_video_total_file_sizes").await?;
     for video_id in video_ids {
         video::Entity::update(video::ActiveModel {
             id: Unchanged(video_id),
@@ -1290,7 +1304,7 @@ pub async fn backfill_video_file_sizes(video_ids: &[i32], connection: &DatabaseC
     .await
     .map_err(|e| anyhow::anyhow!("回填视频文件大小任务失败: {e}"))?;
 
-    let txn = connection.begin().await?;
+    let txn = crate::database::begin_traced_transaction(connection, "utils.model.backfill_video_file_sizes").await?;
     for (page_id, file_size_bytes) in page_sizes {
         page::Entity::update(page::ActiveModel {
             id: Unchanged(page_id),
