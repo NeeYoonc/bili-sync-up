@@ -438,22 +438,28 @@ pub async fn create_videos(
                         tags: model.tags.clone(),
                         ..Default::default()
                     };
-                    update_model.save(connection).await?;
-                    // 恢复后确保参与自动下载流程
-                    video::Entity::update(video::ActiveModel {
-                        id: Unchanged(existing.id),
-                        auto_download: Set(true),
-                        ..Default::default()
-                    })
-                    .exec(connection)
-                    .await?;
+                    crate::database::run_traced_db_operation(
+                        format!("utils.model.restore_deleted_video(video_id={})", existing.id),
+                        async {
+                            update_model.save(connection).await?;
+                            // 恢复后确保参与自动下载流程
+                            video::Entity::update(video::ActiveModel {
+                                id: Unchanged(existing.id),
+                                auto_download: Set(true),
+                                ..Default::default()
+                            })
+                            .exec(connection)
+                            .await?;
 
-                    // 删除该视频的所有旧page记录（如果存在的话）
-                    // 因为视频信息可能已经变化，旧的page记录可能不准确
-                    page::Entity::delete_many()
-                        .filter(page::Column::VideoId.eq(existing.id))
-                        .exec(connection)
-                        .await?;
+                            // 删除该视频的所有旧page记录（如果存在的话）
+                            // 因为视频信息可能已经变化，旧的page记录可能不准确
+                            page::Entity::delete_many()
+                                .filter(page::Column::VideoId.eq(existing.id))
+                                .exec(connection)
+                                .await
+                        },
+                    )
+                    .await?;
 
                     info!("恢复已删除的视频，将重新获取详细信息: {}", existing.name);
                 } else {
@@ -590,7 +596,14 @@ pub async fn create_videos(
                             existing.name, update_model.actors, update_model.share_copy, update_model.show_season_type
                         );
 
-                        update_model.save(connection).await?;
+                        crate::database::run_traced_db_operation(
+                            format!(
+                                "utils.model.update_video_metadata(video_id={}, scan_deleted=true)",
+                                existing.id
+                            ),
+                            async { update_model.save(connection).await },
+                        )
+                        .await?;
                         info!("更新视频 {} 的字段完成", existing.name);
                     } else {
                         tracing::debug!(
@@ -605,11 +618,14 @@ pub async fn create_videos(
                 }
             } else {
                 // 视频不存在，正常插入
-                video::Entity::insert(model)
-                    .on_conflict(OnConflict::new().do_nothing().to_owned())
-                    .do_nothing()
-                    .exec(connection)
-                    .await?;
+                crate::database::run_traced_db_operation("utils.model.insert_video(scan_deleted=true)", async {
+                    video::Entity::insert(model)
+                        .on_conflict(OnConflict::new().do_nothing().to_owned())
+                        .do_nothing()
+                        .exec(connection)
+                        .await
+                })
+                .await?;
             }
         }
     } else {
@@ -695,11 +711,14 @@ pub async fn create_videos(
                 Ok(sea_orm::TryInsertResult::Conflicted)
             } else {
                 // 尝试插入新记录
-                video::Entity::insert(model.clone())
-                    .on_conflict(OnConflict::new().do_nothing().to_owned())
-                    .do_nothing()
-                    .exec(connection)
-                    .await
+                crate::database::run_traced_db_operation("utils.model.insert_video(scan_deleted=false)", async {
+                    video::Entity::insert(model.clone())
+                        .on_conflict(OnConflict::new().do_nothing().to_owned())
+                        .do_nothing()
+                        .exec(connection)
+                        .await
+                })
+                .await
             };
 
             // 如果插入没有影响任何行（即记录已存在），检查是否需要更新 share_copy
@@ -865,7 +884,14 @@ pub async fn create_videos(
                                 existing.name, update_model.actors, update_model.share_copy, update_model.show_season_type
                             );
 
-                            update_model.save(connection).await?;
+                            crate::database::run_traced_db_operation(
+                                format!(
+                                    "utils.model.update_video_metadata(video_id={}, scan_deleted=false)",
+                                    existing.id
+                                ),
+                                async { update_model.save(connection).await },
+                            )
+                            .await?;
                             info!("更新视频 {} 的字段完成(未启用扫描删除)", existing.name);
                         } else {
                             tracing::debug!(

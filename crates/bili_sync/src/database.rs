@@ -57,6 +57,15 @@ fn active_db_operation_snapshot(exclude_id: Option<u64>) -> Vec<String> {
     snapshot
 }
 
+pub fn describe_active_db_operations() -> String {
+    let snapshot = active_db_operation_snapshot(None);
+    if snapshot.is_empty() {
+        "none".to_string()
+    } else {
+        snapshot.join(" | ")
+    }
+}
+
 impl DbOperationGuard {
     fn begin(name: impl Into<String>) -> Self {
         let id = NEXT_DB_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
