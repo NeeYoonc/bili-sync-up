@@ -14,6 +14,14 @@ use tracing::{debug, info, warn};
 
 use crate::adapter::{VideoSource, VideoSourceEnum, _ActiveModel};
 use crate::bilibili::{BiliClient, Dynamic, Submission, VideoInfo};
+use crate::error::{ErrorClassifier, ErrorType};
+
+fn should_use_cached_submission_info(err: &anyhow::Error) -> bool {
+    matches!(
+        ErrorClassifier::classify_error(err).error_type,
+        ErrorType::Timeout | ErrorType::Network
+    )
+}
 
 impl VideoSource for submission::Model {
     fn filter_expr(&self) -> SimpleExpr {
@@ -310,34 +318,69 @@ pub(super) async fn submission_from<'a>(
     Pin<Box<dyn Stream<Item = Result<VideoInfo>> + 'a + Send>>,
 )> {
     let submission = Submission::new(bili_client, upper_id.to_owned());
-    let upper = submission.get_info().await?;
-    // 重新创建带有UP主名称的Submission实例，用于后续的视频流处理和日志显示
-    let submission_with_name = Submission::with_name(bili_client, upper_id.to_owned(), upper.name.clone());
-    submission::Entity::insert(submission::ActiveModel {
-        upper_id: Set(upper.mid.parse()?),
-        upper_name: Set(upper.name),
-        path: Set(path.to_string_lossy().to_string()),
-        created_at: Set(now_standard_string()),
-        latest_row_at: Set("1970-01-01 00:00:00".to_string()),
-        enabled: Set(true),
-        scan_deleted_videos: Set(false),
-        scan_deleted_videos_once: Set(false),
-        use_dynamic_api: Set(false),
-        dynamic_api_full_synced: Set(false),
-        ..Default::default()
-    })
-    .on_conflict(
-        OnConflict::column(submission::Column::UpperId)
-            .update_columns([submission::Column::UpperName, submission::Column::Path])
-            .to_owned(),
-    )
-    .exec(connection)
-    .await?;
-    let submission_record = submission::Entity::find()
-        .filter(submission::Column::UpperId.eq(upper.mid))
-        .one(connection)
-        .await?
-        .context("submission not found")?;
+    let requested_upper_id = upper_id.parse::<i64>().ok();
+
+    let (submission_record, submission_with_name) = match submission.get_info().await {
+        Ok(upper) => {
+            let upper_mid = upper.mid.parse::<i64>()?;
+            let upper_name = upper.name;
+
+            // 重新创建带有UP主名称的Submission实例，用于后续的视频流处理和日志显示
+            let submission_with_name = Submission::with_name(bili_client, upper_id.to_owned(), upper_name.clone());
+            submission::Entity::insert(submission::ActiveModel {
+                upper_id: Set(upper_mid),
+                upper_name: Set(upper_name),
+                path: Set(path.to_string_lossy().to_string()),
+                created_at: Set(now_standard_string()),
+                latest_row_at: Set("1970-01-01 00:00:00".to_string()),
+                enabled: Set(true),
+                scan_deleted_videos: Set(false),
+                scan_deleted_videos_once: Set(false),
+                use_dynamic_api: Set(false),
+                dynamic_api_full_synced: Set(false),
+                ..Default::default()
+            })
+            .on_conflict(
+                OnConflict::column(submission::Column::UpperId)
+                    .update_columns([submission::Column::UpperName, submission::Column::Path])
+                    .to_owned(),
+            )
+            .exec(connection)
+            .await?;
+
+            let submission_record = submission::Entity::find()
+                .filter(submission::Column::UpperId.eq(upper_mid))
+                .one(connection)
+                .await?
+                .context("submission not found")?;
+
+            (submission_record, submission_with_name)
+        }
+        Err(err) if should_use_cached_submission_info(&err) => {
+            let Some(upper_mid) = requested_upper_id else {
+                return Err(err).context("failed to get submission info");
+            };
+
+            let Some(submission_record) = submission::Entity::find()
+                .filter(submission::Column::UpperId.eq(upper_mid))
+                .one(connection)
+                .await?
+            else {
+                return Err(err).context("failed to get submission info");
+            };
+
+            warn!(
+                "获取UP主基础信息超时，回退使用数据库缓存继续扫描: upper_id={}, upper_name={}",
+                upper_id, submission_record.upper_name
+            );
+
+            let submission_with_name =
+                Submission::with_name(bili_client, upper_id.to_owned(), submission_record.upper_name.clone());
+
+            (submission_record, submission_with_name)
+        }
+        Err(err) => return Err(err).context("failed to get submission info"),
+    };
 
     let use_dynamic_api = submission_record.use_dynamic_api;
     let token = cancellation_token.unwrap_or_default();

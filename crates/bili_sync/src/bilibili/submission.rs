@@ -61,7 +61,7 @@ impl<'a> Submission<'a> {
     pub async fn get_info(&self) -> Result<Upper<String>> {
         let mut res = self
             .client
-            .request(Method::GET, "https://api.bilibili.com/x/web-interface/card")
+            .public_request(Method::GET, "https://api.bilibili.com/x/web-interface/card")
             .await
             .query(&[("mid", self.upper_id.as_str())])
             .send()
