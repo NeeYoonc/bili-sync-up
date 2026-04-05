@@ -205,9 +205,20 @@ async fn update_submission_membership_state_batch(
         values.push(upper_id.into());
         values.extend(chunk.iter().map(|bvid| bvid.clone().into()));
 
-        connection
-            .execute(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
-            .await?;
+        crate::database::run_traced_db_operation(
+            format!(
+                "workflow.update_submission_membership_state_batch(source_submission_id={}, upper_id={}, count={})",
+                source_submission_id,
+                upper_id,
+                chunk.len()
+            ),
+            async move {
+                connection
+                    .execute(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
+                    .await
+            },
+        )
+        .await?;
     }
 
     Ok(())
@@ -302,17 +313,28 @@ async fn update_videos_model_with_lock_retry(
             Ok(()) => return Ok(()),
             Err(err) if is_database_locked_error(&err) && attempt < DB_LOCK_RETRY_DELAYS_MS.len() => {
                 let delay_ms = DB_LOCK_RETRY_DELAYS_MS[attempt];
+                let active_operations = crate::database::describe_active_db_operations();
                 warn!(
-                    "更新视频状态遇到数据库锁，{}ms 后重试（第 {}/{} 次）: {}",
+                    "更新视频状态遇到数据库锁，{}ms 后重试（第 {}/{} 次）: active=[{}], error={}",
                     delay_ms,
                     attempt + 1,
                     DB_LOCK_RETRY_DELAYS_MS.len(),
+                    active_operations,
                     err
                 );
                 sleep(Duration::from_millis(delay_ms)).await;
                 attempt += 1;
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                if is_database_locked_error(&err) {
+                    error!(
+                        "更新视频状态最终仍被数据库锁阻塞: active=[{}], error={}",
+                        crate::database::describe_active_db_operations(),
+                        err
+                    );
+                }
+                return Err(err);
+            }
         }
     }
 }
@@ -343,18 +365,28 @@ async fn persist_video_path_with_lock_retry(
                 let anyhow_err = anyhow!(err.to_string());
                 if is_database_locked_error(&anyhow_err) && attempt < DB_LOCK_RETRY_DELAYS_MS.len() {
                     let delay_ms = DB_LOCK_RETRY_DELAYS_MS[attempt];
+                    let active_operations = crate::database::describe_active_db_operations();
                     warn!(
-                        "提前持久化 video.path 遇到数据库锁，{}ms 后重试（video_id={}, 第 {}/{} 次）: old='{}', new='{}'",
+                        "提前持久化 video.path 遇到数据库锁，{}ms 后重试（video_id={}, 第 {}/{} 次）: active=[{}], old='{}', new='{}'",
                         delay_ms,
                         video_id,
                         attempt + 1,
                         DB_LOCK_RETRY_DELAYS_MS.len(),
+                        active_operations,
                         old_path,
                         new_path
                     );
                     sleep(Duration::from_millis(delay_ms)).await;
                     attempt += 1;
                     continue;
+                }
+                if is_database_locked_error(&anyhow_err) {
+                    error!(
+                        "提前持久化 video.path 最终仍被数据库锁阻塞: video_id={}, active=[{}], error={}",
+                        video_id,
+                        crate::database::describe_active_db_operations(),
+                        anyhow_err
+                    );
                 }
                 return Err(anyhow!(err));
             }
@@ -9764,9 +9796,20 @@ async fn cleanup_stale_submission_season_mappings(
         values.push(base_path.to_string().into());
         values.extend(chunk.iter().map(|id| (*id).into()));
 
-        let result = connection
-            .execute(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
-            .await?;
+        let result = crate::database::run_traced_db_operation(
+            format!(
+                "workflow.cleanup_stale_submission_membership_chunk(up_mid={}, base_path={}, count={})",
+                up_mid,
+                base_path,
+                chunk.len()
+            ),
+            async move {
+                connection
+                    .execute(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
+                    .await
+            },
+        )
+        .await?;
         removed += result.rows_affected() as usize;
     }
 
