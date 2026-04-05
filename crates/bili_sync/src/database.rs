@@ -2,14 +2,299 @@ use anyhow::Result;
 use bili_sync_migration::{Migrator, MigratorTrait};
 use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sea_orm::sqlx::{self, Executor};
-use sea_orm::{ConnectionTrait, DatabaseConnection, SqlxSqliteConnector};
-use std::sync::Arc;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, ExecResult, QueryResult, SqlxSqliteConnector, Statement, StreamTrait};
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Instant;
 use tokio::sync::OnceCell;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::config::CONFIG_DIR;
 
 static GLOBAL_DB: OnceCell<Arc<DatabaseConnection>> = OnceCell::const_new();
+static ACTIVE_DB_OPERATIONS: LazyLock<Mutex<HashMap<u64, ActiveDbOperation>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_DB_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
+
+const SLOW_DB_OPERATION_WARN_MS: u128 = 5_000;
+
+#[derive(Clone, Debug)]
+struct ActiveDbOperation {
+    name: String,
+    started_at: Instant,
+}
+
+struct DbOperationGuard {
+    id: u64,
+    name: String,
+    started_at: Instant,
+    finished: bool,
+}
+
+pub struct TracedDatabaseTransaction {
+    txn: sea_orm::DatabaseTransaction,
+    guard: Option<DbOperationGuard>,
+}
+
+fn is_database_locked_message(message: &str) -> bool {
+    message.contains("database is locked") || message.contains("Database is locked")
+}
+
+fn active_db_operation_snapshot(exclude_id: Option<u64>) -> Vec<String> {
+    let now = Instant::now();
+    let operations = ACTIVE_DB_OPERATIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut snapshot = operations
+        .iter()
+        .filter(|(id, _)| Some(**id) != exclude_id)
+        .map(|(id, op)| format!("#{} {} ({}ms)", id, op.name, now.duration_since(op.started_at).as_millis()))
+        .collect::<Vec<_>>();
+    snapshot.sort();
+    snapshot
+}
+
+impl DbOperationGuard {
+    fn begin(name: impl Into<String>) -> Self {
+        let id = NEXT_DB_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
+        let name = name.into();
+        let started_at = Instant::now();
+
+        ACTIVE_DB_OPERATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                id,
+                ActiveDbOperation {
+                    name: name.clone(),
+                    started_at,
+                },
+            );
+
+        let occupied = active_db_operation_snapshot(Some(id));
+        if !occupied.is_empty() {
+            warn!(
+                "数据库操作开始时检测到 {} 个进行中的数据库操作，current={}, active=[{}]",
+                occupied.len(),
+                name,
+                occupied.join(" | ")
+            );
+        } else {
+            debug!("数据库操作开始: {}", name);
+        }
+
+        Self {
+            id,
+            name,
+            started_at,
+            finished: false,
+        }
+    }
+
+    fn on_error<E: std::fmt::Display>(&self, stage: &str, error: &E) {
+        let error_text = error.to_string();
+        if is_database_locked_message(&error_text) {
+            let occupied = active_db_operation_snapshot(Some(self.id));
+            warn!(
+                "数据库操作遇到锁等待/冲突: op={}, stage={}, elapsed={}ms, active=[{}], error={}",
+                self.name,
+                stage,
+                self.started_at.elapsed().as_millis(),
+                if occupied.is_empty() {
+                    "none".to_string()
+                } else {
+                    occupied.join(" | ")
+                },
+                error_text
+            );
+        } else {
+            warn!(
+                "数据库操作失败: op={}, stage={}, elapsed={}ms, error={}",
+                self.name,
+                stage,
+                self.started_at.elapsed().as_millis(),
+                error_text
+            );
+        }
+    }
+
+    fn finish(mut self, stage: &str) {
+        self.finished = true;
+        ACTIVE_DB_OPERATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+
+        let elapsed_ms = self.started_at.elapsed().as_millis();
+        if elapsed_ms >= SLOW_DB_OPERATION_WARN_MS {
+            warn!(
+                "数据库操作结束较慢: op={}, stage={}, elapsed={}ms",
+                self.name, stage, elapsed_ms
+            );
+        } else {
+            debug!("数据库操作结束: op={}, stage={}, elapsed={}ms", self.name, stage, elapsed_ms);
+        }
+    }
+}
+
+impl Drop for DbOperationGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        ACTIVE_DB_OPERATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+
+        warn!(
+            "数据库操作未显式提交/回滚即离开作用域: op={}, elapsed={}ms",
+            self.name,
+            self.started_at.elapsed().as_millis()
+        );
+    }
+}
+
+impl TracedDatabaseTransaction {
+    fn new(txn: sea_orm::DatabaseTransaction, guard: DbOperationGuard) -> Self {
+        Self {
+            txn,
+            guard: Some(guard),
+        }
+    }
+
+    pub async fn commit(mut self) -> anyhow::Result<()> {
+        match self.txn.commit().await {
+            Ok(_) => {
+                if let Some(guard) = self.guard.take() {
+                    guard.finish("commit");
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(guard) = self.guard.as_ref() {
+                    guard.on_error("commit", &error);
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn rollback(mut self) -> anyhow::Result<()> {
+        match self.txn.rollback().await {
+            Ok(_) => {
+                if let Some(guard) = self.guard.take() {
+                    guard.finish("rollback");
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(guard) = self.guard.as_ref() {
+                    guard.on_error("rollback", &error);
+                }
+                Err(error.into())
+            }
+        }
+    }
+}
+
+impl Deref for TracedDatabaseTransaction {
+    type Target = sea_orm::DatabaseTransaction;
+
+    fn deref(&self) -> &Self::Target {
+        &self.txn
+    }
+}
+
+impl DerefMut for TracedDatabaseTransaction {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.txn
+    }
+}
+
+#[async_trait::async_trait]
+impl ConnectionTrait for TracedDatabaseTransaction {
+    fn get_database_backend(&self) -> DbBackend {
+        self.txn.get_database_backend()
+    }
+
+    async fn execute(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
+        self.txn.execute(stmt).await
+    }
+
+    async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        self.txn.execute_unprepared(sql).await
+    }
+
+    async fn query_one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
+        self.txn.query_one(stmt).await
+    }
+
+    async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        self.txn.query_all(stmt).await
+    }
+
+    fn support_returning(&self) -> bool {
+        self.txn.support_returning()
+    }
+
+    fn is_mock_connection(&self) -> bool {
+        self.txn.is_mock_connection()
+    }
+}
+
+impl StreamTrait for TracedDatabaseTransaction {
+    type Stream<'a>
+        = <sea_orm::DatabaseTransaction as StreamTrait>::Stream<'a>
+    where
+        Self: 'a;
+
+    fn stream<'a>(
+        &'a self,
+        stmt: Statement,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Self::Stream<'a>, DbErr>> + 'a + Send>> {
+        self.txn.stream(stmt)
+    }
+}
+
+pub async fn run_traced_db_operation<F, T, E>(name: impl Into<String>, future: F) -> std::result::Result<T, E>
+where
+    F: std::future::Future<Output = std::result::Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let guard = DbOperationGuard::begin(name);
+    match future.await {
+        Ok(result) => {
+            guard.finish("complete");
+            Ok(result)
+        }
+        Err(error) => {
+            guard.on_error("complete", &error);
+            Err(error)
+        }
+    }
+}
+
+pub async fn begin_traced_transaction(
+    connection: &sea_orm::DatabaseConnection,
+    operation_name: impl Into<String>,
+) -> anyhow::Result<TracedDatabaseTransaction> {
+    use sea_orm::TransactionTrait;
+
+    let guard = DbOperationGuard::begin(operation_name);
+    match connection.begin().await {
+        Ok(txn) => Ok(TracedDatabaseTransaction::new(txn, guard)),
+        Err(error) => {
+            guard.on_error("begin", &error);
+            Err(error.into())
+        }
+    }
+}
 
 fn database_path() -> std::path::PathBuf {
     // 确保配置目录存在
@@ -315,8 +600,12 @@ pub fn get_global_db() -> Option<Arc<DatabaseConnection>> {
 /// 通过更新锁定表来强制获取写锁，避免 SQLITE_BUSY_SNAPSHOT 问题
 pub async fn begin_write_transaction(
     connection: &sea_orm::DatabaseConnection,
-) -> anyhow::Result<sea_orm::DatabaseTransaction> {
+    operation_name: impl Into<String>,
+) -> anyhow::Result<TracedDatabaseTransaction> {
     use sea_orm::{ConnectionTrait, TransactionTrait};
+
+    let operation_name = operation_name.into();
+    let guard = DbOperationGuard::begin(format!("{} [write-lock]", operation_name));
 
     // 确保锁定表存在
     let _ = connection
@@ -327,12 +616,155 @@ pub async fn begin_write_transaction(
         .await;
 
     // 开始事务
-    let txn = connection.begin().await?;
+    let txn = match connection.begin().await {
+        Ok(txn) => txn,
+        Err(error) => {
+            guard.on_error("begin", &error);
+            return Err(error.into());
+        }
+    };
 
     // 立即更新锁定表，强制获取写锁
     // 如果其他事务持有锁，这里会等待 busy_timeout
-    txn.execute_unprepared("UPDATE _write_lock SET ts = strftime('%s', 'now') WHERE id = 1")
-        .await?;
+    if let Err(error) = txn
+        .execute_unprepared("UPDATE _write_lock SET ts = strftime('%s', 'now') WHERE id = 1")
+        .await
+    {
+        guard.on_error("acquire_write_lock", &error);
+        return Err(error.into());
+    }
 
-    Ok(txn)
+    Ok(TracedDatabaseTransaction::new(txn, guard))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Write};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::Level;
+    use tracing_subscriber::fmt::MakeWriter;
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer(Arc<StdMutex<Vec<u8>>>);
+
+    struct SharedLogWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter(self.0.clone())
+        }
+    }
+
+    impl Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SharedLogBuffer {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            )
+            .unwrap_or_default()
+        }
+    }
+
+    async fn create_test_connection(path: &Path, busy_timeout_ms: u64) -> anyhow::Result<DatabaseConnection> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(std::time::Duration::from_millis(busy_timeout_ms));
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+
+        Ok(SqlxSqliteConnector::from_sqlx_sqlite_pool(pool))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn traced_db_operation_logs_active_lock_holder_on_sqlite_lock() -> anyhow::Result<()> {
+        ACTIVE_DB_OPERATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        let logs = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(Level::DEBUG)
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let db_path = std::env::temp_dir().join(format!("bili-sync-db-trace-{}.sqlite", Uuid::new_v4()));
+        let connection_1 = create_test_connection(&db_path, 50).await?;
+        let connection_2 = create_test_connection(&db_path, 50).await?;
+
+        connection_1
+            .execute_unprepared("CREATE TABLE test_records (id INTEGER PRIMARY KEY, value TEXT)")
+            .await?;
+
+        let lock_holder = begin_write_transaction(&connection_1, "test.lock_holder").await?;
+
+        let err = run_traced_db_operation("test.contender", async {
+            connection_2
+                .execute_unprepared("INSERT INTO test_records (value) VALUES ('contender')")
+                .await
+        })
+        .await
+        .expect_err("第二个写操作应当被锁住");
+
+        assert!(
+            is_database_locked_message(&err.to_string()),
+            "expected sqlite lock error, got: {err}"
+        );
+
+        lock_holder.rollback().await?;
+
+        let log_output = logs.contents();
+        assert!(
+            log_output.contains("数据库操作开始时检测到"),
+            "expected active operation start warning, got logs: {log_output}"
+        );
+        assert!(
+            log_output.contains("数据库操作遇到锁等待/冲突"),
+            "expected lock conflict warning, got logs: {log_output}"
+        );
+        assert!(
+            log_output.contains("test.lock_holder [write-lock]"),
+            "expected lock holder name in logs, got logs: {log_output}"
+        );
+        assert!(
+            log_output.contains("test.contender"),
+            "expected contender name in logs, got logs: {log_output}"
+        );
+
+        drop(connection_2);
+        drop(connection_1);
+        let _ = std::fs::remove_file(&db_path);
+
+        Ok(())
+    }
 }

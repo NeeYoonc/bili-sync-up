@@ -13,6 +13,7 @@ build = "build.rs"
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-stream = { workspace = true }
+async-trait = { workspace = true }
 base64 = { workspace = true }
 # atty = "0.2.14" # 已移除：未使用
 axum = { workspace = true }

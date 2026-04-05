@@ -13,7 +13,7 @@ use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt, TryStreamExt};
 use sea_orm::entity::prelude::*;
 use sea_orm::ActiveValue::Set;
-use sea_orm::{DatabaseBackend, Statement, TransactionTrait};
+use sea_orm::{DatabaseBackend, Statement};
 use tokio::fs;
 use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use tokio::time::{sleep, Duration};
@@ -325,14 +325,19 @@ async fn persist_video_path_with_lock_retry(
 ) -> Result<()> {
     let mut attempt = 0usize;
     loop {
-        match video::Entity::update(video::ActiveModel {
-            id: Set(video_id),
-            path: Set(new_path.to_string()),
-            ..Default::default()
-        })
-        .exec(connection)
-        .await
-        {
+        match crate::database::run_traced_db_operation(
+            format!("workflow.persist_video_path(video_id={video_id})"),
+            async {
+                video::Entity::update(video::ActiveModel {
+                    id: Set(video_id),
+                    path: Set(new_path.to_string()),
+                    ..Default::default()
+                })
+                .exec(connection)
+                .await
+            },
+        )
+        .await {
             Ok(_) => return Ok(()),
             Err(err) => {
                 let anyhow_err = anyhow!(err.to_string());
@@ -1398,7 +1403,11 @@ pub async fn fetch_video_details(
                 videos_without_season.len()
             );
             for video_model in videos_without_season {
-                let txn = connection.begin().await?;
+                let txn = crate::database::begin_traced_transaction(
+                    connection,
+                    "workflow.populate_bangumi_missing_season",
+                )
+                .await?;
 
                 let (actual_cid, duration) = if let Some(ep_id) = &video_model.ep_id {
                     match get_bangumi_info_from_api(bili_client, ep_id, token.clone()).await {
@@ -1510,7 +1519,11 @@ pub async fn fetch_video_details(
                                 let should_restore_unreset = pages_with_path > 0;
 
                                 // 无论是否需要恢复，都把视频标记为无效（避免后续流程继续处理）
-                                let txn = connection.begin().await?;
+                                let txn = crate::database::begin_traced_transaction(
+                                    connection,
+                                    "workflow.mark_inaccessible_video_invalid",
+                                )
+                                .await?;
                                 video::Entity::update(video::ActiveModel {
                                     id: Unchanged(video_id),
                                     valid: Set(false),
@@ -1640,7 +1653,8 @@ pub async fn fetch_video_details(
                             }
 
                             // 使用写事务函数（立即获取写锁，避免 SQLITE_BUSY_SNAPSHOT）
-                            let txn = crate::database::begin_write_transaction(connection).await?;
+                            let txn =
+                                crate::database::begin_write_transaction(connection, "workflow.process_video_detail").await?;
 
                             if let Some(staff_list) = staff {
                                 debug!("视频 {} 有staff信息，成员数量: {}", video_model.bvid, staff_list.len());
@@ -4982,7 +4996,11 @@ pub async fn download_video_pages(
 
         // 立即修复数据库分页状态，避免前端仍显示“分页未完成”
         let ok_page_status: u32 = PageStatus::from([STATUS_OK; 5]).into();
-        let txn = connection.begin().await?;
+        let txn = crate::database::begin_traced_transaction(
+            connection,
+            "workflow.mark_charge_video_placeholder_complete",
+        )
+        .await?;
         video::Entity::update(video::ActiveModel {
             id: Unchanged(final_video_model.id),
             valid: Set(false),
@@ -8800,7 +8818,7 @@ async fn process_bangumi_video(
 
     let should_update_video_cid = video_model.cid.is_none();
 
-    let txn = connection.begin().await?;
+    let txn = crate::database::begin_traced_transaction(connection, "workflow.fill_single_page_cid").await?;
 
     let page_info = PageInfo {
         cid: actual_cid,
@@ -8865,7 +8883,7 @@ pub async fn auto_reset_risk_control_failures(connection: &DatabaseConnection) -
     let mut resetted_videos = 0;
     let mut resetted_pages = 0;
 
-    let txn = connection.begin().await?;
+    let txn = crate::database::begin_traced_transaction(connection, "workflow.reset_failed_video_tasks").await?;
 
     // 重置视频失败、进行中和未完成状态
     for (id, name, download_status) in all_videos {
@@ -10361,7 +10379,11 @@ async fn backfill_submission_collection_membership(
     }
 
     let mut updated_rows = 0u64;
-    let txn = connection.begin().await?;
+    let txn = crate::database::begin_traced_transaction(
+        connection,
+        "workflow.sync_submission_membership_episode_numbers",
+    )
+    .await?;
 
     for (bvid, (collection_key, episode_number)) in membership {
         let result = txn
@@ -10834,7 +10856,8 @@ pub async fn fix_page_video_ids(connection: &DatabaseConnection) -> Result<()> {
     warn!("注意：在写穿透模式下，此数据修复功能理论上不应该需要。如果频繁出现需要修复的数据，请检查系统配置。");
 
     // 使用事务确保原子性
-    let txn = connection.begin().await?;
+    let txn =
+        crate::database::begin_traced_transaction(connection, "workflow.cleanup_stale_submission_membership").await?;
 
     // 1. 首先处理cid不匹配的记录 - 这些应该删除
     let cid_mismatch_count: i64 = txn
