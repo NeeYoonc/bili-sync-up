@@ -20,11 +20,25 @@ static ACTIVE_DB_OPERATIONS: LazyLock<Mutex<HashMap<u64, ActiveDbOperation>>> =
 static NEXT_DB_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
 
 const SLOW_DB_OPERATION_WARN_MS: u128 = 5_000;
+const ACTIVE_DB_CONTENTION_DEBUG_MS: u128 = 50;
+const ACTIVE_DB_CONTENTION_WARN_MS: u128 = 200;
 
 #[derive(Clone, Debug)]
 struct ActiveDbOperation {
     name: String,
     started_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveDbOperationSnapshot {
+    description: String,
+    elapsed_ms: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveDbOperationContentionLevel {
+    Debug,
+    Warn,
 }
 
 struct DbOperationGuard {
@@ -43,7 +57,7 @@ fn is_database_locked_message(message: &str) -> bool {
     message.contains("database is locked") || message.contains("Database is locked")
 }
 
-fn active_db_operation_snapshot(exclude_id: Option<u64>) -> Vec<String> {
+fn active_db_operation_snapshots(exclude_id: Option<u64>) -> Vec<ActiveDbOperationSnapshot> {
     let now = Instant::now();
     let operations = ACTIVE_DB_OPERATIONS
         .lock()
@@ -51,10 +65,73 @@ fn active_db_operation_snapshot(exclude_id: Option<u64>) -> Vec<String> {
     let mut snapshot = operations
         .iter()
         .filter(|(id, _)| Some(**id) != exclude_id)
-        .map(|(id, op)| format!("#{} {} ({}ms)", id, op.name, now.duration_since(op.started_at).as_millis()))
+        .map(|(id, op)| {
+            let elapsed_ms = now.duration_since(op.started_at).as_millis();
+            ActiveDbOperationSnapshot {
+                description: format!("#{} {} ({}ms)", id, op.name, elapsed_ms),
+                elapsed_ms,
+            }
+        })
         .collect::<Vec<_>>();
-    snapshot.sort();
+    snapshot.sort_by(|left, right| left.description.cmp(&right.description));
     snapshot
+}
+
+fn active_db_operation_snapshot(exclude_id: Option<u64>) -> Vec<String> {
+    active_db_operation_snapshots(exclude_id)
+        .into_iter()
+        .map(|snapshot| snapshot.description)
+        .collect()
+}
+
+fn format_active_db_operation_snapshots(snapshot: &[ActiveDbOperationSnapshot]) -> String {
+    snapshot
+        .iter()
+        .map(|item| item.description.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn classify_active_db_operation_contention(
+    snapshot: &[ActiveDbOperationSnapshot],
+) -> Option<ActiveDbOperationContentionLevel> {
+    let max_elapsed_ms = snapshot.iter().map(|item| item.elapsed_ms).max().unwrap_or(0);
+    if max_elapsed_ms >= ACTIVE_DB_CONTENTION_WARN_MS {
+        Some(ActiveDbOperationContentionLevel::Warn)
+    } else if max_elapsed_ms >= ACTIVE_DB_CONTENTION_DEBUG_MS {
+        Some(ActiveDbOperationContentionLevel::Debug)
+    } else {
+        None
+    }
+}
+
+fn log_active_db_operation_contention(message_prefix: &str, idle_message: &str, current: &str, exclude_id: Option<u64>) {
+    let occupied = active_db_operation_snapshots(exclude_id);
+    let Some(level) = classify_active_db_operation_contention(&occupied) else {
+        debug!("{}: {}", idle_message, current);
+        return;
+    };
+
+    let max_elapsed_ms = occupied.iter().map(|item| item.elapsed_ms).max().unwrap_or(0);
+    let active = format_active_db_operation_snapshots(&occupied);
+    match level {
+        ActiveDbOperationContentionLevel::Warn => warn!(
+            "{} {} 个进行中的数据库操作，current={}, max_active_elapsed={}ms, active=[{}]",
+            message_prefix,
+            occupied.len(),
+            current,
+            max_elapsed_ms,
+            active
+        ),
+        ActiveDbOperationContentionLevel::Debug => debug!(
+            "{} {} 个进行中的数据库操作，current={}, max_active_elapsed={}ms, active=[{}]",
+            message_prefix,
+            occupied.len(),
+            current,
+            max_elapsed_ms,
+            active
+        ),
+    }
 }
 
 pub fn describe_active_db_operations() -> String {
@@ -90,17 +167,7 @@ impl DbOperationGuard {
             );
 
         if emit_start_log {
-            let occupied = active_db_operation_snapshot(Some(id));
-            if !occupied.is_empty() {
-                warn!(
-                    "数据库操作开始时检测到 {} 个进行中的数据库操作，current={}, active=[{}]",
-                    occupied.len(),
-                    name,
-                    occupied.join(" | ")
-                );
-            } else {
-                debug!("数据库操作开始: {}", name);
-            }
+            log_active_db_operation_contention("数据库操作开始时检测到", "数据库操作开始", &name, Some(id));
         }
 
         Self {
@@ -305,17 +372,7 @@ pub async fn begin_traced_transaction(
 
     let name = operation_name.into();
     let begin_started_at = Instant::now();
-    let occupied = active_db_operation_snapshot(None);
-    if !occupied.is_empty() {
-        warn!(
-            "数据库事务开始前检测到 {} 个进行中的数据库操作，current={}, active=[{}]",
-            occupied.len(),
-            name,
-            occupied.join(" | ")
-        );
-    } else {
-        debug!("数据库事务开始: {}", name);
-    }
+    log_active_db_operation_contention("数据库事务开始前检测到", "数据库事务开始", &name, None);
 
     match connection.begin().await {
         Ok(txn) => {
@@ -769,6 +826,79 @@ mod tests {
         Ok(SqlxSqliteConnector::from_sqlx_sqlite_pool(pool))
     }
 
+    #[test]
+    fn classify_active_db_operation_contention_respects_thresholds() {
+        assert_eq!(classify_active_db_operation_contention(&[]), None);
+        assert_eq!(
+            classify_active_db_operation_contention(&[ActiveDbOperationSnapshot {
+                description: "#1 short (49ms)".to_string(),
+                elapsed_ms: 49,
+            }]),
+            None
+        );
+        assert_eq!(
+            classify_active_db_operation_contention(&[ActiveDbOperationSnapshot {
+                description: "#1 medium (50ms)".to_string(),
+                elapsed_ms: 50,
+            }]),
+            Some(ActiveDbOperationContentionLevel::Debug)
+        );
+        assert_eq!(
+            classify_active_db_operation_contention(&[ActiveDbOperationSnapshot {
+                description: "#1 long (200ms)".to_string(),
+                elapsed_ms: 200,
+            }]),
+            Some(ActiveDbOperationContentionLevel::Warn)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn traced_db_operation_skips_contention_warning_for_short_overlap() -> anyhow::Result<()> {
+        ACTIVE_DB_OPERATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        let logs = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(Level::DEBUG)
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        ACTIVE_DB_OPERATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                999,
+                ActiveDbOperation {
+                    name: "test.short_holder".to_string(),
+                    started_at: Instant::now() - std::time::Duration::from_millis(10),
+                },
+            );
+
+        run_traced_db_operation("test.short_contender", async { Ok::<_, anyhow::Error>(()) }).await?;
+
+        ACTIVE_DB_OPERATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&999);
+
+        let log_output = logs.contents();
+        assert!(
+            !log_output.contains("数据库操作开始时检测到"),
+            "short overlap should not emit contention log, got logs: {log_output}"
+        );
+        assert!(
+            log_output.contains("数据库操作开始: test.short_contender"),
+            "short overlap should fall back to normal start debug log, got logs: {log_output}"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn traced_db_operation_logs_active_lock_holder_on_sqlite_lock() -> anyhow::Result<()> {
         ACTIVE_DB_OPERATIONS
@@ -794,6 +924,7 @@ mod tests {
             .await?;
 
         let lock_holder = begin_write_transaction(&connection_1, "test.lock_holder").await?;
+        tokio::time::sleep(std::time::Duration::from_millis((ACTIVE_DB_CONTENTION_WARN_MS + 20) as u64)).await;
 
         let err = run_traced_db_operation("test.contender", async {
             connection_2
