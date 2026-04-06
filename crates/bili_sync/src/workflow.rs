@@ -7422,6 +7422,8 @@ pub async fn fetch_page_danmaku(
     danmaku_path: PathBuf,
     token: CancellationToken,
 ) -> Result<ExecutionStatus> {
+    const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     if !should_run {
         return Ok(ExecutionStatus::Skipped);
     }
@@ -7465,10 +7467,32 @@ pub async fn fetch_page_danmaku(
     let danmaku_writer = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
-        res = bili_video.get_danmaku_writer(page_info, token.clone()) => res?,
+        res = tokio::time::timeout(
+            SIDECAR_REQUEST_TIMEOUT,
+            bili_video.get_danmaku_writer(page_info, token.clone()),
+        ) => match res {
+            Ok(inner) => inner?,
+            Err(_) => {
+                bail!(
+                    "弹幕请求超时（{} 秒）: 视频「{}」第 {} 页",
+                    SIDECAR_REQUEST_TIMEOUT.as_secs(),
+                    video_model.name,
+                    page_info.page
+                );
+            }
+        },
     };
 
-    danmaku_writer.write(danmaku_path).await?;
+    tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, danmaku_writer.write(danmaku_path))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "弹幕写入超时（{} 秒）: 视频「{}」第 {} 页",
+                SIDECAR_REQUEST_TIMEOUT.as_secs(),
+                video_model.name,
+                page_info.page
+            )
+        })??;
     Ok(ExecutionStatus::Succeeded)
 }
 
@@ -7480,6 +7504,8 @@ pub async fn fetch_page_subtitle(
     subtitle_path: &Path,
     token: CancellationToken,
 ) -> Result<ExecutionStatus> {
+    const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     if !should_run {
         return Ok(ExecutionStatus::Skipped);
     }
@@ -7487,7 +7513,17 @@ pub async fn fetch_page_subtitle(
     let subtitles = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
-        res = bili_video.get_subtitles(page_info) => res?,
+        res = tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, bili_video.get_subtitles(page_info)) => match res {
+            Ok(inner) => inner?,
+            Err(_) => {
+                bail!(
+                    "字幕请求超时（{} 秒）: 视频「{}」第 {} 页",
+                    SIDECAR_REQUEST_TIMEOUT.as_secs(),
+                    video_model.name,
+                    page_info.page
+                );
+            }
+        },
     };
     let tasks = subtitles
         .into_iter()
@@ -7497,7 +7533,16 @@ pub async fn fetch_page_subtitle(
             tokio::fs::write(path, subtitle.body.to_string()).await
         })
         .collect::<FuturesUnordered<_>>();
-    tasks.try_collect::<Vec<()>>().await?;
+    tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, tasks.try_collect::<Vec<()>>())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "字幕写入超时（{} 秒）: 视频「{}」第 {} 页",
+                SIDECAR_REQUEST_TIMEOUT.as_secs(),
+                video_model.name,
+                page_info.page
+            )
+        })??;
     Ok(ExecutionStatus::Succeeded)
 }
 
