@@ -1179,15 +1179,15 @@ async fn flush_batched_page_updates(connection: DatabaseConnection) {
         merged_pages.extend(passthrough_pages);
 
         let affected_count = merged_pages.len();
-        let result = crate::database::run_traced_db_operation(
-            format!("utils.model.update_pages_model(count={affected_count})"),
-            async {
-                for page in merged_pages {
-                    page::Entity::update(page).exec(&connection).await?;
-                }
-                Ok::<_, DbErr>(())
-            },
-        )
+        let operation_name = format!("utils.model.update_pages_model(count={affected_count})");
+        let result = async {
+            let txn = crate::database::begin_traced_transaction(&connection, operation_name).await?;
+            for page in merged_pages {
+                page::Entity::update(page).exec(&txn).await?;
+            }
+            txn.commit().await?;
+            Ok::<_, anyhow::Error>(())
+        }
         .await;
 
         if result.is_ok() {
@@ -1436,6 +1436,21 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    static PAGE_MODEL_TEST_GUARD: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
+
+    async fn wait_for_page_update_worker_idle() {
+        for _ in 0..50 {
+            let queue_is_empty = PAGE_MODEL_UPDATE_QUEUE.lock().await.is_empty();
+            let worker_running = PAGE_MODEL_UPDATE_WORKER_RUNNING.load(Ordering::Acquire);
+            if queue_is_empty && !worker_running {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("分页状态批量写入 worker 在测试开始前未能及时空闲");
+    }
+
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
         dir.push(format!("bili-sync-model-{}-{}", prefix, uuid::Uuid::new_v4()));
@@ -1592,6 +1607,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_pages_model_updates_page_sizes_without_recomputing_video_total_file_size_bytes() {
+        let _guard = PAGE_MODEL_TEST_GUARD.lock().await;
+        wait_for_page_update_worker_idle().await;
         let db = create_test_db("update-page-sizes").await;
         insert_test_video(&db, 1, "测试视频").await;
         insert_test_page(&db, 1, 1, Some("/tmp/page-1.m4s".to_string())).await;
@@ -1631,10 +1648,13 @@ mod tests {
             .expect("应能查询视频")
             .expect("视频应存在");
         assert_eq!(video.total_file_size_bytes, None);
+        wait_for_page_update_worker_idle().await;
     }
 
     #[tokio::test]
     async fn update_pages_model_handles_concurrent_single_page_updates() {
+        let _guard = PAGE_MODEL_TEST_GUARD.lock().await;
+        wait_for_page_update_worker_idle().await;
         let db = create_test_db("update-page-concurrent").await;
         insert_test_video(&db, 1, "测试视频").await;
         insert_test_page(&db, 1, 1, Some("/tmp/page-1.m4s".to_string())).await;
@@ -1675,6 +1695,7 @@ mod tests {
         assert_eq!(pages[0].file_size_bytes, Some(32));
         assert_eq!(pages[1].download_status, 8);
         assert_eq!(pages[1].file_size_bytes, Some(18));
+        wait_for_page_update_worker_idle().await;
     }
 
     #[tokio::test]
