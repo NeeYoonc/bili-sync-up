@@ -68,9 +68,15 @@ pub fn describe_active_db_operations() -> String {
 
 impl DbOperationGuard {
     fn begin(name: impl Into<String>) -> Self {
+        Self::begin_inner(name.into(), Instant::now(), true)
+    }
+
+    fn begin_after_wait(name: impl Into<String>, started_at: Instant) -> Self {
+        Self::begin_inner(name.into(), started_at, false)
+    }
+
+    fn begin_inner(name: String, started_at: Instant, emit_start_log: bool) -> Self {
         let id = NEXT_DB_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
-        let name = name.into();
-        let started_at = Instant::now();
 
         ACTIVE_DB_OPERATIONS
             .lock()
@@ -83,16 +89,18 @@ impl DbOperationGuard {
                 },
             );
 
-        let occupied = active_db_operation_snapshot(Some(id));
-        if !occupied.is_empty() {
-            warn!(
-                "数据库操作开始时检测到 {} 个进行中的数据库操作，current={}, active=[{}]",
-                occupied.len(),
-                name,
-                occupied.join(" | ")
-            );
-        } else {
-            debug!("数据库操作开始: {}", name);
+        if emit_start_log {
+            let occupied = active_db_operation_snapshot(Some(id));
+            if !occupied.is_empty() {
+                warn!(
+                    "数据库操作开始时检测到 {} 个进行中的数据库操作，current={}, active=[{}]",
+                    occupied.len(),
+                    name,
+                    occupied.join(" | ")
+                );
+            } else {
+                debug!("数据库操作开始: {}", name);
+            }
         }
 
         Self {
@@ -295,11 +303,61 @@ pub async fn begin_traced_transaction(
 ) -> anyhow::Result<TracedDatabaseTransaction> {
     use sea_orm::TransactionTrait;
 
-    let guard = DbOperationGuard::begin(operation_name);
+    let name = operation_name.into();
+    let begin_started_at = Instant::now();
+    let occupied = active_db_operation_snapshot(None);
+    if !occupied.is_empty() {
+        warn!(
+            "数据库事务开始前检测到 {} 个进行中的数据库操作，current={}, active=[{}]",
+            occupied.len(),
+            name,
+            occupied.join(" | ")
+        );
+    } else {
+        debug!("数据库事务开始: {}", name);
+    }
+
     match connection.begin().await {
-        Ok(txn) => Ok(TracedDatabaseTransaction::new(txn, guard)),
+        Ok(txn) => {
+            let begin_elapsed_ms = begin_started_at.elapsed().as_millis();
+            if begin_elapsed_ms >= SLOW_DB_OPERATION_WARN_MS {
+                warn!(
+                    "数据库事务开始较慢: op={}, stage=begin, elapsed={}ms",
+                    name, begin_elapsed_ms
+                );
+            } else {
+                debug!(
+                    "数据库事务开始完成: op={}, stage=begin, elapsed={}ms",
+                    name, begin_elapsed_ms
+                );
+            }
+
+            let guard = DbOperationGuard::begin_after_wait(name, begin_started_at);
+            Ok(TracedDatabaseTransaction::new(txn, guard))
+        }
         Err(error) => {
-            guard.on_error("begin", &error);
+            let error_text = error.to_string();
+            let occupied = active_db_operation_snapshot(None);
+            if is_database_locked_message(&error_text) {
+                warn!(
+                    "数据库事务开始遇到锁等待/冲突: op={}, stage=begin, elapsed={}ms, active=[{}], error={}",
+                    name,
+                    begin_started_at.elapsed().as_millis(),
+                    if occupied.is_empty() {
+                        "none".to_string()
+                    } else {
+                        occupied.join(" | ")
+                    },
+                    error_text
+                );
+            } else {
+                warn!(
+                    "数据库事务开始失败: op={}, stage=begin, elapsed={}ms, error={}",
+                    name,
+                    begin_started_at.elapsed().as_millis(),
+                    error_text
+                );
+            }
             Err(error.into())
         }
     }

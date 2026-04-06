@@ -5,10 +5,12 @@ use once_cell::sync::Lazy;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{OnConflict, SimpleExpr};
 use sea_orm::DatabaseTransaction;
-use sea_orm::{QuerySelect, Set, Unchanged};
+use sea_orm::{DatabaseBackend, QuerySelect, Set, Statement, Unchanged};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
@@ -1087,15 +1089,7 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         return Ok(());
     }
 
-    let affected_page_ids: Vec<i32> = pages
-        .iter()
-        .filter_map(|page| match &page.id {
-            sea_orm::ActiveValue::Set(id) | sea_orm::ActiveValue::Unchanged(id) => Some(*id),
-            sea_orm::ActiveValue::NotSet => None,
-        })
-        .collect();
-
-    let affected_count = affected_page_ids.len();
+    let affected_count = pages.len();
     crate::database::run_traced_db_operation(
         format!("utils.model.update_pages_model(count={affected_count})"),
         async {
@@ -1114,9 +1108,6 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         },
     )
     .await?;
-
-    let affected_video_ids = resolve_video_ids_by_page_ids(&affected_page_ids, connection).await?;
-    recompute_video_total_file_sizes(&affected_video_ids, connection).await?;
 
     notify_videos_changed();
     Ok(())
@@ -1137,6 +1128,7 @@ const VIDEO_FILE_SIZE_BACKFILL_BATCH_SIZE: usize = 200;
 
 static VIDEO_FILE_SIZE_BACKFILL_QUEUE: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static VIDEO_FILE_SIZE_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
+static VIDEO_TOTAL_FILE_SIZE_RECOMPUTE_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 
 fn take_video_file_size_backfill_batch(limit: usize) -> Vec<i32> {
     let mut queue = VIDEO_FILE_SIZE_BACKFILL_QUEUE
@@ -1233,60 +1225,64 @@ pub async fn queue_missing_video_file_size_backfill(connection: Arc<DatabaseConn
     Ok(queue_video_file_size_backfill(&missing_video_ids, connection))
 }
 
-async fn resolve_video_ids_by_page_ids(page_ids: &[i32], connection: &DatabaseConnection) -> Result<Vec<i32>> {
-    let page_ids = dedup_ids(page_ids);
-    if page_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let rows: Vec<(i32,)> = page::Entity::find()
-        .select_only()
-        .column(page::Column::VideoId)
-        .filter(page::Column::Id.is_in(page_ids))
-        .into_tuple::<(i32,)>()
-        .all(connection)
-        .await?;
-
-    Ok(dedup_ids(
-        &rows.into_iter().map(|(video_id,)| video_id).collect::<Vec<_>>(),
-    ))
-}
-
 pub async fn recompute_video_total_file_sizes(video_ids: &[i32], connection: &DatabaseConnection) -> Result<()> {
     let video_ids = dedup_ids(video_ids);
     if video_ids.is_empty() {
         return Ok(());
     }
 
-    let page_sizes: Vec<(i32, Option<i64>)> = page::Entity::find()
-        .select_only()
-        .column(page::Column::VideoId)
-        .column(page::Column::FileSizeBytes)
-        .filter(page::Column::VideoId.is_in(video_ids.clone()))
-        .into_tuple::<(i32, Option<i64>)>()
-        .all(connection)
-        .await?;
-
-    let mut total_sizes = HashMap::<i32, i64>::new();
-    for (video_id, file_size_bytes) in page_sizes {
-        let size = file_size_bytes.unwrap_or(0).max(0);
-        total_sizes
-            .entry(video_id)
-            .and_modify(|total| *total = total.saturating_add(size))
-            .or_insert(size);
+    let wait_started_at = Instant::now();
+    let _recompute_lock = VIDEO_TOTAL_FILE_SIZE_RECOMPUTE_LOCK.lock().await;
+    let wait_elapsed_ms = wait_started_at.elapsed().as_millis();
+    if wait_elapsed_ms >= 5_000 {
+        warn!(
+            "视频总大小重算等待串行锁较久: count={}, elapsed={}ms",
+            video_ids.len(),
+            wait_elapsed_ms
+        );
+    } else if wait_elapsed_ms >= 100 {
+        debug!(
+            "视频总大小重算等待串行锁: count={}, elapsed={}ms",
+            video_ids.len(),
+            wait_elapsed_ms
+        );
     }
 
-    let txn = crate::database::begin_traced_transaction(connection, "utils.model.recompute_video_total_file_sizes").await?;
-    for video_id in video_ids {
-        video::Entity::update(video::ActiveModel {
-            id: Unchanged(video_id),
-            total_file_size_bytes: Set(Some(total_sizes.get(&video_id).copied().unwrap_or(0))),
-            ..Default::default()
-        })
-        .exec(&txn)
-        .await?;
-    }
-    txn.commit().await?;
+    let placeholders = video_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        r#"
+        UPDATE video
+        SET total_file_size_bytes = COALESCE(
+            (
+                SELECT SUM(
+                    CASE
+                        WHEN page.file_size_bytes IS NULL OR page.file_size_bytes < 0 THEN 0
+                        ELSE page.file_size_bytes
+                    END
+                )
+                FROM page
+                WHERE page.video_id = video.id
+            ),
+            0
+        )
+        WHERE id IN ({})
+        "#,
+        placeholders
+    );
+    let values = video_ids.iter().copied().map(Into::into).collect::<Vec<_>>();
+
+    crate::database::run_traced_db_operation(
+        format!(
+            "utils.model.recompute_video_total_file_sizes(count={})",
+            video_ids.len()
+        ),
+        async move {
+            connection
+                .execute(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
+                .await
+        },
+    )
+    .await?;
 
     Ok(())
 }
@@ -1521,7 +1517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_pages_model_recomputes_video_total_file_size_bytes() {
+    async fn update_pages_model_updates_page_sizes_without_recomputing_video_total_file_size_bytes() {
         let db = create_test_db("update-page-sizes").await;
         insert_test_video(&db, 1, "测试视频").await;
         insert_test_page(&db, 1, 1, Some("/tmp/page-1.m4s".to_string())).await;
@@ -1560,6 +1556,58 @@ mod tests {
             .await
             .expect("应能查询视频")
             .expect("视频应存在");
-        assert_eq!(video.total_file_size_bytes, Some(50));
+        assert_eq!(video.total_file_size_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn recompute_video_total_file_sizes_treats_missing_sizes_as_zero() {
+        let db = create_test_db("recompute-video-total-sizes").await;
+        insert_test_video(&db, 1, "有分页视频").await;
+        insert_test_video(&db, 2, "空分页视频").await;
+        insert_test_page(&db, 1, 1, Some("/tmp/page-1.m4s".to_string())).await;
+        insert_test_page(&db, 2, 1, Some("/tmp/page-2.m4s".to_string())).await;
+
+        let mut page_one: page::ActiveModel = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询第一个分页")
+            .expect("第一个分页应存在")
+            .into();
+        page_one.file_size_bytes = Set(Some(32));
+
+        let mut page_two: page::ActiveModel = page::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("应能查询第二个分页")
+            .expect("第二个分页应存在")
+            .into();
+        page_two.file_size_bytes = Set(None);
+
+        page::Entity::update(page_one)
+            .exec(&db)
+            .await
+            .expect("应能更新第一个分页大小");
+        page::Entity::update(page_two)
+            .exec(&db)
+            .await
+            .expect("应能更新第二个分页大小");
+
+        recompute_video_total_file_sizes(&[1, 2], &db)
+            .await
+            .expect("重算视频总大小应成功");
+
+        let video_one = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询第一个视频")
+            .expect("第一个视频应存在");
+        assert_eq!(video_one.total_file_size_bytes, Some(32));
+
+        let video_two = video::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("应能查询第二个视频")
+            .expect("第二个视频应存在");
+        assert_eq!(video_two.total_file_size_bytes, Some(0));
     }
 }
