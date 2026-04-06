@@ -1685,19 +1685,7 @@ pub async fn fetch_video_details(
                                 video_model_mut.upper_name = source_submission.upper_name.clone();
                             }
 
-                            // 使用写事务函数（立即获取写锁，避免 SQLITE_BUSY_SNAPSHOT）
-                            let txn =
-                                crate::database::begin_write_transaction(connection, "workflow.process_video_detail").await?;
-
-                            if let Some(staff_list) = staff {
-                                debug!("视频 {} 有staff信息，成员数量: {}", video_model.bvid, staff_list.len());
-                                for staff_member in staff_list.iter() {
-                                    debug!(
-                                        "  - staff: mid={}, title={}, name={}",
-                                        staff_member.mid, staff_member.title, staff_member.name
-                                    );
-                                }
-
+                            if let Some(staff_list) = staff.as_ref() {
                                 if staff_list.len() > 1 {
                                     debug!(
                                         "发现合作视频：bvid={}, staff_count={}",
@@ -1705,14 +1693,14 @@ pub async fn fetch_video_details(
                                         staff_list.len()
                                     );
 
-                                    // 查找所有可能的订阅UP主
+                                    // 先在事务外完成合作视频归属匹配，缩短写锁持有时间
                                     let mut matched_submission: Option<submission::Model> = None;
 
                                     // 1. 如果是submission来源，直接使用source_submission_id
                                     if let Some(source_submission_id) = video_model.source_submission_id {
                                         debug!("submission来源视频，source_submission_id: {}", source_submission_id);
                                         if let Ok(Some(submission)) =
-                                            submission::Entity::find_by_id(source_submission_id).one(&txn).await
+                                            submission::Entity::find_by_id(source_submission_id).one(connection).await
                                         {
                                             debug!(
                                                 "找到来源submission: {} ({})",
@@ -1748,7 +1736,7 @@ pub async fn fetch_video_details(
                                             if let Ok(Some(submission)) = submission::Entity::find()
                                                 .filter(submission::Column::UpperId.eq(staff_member.mid))
                                                 .filter(submission::Column::Enabled.eq(true))
-                                                .one(&txn)
+                                                .one(connection)
                                                 .await
                                             {
                                                 debug!(
@@ -1830,8 +1818,6 @@ pub async fn fetch_video_details(
                                 }
                             }
 
-                            // 将分页信息写入数据库
-                            create_pages(pages, &video_model_mut, &txn).await?;
                             let mut video_active_model = view_info.into_detail_model(video_model_mut.clone());
                             video_source.set_relation_id(&mut video_active_model);
                             video_active_model.single_page = Set(Some(pages_len == 1));
@@ -1878,6 +1864,12 @@ pub async fn fetch_video_details(
                                 debug!("非合作视频或未发生更新，保持API返回的upper信息");
                             }
 
+                            // 使用写事务函数（立即获取写锁，避免 SQLITE_BUSY_SNAPSHOT）
+                            let txn =
+                                crate::database::begin_write_transaction(connection, "workflow.process_video_detail").await?;
+
+                            // 将分页信息写入数据库
+                            create_pages(pages, &video_model_mut, &txn).await?;
                             video_active_model.save(&txn).await?;
                             txn.commit().await?;
                             notify_videos_changed();
