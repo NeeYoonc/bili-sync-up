@@ -1086,6 +1086,9 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         return Ok(());
     }
 
+    // SQLite 同一时刻只能有一个写者。分页状态更新最频繁，先在应用层串行化，
+    // 避免多个 update_pages_model 同时抢写锁把单条更新放大成秒级排队。
+    let _page_update_guard = PAGE_MODEL_UPDATE_LOCK.lock().await;
     let affected_count = pages.len();
     crate::database::run_traced_db_operation(
         format!("utils.model.update_pages_model(count={affected_count})"),
@@ -1118,6 +1121,7 @@ const VIDEO_FILE_SIZE_BACKFILL_BATCH_SIZE: usize = 200;
 
 static VIDEO_FILE_SIZE_BACKFILL_QUEUE: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static VIDEO_FILE_SIZE_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
+static PAGE_MODEL_UPDATE_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 static VIDEO_TOTAL_FILE_SIZE_RECOMPUTE_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 
 fn take_video_file_size_backfill_batch(limit: usize) -> Vec<i32> {
@@ -1547,6 +1551,50 @@ mod tests {
             .expect("应能查询视频")
             .expect("视频应存在");
         assert_eq!(video.total_file_size_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn update_pages_model_handles_concurrent_single_page_updates() {
+        let db = create_test_db("update-page-concurrent").await;
+        insert_test_video(&db, 1, "测试视频").await;
+        insert_test_page(&db, 1, 1, Some("/tmp/page-1.m4s".to_string())).await;
+        insert_test_page(&db, 2, 1, Some("/tmp/page-2.m4s".to_string())).await;
+
+        let mut page_one: page::ActiveModel = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询第一个分页")
+            .expect("第一个分页应存在")
+            .into();
+        page_one.download_status = Set(7);
+        page_one.file_size_bytes = Set(Some(32));
+
+        let mut page_two: page::ActiveModel = page::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("应能查询第二个分页")
+            .expect("第二个分页应存在")
+            .into();
+        page_two.download_status = Set(8);
+        page_two.file_size_bytes = Set(Some(18));
+
+        let (first, second) = tokio::join!(
+            update_pages_model(vec![page_one], &db),
+            update_pages_model(vec![page_two], &db),
+        );
+        first.expect("第一个并发分页更新应成功");
+        second.expect("第二个并发分页更新应成功");
+
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.eq(1))
+            .order_by_asc(page::Column::Id)
+            .all(&db)
+            .await
+            .expect("应能查询分页");
+        assert_eq!(pages[0].download_status, 7);
+        assert_eq!(pages[0].file_size_bytes, Some(32));
+        assert_eq!(pages[1].download_status, 8);
+        assert_eq!(pages[1].file_size_bytes, Some(18));
     }
 
     #[tokio::test]
