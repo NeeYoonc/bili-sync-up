@@ -5358,6 +5358,50 @@ pub async fn download_video_pages(
     Ok(video_active_model)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PagePersistenceDecision {
+    should_persist: bool,
+    should_recompute_video_total_size: bool,
+}
+
+#[derive(Debug)]
+struct PageDownloadOutcome {
+    model: page::ActiveModel,
+    persistence: PagePersistenceDecision,
+}
+
+fn active_value_matches<T>(value: &sea_orm::ActiveValue<T>, original: &T) -> bool
+where
+    T: PartialEq + Into<sea_orm::Value>,
+{
+    match value {
+        sea_orm::ActiveValue::Set(current) | sea_orm::ActiveValue::Unchanged(current) => current == original,
+        sea_orm::ActiveValue::NotSet => false,
+    }
+}
+
+fn detect_page_persistence_decision(original: &page::Model, updated: &page::ActiveModel) -> PagePersistenceDecision {
+    let status_changed = !active_value_matches(&updated.download_status, &original.download_status);
+    let path_changed = !active_value_matches(&updated.path, &original.path);
+    let file_size_changed = !active_value_matches(&updated.file_size_bytes, &original.file_size_bytes);
+    let video_stream_size_changed =
+        !active_value_matches(&updated.video_stream_size_bytes, &original.video_stream_size_bytes);
+    let audio_stream_size_changed =
+        !active_value_matches(&updated.audio_stream_size_bytes, &original.audio_stream_size_bytes);
+
+    PagePersistenceDecision {
+        should_persist: status_changed
+            || path_changed
+            || file_size_changed
+            || video_stream_size_changed
+            || audio_stream_size_changed,
+        should_recompute_video_total_size: path_changed
+            || file_size_changed
+            || video_stream_size_changed
+            || audio_stream_size_changed,
+    }
+}
+
 /// 分发并执行分页下载任务，当且仅当所有分页成功下载或达到最大重试次数时返回 Ok，否则根据失败原因返回对应的错误
 pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationToken) -> Result<ExecutionStatus> {
     if !args.should_run {
@@ -5405,21 +5449,26 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
     let mut stream = tasks;
     while let Some((res, page_pid, page_name)) = stream.next().await {
         match res {
-            Ok(model) => {
+            Ok(outcome) => {
                 if download_aborted {
                     continue;
                 }
+                let model = outcome.model;
                 // 该视频的所有分页的下载状态都会在此返回，需要根据这些状态确认视频层"分 P 下载"子任务的状态
                 // 在过去的实现中，此处仅仅根据 page_download_status 的最高标志位来判断，如果最高标志位是 true 则认为完成
                 // 这样会导致即使分页中有失败到 MAX_RETRY 的情况，视频层的分 P 下载状态也会被认为是 Succeeded，不够准确
                 // 新版本实现会将此处取值为所有子任务状态的最小值，这样只有所有分页的子任务全部成功时才会认为视频层的分 P 下载状态是 Succeeded
-                let page_download_status = model.download_status.try_as_ref().expect("download_status must be set");
-                let separate_status: [u32; 5] = PageStatus::from(*page_download_status).into();
+                let page_download_status = *model.download_status.try_as_ref().expect("download_status must be set");
+                let separate_status: [u32; 5] = PageStatus::from(page_download_status).into();
                 for status in separate_status {
                     target_status = target_status.min(status);
                 }
-                update_pages_model(vec![model], args.connection).await?;
-                should_recompute_video_total_size = true;
+                if outcome.persistence.should_persist {
+                    update_pages_model(vec![model], args.connection).await?;
+                }
+                if outcome.persistence.should_recompute_video_total_size {
+                    should_recompute_video_total_size = true;
+                }
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -5674,9 +5723,9 @@ async fn sync_page_companion_files_by_episode_key(
     Ok(total_renamed)
 }
 
-/// 下载某个分页，未发生风控且正常运行时返回 Ok(Page::ActiveModel)，其中 status 字段存储了新的下载状态，发生风控时返回 DownloadAbortError
+/// 下载某个分页，未发生风控且正常运行时返回 Ok(PageDownloadOutcome)，其中会标记该分页是否真的需要落库/重算总大小
 #[allow(clippy::too_many_arguments)]
-pub async fn download_page(
+async fn download_page(
     bili_client: &BiliClient,
     video_source: &VideoSourceEnum,
     video_model: &video::Model,
@@ -5686,12 +5735,13 @@ pub async fn download_page(
     downloader: &UnifiedDownloader,
     base_path: &Path,
     token: CancellationToken,
-) -> Result<page::ActiveModel> {
+) -> Result<PageDownloadOutcome> {
     let _permit = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
         permit = semaphore.acquire() => permit.context("acquire semaphore failed")?,
     };
+    let original_page_model = page_model.clone();
     let mut status = PageStatus::from(page_model.download_status);
     let mut separate_status = status.should_run();
     let is_single_page = video_model.single_page.context("single_page is null")?;
@@ -6518,7 +6568,11 @@ pub async fn download_page(
     if let Some(audio_stream_size_bytes) = page_audio_stream_size_bytes {
         page_active_model.audio_stream_size_bytes = Set(Some(audio_stream_size_bytes));
     }
-    Ok(page_active_model)
+    let persistence = detect_page_persistence_decision(&original_page_model, &page_active_model);
+    Ok(PageDownloadOutcome {
+        model: page_active_model,
+        persistence,
+    })
 }
 
 pub async fn fetch_page_poster(
@@ -11942,6 +11996,62 @@ mod tests {
 
         assert!(is_database_locked_error(&locked_err));
         assert!(!is_database_locked_error(&other_err));
+    }
+
+    fn sample_page_model_for_persistence_decision() -> page::Model {
+        page::Model {
+            id: 1,
+            video_id: 1,
+            cid: 1001,
+            pid: 1,
+            name: "测试分页".to_string(),
+            width: Some(1920),
+            height: Some(1080),
+            duration: 120,
+            path: Some("/tmp/page-1.mp4".to_string()),
+            file_size_bytes: Some(1024),
+            video_stream_size_bytes: Some(800),
+            audio_stream_size_bytes: Some(224),
+            image: None,
+            download_status: 7,
+            created_at: "2026-04-06 00:00:00".to_string(),
+            play_video_streams: None,
+            play_audio_streams: None,
+            play_subtitle_streams: None,
+            play_streams_updated_at: None,
+            ai_renamed: Some(0),
+        }
+    }
+
+    #[test]
+    fn test_detect_page_persistence_decision_skips_unchanged_page() {
+        let page_model = sample_page_model_for_persistence_decision();
+        let page_active_model: page::ActiveModel = page_model.clone().into();
+
+        let decision = detect_page_persistence_decision(&page_model, &page_active_model);
+        assert_eq!(decision, PagePersistenceDecision::default());
+    }
+
+    #[test]
+    fn test_detect_page_persistence_decision_persists_status_only_change_without_recompute() {
+        let page_model = sample_page_model_for_persistence_decision();
+        let mut page_active_model: page::ActiveModel = page_model.clone().into();
+        page_active_model.download_status = Set(15);
+
+        let decision = detect_page_persistence_decision(&page_model, &page_active_model);
+        assert!(decision.should_persist);
+        assert!(!decision.should_recompute_video_total_size);
+    }
+
+    #[test]
+    fn test_detect_page_persistence_decision_recomputes_when_path_changes() {
+        let page_model = sample_page_model_for_persistence_decision();
+        let mut page_active_model: page::ActiveModel = page_model.clone().into();
+        page_active_model.path = Set(Some("/tmp/page-1-renamed.mp4".to_string()));
+
+        let decision = detect_page_persistence_decision(&page_model, &page_active_model);
+        assert!(decision.should_persist);
+        assert!(decision.should_recompute_video_total_size);
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测
