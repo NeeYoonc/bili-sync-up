@@ -44,6 +44,7 @@ lazy_static::lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
     static ref ROOT_ALIAS_ASSET_FORCE_REFRESH_CACHE: Arc<Mutex<HashMap<String, i64>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    static ref VIDEO_DETAIL_PERSIST_LOCK: Arc<TokioMutex<()>> = Arc::new(TokioMutex::new(()));
 }
 
 #[derive(Debug, Clone)]
@@ -1908,6 +1909,9 @@ pub async fn fetch_video_details(
                                 debug!("非合作视频或未发生更新，保持API返回的upper信息");
                             }
 
+                            // 仅串行化详情落库，保留详情抓取与解析并发，避免扫描初期大量写事务互相争锁。
+                            let _detail_persist_guard = VIDEO_DETAIL_PERSIST_LOCK.lock().await;
+
                             // 使用写事务函数（立即获取写锁，避免 SQLITE_BUSY_SNAPSHOT）
                             let txn =
                                 crate::database::begin_write_transaction(connection, "workflow.process_video_detail")
@@ -1917,6 +1921,7 @@ pub async fn fetch_video_details(
                             create_pages(pages, &video_model_mut, &txn).await?;
                             video_active_model.save(&txn).await?;
                             txn.commit().await?;
+                            drop(_detail_persist_guard);
                             notify_videos_changed();
                         }
                     };
