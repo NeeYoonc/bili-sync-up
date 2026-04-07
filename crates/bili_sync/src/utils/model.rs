@@ -1200,9 +1200,22 @@ async fn flush_batched_page_updates(connection: DatabaseConnection) {
         let result = crate::database::run_traced_db_operation(
             format!("utils.model.update_pages_model(count={affected_count})"),
             async {
-                for page in merged_pages {
-                    page::Entity::update(page).exec(&connection).await?;
-                }
+                use sea_orm::TransactionTrait;
+
+                connection
+                    .transaction::<_, (), DbErr>(move |txn| {
+                        Box::pin(async move {
+                            for page in merged_pages {
+                                page::Entity::update(page).exec(txn).await?;
+                            }
+                            Ok(())
+                        })
+                    })
+                    .await
+                    .map_err(|err| match err {
+                        sea_orm::TransactionError::Connection(db_err)
+                        | sea_orm::TransactionError::Transaction(db_err) => db_err,
+                    })?;
                 Ok::<_, DbErr>(())
             },
         )
