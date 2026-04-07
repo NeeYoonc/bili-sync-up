@@ -44,6 +44,7 @@ lazy_static::lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
     static ref ROOT_ALIAS_ASSET_FORCE_REFRESH_CACHE: Arc<Mutex<HashMap<String, i64>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    static ref VIDEO_DETAIL_PERSIST_LOCK: Arc<TokioMutex<()>> = Arc::new(TokioMutex::new(()));
 }
 
 #[derive(Debug, Clone)]
@@ -359,7 +360,8 @@ async fn persist_video_path_with_lock_retry(
                 .await
             },
         )
-        .await {
+        .await
+        {
             Ok(_) => return Ok(()),
             Err(err) => {
                 let anyhow_err = anyhow!(err.to_string());
@@ -392,6 +394,54 @@ async fn persist_video_path_with_lock_retry(
             }
         }
     }
+}
+
+async fn persist_video_path_if_materialized_with_lock_retry(
+    video_id: i32,
+    old_path: &str,
+    new_path: &str,
+    connection: &DatabaseConnection,
+    reason: &str,
+) -> Result<bool> {
+    if new_path.is_empty() || old_path == new_path {
+        return Ok(false);
+    }
+
+    let materialized = fs::metadata(Path::new(new_path))
+        .await
+        .map(|meta| meta.is_dir() || meta.is_file())
+        .unwrap_or(false);
+    if !materialized {
+        debug!(
+            "跳过按需持久化 video.path: video_id={}, reason={}, old='{}', new='{}'（目标路径尚未实体化）",
+            video_id, reason, old_path, new_path
+        );
+        return Ok(false);
+    }
+
+    persist_video_path_with_lock_retry(video_id, old_path, new_path, connection).await?;
+    debug!(
+        "已按需持久化 video.path: video_id={}, reason={}, old='{}', new='{}'",
+        video_id, reason, old_path, new_path
+    );
+    Ok(true)
+}
+
+fn should_keep_db_video_path_override(db_path: &str, expected_path: &str, original_db_path: &str) -> bool {
+    !db_path.is_empty() && db_path != expected_path && db_path != original_db_path
+}
+
+fn resolve_final_video_path(
+    path_to_save: &str,
+    ingest_old_video_path: &str,
+    latest_video_snapshot: Option<&video::Model>,
+) -> String {
+    latest_video_snapshot
+        .and_then(|latest_video| {
+            should_keep_db_video_path_override(&latest_video.path, path_to_save, ingest_old_video_path)
+                .then(|| latest_video.path.clone())
+        })
+        .unwrap_or_else(|| path_to_save.to_string())
 }
 
 fn normalize_upper_face_bucket(name: &str) -> String {
@@ -1435,11 +1485,9 @@ pub async fn fetch_video_details(
                 videos_without_season.len()
             );
             for video_model in videos_without_season {
-                let txn = crate::database::begin_traced_transaction(
-                    connection,
-                    "workflow.populate_bangumi_missing_season",
-                )
-                .await?;
+                let txn =
+                    crate::database::begin_traced_transaction(connection, "workflow.populate_bangumi_missing_season")
+                        .await?;
 
                 let (actual_cid, duration) = if let Some(ep_id) = &video_model.ep_id {
                     match get_bangumi_info_from_api(bili_client, ep_id, token.clone()).await {
@@ -1570,9 +1618,7 @@ pub async fn fetch_video_details(
                                 if should_restore_unreset {
                                     warn!(
                                         "视频「{}」({}) {}，已跳过重置并恢复为未重置状态",
-                                        &video_model.name,
-                                        &video_model.bvid,
-                                        inaccessible_reason
+                                        &video_model.name, &video_model.bvid, inaccessible_reason
                                     );
 
                                     let ok_video_status: u32 = VideoStatus::from([STATUS_OK; 5]).into();
@@ -1594,9 +1640,7 @@ pub async fn fetch_video_details(
                                 } else {
                                     warn!(
                                         "视频「{}」({}) {}，已标记为无效并跳过处理",
-                                        &video_model.name,
-                                        &video_model.bvid,
-                                        inaccessible_reason
+                                        &video_model.name, &video_model.bvid, inaccessible_reason
                                     );
                                 }
 
@@ -1684,19 +1728,7 @@ pub async fn fetch_video_details(
                                 video_model_mut.upper_name = source_submission.upper_name.clone();
                             }
 
-                            // 使用写事务函数（立即获取写锁，避免 SQLITE_BUSY_SNAPSHOT）
-                            let txn =
-                                crate::database::begin_write_transaction(connection, "workflow.process_video_detail").await?;
-
-                            if let Some(staff_list) = staff {
-                                debug!("视频 {} 有staff信息，成员数量: {}", video_model.bvid, staff_list.len());
-                                for staff_member in staff_list.iter() {
-                                    debug!(
-                                        "  - staff: mid={}, title={}, name={}",
-                                        staff_member.mid, staff_member.title, staff_member.name
-                                    );
-                                }
-
+                            if let Some(staff_list) = staff.as_ref() {
                                 if staff_list.len() > 1 {
                                     debug!(
                                         "发现合作视频：bvid={}, staff_count={}",
@@ -1704,14 +1736,16 @@ pub async fn fetch_video_details(
                                         staff_list.len()
                                     );
 
-                                    // 查找所有可能的订阅UP主
+                                    // 先在事务外完成合作视频归属匹配，缩短写锁持有时间
                                     let mut matched_submission: Option<submission::Model> = None;
 
                                     // 1. 如果是submission来源，直接使用source_submission_id
                                     if let Some(source_submission_id) = video_model.source_submission_id {
                                         debug!("submission来源视频，source_submission_id: {}", source_submission_id);
                                         if let Ok(Some(submission)) =
-                                            submission::Entity::find_by_id(source_submission_id).one(&txn).await
+                                            submission::Entity::find_by_id(source_submission_id)
+                                                .one(connection)
+                                                .await
                                         {
                                             debug!(
                                                 "找到来源submission: {} ({})",
@@ -1747,7 +1781,7 @@ pub async fn fetch_video_details(
                                             if let Ok(Some(submission)) = submission::Entity::find()
                                                 .filter(submission::Column::UpperId.eq(staff_member.mid))
                                                 .filter(submission::Column::Enabled.eq(true))
-                                                .one(&txn)
+                                                .one(connection)
                                                 .await
                                             {
                                                 debug!(
@@ -1829,8 +1863,6 @@ pub async fn fetch_video_details(
                                 }
                             }
 
-                            // 将分页信息写入数据库
-                            create_pages(pages, &video_model_mut, &txn).await?;
                             let mut video_active_model = view_info.into_detail_model(video_model_mut.clone());
                             video_source.set_relation_id(&mut video_active_model);
                             video_active_model.single_page = Set(Some(pages_len == 1));
@@ -1877,8 +1909,19 @@ pub async fn fetch_video_details(
                                 debug!("非合作视频或未发生更新，保持API返回的upper信息");
                             }
 
+                            // 仅串行化详情落库，保留详情抓取与解析并发，避免扫描初期大量写事务互相争锁。
+                            let _detail_persist_guard = VIDEO_DETAIL_PERSIST_LOCK.lock().await;
+
+                            // 使用写事务函数（立即获取写锁，避免 SQLITE_BUSY_SNAPSHOT）
+                            let txn =
+                                crate::database::begin_write_transaction(connection, "workflow.process_video_detail")
+                                    .await?;
+
+                            // 将分页信息写入数据库
+                            create_pages(pages, &video_model_mut, &txn).await?;
                             video_active_model.save(&txn).await?;
                             txn.commit().await?;
+                            drop(_detail_persist_guard);
                             notify_videos_changed();
                         }
                     };
@@ -3563,8 +3606,9 @@ pub async fn download_video_pages(
     let base_upper_path = &current_config.upper_path.join(&first_char).join(&upper_name);
     let is_single_page = final_video_model.single_page.context("single_page is null")?;
 
-    // 提前计算并持久化 video.path，避免下载中途失败后下轮将同一目录误判为“同名冲突”。
-    // 典型场景：上一轮在下载初期（如 412 风控）中止，目录已创建但路径尚未写回数据库。
+    // 预先计算本轮应使用的 video.path。
+    // 正常成功路径交给最终的 update_videos_model 一次性写回；
+    // 只有真实迁移成功或中途中止且目标路径已经实体化时，才按需补写数据库。
     let path_to_save = if is_bangumi {
         if let Some(ref bangumi_folder_path) = bangumi_folder_path {
             bangumi_folder_path.to_string_lossy().to_string()
@@ -3582,28 +3626,7 @@ pub async fn download_video_pages(
     } else {
         base_path.to_string_lossy().to_string()
     };
-
-    if !path_to_save.is_empty() && final_video_model.path != path_to_save {
-        if let Err(e) = persist_video_path_with_lock_retry(
-            final_video_model.id,
-            &final_video_model.path,
-            &path_to_save,
-            connection,
-        )
-        .await
-        {
-            warn!(
-                "提前持久化 video.path 失败（不中断下载流程）: video_id={}, old='{}', new='{}', err={}",
-                final_video_model.id, final_video_model.path, path_to_save, e
-            );
-        } else {
-            debug!(
-                "已提前持久化 video.path: video_id={}, old='{}', new='{}'",
-                final_video_model.id, final_video_model.path, path_to_save
-            );
-            notify_videos_changed();
-        }
-    }
+    let path_changed = !path_to_save.is_empty() && final_video_model.path != path_to_save;
 
     // 为多P视频生成基于视频名称的文件名
     let video_base_name = if !is_single_page {
@@ -5028,11 +5051,9 @@ pub async fn download_video_pages(
 
         // 立即修复数据库分页状态，避免前端仍显示“分页未完成”
         let ok_page_status: u32 = PageStatus::from([STATUS_OK; 5]).into();
-        let txn = crate::database::begin_traced_transaction(
-            connection,
-            "workflow.mark_charge_video_placeholder_complete",
-        )
-        .await?;
+        let txn =
+            crate::database::begin_traced_transaction(connection, "workflow.mark_charge_video_placeholder_complete")
+                .await?;
         video::Entity::update(video::ActiveModel {
             id: Unchanged(final_video_model.id),
             valid: Set(false),
@@ -5209,15 +5230,7 @@ pub async fn download_video_pages(
                 }
             }
         });
-    if let ExecutionStatus::Failed(e) = all_results
-        .into_iter()
-        .nth(4)
-        .context("page download result not found")?
-    {
-        if e.downcast_ref::<DownloadAbortError>().is_some() {
-            return Err(e);
-        }
-    }
+
     // 保存入库日志需要的值（因为 final_video_model 会被 .into() 消耗）
     let ingest_video_id = final_video_model.id;
     let ingest_video_name = final_video_model.name.clone();
@@ -5236,6 +5249,32 @@ pub async fn download_video_pages(
         }
         None
     });
+
+    if let ExecutionStatus::Failed(e) = all_results
+        .into_iter()
+        .nth(4)
+        .context("page download result not found")?
+    {
+        if e.downcast_ref::<DownloadAbortError>().is_some() {
+            if path_changed {
+                if let Err(persist_err) = persist_video_path_if_materialized_with_lock_retry(
+                    ingest_video_id,
+                    &ingest_old_video_path,
+                    &path_to_save,
+                    connection,
+                    "download_abort",
+                )
+                .await
+                {
+                    warn!(
+                        "下载中止后补写 video.path 失败（不中断异常传递）: video_id={}, old='{}', new='{}', err={}",
+                        ingest_video_id, ingest_old_video_path, path_to_save, persist_err
+                    );
+                }
+            }
+            return Err(e);
+        }
+    }
 
     let mut video_active_model: video::ActiveModel = final_video_model.into();
     video_active_model.download_status = Set(status.into());
@@ -5298,6 +5337,26 @@ pub async fn download_video_pages(
                                     }
                                 }
                             }
+
+                            if path_changed {
+                                match persist_video_path_if_materialized_with_lock_retry(
+                                    ingest_video_id,
+                                    &ingest_old_video_path,
+                                    &path_to_save,
+                                    connection,
+                                    "migrated_existing_folder",
+                                )
+                                .await
+                                {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        warn!(
+                                            "视频文件夹迁移后补写 video.path 失败（不中断下载流程）: video_id={}, old='{}', new='{}', err={}",
+                                            ingest_video_id, ingest_old_video_path, path_to_save, e
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             warn!(
@@ -5343,26 +5402,63 @@ pub async fn download_video_pages(
         .await
         .ok()
         .flatten();
-    let final_path = match latest_video_snapshot.as_ref() {
-        Some(latest_video) => {
-            if !latest_video.path.is_empty() && latest_video.path != path_to_save {
-                debug!(
-                    "检测到 AI 重命名后的路径变化: video_id={}, 原路径='{}', 新路径='{}'",
-                    ingest_video_id, path_to_save, latest_video.path
-                );
-                latest_video.path.clone()
-            } else {
-                path_to_save
-            }
-        }
-        None => path_to_save,
-    };
+    let final_path = resolve_final_video_path(&path_to_save, &ingest_old_video_path, latest_video_snapshot.as_ref());
+    if final_path != path_to_save {
+        debug!(
+            "检测到数据库中的路径覆盖本轮计算结果: video_id={}, 计算路径='{}', 数据库路径='{}'",
+            ingest_video_id, path_to_save, final_path
+        );
+    }
 
     video_active_model.path = Set(final_path);
     video_active_model.total_file_size_bytes = Set(latest_video_snapshot
         .as_ref()
         .and_then(|latest_video| latest_video.total_file_size_bytes));
     Ok(video_active_model)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PagePersistenceDecision {
+    should_persist: bool,
+    should_recompute_video_total_size: bool,
+}
+
+#[derive(Debug)]
+struct PageDownloadOutcome {
+    model: page::ActiveModel,
+    persistence: PagePersistenceDecision,
+}
+
+fn active_value_matches<T>(value: &sea_orm::ActiveValue<T>, original: &T) -> bool
+where
+    T: PartialEq + Into<sea_orm::Value>,
+{
+    match value {
+        sea_orm::ActiveValue::Set(current) | sea_orm::ActiveValue::Unchanged(current) => current == original,
+        sea_orm::ActiveValue::NotSet => false,
+    }
+}
+
+fn detect_page_persistence_decision(original: &page::Model, updated: &page::ActiveModel) -> PagePersistenceDecision {
+    let status_changed = !active_value_matches(&updated.download_status, &original.download_status);
+    let path_changed = !active_value_matches(&updated.path, &original.path);
+    let file_size_changed = !active_value_matches(&updated.file_size_bytes, &original.file_size_bytes);
+    let video_stream_size_changed =
+        !active_value_matches(&updated.video_stream_size_bytes, &original.video_stream_size_bytes);
+    let audio_stream_size_changed =
+        !active_value_matches(&updated.audio_stream_size_bytes, &original.audio_stream_size_bytes);
+
+    PagePersistenceDecision {
+        should_persist: status_changed
+            || path_changed
+            || file_size_changed
+            || video_stream_size_changed
+            || audio_stream_size_changed,
+        should_recompute_video_total_size: path_changed
+            || file_size_changed
+            || video_stream_size_changed
+            || audio_stream_size_changed,
+    }
 }
 
 /// 分发并执行分页下载任务，当且仅当所有分页成功下载或达到最大重试次数时返回 Ok，否则根据失败原因返回对应的错误
@@ -5408,25 +5504,31 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
     let (mut download_aborted, mut target_status) = (false, STATUS_OK);
     let mut cancelled_by_user = false;
     let mut failed_pages: Vec<String> = Vec::new(); // 收集失败的分页信息
-    let mut has_page_updates = false;
+    let mut changed_pages: Vec<page::ActiveModel> = Vec::new();
+    let mut should_recompute_video_total_size = false;
     let mut stream = tasks;
     while let Some((res, page_pid, page_name)) = stream.next().await {
         match res {
-            Ok(model) => {
+            Ok(outcome) => {
                 if download_aborted {
                     continue;
                 }
+                let model = outcome.model;
                 // 该视频的所有分页的下载状态都会在此返回，需要根据这些状态确认视频层"分 P 下载"子任务的状态
                 // 在过去的实现中，此处仅仅根据 page_download_status 的最高标志位来判断，如果最高标志位是 true 则认为完成
                 // 这样会导致即使分页中有失败到 MAX_RETRY 的情况，视频层的分 P 下载状态也会被认为是 Succeeded，不够准确
                 // 新版本实现会将此处取值为所有子任务状态的最小值，这样只有所有分页的子任务全部成功时才会认为视频层的分 P 下载状态是 Succeeded
-                let page_download_status = model.download_status.try_as_ref().expect("download_status must be set");
-                let separate_status: [u32; 5] = PageStatus::from(*page_download_status).into();
+                let page_download_status = *model.download_status.try_as_ref().expect("download_status must be set");
+                let separate_status: [u32; 5] = PageStatus::from(page_download_status).into();
                 for status in separate_status {
                     target_status = target_status.min(status);
                 }
-                update_pages_model(vec![model], args.connection).await?;
-                has_page_updates = true;
+                if outcome.persistence.should_persist {
+                    changed_pages.push(model);
+                }
+                if outcome.persistence.should_recompute_video_total_size {
+                    should_recompute_video_total_size = true;
+                }
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -5511,7 +5613,11 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
         }
     }
 
-    if has_page_updates {
+    if !changed_pages.is_empty() {
+        update_pages_model(changed_pages, args.connection).await?;
+    }
+
+    if should_recompute_video_total_size {
         recompute_video_total_file_sizes(&[args.video_model.id], args.connection).await?;
     }
 
@@ -5681,9 +5787,9 @@ async fn sync_page_companion_files_by_episode_key(
     Ok(total_renamed)
 }
 
-/// 下载某个分页，未发生风控且正常运行时返回 Ok(Page::ActiveModel)，其中 status 字段存储了新的下载状态，发生风控时返回 DownloadAbortError
+/// 下载某个分页，未发生风控且正常运行时返回 Ok(PageDownloadOutcome)，其中会标记该分页是否真的需要落库/重算总大小
 #[allow(clippy::too_many_arguments)]
-pub async fn download_page(
+async fn download_page(
     bili_client: &BiliClient,
     video_source: &VideoSourceEnum,
     video_model: &video::Model,
@@ -5693,12 +5799,13 @@ pub async fn download_page(
     downloader: &UnifiedDownloader,
     base_path: &Path,
     token: CancellationToken,
-) -> Result<page::ActiveModel> {
+) -> Result<PageDownloadOutcome> {
     let _permit = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
         permit = semaphore.acquire() => permit.context("acquire semaphore failed")?,
     };
+    let original_page_model = page_model.clone();
     let mut status = PageStatus::from(page_model.download_status);
     let mut separate_status = status.should_run();
     let is_single_page = video_model.single_page.context("single_page is null")?;
@@ -6525,7 +6632,11 @@ pub async fn download_page(
     if let Some(audio_stream_size_bytes) = page_audio_stream_size_bytes {
         page_active_model.audio_stream_size_bytes = Set(Some(audio_stream_size_bytes));
     }
-    Ok(page_active_model)
+    let persistence = detect_page_persistence_decision(&original_page_model, &page_active_model);
+    Ok(PageDownloadOutcome {
+        model: page_active_model,
+        persistence,
+    })
 }
 
 pub async fn fetch_page_poster(
@@ -7370,6 +7481,8 @@ pub async fn fetch_page_danmaku(
     danmaku_path: PathBuf,
     token: CancellationToken,
 ) -> Result<ExecutionStatus> {
+    const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     if !should_run {
         return Ok(ExecutionStatus::Skipped);
     }
@@ -7413,10 +7526,32 @@ pub async fn fetch_page_danmaku(
     let danmaku_writer = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
-        res = bili_video.get_danmaku_writer(page_info, token.clone()) => res?,
+        res = tokio::time::timeout(
+            SIDECAR_REQUEST_TIMEOUT,
+            bili_video.get_danmaku_writer(page_info, token.clone()),
+        ) => match res {
+            Ok(inner) => inner?,
+            Err(_) => {
+                bail!(
+                    "弹幕请求超时（{} 秒）: 视频「{}」第 {} 页",
+                    SIDECAR_REQUEST_TIMEOUT.as_secs(),
+                    video_model.name,
+                    page_info.page
+                );
+            }
+        },
     };
 
-    danmaku_writer.write(danmaku_path).await?;
+    tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, danmaku_writer.write(danmaku_path))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "弹幕写入超时（{} 秒）: 视频「{}」第 {} 页",
+                SIDECAR_REQUEST_TIMEOUT.as_secs(),
+                video_model.name,
+                page_info.page
+            )
+        })??;
     Ok(ExecutionStatus::Succeeded)
 }
 
@@ -7428,6 +7563,8 @@ pub async fn fetch_page_subtitle(
     subtitle_path: &Path,
     token: CancellationToken,
 ) -> Result<ExecutionStatus> {
+    const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     if !should_run {
         return Ok(ExecutionStatus::Skipped);
     }
@@ -7435,7 +7572,17 @@ pub async fn fetch_page_subtitle(
     let subtitles = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
-        res = bili_video.get_subtitles(page_info) => res?,
+        res = tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, bili_video.get_subtitles(page_info)) => match res {
+            Ok(inner) => inner?,
+            Err(_) => {
+                bail!(
+                    "字幕请求超时（{} 秒）: 视频「{}」第 {} 页",
+                    SIDECAR_REQUEST_TIMEOUT.as_secs(),
+                    video_model.name,
+                    page_info.page
+                );
+            }
+        },
     };
     let tasks = subtitles
         .into_iter()
@@ -7445,7 +7592,16 @@ pub async fn fetch_page_subtitle(
             tokio::fs::write(path, subtitle.body.to_string()).await
         })
         .collect::<FuturesUnordered<_>>();
-    tasks.try_collect::<Vec<()>>().await?;
+    tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, tasks.try_collect::<Vec<()>>())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "字幕写入超时（{} 秒）: 视频「{}」第 {} 页",
+                SIDECAR_REQUEST_TIMEOUT.as_secs(),
+                video_model.name,
+                page_info.page
+            )
+        })??;
     Ok(ExecutionStatus::Succeeded)
 }
 
@@ -10422,11 +10578,9 @@ async fn backfill_submission_collection_membership(
     }
 
     let mut updated_rows = 0u64;
-    let txn = crate::database::begin_traced_transaction(
-        connection,
-        "workflow.sync_submission_membership_episode_numbers",
-    )
-    .await?;
+    let txn =
+        crate::database::begin_traced_transaction(connection, "workflow.sync_submission_membership_episode_numbers")
+            .await?;
 
     for (bvid, (collection_key, episode_number)) in membership {
         let result = txn
@@ -11934,7 +12088,10 @@ mod tests {
     #[test]
     fn test_is_bili_request_failed_inaccessible_matches_404_and_62002() {
         let deleted_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-404, "not found".to_string()));
-        let invisible_err = anyhow!(crate::bilibili::BiliError::RequestFailed(62002, "稿件不可见".to_string()));
+        let invisible_err = anyhow!(crate::bilibili::BiliError::RequestFailed(
+            62002,
+            "稿件不可见".to_string()
+        ));
         let other_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-352, "风控".to_string()));
 
         assert!(is_bili_request_failed_inaccessible(&deleted_err));
@@ -11949,6 +12106,130 @@ mod tests {
 
         assert!(is_database_locked_error(&locked_err));
         assert!(!is_database_locked_error(&other_err));
+    }
+
+    #[test]
+    fn test_should_keep_db_video_path_override_ignores_stale_original_path() {
+        assert!(!should_keep_db_video_path_override(
+            "/videos/old-path",
+            "/videos/new-path",
+            "/videos/old-path"
+        ));
+    }
+
+    #[test]
+    fn test_should_keep_db_video_path_override_accepts_external_new_path() {
+        assert!(should_keep_db_video_path_override(
+            "/videos/ai-renamed",
+            "/videos/new-path",
+            "/videos/old-path"
+        ));
+    }
+
+    #[test]
+    fn test_resolve_final_video_path_prefers_computed_path_when_db_still_old() {
+        let latest_video = video::Model {
+            id: 1,
+            collection_id: None,
+            favorite_id: None,
+            watch_later_id: None,
+            submission_id: Some(1),
+            source_id: None,
+            source_type: Some(4),
+            upper_id: 1,
+            upper_name: "测试UP".to_string(),
+            upper_face: String::new(),
+            staff_info: None,
+            source_submission_id: None,
+            name: "测试视频".to_string(),
+            path: "/videos/old-path".to_string(),
+            category: 1,
+            bvid: "BV1xx411c7mD".to_string(),
+            intro: String::new(),
+            cover: String::new(),
+            ctime: chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc(),
+            pubtime: chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc(),
+            favtime: chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc(),
+            download_status: 0,
+            valid: true,
+            tags: None,
+            single_page: Some(true),
+            created_at: "2026-04-07 00:00:00".to_string(),
+            season_id: None,
+            submission_membership_state: 0,
+            submission_membership_checked_at: None,
+            ep_id: None,
+            season_number: None,
+            episode_number: None,
+            deleted: 0,
+            share_copy: None,
+            show_season_type: None,
+            actors: None,
+            auto_download: true,
+            cid: None,
+            is_charge_video: false,
+            charge_can_play: false,
+            total_file_size_bytes: None,
+        };
+
+        let resolved = resolve_final_video_path("/videos/new-path", "/videos/old-path", Some(&latest_video));
+        assert_eq!(resolved, "/videos/new-path");
+    }
+
+    fn sample_page_model_for_persistence_decision() -> page::Model {
+        page::Model {
+            id: 1,
+            video_id: 1,
+            cid: 1001,
+            pid: 1,
+            name: "测试分页".to_string(),
+            width: Some(1920),
+            height: Some(1080),
+            duration: 120,
+            path: Some("/tmp/page-1.mp4".to_string()),
+            file_size_bytes: Some(1024),
+            video_stream_size_bytes: Some(800),
+            audio_stream_size_bytes: Some(224),
+            image: None,
+            download_status: 7,
+            created_at: "2026-04-06 00:00:00".to_string(),
+            play_video_streams: None,
+            play_audio_streams: None,
+            play_subtitle_streams: None,
+            play_streams_updated_at: None,
+            ai_renamed: Some(0),
+        }
+    }
+
+    #[test]
+    fn test_detect_page_persistence_decision_skips_unchanged_page() {
+        let page_model = sample_page_model_for_persistence_decision();
+        let page_active_model: page::ActiveModel = page_model.clone().into();
+
+        let decision = detect_page_persistence_decision(&page_model, &page_active_model);
+        assert_eq!(decision, PagePersistenceDecision::default());
+    }
+
+    #[test]
+    fn test_detect_page_persistence_decision_persists_status_only_change_without_recompute() {
+        let page_model = sample_page_model_for_persistence_decision();
+        let mut page_active_model: page::ActiveModel = page_model.clone().into();
+        page_active_model.download_status = Set(15);
+
+        let decision = detect_page_persistence_decision(&page_model, &page_active_model);
+        assert!(decision.should_persist);
+        assert!(!decision.should_recompute_video_total_size);
+    }
+
+    #[test]
+    fn test_detect_page_persistence_decision_recomputes_when_path_changes() {
+        let page_model = sample_page_model_for_persistence_decision();
+        let mut page_active_model: page::ActiveModel = page_model.clone().into();
+        page_active_model.path = Set(Some("/tmp/page-1-renamed.mp4".to_string()));
+
+        let decision = detect_page_persistence_decision(&page_model, &page_active_model);
+        assert!(decision.should_persist);
+        assert!(decision.should_recompute_video_total_size);
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测
