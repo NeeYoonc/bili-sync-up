@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
 use tracing::{debug, info, warn};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
@@ -1091,6 +1091,7 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         let mut queue = PAGE_MODEL_UPDATE_QUEUE.lock().await;
         queue.push(PendingPageUpdateRequest { pages, done_tx });
     }
+    PAGE_MODEL_UPDATE_QUEUE_NOTIFY.notify_one();
 
     if PAGE_MODEL_UPDATE_WORKER_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1127,9 +1128,10 @@ static VIDEO_FILE_SIZE_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
 static VIDEO_TOTAL_FILE_SIZE_RECOMPUTE_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 static PAGE_MODEL_UPDATE_QUEUE: Lazy<AsyncMutex<Vec<PendingPageUpdateRequest>>> =
     Lazy::new(|| AsyncMutex::new(Vec::new()));
+static PAGE_MODEL_UPDATE_QUEUE_NOTIFY: Lazy<Notify> = Lazy::new(Notify::new);
 static PAGE_MODEL_UPDATE_WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 
-const PAGE_MODEL_UPDATE_BATCH_WINDOW: Duration = Duration::from_millis(20);
+const PAGE_MODEL_UPDATE_BATCH_WINDOW: Duration = Duration::from_millis(50);
 
 struct PendingPageUpdateRequest {
     pages: Vec<page::ActiveModel>,
@@ -1145,9 +1147,7 @@ fn get_page_active_model_id(page: &page::ActiveModel) -> Option<i32> {
 
 async fn flush_batched_page_updates(connection: DatabaseConnection) {
     loop {
-        tokio::time::sleep(PAGE_MODEL_UPDATE_BATCH_WINDOW).await;
-
-        let requests = {
+        let mut requests = {
             let mut queue = PAGE_MODEL_UPDATE_QUEUE.lock().await;
             if queue.is_empty() {
                 PAGE_MODEL_UPDATE_WORKER_RUNNING.store(false, Ordering::Release);
@@ -1155,6 +1155,24 @@ async fn flush_batched_page_updates(connection: DatabaseConnection) {
             }
             queue.drain(..).collect::<Vec<_>>()
         };
+
+        // 等待一个短暂的安静窗口，把同一波后续页面状态写入尽量合并成一批。
+        while tokio::time::timeout(
+            PAGE_MODEL_UPDATE_BATCH_WINDOW,
+            PAGE_MODEL_UPDATE_QUEUE_NOTIFY.notified(),
+        )
+        .await
+        .is_ok()
+        {
+            let mut extra_requests = {
+                let mut queue = PAGE_MODEL_UPDATE_QUEUE.lock().await;
+                queue.drain(..).collect::<Vec<_>>()
+            };
+            if extra_requests.is_empty() {
+                continue;
+            }
+            requests.append(&mut extra_requests);
+        }
 
         let mut ordered_ids = Vec::new();
         let mut deduped_pages = HashMap::new();
