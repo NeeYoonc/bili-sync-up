@@ -277,7 +277,7 @@ use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
     create_pages, create_videos, filter_unfilled_videos, filter_unhandled_video_pages,
-    get_failed_videos_in_current_cycle, recompute_video_total_file_sizes, update_pages_model, update_videos_model,
+    get_failed_videos_in_current_cycle, update_pages_model, update_videos_model,
 };
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
@@ -2901,6 +2901,7 @@ pub struct DownloadPageArgs<'a> {
     pub connection: &'a DatabaseConnection,
     pub downloader: &'a UnifiedDownloader,
     pub base_path: &'a Path,
+    pub inline_total_file_size_bytes: Arc<TokioMutex<Option<i64>>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4860,6 +4861,7 @@ pub async fn download_video_pages(
             base_upper_path.join("person.nfo"),
         ),
     );
+    let inline_total_file_size_bytes = Arc::new(TokioMutex::new(None));
     let res_5_fut = Box::pin(
         // 分发并执行分 P 下载的任务
         dispatch_download_page(
@@ -4872,6 +4874,7 @@ pub async fn download_video_pages(
                 connection,
                 downloader,
                 base_path: &base_path,
+                inline_total_file_size_bytes: inline_total_file_size_bytes.clone(),
             },
             token.clone(),
         ),
@@ -4879,6 +4882,7 @@ pub async fn download_video_pages(
 
     let (res_1, res_2, res_folder, res_3, res_4, res_5) =
         tokio::join!(res_1_fut, res_2_fut, res_folder_fut, res_3_fut, res_4_fut, res_5_fut);
+    let inline_total_file_size_bytes = inline_total_file_size_bytes.lock().await.take();
 
     // 兼容命名：根目录补充“根目录名-thumb/fanart”，例如：
     // - 投稿源同UP合集分季：浅影阿_合集-thumb.jpg / 浅影阿_合集-fanart.jpg（使用 UP 头像）
@@ -5411,9 +5415,11 @@ pub async fn download_video_pages(
     }
 
     video_active_model.path = Set(final_path);
-    video_active_model.total_file_size_bytes = Set(latest_video_snapshot
-        .as_ref()
-        .and_then(|latest_video| latest_video.total_file_size_bytes));
+    video_active_model.total_file_size_bytes = Set(inline_total_file_size_bytes.or_else(|| {
+        latest_video_snapshot
+            .as_ref()
+            .and_then(|latest_video| latest_video.total_file_size_bytes)
+    }));
     Ok(video_active_model)
 }
 
@@ -5437,6 +5443,45 @@ where
         sea_orm::ActiveValue::Set(current) | sea_orm::ActiveValue::Unchanged(current) => current == original,
         sea_orm::ActiveValue::NotSet => false,
     }
+}
+
+fn active_value_or_original<T>(value: &sea_orm::ActiveValue<T>, original: &T) -> T
+where
+    T: Clone + Into<sea_orm::Value>,
+{
+    match value {
+        sea_orm::ActiveValue::Set(current) | sea_orm::ActiveValue::Unchanged(current) => current.clone(),
+        sea_orm::ActiveValue::NotSet => original.clone(),
+    }
+}
+
+fn normalize_total_file_size_bytes(file_size_bytes: Option<i64>) -> i64 {
+    file_size_bytes.filter(|size| *size >= 0).unwrap_or(0)
+}
+
+fn merge_video_total_file_size_bytes(original_pages: &[page::Model], changed_pages: &[page::ActiveModel]) -> i64 {
+    let changed_pages_by_id = changed_pages
+        .iter()
+        .filter_map(|page| match &page.id {
+            sea_orm::ActiveValue::Set(id) | sea_orm::ActiveValue::Unchanged(id) => Some((*id, page)),
+            sea_orm::ActiveValue::NotSet => None,
+        })
+        .collect::<HashMap<_, _>>();
+
+    original_pages
+        .iter()
+        .map(|page| {
+            changed_pages_by_id
+                .get(&page.id)
+                .map(|updated_page| {
+                    normalize_total_file_size_bytes(active_value_or_original(
+                        &updated_page.file_size_bytes,
+                        &page.file_size_bytes,
+                    ))
+                })
+                .unwrap_or_else(|| normalize_total_file_size_bytes(page.file_size_bytes))
+        })
+        .sum()
 }
 
 fn detect_page_persistence_decision(original: &page::Model, updated: &page::ActiveModel) -> PagePersistenceDecision {
@@ -5469,6 +5514,7 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
 
     let current_config = crate::config::reload_config();
     let child_semaphore = Arc::new(Semaphore::new(current_config.concurrent_limit.page));
+    let original_pages = args.pages.clone();
     let tasks = args
         .pages
         .into_iter()
@@ -5613,12 +5659,14 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
         }
     }
 
-    if !changed_pages.is_empty() {
-        update_pages_model(changed_pages, args.connection).await?;
+    let inline_total_file_size_bytes =
+        should_recompute_video_total_size.then(|| merge_video_total_file_size_bytes(&original_pages, &changed_pages));
+    if let Some(total_file_size_bytes) = inline_total_file_size_bytes {
+        *args.inline_total_file_size_bytes.lock().await = Some(total_file_size_bytes);
     }
 
-    if should_recompute_video_total_size {
-        recompute_video_total_file_sizes(&[args.video_model.id], args.connection).await?;
+    if !changed_pages.is_empty() {
+        update_pages_model(changed_pages, args.connection).await?;
     }
 
     if download_aborted {
@@ -12230,6 +12278,39 @@ mod tests {
         let decision = detect_page_persistence_decision(&page_model, &page_active_model);
         assert!(decision.should_persist);
         assert!(decision.should_recompute_video_total_size);
+    }
+
+    #[test]
+    fn test_merge_video_total_file_size_bytes_uses_updated_page_sizes() {
+        let first_page = sample_page_model_for_persistence_decision();
+        let second_page = page::Model {
+            id: 2,
+            file_size_bytes: Some(2048),
+            ..sample_page_model_for_persistence_decision()
+        };
+
+        let mut updated_first_page: page::ActiveModel = first_page.clone().into();
+        updated_first_page.file_size_bytes = Set(Some(4096));
+
+        let total = merge_video_total_file_size_bytes(&[first_page, second_page], &[updated_first_page]);
+        assert_eq!(total, 6144);
+    }
+
+    #[test]
+    fn test_merge_video_total_file_size_bytes_treats_missing_sizes_as_zero() {
+        let first_page = page::Model {
+            id: 1,
+            file_size_bytes: None,
+            ..sample_page_model_for_persistence_decision()
+        };
+        let second_page = page::Model {
+            id: 2,
+            file_size_bytes: Some(-1),
+            ..sample_page_model_for_persistence_decision()
+        };
+
+        let total = merge_video_total_file_size_bytes(&[first_page, second_page], &[]);
+        assert_eq!(total, 0);
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测
