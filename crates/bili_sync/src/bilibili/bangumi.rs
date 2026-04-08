@@ -104,7 +104,7 @@ impl Bangumi {
         } else if let Some(ep_id) = &self.ep_id {
             // 通过 ep_id 获取 season_id
             let url = format!("https://api.bilibili.com/pgc/view/web/season?ep_id={}", ep_id);
-            let resp = self.client.get(&url, CancellationToken::new()).await?;
+            let resp = self.client.public_get(&url, CancellationToken::new()).await?;
             let json: serde_json::Value = resp.json().await?;
             json.validate()?["result"]["season_id"]
                 .as_str()
@@ -115,7 +115,7 @@ impl Bangumi {
         };
 
         let url = format!("https://api.bilibili.com/pgc/view/web/season?season_id={}", season_id);
-        let resp = self.client.get(&url, CancellationToken::new()).await?;
+        let resp = self.client.public_get(&url, CancellationToken::new()).await?;
         let json: serde_json::Value = resp.json().await?;
         json.validate().map(|v| v["result"].clone())
     }

@@ -8347,7 +8347,7 @@ async fn get_season_title_from_api(
         match tokio::select! {
             biased;
             _ = token.cancelled() => return None,
-            res = bili_client.get(&url, token.clone()) => res,
+            res = bili_client.public_get(&url, token.clone()) => res,
         } {
             Ok(res) => {
                 if res.status().is_success() {
@@ -8442,7 +8442,7 @@ async fn get_bangumi_aid_from_api(bili_client: &BiliClient, ep_id: &str, token: 
         match tokio::select! {
             biased;
             _ = token.cancelled() => return None,
-            res = bili_client.get(&url, token.clone()) => res,
+            res = bili_client.public_get(&url, token.clone()) => res,
         } {
             Ok(res) => {
                 if res.status().is_success() {
@@ -8532,7 +8532,7 @@ async fn get_bangumi_info_from_api(
         match tokio::select! {
             biased;
             _ = token.cancelled() => return None,
-            res = bili_client.get(&url, token.clone()) => res,
+            res = bili_client.public_get(&url, token.clone()) => res,
         } {
             Ok(res) => {
                 if res.status().is_success() {
@@ -8664,7 +8664,7 @@ async fn get_season_info_from_api(
     let res = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Request cancelled")),
-        res = bili_client.get(&url, token.clone()) => res,
+        res = bili_client.public_get(&url, token.clone()) => res,
     }?;
 
     if !res.status().is_success() {

@@ -257,6 +257,27 @@ impl BiliClient {
         Ok(response?)
     }
 
+    /// 发送不附带登录凭证的公开 GET 请求
+    pub async fn public_get(&self, url: &str, token: CancellationToken) -> Result<reqwest::Response> {
+        if let Some(limiter) = &self.limiter {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(anyhow!("Request cancelled in limiter")),
+                _ = limiter.acquire_one() => {},
+            }
+        }
+
+        let request_builder = self.client.request(Method::GET, url, None);
+
+        let response = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err(anyhow!("Request cancelled before send")),
+            res = request_builder.send() => res,
+        };
+
+        Ok(response?)
+    }
+
     pub async fn check_refresh(&self) -> Result<()> {
         let config = crate::config::reload_config();
         let credential = config.credential.load();
