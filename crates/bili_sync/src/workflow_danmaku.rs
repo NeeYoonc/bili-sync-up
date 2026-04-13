@@ -28,6 +28,70 @@ struct ExistingDanmakuCursor {
     known_source_ids: HashSet<String>,
 }
 
+fn is_bili_request_failed_with_codes(err: &anyhow::Error, codes: &[i64]) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<crate::bilibili::BiliError>().is_some_and(|e| match e {
+            crate::bilibili::BiliError::RequestFailed(code, _) => codes.contains(code),
+            _ => false,
+        })
+    })
+}
+
+fn should_fallback_to_stored_pages(err: &anyhow::Error) -> bool {
+    is_bili_request_failed_with_codes(err, &[-404, 62002, 62012])
+}
+
+fn build_stored_page_info(page_model: &page::Model) -> Result<BiliPageInfo> {
+    let cid = page_model.danmaku_cid_snapshot.unwrap_or(page_model.cid);
+    if cid <= 0 {
+        bail!("分页 pid={} 缺少可用 cid，无法回退到数据库分页信息刷新弹幕", page_model.pid);
+    }
+
+    let dimension = match (page_model.width, page_model.height) {
+        (Some(width), Some(height)) => Some(Dimension {
+            width,
+            height,
+            rotate: 0,
+        }),
+        _ => None,
+    };
+
+    Ok(BiliPageInfo {
+        cid,
+        page: page_model.pid,
+        name: page_model.name.clone(),
+        duration: page_model.duration,
+        first_frame: None,
+        dimension,
+    })
+}
+
+async fn load_fresh_pages_or_fallback(
+    bili_video: &Video<'_>,
+    video_model: &video::Model,
+    db_pages: &[page::Model],
+    error_context: &str,
+) -> Result<Vec<BiliPageInfo>> {
+    match bili_video.get_view_info().await {
+        Ok(VideoInfo::Detail { pages, .. }) => Ok(pages),
+        Ok(_) => {
+            warn!(
+                "视频「{}」({}) 的 view_info 返回了非 Detail 类型，改用数据库已存分页信息继续刷新弹幕",
+                video_model.name, video_model.bvid
+            );
+            db_pages.iter().map(build_stored_page_info).collect()
+        }
+        Err(err) if should_fallback_to_stored_pages(&err) => {
+            warn!(
+                "视频「{}」({}) 获取 view_info 失败，改用数据库已存分页信息继续刷新弹幕：{:#}",
+                video_model.name, video_model.bvid, err
+            );
+            db_pages.iter().map(build_stored_page_info).collect()
+        }
+        Err(err) => Err(err).with_context(|| error_context.to_string()),
+    }
+}
+
 pub async fn refresh_danmaku_incremental(
     bili_client: &BiliClient,
     connection: &DatabaseConnection,
@@ -129,13 +193,13 @@ pub async fn refresh_danmaku_for_page(
         .ok_or_else(|| anyhow!("page {} 的宿主 video 不存在", page_id))?;
 
     let bili_video = Video::new(bili_client, video_model.bvid.clone());
-    let view_info = bili_video
-        .get_view_info()
-        .await
-        .with_context(|| format!("获取视频 {} 的 view_info 失败", video_model.bvid))?;
-    let VideoInfo::Detail { pages: fresh_pages, .. } = view_info else {
-        bail!("view_info 返回了非 Detail 类型，无法刷新弹幕");
-    };
+    let fresh_pages = load_fresh_pages_or_fallback(
+        &bili_video,
+        &video_model,
+        std::slice::from_ref(&page_model),
+        &format!("获取视频 {} 的 view_info 失败", video_model.bvid),
+    )
+    .await?;
     let fresh = fresh_pages
         .iter()
         .find(|page_info| page_info.page == page_model.pid)
@@ -295,13 +359,17 @@ async fn refresh_video_pages(
     now: DateTime<Utc>,
 ) -> Result<usize> {
     let bili_video = Video::new(bili_client, video_model.bvid.clone());
-    let view_info = bili_video
-        .get_view_info()
-        .await
-        .with_context(|| format!("刷新视频 {} 时获取 view_info 失败", video_model.bvid))?;
-    let VideoInfo::Detail { pages: fresh_pages, .. } = view_info else {
-        bail!("view_info 返回了非 Detail 类型，无法刷新弹幕");
-    };
+    let selected_pages = selected
+        .iter()
+        .map(|(page_model, _)| page_model.clone())
+        .collect::<Vec<_>>();
+    let fresh_pages = load_fresh_pages_or_fallback(
+        &bili_video,
+        video_model,
+        &selected_pages,
+        &format!("刷新视频 {} 时获取 view_info 失败", video_model.bvid),
+    )
+    .await?;
 
     let mut success = 0usize;
     for (db_page, next_stage) in selected {
@@ -735,5 +803,11 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().any(|elem| elem.dmid_str == "101"));
         assert!(filtered.iter().any(|elem| elem.dmid_str == "102"));
+    }
+
+    #[test]
+    fn should_fallback_to_stored_pages_accepts_62012() {
+        let err = anyhow!(crate::bilibili::BiliError::RequestFailed(62012, "62012".to_string()));
+        assert!(should_fallback_to_stored_pages(&err));
     }
 }
