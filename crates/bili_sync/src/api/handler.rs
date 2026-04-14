@@ -1328,6 +1328,19 @@ mod queue_sse_tests {
         assert!(!submission.scan_deleted_videos);
         assert!(submission.scan_deleted_videos_once);
     }
+
+    #[test]
+    fn test_normalize_video_source_latest_row_at_filters_initial_value() {
+        assert_eq!(normalize_video_source_latest_row_at(""), None);
+        assert_eq!(
+            normalize_video_source_latest_row_at("1970-01-01 00:00:00"),
+            None
+        );
+        assert_eq!(
+            normalize_video_source_latest_row_at("2026-04-14 12:34:56"),
+            Some("2026-04-14 12:34:56".to_string())
+        );
+    }
 }
 
 #[derive(OpenApi)]
@@ -1468,6 +1481,7 @@ pub async fn get_video_sources(
                 name: model.name,
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
@@ -1528,6 +1542,7 @@ pub async fn get_video_sources(
                 name: model.name,
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: Some(model.f_id),
@@ -1588,6 +1603,7 @@ pub async fn get_video_sources(
                 name: model.upper_name.clone(),
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
@@ -1648,6 +1664,7 @@ pub async fn get_video_sources(
                 name: "稍后再看".to_string(),
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
@@ -1727,6 +1744,7 @@ pub async fn get_video_sources(
                 name: model.name,
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
@@ -1773,6 +1791,15 @@ pub async fn get_video_sources(
         watch_later: watch_later_sources,
         bangumi: bangumi_sources,
     }))
+}
+
+fn normalize_video_source_latest_row_at(latest_row_at: &str) -> Option<String> {
+    let trimmed = latest_row_at.trim();
+    if trimmed.is_empty() || trimmed == "1970-01-01 00:00:00" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 async fn resolve_collection_aggregate_season_number(up_id: i64, s_id: i64, collection_type: i32) -> Option<i32> {

@@ -37,6 +37,7 @@ export interface VideoSource {
 	name: string;
 	enabled: boolean;
 	path: string;
+	latest_row_at?: string | null; // 最近一条视频的发布时间（北京时间）
 	scan_deleted_videos: boolean;
 	scan_deleted_videos_once: boolean;
 	// 类型特有的ID字段

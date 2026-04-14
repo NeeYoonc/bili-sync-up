@@ -199,6 +199,8 @@ pub struct VideoSource {
     pub name: String,
     pub enabled: bool,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_row_at: Option<String>,
     pub scan_deleted_videos: bool,
     pub scan_deleted_videos_once: bool,
     // 类型特有的ID字段

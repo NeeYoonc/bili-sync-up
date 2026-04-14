@@ -41,6 +41,7 @@
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import { goto } from '$app/navigation';
+	import { formatTimestamp } from '$lib/utils/timezone';
 
 	let loading = false;
 	let bulkUpdating = false;
@@ -127,6 +128,47 @@
 		enableBangumi: false,
 		renameParentDir: false
 	};
+
+	function normalizeBeijingDateTime(value: string | null | undefined): string | null {
+		if (!value || value === '1970-01-01 00:00:00') return null;
+		if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) {
+			return `${value.replace(' ', 'T')}+08:00`;
+		}
+		return value;
+	}
+
+	function formatLatestVideoTime(value: string | null | undefined): string {
+		const normalized = normalizeBeijingDateTime(value);
+		if (!normalized) return '-';
+		const formatted = formatTimestamp(normalized, 'Asia/Shanghai', 'datetime');
+		return formatted === '无效时间' || formatted === '格式化失败' ? value ?? '-' : formatted;
+	}
+
+	function getLatestVideoAgeDays(value: string | null | undefined): number | null {
+		const normalized = normalizeBeijingDateTime(value);
+		if (!normalized) return null;
+
+		const timestamp = new Date(normalized).getTime();
+		if (Number.isNaN(timestamp)) return null;
+
+		const diffMs = Date.now() - timestamp;
+		if (diffMs <= 0) return 0;
+		return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+	}
+
+	function getLatestVideoTimeBadgeClass(value: string | null | undefined): string {
+		const ageDays = getLatestVideoAgeDays(value);
+		if (ageDays === null) {
+			return 'text-muted-foreground';
+		}
+		if (ageDays <= 7) {
+			return 'border-green-200 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950/20 dark:text-green-300';
+		}
+		if (ageDays <= 30) {
+			return 'border-yellow-200 bg-yellow-50 text-yellow-700 dark:border-yellow-800 dark:bg-yellow-950/20 dark:text-yellow-300';
+		}
+		return 'border-red-200 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/20 dark:text-red-300';
+	}
 
 	async function loadVideoSources() {
 		const response = await runRequest(() => api.getVideoSources(), {
@@ -1238,11 +1280,23 @@
 														{source.enabled ? '已启用' : '已禁用'}
 													</Badge>
 												</div>
-												<div class="text-muted-foreground truncate text-sm" title={source.path}>
-													{source.path || '未设置路径'}
-												</div>
-												<!-- 显示对应类型的ID -->
-												<div class="text-muted-foreground mt-1 text-xs">
+											<div class="text-muted-foreground truncate text-sm" title={source.path}>
+												{source.path || '未设置路径'}
+											</div>
+											<div
+												class="text-muted-foreground mt-1 flex items-center gap-2 text-xs"
+												title="该视频源当前已发现的最新一条视频发布时间。最近 7 天内为绿色，8 到 30 天为黄色，31 天及以上为红色，可用于判断这个源最近是否还有更新"
+											>
+												<span>最新视频时间：</span>
+												<Badge
+													variant="outline"
+													class={getLatestVideoTimeBadgeClass(source.latest_row_at)}
+												>
+													{formatLatestVideoTime(source.latest_row_at)}
+												</Badge>
+											</div>
+											<!-- 显示对应类型的ID -->
+											<div class="text-muted-foreground mt-1 text-xs">
 													{#if sourceConfig.type === 'favorite' && source.f_id}
 														收藏夹ID: {source.f_id}
 													{:else if sourceConfig.type === 'collection' && source.s_id}
