@@ -135,7 +135,11 @@ let renameParentDir = false;
 <AlertDialog.Root bind:open={isOpen}>
 	<AlertDialog.Content class="max-w-lg">
 		<AlertDialog.Header>
-			<AlertDialog.Title>AI批量重命名历史文件</AlertDialog.Title>
+			<AlertDialog.Title
+				title={sourceName ? `AI批量重命名历史文件 - ${sourceName}` : 'AI批量重命名历史文件'}
+			>
+				AI批量重命名历史文件
+			</AlertDialog.Title>
 			<AlertDialog.Description>
 				为 {getSourceTypeLabel(sourceType)} 「{sourceName}」 下的所有已下载文件执行AI重命名
 			</AlertDialog.Description>

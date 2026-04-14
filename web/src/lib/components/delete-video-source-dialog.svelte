@@ -70,7 +70,10 @@
 <AlertDialog.Root bind:open={isOpen}>
 	<AlertDialog.Content class="max-w-md">
 		<AlertDialog.Header>
-			<AlertDialog.Title class="text-destructive flex items-center gap-2 dark:text-red-400">
+			<AlertDialog.Title
+				class="text-destructive flex items-center gap-2 dark:text-red-400"
+				title={sourceName ? `删除视频源 - ${sourceName}` : '删除视频源'}
+			>
 				<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path
 						stroke-linecap="round"

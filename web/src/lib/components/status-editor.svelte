@@ -224,7 +224,9 @@
 		class="status-editor-dialog flex !h-[92svh] !w-[calc(100vw-1rem)] !max-w-[calc(100vw-1rem)] flex-col overflow-hidden p-0 sm:!h-[min(88vh,920px)] sm:!w-[min(92vw,980px)] sm:!max-w-[min(92vw,980px)]"
 	>
 		<DialogHeader class="status-editor-header px-3 pt-2 pb-1 sm:px-6 sm:pt-5 sm:pb-2">
-			<DialogTitle class="text-base sm:text-lg">编辑状态</DialogTitle>
+			<DialogTitle class="text-base sm:text-lg" title="编辑视频和分页的下载状态">
+				编辑状态
+			</DialogTitle>
 			<DialogDescription class="status-editor-description text-muted-foreground space-y-2 text-sm">
 				<div class="status-editor-copy text-[11px] leading-4 sm:text-sm sm:leading-6">
 					修改视频和分页的下载状态。可以将任务重置为未开始状态，或者标记为已完成。
@@ -266,8 +268,21 @@
 		<div class="status-editor-body flex-1 overflow-hidden px-2 pb-2 sm:px-6 sm:pb-5">
 			<Tabs bind:value={activeView} class="status-editor-tabs flex h-full min-h-0 flex-col gap-2 sm:gap-4">
 				<TabsList class="status-editor-tabs-list grid h-9 w-full grid-cols-[minmax(0,1fr)_minmax(0,1fr)] sm:h-10">
-					<TabsTrigger value="video" class="min-w-0">视频状态</TabsTrigger>
-					<TabsTrigger value="page" class="min-w-0" disabled={pages.length === 0}>分页状态</TabsTrigger>
+					<TabsTrigger
+						value="video"
+						class="min-w-0"
+						title="查看和修改视频级任务状态"
+					>
+						视频状态
+					</TabsTrigger>
+					<TabsTrigger
+						value="page"
+						class="min-w-0"
+						disabled={pages.length === 0}
+						title="查看和修改分页级任务状态"
+					>
+						分页状态
+					</TabsTrigger>
 				</TabsList>
 
 				<TabsContent value="video" class="min-h-0 flex-1 overflow-hidden">
@@ -345,6 +360,7 @@
 				onclick={resetAllStatuses}
 				disabled={!buttonEnabled}
 				class="status-editor-footer-button h-10 w-full cursor-pointer text-sm sm:h-10 sm:flex-1"
+				title="将当前修改恢复为原始状态"
 			>
 				重置所有状态
 			</Button>
@@ -352,6 +368,7 @@
 				onclick={handleSubmit}
 				disabled={loading || !buttonEnabled}
 				class="status-editor-footer-button h-10 w-full cursor-pointer text-sm sm:h-10 sm:flex-1"
+				title="提交当前状态修改"
 			>
 				{loading ? '提交中...' : '提交更改'}
 			</Button>

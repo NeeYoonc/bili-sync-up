@@ -345,7 +345,10 @@
 		>
 			<div class="flex items-center justify-between">
 				<div>
-					<AlertDialog.Title class="flex items-center gap-2 text-blue-800 dark:text-blue-200">
+					<AlertDialog.Title
+						class="flex items-center gap-2 text-blue-800 dark:text-blue-200"
+						title={upperName ? `选择历史投稿 - ${upperName}` : '选择历史投稿'}
+					>
 						<span class="text-base sm:text-lg">选择历史投稿</span>
 					</AlertDialog.Title>
 					<AlertDialog.Description class="mt-1 text-xs text-blue-600 sm:text-sm dark:text-blue-400">

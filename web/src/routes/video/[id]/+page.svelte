@@ -688,6 +688,7 @@
 					class="{isMobile ? 'w-full' : 'shrink-0'} cursor-pointer"
 					onclick={() => (statusEditorOpen = true)}
 					disabled={statusEditorLoading}
+					title="编辑视频和分页的下载状态"
 				>
 					<EditIcon class="mr-2 h-4 w-4" />
 					编辑状态
@@ -698,6 +699,7 @@
 					class="{isMobile ? 'w-full' : 'shrink-0'} cursor-pointer"
 					onclick={() => (deleteDialogOpen = true)}
 					disabled={deleting}
+					title="删除当前视频记录和关联状态"
 				>
 					<TrashIcon class="mr-2 h-4 w-4" />
 					删除视频

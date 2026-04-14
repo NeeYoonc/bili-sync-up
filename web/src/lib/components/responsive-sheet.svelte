@@ -5,6 +5,7 @@
 	export let onOpenChange: (open: boolean) => void;
 	export let title: string;
 	export let description: string = '';
+	export let titleTooltip: string = '';
 	export let isMobile: boolean = false;
 	export let backgroundImage: string = '';
 
@@ -34,7 +35,7 @@
 		<AlertDialog.Header class="{isMobile ? 'border-b p-4' : 'border-b p-6'} relative z-10">
 			<div class="flex flex-col gap-1.5 pr-8">
 				<slot name="header">
-					<AlertDialog.Title>{title}</AlertDialog.Title>
+					<AlertDialog.Title title={titleTooltip || undefined}>{title}</AlertDialog.Title>
 					{#if description}
 						<AlertDialog.Description>{description}</AlertDialog.Description>
 					{/if}

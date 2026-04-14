@@ -34,7 +34,10 @@
 	<div class="flex items-center gap-3">
 		<div>
 			<div class="flex items-center gap-2">
-				<span class="status-task-title text-sm font-medium leading-5 {isDownloadTask ? 'text-orange-700' : ''}">{taskName}</span
+				<span
+					class="status-task-title text-sm font-medium leading-5 {isDownloadTask ? 'text-orange-700' : ''}"
+					title={taskName}
+				>{taskName}</span
 				>
 				{#if isDownloadTask}
 					<span class="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700"
@@ -73,6 +76,7 @@
 			class="h-7.5 w-full cursor-pointer px-3 text-xs sm:h-8 sm:min-w-[60px] sm:w-auto {currentStatus === 0
 				? 'border-yellow-600 bg-yellow-600 font-medium text-white hover:bg-yellow-700'
 				: 'hover:border-yellow-400 hover:bg-yellow-50 hover:text-yellow-700'}"
+			title={`将“${taskName}”标记为未开始`}
 		>
 			未开始
 		</Button>
@@ -84,6 +88,7 @@
 			class="h-7.5 w-full cursor-pointer px-3 text-xs sm:h-8 sm:min-w-[60px] sm:w-auto {currentStatus === 7
 				? 'border-green-600 bg-green-600 font-medium text-white hover:bg-green-700'
 				: 'hover:border-green-400 hover:bg-green-50 hover:text-green-700'}"
+			title={`将“${taskName}”标记为已完成`}
 		>
 			已完成
 		</Button>

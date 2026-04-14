@@ -999,6 +999,7 @@
 						class="col-span-2 w-full sm:col-span-1 sm:w-auto"
 						onclick={() => (resetAllDialogOpen = true)}
 						disabled={resettingAll || loading}
+						title="按当前筛选条件批量重置视频任务状态"
 					>
 						<RotateCcwIcon class="mr-2 h-4 w-4 {resettingAll ? 'animate-spin' : ''}" />
 						<span class="xs:inline hidden">批量重置</span>
@@ -1183,7 +1184,7 @@
 	<!-- 视频列表统计 -->
 	{#if videosData}
 		<div class="text-muted-foreground flex items-center justify-between text-sm">
-			<span>
+			<span title="显示当前筛选结果总数和所在分页">
 				共 {videosData.total_count} 个视频，当前第 {$appStateStore.currentPage + 1} / {totalPages} 页
 			</span>
 			<Badge
@@ -1195,6 +1196,13 @@
 						: liveUpdateStatus === 'error'
 							? 'border-yellow-200 bg-yellow-50 text-yellow-700'
 							: 'border-muted-foreground/20 text-muted-foreground'}
+				title={liveUpdateStatus === 'connected'
+					? '视频下载和任务状态会通过实时连接自动更新'
+					: liveUpdateStatus === 'connecting'
+						? '正在建立实时连接，建立后会自动更新进度'
+						: liveUpdateStatus === 'error'
+							? '实时连接正在重试，恢复后会继续自动更新进度'
+							: '当前未建立实时连接，需要手动刷新查看最新进度'}
 			>
 				{#if liveUpdateStatus === 'connected'}
 					进度实时更新中
@@ -1214,7 +1222,12 @@
 		{/if}
 		{#if $appStateStore.currentPage > 0 && pendingInsertedCount > 0}
 			<div class="mt-2">
-				<Button variant="outline" size="sm" onclick={handlePendingInsertedClick}>
+				<Button
+					variant="outline"
+					size="sm"
+					onclick={handlePendingInsertedClick}
+					title="跳转到第一页查看新入库视频"
+				>
 					当前页外有 {pendingInsertedCount} 个新入库视频，点击跳到第一页查看
 				</Button>
 			</div>

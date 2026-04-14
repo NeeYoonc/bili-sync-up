@@ -138,17 +138,18 @@
 				class="border-input bg-background ring-offset-background focus:ring-ring h-8 w-20 rounded-md border px-2 text-center text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none"
 			/>
 			<span class="text-muted-foreground text-sm">页</span>
-			<Button
-				variant="outline"
-				size="sm"
-				class="h-8 cursor-pointer"
-				onclick={handleJumpToPage}
-				disabled={!jumpInputValue ||
-					parseInt(jumpInputValue) < 1 ||
-					parseInt(jumpInputValue) > totalPages}
-			>
-				跳转
-			</Button>
+		<Button
+			variant="outline"
+			size="sm"
+			class="h-8 cursor-pointer"
+			onclick={handleJumpToPage}
+			disabled={!jumpInputValue ||
+				parseInt(jumpInputValue) < 1 ||
+				parseInt(jumpInputValue) > totalPages}
+			title="跳转到输入的页码"
+		>
+			跳转
+		</Button>
 		</div>
 	{/if}
 {/if}

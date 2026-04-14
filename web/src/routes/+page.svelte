@@ -406,7 +406,12 @@
 			<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
 				<Card class="lg:col-span-1">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle class="text-sm font-medium">存储空间</CardTitle>
+						<CardTitle
+							class="text-sm font-medium"
+							title="显示当前磁盘可用空间、总容量和已用比例"
+						>
+							存储空间
+						</CardTitle>
 						<HardDriveIcon class="text-muted-foreground h-4 w-4" />
 					</CardHeader>
 					<CardContent>
@@ -430,7 +435,12 @@
 				</Card>
 				<Card class="lg:col-span-2">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle class="text-sm font-medium">当前监听</CardTitle>
+						<CardTitle
+							class="text-sm font-medium"
+							title="显示当前监听的视频源状态、下次扫描时间和监听统计"
+						>
+							当前监听
+						</CardTitle>
 						<DatabaseIcon class="text-muted-foreground h-4 w-4" />
 					</CardHeader>
 					<CardContent>
@@ -553,7 +563,12 @@
 			<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
 				<Card class="max-w-full overflow-hidden lg:col-span-2">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle class="text-sm font-medium">最近入库</CardTitle>
+						<CardTitle
+							class="text-sm font-medium"
+							title="显示近七日新增视频统计和最近入库记录"
+						>
+							最近入库
+						</CardTitle>
 						<VideoIcon class="text-muted-foreground h-4 w-4" />
 					</CardHeader>
 					<CardContent>
@@ -621,7 +636,12 @@
 				</Card>
 				<Card class="max-w-full md:col-span-1">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle class="text-sm font-medium">下载任务状态</CardTitle>
+						<CardTitle
+							class="text-sm font-medium"
+							title="显示下载与扫描任务的运行状态和控制入口"
+						>
+							下载任务状态
+						</CardTitle>
 						<CloudDownloadIcon class="text-muted-foreground h-4 w-4" />
 					</CardHeader>
 					<CardContent>
@@ -725,7 +745,12 @@
 				<!-- 内存使用情况 -->
 				<Card class="overflow-hidden">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle class="text-sm font-medium">内存使用情况</CardTitle>
+						<CardTitle
+							class="text-sm font-medium"
+							title="显示系统总内存、已用内存和进程内存变化"
+						>
+							内存使用情况
+						</CardTitle>
 						<MemoryStickIcon class="text-muted-foreground h-4 w-4" />
 					</CardHeader>
 					<CardContent>
@@ -798,7 +823,12 @@
 
 				<Card class="overflow-hidden">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle class="text-sm font-medium">CPU 使用情况</CardTitle>
+						<CardTitle
+							class="text-sm font-medium"
+							title="显示当前 CPU 使用率和最近一段时间的变化"
+						>
+							CPU 使用情况
+						</CardTitle>
 						<CpuIcon class="text-muted-foreground h-4 w-4" />
 					</CardHeader>
 					<CardContent class="overflow-hidden">

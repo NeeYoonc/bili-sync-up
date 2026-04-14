@@ -327,7 +327,10 @@
 <AlertDialog.Root bind:open={isOpen}>
 	<AlertDialog.Content class="max-h-[90vh] max-w-2xl overflow-y-auto">
 		<AlertDialog.Header>
-			<AlertDialog.Title class="flex items-center gap-2 text-purple-600 dark:text-purple-400">
+			<AlertDialog.Title
+				class="flex items-center gap-2 text-purple-600 dark:text-purple-400"
+				title={sourceName ? `关键词过滤器 - ${sourceName}` : '关键词过滤器'}
+			>
 				<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path
 						stroke-linecap="round"

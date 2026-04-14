@@ -422,6 +422,7 @@
 						variant="outline"
 						class="{mode === 'detail' ? 'w-full' : 'shrink-0'} cursor-pointer px-2"
 						onclick={() => (resetDialogOpen = true)}
+						title="打开重置对话框，可选择只重置失败任务或强制重置全部任务"
 					>
 						<RotateCcwIcon class="mr-1 h-3 w-3" />
 						{mode === 'detail' ? '重置' : ''}
@@ -459,10 +460,20 @@
 		</AlertDialog.Header>
 		<AlertDialog.Footer>
 			<AlertDialog.Cancel>取消</AlertDialog.Cancel>
-			<Button variant="secondary" onclick={() => handleReset(false)} disabled={resetting}>
+			<Button
+				variant="secondary"
+				onclick={() => handleReset(false)}
+				disabled={resetting}
+				title="仅重置失败的任务，已成功的任务保持不变"
+			>
 				{resetting ? '重置中...' : '重置失败'}
 			</Button>
-			<Button variant="destructive" onclick={() => handleReset(true)} disabled={resetting}>
+			<Button
+				variant="destructive"
+				onclick={() => handleReset(true)}
+				disabled={resetting}
+				title="重置所有任务状态并重新下载，可能覆盖现有文件"
+			>
 				{resetting ? '重置中...' : '强制重置'}
 			</Button>
 		</AlertDialog.Footer>

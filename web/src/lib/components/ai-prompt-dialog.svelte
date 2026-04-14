@@ -143,7 +143,9 @@ let renameParentDir = false;
 <AlertDialog.Root bind:open={isOpen}>
 	<AlertDialog.Content class="max-w-lg">
 		<AlertDialog.Header>
-			<AlertDialog.Title>AI重命名设置</AlertDialog.Title>
+			<AlertDialog.Title title={sourceName ? `AI重命名设置 - ${sourceName}` : 'AI重命名设置'}>
+				AI重命名设置
+			</AlertDialog.Title>
 			<AlertDialog.Description>
 				为 {getSourceTypeLabel(sourceType)} 「{sourceName}」 设置自定义AI重命名提示词
 			</AlertDialog.Description>

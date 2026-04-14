@@ -124,6 +124,25 @@
 		}
 	];
 
+	const settingTooltips = {
+		naming: '调整视频、分页、番剧等文件命名规则，以及目录结构和媒体库兼容方式。',
+		quality: '限制视频与音频清晰度、编码格式和优先选择范围。',
+		download: '控制下载并发、速率限制、任务执行方式和下载器行为。',
+		danmaku: '配置弹幕文件的显示样式、布局参数和同步策略。',
+		credential: '填写 B 站登录凭证，影响会员画质、互动内容和受限接口访问。',
+		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
+		captcha: '设置遇到验证码风控时的处理模式、超时和自动识别参数。',
+		aria2: '配置外部 Aria2 的健康检查、自动重启和监控策略。',
+		interface: '调整主题模式和前端界面显示偏好。',
+		notification: '配置扫描完成后的推送渠道、测试发送和通知内容。',
+		ai_rename: '配置 AI 自动重命名的启用范围、提示词和相关行为。',
+		system: '调整扫描间隔、监听端口、路径模板和基础系统行为。'
+	} as const;
+
+	function getSettingTooltip(id: string) {
+		return settingTooltips[id as keyof typeof settingTooltips] ?? '';
+	}
+
 	// 表单数据
 	let videoName = '{{upper_name}}';
 	let pageName = '{{pubtime}}-{{bvid}}-{{truncate title 20}}';
@@ -1234,7 +1253,12 @@
 <div class="py-2">
 	<div class="mx-auto px-4">
 		<div class="bg-card rounded-lg border shadow-sm {isMobile ? 'p-4' : 'p-6'}">
-			<h1 class="font-bold {isMobile ? 'mb-4 text-xl' : 'mb-6 text-2xl'}">系统设置</h1>
+			<h1
+				class="font-bold {isMobile ? 'mb-4 text-xl' : 'mb-6 text-2xl'}"
+				title="管理下载、命名、弹幕、通知和系统行为等配置"
+			>
+				系统设置
+			</h1>
 
 			{#if loading}
 				<div class="flex items-center justify-center py-12">
@@ -1261,9 +1285,12 @@
 										/>
 									</div>
 									<div class="flex-1">
-										<CardTitle class={isMobile ? 'text-sm' : 'text-base'}
-											>{category.title}</CardTitle
+										<CardTitle
+											class={isMobile ? 'text-sm' : 'text-base'}
+											title={getSettingTooltip(category.id)}
 										>
+											{category.title}
+										</CardTitle>
 										<CardDescription class="mt-1 {isMobile ? 'text-xs' : 'text-sm'} line-clamp-2"
 											>{category.description}</CardDescription
 										>
@@ -1286,6 +1313,7 @@
 	}}
 	title="文件命名设置"
 	description="配置视频、分页、番剧等文件命名模板"
+	titleTooltip={getSettingTooltip('naming')}
 	{isMobile}
 >
 	<form
@@ -1296,7 +1324,10 @@
 		class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}"
 	>
 		<div class="min-h-0 flex-1 space-y-6 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
-			<SectionHeader title="文件命名模板">
+			<SectionHeader
+				title="文件命名模板"
+				titleTooltip="配置视频、分页和番剧的命名模板与变量规则。"
+			>
 				{#snippet actions()}
 					<button
 						type="button"
@@ -1666,6 +1697,7 @@
 	}}
 	title="视频质量设置"
 	description="设置视频/音频质量、编解码器等参数"
+	titleTooltip={getSettingTooltip('quality')}
 	{isMobile}
 >
 	<form
@@ -1879,6 +1911,7 @@
 	}}
 	title="下载设置"
 	description="并行下载、并发控制、速率限制配置"
+	titleTooltip={getSettingTooltip('download')}
 	{isMobile}
 >
 	<form
@@ -2021,6 +2054,7 @@
 	}}
 	title="弹幕设置"
 	description="弹幕显示样式和布局参数"
+	titleTooltip={getSettingTooltip('danmaku')}
 	{isMobile}
 >
 	<form
@@ -2323,6 +2357,7 @@
 	}}
 	title="B站凭证设置"
 	description="配置B站登录凭证信息"
+	titleTooltip={getSettingTooltip('credential')}
 	{isMobile}
 >
 	<div slot="header">
@@ -2502,6 +2537,7 @@
 	}}
 	title="风控配置"
 	description="UP主投稿获取风控策略，用于优化大量视频UP主的获取"
+	titleTooltip={getSettingTooltip('risk')}
 	{isMobile}
 >
 	<form
@@ -2835,6 +2871,7 @@
 	}}
 	title="Aria2监控设置"
 	description="下载器健康检查和自动重启配置"
+	titleTooltip={getSettingTooltip('aria2')}
 	{isMobile}
 >
 	<form
@@ -2980,6 +3017,7 @@
 	}}
 	title="界面设置"
 	description="主题模式、显示选项等界面配置"
+	titleTooltip={getSettingTooltip('interface')}
 	{isMobile}
 >
 	<div class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}">
@@ -2991,6 +3029,7 @@
 						as="div"
 						title="主题模式"
 						description="选择您偏好的界面主题"
+						titleTooltip="切换浅色、深色或跟随系统的界面主题。"
 						titleClass="text-lg font-medium"
 						descriptionClass="text-muted-foreground text-sm"
 					>
@@ -3070,6 +3109,7 @@
 	}}
 	title="系统设置"
 	description="扫描间隔等其他设置"
+	titleTooltip={getSettingTooltip('system')}
 	{isMobile}
 >
 	<form
@@ -3246,6 +3286,7 @@
 	}}
 	title="推送通知设置"
 	description="配置扫描完成推送通知"
+	titleTooltip={getSettingTooltip('notification')}
 	{isMobile}
 >
 	<form
@@ -3713,6 +3754,7 @@
 	}}
 	title="验证码风控设置"
 	description="v_voucher验证码风控配置，用于处理B站的风控验证"
+	titleTooltip={getSettingTooltip('captcha')}
 	{isMobile}
 >
 	<form
@@ -3879,6 +3921,7 @@
 	}}
 	title="AI重命名设置"
 	description="配置AI自动重命名功能，使用大语言模型为视频文件生成更好的文件名"
+	titleTooltip={getSettingTooltip('ai_rename')}
 	{isMobile}
 >
 	<form

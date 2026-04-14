@@ -78,7 +78,10 @@
 <AlertDialog.Root bind:open={isOpen}>
 	<AlertDialog.Content class="max-w-lg">
 		<AlertDialog.Header>
-			<AlertDialog.Title class="flex items-center gap-2 text-blue-600 dark:text-blue-400">
+			<AlertDialog.Title
+				class="flex items-center gap-2 text-blue-600 dark:text-blue-400"
+				title={sourceName ? `重设视频源路径 - ${sourceName}` : '重设视频源路径'}
+			>
 				<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path
 						stroke-linecap="round"
