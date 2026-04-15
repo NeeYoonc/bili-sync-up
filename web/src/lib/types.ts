@@ -694,6 +694,7 @@ export interface QueueStatusResponse {
 	delete_queue: QueueInfo;
 	video_delete_queue: QueueInfo;
 	add_queue: QueueInfo;
+	danmaku_queue: QueueInfo;
 	config_queue: ConfigQueueInfo;
 }
 

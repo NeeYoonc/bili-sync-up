@@ -2500,15 +2500,30 @@ pub async fn refresh_video_danmaku(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<RefreshDanmakuResponse>, ApiError> {
-    let config = crate::config::reload_config();
-    let bili_client = crate::bilibili::BiliClient::new(String::new());
-    let refreshed_pages =
-        crate::workflow_danmaku::refresh_danmaku_for_video(id, &bili_client, db.as_ref(), &config).await?;
+    let (refreshed_pages, message) = if crate::task::is_scanning() {
+        let task = crate::task::RefreshDanmakuTask {
+            video_id: Some(id),
+            page_id: None,
+            task_id: uuid::Uuid::new_v4().to_string(),
+        };
+        crate::task::enqueue_refresh_danmaku_task(task, db.as_ref()).await?;
+        (
+            0,
+            "当前正在扫描，已加入弹幕刷新队列，扫描结束后会按现有下载状态流处理".to_string(),
+        )
+    } else {
+        let refreshed_pages = crate::workflow_danmaku::schedule_video_danmaku_refresh(db.as_ref(), id).await?;
+        crate::task::resume_scanning();
+        (
+            refreshed_pages,
+            format!("已将 {} 个分页的弹幕标记为待刷新，下一轮扫描会按现有下载流程处理", refreshed_pages),
+        )
+    };
 
     Ok(ApiResponse::ok(RefreshDanmakuResponse {
         success: true,
         refreshed_pages,
-        message: format!("已刷新 {} 个分页的弹幕", refreshed_pages),
+        message,
     }))
 }
 
@@ -2526,15 +2541,30 @@ pub async fn refresh_page_danmaku(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<RefreshDanmakuResponse>, ApiError> {
-    let config = crate::config::reload_config();
-    let bili_client = crate::bilibili::BiliClient::new(String::new());
-    let refreshed_pages =
-        crate::workflow_danmaku::refresh_danmaku_for_page(id, &bili_client, db.as_ref(), &config).await?;
+    let (refreshed_pages, message) = if crate::task::is_scanning() {
+        let task = crate::task::RefreshDanmakuTask {
+            video_id: None,
+            page_id: Some(id),
+            task_id: uuid::Uuid::new_v4().to_string(),
+        };
+        crate::task::enqueue_refresh_danmaku_task(task, db.as_ref()).await?;
+        (
+            0,
+            "当前正在扫描，已加入弹幕刷新队列，扫描结束后会按现有下载状态流处理".to_string(),
+        )
+    } else {
+        let refreshed_pages = crate::workflow_danmaku::schedule_page_danmaku_refresh(db.as_ref(), id).await?;
+        crate::task::resume_scanning();
+        (
+            refreshed_pages,
+            "已将当前分页的弹幕标记为待刷新，下一轮扫描会按现有下载流程处理".to_string(),
+        )
+    };
 
     Ok(ApiResponse::ok(RefreshDanmakuResponse {
         success: true,
         refreshed_pages,
-        message: "已刷新当前分页的弹幕".to_string(),
+        message,
     }))
 }
 
@@ -11591,6 +11621,7 @@ pub struct QueueStatusResponse {
     pub delete_queue: QueueInfo,
     pub video_delete_queue: QueueInfo,
     pub add_queue: QueueInfo,
+    pub danmaku_queue: QueueInfo,
     pub config_queue: ConfigQueueInfo,
 }
 
@@ -11634,7 +11665,10 @@ pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiE
 }
 
 async fn load_queue_status_response() -> QueueStatusResponse {
-    use crate::task::{ADD_TASK_QUEUE, CONFIG_TASK_QUEUE, DELETE_TASK_QUEUE, TASK_CONTROLLER, VIDEO_DELETE_TASK_QUEUE};
+    use crate::task::{
+        ADD_TASK_QUEUE, CONFIG_TASK_QUEUE, DELETE_TASK_QUEUE, REFRESH_DANMAKU_TASK_QUEUE, TASK_CONTROLLER,
+        VIDEO_DELETE_TASK_QUEUE,
+    };
 
     // 获取扫描状态
     let is_scanning = TASK_CONTROLLER.is_scanning();
@@ -11683,6 +11717,23 @@ async fn load_queue_status_response() -> QueueStatusResponse {
         })
         .collect();
 
+    let danmaku_raw_tasks = REFRESH_DANMAKU_TASK_QUEUE.list_tasks().await;
+    let danmaku_queue_length = danmaku_raw_tasks.len();
+    let danmaku_is_processing = REFRESH_DANMAKU_TASK_QUEUE.is_processing();
+    let danmaku_tasks = danmaku_raw_tasks
+        .into_iter()
+        .map(|task| QueueTaskInfo {
+            task_id: task.task_id,
+            task_type: "refresh_danmaku".to_string(),
+            description: match (task.video_id, task.page_id) {
+                (Some(video_id), None) => format!("刷新视频弹幕 ID={}", video_id),
+                (None, Some(page_id)) => format!("刷新分页弹幕 ID={}", page_id),
+                _ => "刷新弹幕".to_string(),
+            },
+            created_at: now_standard_string(),
+        })
+        .collect();
+
     // 获取配置队列状态
     let config_update_raw_tasks = CONFIG_TASK_QUEUE.list_update_tasks().await;
     let config_reload_raw_tasks = CONFIG_TASK_QUEUE.list_reload_tasks().await;
@@ -11726,6 +11777,11 @@ async fn load_queue_status_response() -> QueueStatusResponse {
             length: add_queue_length,
             is_processing: add_is_processing,
             tasks: add_tasks,
+        },
+        danmaku_queue: QueueInfo {
+            length: danmaku_queue_length,
+            is_processing: danmaku_is_processing,
+            tasks: danmaku_tasks,
         },
         config_queue: ConfigQueueInfo {
             update_length: config_update_length,
