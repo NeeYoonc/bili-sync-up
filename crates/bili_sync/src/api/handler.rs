@@ -1332,10 +1332,7 @@ mod queue_sse_tests {
     #[test]
     fn test_normalize_video_source_latest_row_at_filters_initial_value() {
         assert_eq!(normalize_video_source_latest_row_at(""), None);
-        assert_eq!(
-            normalize_video_source_latest_row_at("1970-01-01 00:00:00"),
-            None
-        );
+        assert_eq!(normalize_video_source_latest_row_at("1970-01-01 00:00:00"), None);
         assert_eq!(
             normalize_video_source_latest_row_at("2026-04-14 12:34:56"),
             Some("2026-04-14 12:34:56".to_string())
@@ -8337,6 +8334,7 @@ pub async fn update_config_internal(
     let original_collection_quick_subscribe_path = config.collection_quick_subscribe_path.clone();
     let original_submission_quick_subscribe_path = config.submission_quick_subscribe_path.clone();
     let original_bangumi_quick_subscribe_path = config.bangumi_quick_subscribe_path.clone();
+    let original_danmaku_update_enabled = config.danmaku_update_policy.enabled;
 
     // 更新配置字段
     if let Some(video_name) = params.video_name {
@@ -9277,6 +9275,13 @@ pub async fn update_config_internal(
 
     let updated_field_labels = format_config_update_fields_display(&updated_fields);
     let updated_fields_display = updated_field_labels.join("、");
+    let should_initialize_danmaku_baseline = !original_danmaku_update_enabled && config.danmaku_update_policy.enabled;
+
+    if should_initialize_danmaku_baseline {
+        crate::workflow_danmaku::initialize_danmaku_incremental_baseline(db.as_ref(), &config)
+            .await
+            .context("初始化弹幕增量更新基线失败")?;
+    }
 
     // 移除配置文件保存 - 配置现在完全基于数据库
     // config.save()?;
