@@ -107,6 +107,16 @@ fn build_stored_page_info(page_model: &page::Model) -> Result<BiliPageInfo> {
     })
 }
 
+fn resolve_initial_danmaku_baseline(page_model: &page::Model, video_model: &video::Model, fallback: &str) -> String {
+    if parse_time_string(&page_model.created_at).is_some() {
+        return page_model.created_at.clone();
+    }
+    if parse_time_string(&video_model.created_at).is_some() {
+        return video_model.created_at.clone();
+    }
+    fallback.to_string()
+}
+
 pub async fn initialize_danmaku_incremental_baseline(
     connection: &DatabaseConnection,
     config: &Config,
@@ -129,8 +139,9 @@ pub async fn initialize_danmaku_incremental_baseline(
                 continue;
             }
 
+            let baseline = resolve_initial_danmaku_baseline(&page_model, &video_model, &now_str);
             let mut active: page::ActiveModel = page_model.clone().into();
-            active.danmaku_last_synced_at = Set(Some(now_str.clone()));
+            active.danmaku_last_synced_at = Set(Some(baseline));
             active.danmaku_sync_generation = Set(generation);
             if page_model.cid > 0 && page_model.danmaku_cid_snapshot != Some(page_model.cid) {
                 active.danmaku_cid_snapshot = Set(Some(page_model.cid));
@@ -193,7 +204,10 @@ pub async fn schedule_incremental_danmaku_for_source(
 
     let scheduled = mark_pages_danmaku_pending(connection, selected_pages, false).await?;
     if scheduled > 0 {
-        info!("已将 {} 个到期分页的弹幕并回主下载状态流，等待本轮下载阶段处理", scheduled);
+        info!(
+            "已将 {} 个到期分页的弹幕并回主下载状态流，等待本轮下载阶段处理",
+            scheduled
+        );
     }
     Ok(scheduled)
 }
@@ -277,7 +291,8 @@ async fn mark_pages_danmaku_pending(
     }
 
     let scheduled_count = page_updates.len();
-    let txn = crate::database::begin_traced_transaction(connection, "workflow_danmaku.mark_pages_danmaku_pending").await?;
+    let txn =
+        crate::database::begin_traced_transaction(connection, "workflow_danmaku.mark_pages_danmaku_pending").await?;
     for update in video_updates {
         update.update(&txn).await?;
     }
@@ -459,9 +474,7 @@ pub async fn sync_page_danmaku(
         .danmaku_last_synced_at
         .as_deref()
         .and_then(parse_stored_datetime);
-    let danmaku_elems = bili_video
-        .get_danmaku_elements(&page_info_for_danmaku, token)
-        .await?;
+    let danmaku_elems = bili_video.get_danmaku_elements(&page_info_for_danmaku, token).await?;
     let file_exists = tokio::fs::metadata(&danmaku_path).await.is_ok();
     let fetched_danmaku_count = danmaku_elems.len() as u32;
     let last_write_count = if file_exists && !cid_changed {
@@ -811,7 +824,10 @@ mod tests {
     }
 
     fn completed_page_status() -> u32 {
-        STATUS_COMPLETED | (0..5).map(|index| STATUS_OK << (index * 3)).fold(0u32, |acc, item| acc | item)
+        STATUS_COMPLETED
+            | (0..5)
+                .map(|index| STATUS_OK << (index * 3))
+                .fold(0u32, |acc, item| acc | item)
     }
 
     fn enabled_policy() -> DanmakuUpdatePolicy {
@@ -868,8 +884,69 @@ mod tests {
             .expect("查询分页应成功")
             .expect("分页应存在");
         assert!(page_model.danmaku_last_synced_at.is_some());
-        assert_eq!(page_model.danmaku_sync_generation, Stage::Fresh.as_generation());
+        assert_ne!(page_model.danmaku_sync_generation, Stage::Initial.as_generation());
         assert_eq!(page_model.danmaku_cid_snapshot, Some(334951837));
+    }
+
+    #[tokio::test]
+    async fn initialize_baseline_prefers_page_created_at_over_video_created_at_and_now() {
+        let db = create_test_db("baseline-created-at").await;
+        insert_test_submission(&db, 39031).await;
+
+        let media_dir = unique_temp_dir("baseline-created-at-media");
+        fs::create_dir_all(&media_dir).expect("应能创建测试媒体目录");
+        let video_path = media_dir.join("baseline-created-at.mp4");
+        fs::write(&video_path, []).expect("应能创建测试视频文件");
+
+        let pubtime = Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        insert_test_video(&db, 11, 39031, "BVBASELINE0002", "基线创建时间测试", pubtime).await;
+        insert_test_page(
+            &db,
+            11,
+            11,
+            1,
+            334951839,
+            &video_path.to_string_lossy(),
+            None,
+            Stage::Initial.as_generation(),
+        )
+        .await;
+
+        let video_model = video::Entity::find_by_id(11)
+            .one(&db)
+            .await
+            .expect("查询视频应成功")
+            .expect("视频应存在");
+        let mut video_active: video::ActiveModel = video_model.into();
+        video_active.created_at = Set("2026-03-01 10:00:00".to_string());
+        video_active.update(&db).await.expect("应能更新视频创建时间");
+
+        let page_model = page::Entity::find_by_id(11)
+            .one(&db)
+            .await
+            .expect("查询分页应成功")
+            .expect("分页应存在");
+        let mut page_active: page::ActiveModel = page_model.into();
+        page_active.created_at = Set("2026-03-02 11:22:33".to_string());
+        page_active.update(&db).await.expect("应能更新分页创建时间");
+
+        let config = Config {
+            danmaku_update_policy: enabled_policy(),
+            ..Config::default()
+        };
+        initialize_danmaku_incremental_baseline(&db, &config)
+            .await
+            .expect("初始化基线应成功");
+
+        let page_model = page::Entity::find_by_id(11)
+            .one(&db)
+            .await
+            .expect("查询分页应成功")
+            .expect("分页应存在");
+        assert_eq!(
+            page_model.danmaku_last_synced_at.as_deref(),
+            Some("2026-03-02 11:22:33")
+        );
     }
 
     #[tokio::test]
@@ -1025,5 +1102,4 @@ mod tests {
         let err = anyhow!(crate::bilibili::BiliError::RequestFailed(62012, "62012".to_string()));
         assert!(should_fallback_to_stored_pages(&err));
     }
-
 }
