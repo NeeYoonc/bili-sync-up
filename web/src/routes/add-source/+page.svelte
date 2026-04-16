@@ -9,6 +9,8 @@
 	import SubmissionSelectionToolbar from '$lib/components/submission-selection-toolbar.svelte';
 	import SelectableCardButton from '$lib/components/selectable-card-button.svelte';
 	import SidePanel from '$lib/components/side-panel.svelte';
+	import SelectAllButton from '$lib/components/select-all-button.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
@@ -3736,14 +3738,7 @@
 						>
 							{#snippet actions()}
 								{#if batchMode && sourceType === 'submission'}
-									<Button
-										size="sm"
-										variant="outline"
-										onclick={() => selectAllVisible('search')}
-										class="text-xs"
-									>
-										全选
-									</Button>
+									<SelectAllButton onclick={() => selectAllVisible('search')} />
 								{/if}
 								<button
 									onclick={() => {
@@ -3901,14 +3896,7 @@
 							showActions={batchMode}
 						>
 							{#snippet actions()}
-								<Button
-									size="sm"
-									variant="outline"
-									onclick={() => selectAllVisible('following')}
-									class="text-xs"
-								>
-									全选
-								</Button>
+								<SelectAllButton onclick={() => selectAllVisible('following')} />
 							{/snippet}
 
 							<div
@@ -4002,14 +3990,7 @@
 							showActions={batchMode}
 						>
 							{#snippet actions()}
-								<Button
-									size="sm"
-									variant="outline"
-									onclick={() => selectAllVisible('collection')}
-									class="text-xs"
-								>
-									全选
-								</Button>
+								<SelectAllButton onclick={() => selectAllVisible('collection')} />
 							{/snippet}
 
 							<div
@@ -4109,14 +4090,7 @@
 							showActions={batchMode}
 						>
 							{#snippet actions()}
-								<Button
-									size="sm"
-									variant="outline"
-									onclick={() => selectAllVisible('favorite')}
-									class="text-xs"
-								>
-									全选
-								</Button>
+								<SelectAllButton onclick={() => selectAllVisible('favorite')} />
 							{/snippet}
 
 							<div
@@ -4205,14 +4179,7 @@
 						>
 							{#snippet actions()}
 								{#if batchMode && searchedUserFavorites.length > 0}
-									<Button
-										size="sm"
-										variant="outline"
-										onclick={() => selectAllVisible('searched-favorite')}
-										class="text-xs"
-									>
-										全选
-									</Button>
+									<SelectAllButton onclick={() => selectAllVisible('searched-favorite')} />
 								{/if}
 								<button
 									onclick={clearSearchedUserFavoritesSelection}
@@ -4224,9 +4191,11 @@
 
 							{#if loadingSearchedUserFavorites}
 								<div class="p-4 text-center">
-									<div class="text-sm text-green-700 dark:text-green-300">
-										正在获取收藏夹列表...
-									</div>
+									<Loading
+										size="sm"
+										text="正在获取收藏夹列表..."
+										textClass="text-sm text-green-700 dark:text-green-300"
+									/>
 								</div>
 							{:else if searchedUserFavorites.length > 0}
 								<div
@@ -4476,14 +4445,7 @@
 							showActions={batchMode}
 						>
 							{#snippet actions()}
-								<Button
-									size="sm"
-									variant="outline"
-									onclick={() => selectAllVisible('subscribed-collection')}
-									class="text-xs"
-								>
-									全选
-								</Button>
+								<SelectAllButton onclick={() => selectAllVisible('subscribed-collection')} />
 							{/snippet}
 
 							<div
@@ -4678,28 +4640,12 @@
 									onscroll={handleSubmissionScroll}
 								>
 									{#if submissionLoading && submissionVideos.length === 0}
-										<div class="flex items-center justify-center py-8">
-											<svg
-												class="h-8 w-8 animate-spin text-blue-600 dark:text-blue-400"
-												fill="none"
-												viewBox="0 0 24 24"
-											>
-												<circle
-													class="opacity-25"
-													cx="12"
-													cy="12"
-													r="10"
-													stroke="currentColor"
-													stroke-width="4"
-												></circle>
-												<path
-													class="opacity-75"
-													fill="currentColor"
-													d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-												></path>
-											</svg>
-											<span class="text-muted-foreground ml-2 text-sm">加载中...</span>
-										</div>
+										<Loading
+											showSpinner={true}
+											spinnerClass="text-blue-600 dark:text-blue-400"
+											textClass="text-sm"
+											class="py-8"
+										/>
 									{:else if filteredSubmissionVideos.length === 0}
 										<EmptyState
 											icon={Search}
@@ -4795,12 +4741,13 @@
 														disabled={isLoadingMore}
 													>
 														{#if isLoadingMore}
-															<div class="flex items-center gap-2">
-																<div
-																	class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"
-																></div>
-																<span>加载中...</span>
-															</div>
+															<Loading
+																inline={true}
+																showSpinner={true}
+																spinnerClass="text-white"
+																textClass="text-white"
+																class="gap-2"
+															/>
 														{:else}
 															加载更多 ({submissionVideos.length}/{submissionTotalCount})
 														{/if}

@@ -141,6 +141,75 @@
 - 后续新增页面头部时可直接复用 `SectionHeader`
 - 减少页面级重复布局代码
 
+### 6. 页面级加载态样式统一为 Loading 组件
+
+原本多个页面都各自写一段相同的：
+
+- `flex items-center justify-center py-*`
+- `text-muted-foreground`
+- `加载中...`
+
+涉及页面：
+
+- `web/src/routes/+page.svelte`
+- `web/src/routes/settings/+page.svelte`
+- `web/src/routes/video/[id]/+page.svelte`
+- `web/src/routes/video-sources/+page.svelte`
+- `web/src/routes/videos/+page.svelte`
+
+本次新增/复用：
+
+- `web/src/lib/components/ui/Loading.svelte`
+
+本次改造后：
+
+- 页面级通用加载态统一使用 `<Loading />`
+- 支持 `size` 参数，兼容不同页面的垂直间距
+
+收益：
+
+- 去掉重复加载态样板代码
+- 页面级 loading 样式统一
+- 后续若要替换成 spinner / skeleton，可集中在一个组件里演进
+
+### 7. 批量选择按钮与局部 loading 交互进一步统一
+
+原本多个面板和弹窗中还存在重复的 UI 片段：
+
+- `全选` 小按钮
+- 带 spinner 的局部 `加载中...`
+- 加载更多按钮中的白色 spinner + 文案
+
+涉及位置：
+
+- `web/src/routes/add-source/+page.svelte`
+- `web/src/routes/video-sources/+page.svelte`
+- `web/src/routes/videos/+page.svelte`
+- `web/src/lib/components/submission-selection-dialog.svelte`
+- `web/src/lib/components/submission-selection-toolbar.svelte`
+- `web/src/lib/components/keyword-filter-dialog.svelte`
+
+本次新增/增强：
+
+- `web/src/lib/components/select-all-button.svelte`
+- 增强 `web/src/lib/components/ui/Loading.svelte`
+  - 支持 `inline`
+  - 支持 `showSpinner`
+  - 支持 `align`
+  - 支持 `spinnerClass` / `textClass`
+
+本次改造后：
+
+- 多处 `全选` 按钮统一为公共组件
+- 多处局部 spinner loading 统一由 `Loading` 组件承担
+- 加载更多按钮中的 loading 内容也统一复用
+
+收益：
+
+- 减少重复按钮样式与局部 loading 样板代码
+- 小型交互反馈风格更统一
+- 后续修改局部 loading / 全选按钮样式时只需改公共组件
+
 ## 当前检查范围内的复用项已完成
 
 本轮记录中的剩余项已经全部落地处理：
@@ -156,12 +225,17 @@
 - `web/src/lib/utils/live-event-source.ts`
 - `web/src/lib/utils/submission.ts`
 - `web/src/lib/components/submission-selection-toolbar.svelte`
+- `web/src/lib/components/select-all-button.svelte`
+- `web/src/lib/components/ui/Loading.svelte`
+- `web/src/lib/components/keyword-filter-dialog.svelte`
 - `web/src/routes/+layout.svelte`
 - `web/src/routes/+page.svelte`
 - `web/src/routes/add-source/+page.svelte`
 - `web/src/routes/queue/+page.svelte`
 - `web/src/routes/video-sources/+page.svelte`
 - `web/src/routes/videos/+page.svelte`
+- `web/src/routes/video/[id]/+page.svelte`
+- `web/src/routes/settings/+page.svelte`
 - `web/src/lib/components/submission-selection-dialog.svelte`
 
 ## 结论
@@ -174,5 +248,7 @@
 4. 投稿列表日期/数值展示 helper 统一
 5. 投稿选择搜索与批量操作工具栏统一
 6. 页面级标题/操作区统一到 `SectionHeader`
+7. 页面级通用加载态统一到 `Loading`
+8. 批量选择按钮与局部 spinner loading 统一
 
 当前检查范围内识别出的前端复用点已经全部落地完成，并已通过 Node 20 的 `check` / `build` 验证。

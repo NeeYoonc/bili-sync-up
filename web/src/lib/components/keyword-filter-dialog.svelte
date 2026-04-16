@@ -2,6 +2,7 @@
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import { createEventDispatcher } from 'svelte';
 	import { api } from '$lib/api';
+	import Loading from '$lib/components/ui/Loading.svelte';
 
 	export let isOpen = false;
 	export let sourceName = '';
@@ -426,7 +427,7 @@
 								bind:value={minDurationSeconds}
 								disabled={isSaving}
 								placeholder="例如 60"
-								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
+								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm transition outline-none focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
 							/>
 						</div>
 						<div class="space-y-1">
@@ -442,7 +443,7 @@
 								bind:value={maxDurationSeconds}
 								disabled={isSaving}
 								placeholder="例如 1800"
-								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
+								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm transition outline-none focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
 							/>
 						</div>
 						<div class="space-y-1">
@@ -455,7 +456,7 @@
 								type="date"
 								bind:value={publishedAfter}
 								disabled={isSaving}
-								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
+								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm transition outline-none focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
 							/>
 						</div>
 						<div class="space-y-1">
@@ -468,7 +469,7 @@
 								type="date"
 								bind:value={publishedBefore}
 								disabled={isSaving}
-								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
+								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm transition outline-none focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
 							/>
 						</div>
 					</div>
@@ -481,24 +482,12 @@
 				</div>
 
 				{#if isLoading}
-					<div class="flex items-center justify-center py-8">
-						<svg class="h-6 w-6 animate-spin text-purple-600" fill="none" viewBox="0 0 24 24">
-							<circle
-								class="opacity-25"
-								cx="12"
-								cy="12"
-								r="10"
-								stroke="currentColor"
-								stroke-width="4"
-							></circle>
-							<path
-								class="opacity-75"
-								fill="currentColor"
-								d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-							></path>
-						</svg>
-						<span class="ml-2 text-sm text-gray-500">加载中...</span>
-					</div>
+					<Loading
+						showSpinner={true}
+						spinnerClass="text-purple-600"
+						textClass="text-sm text-gray-500"
+						class="py-8"
+					/>
 				{:else}
 					<!-- 标签页切换 -->
 					<div class="flex border-b border-gray-200 dark:border-gray-700">

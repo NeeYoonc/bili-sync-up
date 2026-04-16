@@ -24,6 +24,8 @@
 	} from '$lib/types';
 	import AuthLogin from '$lib/components/auth-login.svelte';
 	import InitialSetup from '$lib/components/initial-setup.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
 
 	// 图标导入
 	import CloudDownloadIcon from '@lucide/svelte/icons/cloud-download';
@@ -389,9 +391,7 @@
 {:else}
 	<div class="space-y-6">
 		{#if loading}
-			<div class="flex items-center justify-center py-12">
-				<div class="text-muted-foreground">加载中...</div>
-			</div>
+			<Loading />
 		{:else}
 			<!-- 第一行：存储空间 + 当前监听 -->
 			<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -417,7 +417,7 @@
 								</div>
 							</div>
 						{:else}
-							<div class="text-muted-foreground text-sm">加载中...</div>
+							<Loading size="sm" align="start" textClass="text-sm" />
 						{/if}
 					</CardContent>
 				</Card>
@@ -541,7 +541,7 @@
 								</div>
 							</div>
 						{:else}
-							<div class="text-muted-foreground text-sm">加载中...</div>
+							<Loading size="sm" align="start" textClass="text-sm" />
 						{/if}
 					</CardContent>
 				</Card>
@@ -716,7 +716,7 @@
 								{/if}
 							</div>
 						{:else}
-							<div class="text-muted-foreground text-sm">加载中...</div>
+							<Loading size="sm" align="start" textClass="text-sm" />
 						{/if}
 					</CardContent>
 				</Card>
@@ -900,7 +900,7 @@
 			</Dialog.Header>
 			<div class="mt-2 max-h-[60vh] space-y-2 overflow-auto">
 				{#if latestIngests.length === 0}
-					<div class="text-muted-foreground py-8 text-center text-sm">暂无入库记录</div>
+					<EmptyState title="暂无入库记录" class="border-0 bg-transparent py-8" />
 				{:else}
 					{#each latestIngests as item (item.video_id)}
 						<div class="hover:bg-muted/30 rounded-lg border p-3 transition-colors">

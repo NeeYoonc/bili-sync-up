@@ -6,6 +6,9 @@
 	import Pagination from '$lib/components/pagination.svelte';
 	import SearchBar from '$lib/components/search-bar.svelte';
 	import SectionHeader from '$lib/components/section-header.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
+	import SelectAllButton from '$lib/components/select-all-button.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
@@ -1112,7 +1115,7 @@
 				</div>
 				<div class="flex gap-2">
 					{#if videosData?.videos && selectedVideos.size < videosData.videos.length}
-						<Button variant="outline" size="sm" onclick={selectAllVideos}>全选</Button>
+						<SelectAllButton onclick={selectAllVideos} className="text-sm" />
 					{/if}
 					{#if selectedVideos.size > 0}
 						<Button variant="outline" size="sm" onclick={clearSelection}>取消选中</Button>
@@ -1307,9 +1310,7 @@
 
 	<!-- 视频卡片网格 -->
 	{#if loading}
-		<div class="flex items-center justify-center py-16">
-			<div class="text-muted-foreground">加载中...</div>
-		</div>
+		<Loading size="lg" />
 	{:else if videosData?.videos.length}
 		<div
 			class="grid gap-4 sm:grid-cols-2 md:grid-cols-[repeat(var(--videos-grid-cols),minmax(0,1fr))]"
@@ -1337,12 +1338,7 @@
 			/>
 		{/if}
 	{:else}
-		<div class="flex items-center justify-center py-16">
-			<div class="space-y-2 text-center">
-				<div class="text-muted-foreground">暂无视频数据</div>
-				<p class="text-muted-foreground text-sm">尝试调整搜索条件或添加视频源</p>
-			</div>
-		</div>
+		<EmptyState title="暂无视频数据" description="尝试调整搜索条件或添加视频源" class="py-16" />
 	{/if}
 </div>
 

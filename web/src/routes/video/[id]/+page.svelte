@@ -28,6 +28,7 @@
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { get } from 'svelte/store';
+	import Loading from '$lib/components/ui/Loading.svelte';
 
 	let videoData: VideoResponse | null = null;
 	let loading = false;
@@ -94,9 +95,7 @@
 
 	function parseBeijingTimestamp(value?: string | null): Date | null {
 		if (!value) return null;
-		const match = value.match(
-			/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/
-		);
+		const match = value.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/);
 		if (!match) return null;
 		const [, year, month, day, hour, minute, second] = match;
 		return new Date(
@@ -133,7 +132,9 @@
 	function getDanmakuSyncTitle(generation: number, lastSyncedAt?: string | null) {
 		const stageLabel = getDanmakuStageLabel(generation);
 		const description = getDanmakuStageDescription(generation);
-		return lastSyncedAt ? `当前阶段：${stageLabel}。${description}` : `当前阶段：${stageLabel}。${description}`;
+		return lastSyncedAt
+			? `当前阶段：${stageLabel}。${description}`
+			: `当前阶段：${stageLabel}。${description}`;
 	}
 
 	function getDanmakuLastSyncedTitle(value?: string | null) {
@@ -618,9 +619,7 @@
 </svelte:head>
 
 {#if loading}
-	<div class="flex items-center justify-center py-12">
-		<div class="text-muted-foreground">加载中...</div>
-	</div>
+	<Loading />
 {:else if error}
 	<div class="flex items-center justify-center py-12">
 		<div class="space-y-2 text-center">
@@ -762,9 +761,7 @@
 						onclick={handleRefreshVideoDanmaku}
 						disabled={refreshingVideoDanmaku}
 					>
-						<RefreshCwIcon
-							class="mr-2 h-4 w-4 {refreshingVideoDanmaku ? 'animate-spin' : ''}"
-						/>
+						<RefreshCwIcon class="mr-2 h-4 w-4 {refreshingVideoDanmaku ? 'animate-spin' : ''}" />
 						{refreshingVideoDanmaku ? '刷新中...' : '刷新全部弹幕'}
 					</Button>
 				</div>
@@ -803,7 +800,9 @@
 									showProgress={true}
 								/>
 
-								<div class="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
+								<div
+									class="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-3 py-2"
+								>
 									<div class="min-w-0">
 										<div
 											class="text-muted-foreground cursor-help text-xs"
@@ -815,7 +814,7 @@
 											弹幕同步
 										</div>
 										<div
-											class="truncate cursor-help text-sm font-medium"
+											class="cursor-help truncate text-sm font-medium"
 											title={getDanmakuSyncTitle(
 												pageInfo.danmaku_sync_generation,
 												pageInfo.danmaku_last_synced_at

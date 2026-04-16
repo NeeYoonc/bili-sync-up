@@ -20,6 +20,9 @@
 	import KeywordFilterDialog from '$lib/components/keyword-filter-dialog.svelte';
 	import AiPromptDialog from '$lib/components/ai-prompt-dialog.svelte';
 	import SectionHeader from '$lib/components/section-header.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
+	import SelectAllButton from '$lib/components/select-all-button.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
 	import AiRenameHistoryDialog from '$lib/components/ai-rename-history-dialog.svelte';
 	import type { VideoSource, VideoSourcesResponse } from '$lib/types';
 
@@ -1094,9 +1097,7 @@
 	</SectionHeader>
 
 	{#if loading}
-		<div class="flex items-center justify-center py-12">
-			<div class="text-muted-foreground">加载中...</div>
-		</div>
+		<Loading />
 	{:else}
 		<!-- 视频源分类展示 -->
 		<div class="grid gap-6">
@@ -1188,14 +1189,11 @@
 										</span>
 
 										<div class="ml-auto flex flex-wrap items-center gap-2">
-											<Button
-												size="sm"
-												variant="outline"
+											<SelectAllButton
 												disabled={bulkUpdating}
 												onclick={() => selectAll(sourceKey, sources)}
-											>
-												全选
-											</Button>
+												className="text-sm"
+											/>
 											<Button
 												size="sm"
 												variant="outline"
@@ -1642,25 +1640,25 @@
 									{/each}
 								</div>
 							{:else}
-								<div class="flex flex-col items-center justify-center py-8 text-center">
-									<sourceConfig.icon class="text-muted-foreground mb-4 h-12 w-12" />
-									<div class="text-muted-foreground mb-2">暂无{sourceConfig.title}</div>
-									<p class="text-muted-foreground mb-4 text-sm">
-										{#if sourceConfig.type === 'favorite'}
-											还没有添加任何收藏夹订阅
-										{:else if sourceConfig.type === 'collection'}
-											还没有添加任何合集或列表订阅
-										{:else if sourceConfig.type === 'submission'}
-											还没有添加任何UP主投稿订阅
-										{:else}
-											还没有添加稍后再看订阅
-										{/if}
-									</p>
-									<Button size="sm" variant="outline" onclick={navigateToAddSource}>
-										<PlusIcon class="mr-2 h-4 w-4" />
-										添加{sourceConfig.title}
-									</Button>
-								</div>
+								<EmptyState
+									icon={sourceConfig.icon}
+									title={`暂无${sourceConfig.title}`}
+									description={sourceConfig.type === 'favorite'
+										? '还没有添加任何收藏夹订阅'
+										: sourceConfig.type === 'collection'
+											? '还没有添加任何合集或列表订阅'
+											: sourceConfig.type === 'submission'
+												? '还没有添加任何UP主投稿订阅'
+												: '还没有添加稍后再看订阅'}
+									class="py-8"
+								>
+									{#snippet actions()}
+										<Button size="sm" variant="outline" onclick={navigateToAddSource}>
+											<PlusIcon class="mr-2 h-4 w-4" />
+											添加{sourceConfig.title}
+										</Button>
+									{/snippet}
+								</EmptyState>
 							{/if}
 						</CardContent>
 					{/if}

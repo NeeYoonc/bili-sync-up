@@ -8,6 +8,7 @@
 	import type { SubmissionVideoInfo } from '$lib/types';
 	import { toast } from 'svelte-sonner';
 	import SubmissionSelectionToolbar from '$lib/components/submission-selection-toolbar.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
 	import { formatSubmissionDateLabel, formatSubmissionMetricLabel } from '$lib/utils/submission';
 
 	export let isOpen = false;
@@ -411,28 +412,12 @@
 					onscroll={handleSubmissionScroll}
 				>
 					{#if (submissionLoading || loadingDownloaded) && submissionVideos.length === 0}
-						<div class="flex items-center justify-center py-8">
-							<svg
-								class="h-8 w-8 animate-spin text-blue-600 dark:text-blue-400"
-								fill="none"
-								viewBox="0 0 24 24"
-							>
-								<circle
-									class="opacity-25"
-									cx="12"
-									cy="12"
-									r="10"
-									stroke="currentColor"
-									stroke-width="4"
-								></circle>
-								<path
-									class="opacity-75"
-									fill="currentColor"
-									d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-								></path>
-							</svg>
-							<span class="text-muted-foreground ml-2 text-sm">加载中...</span>
-						</div>
+						<Loading
+							showSpinner={true}
+							spinnerClass="text-blue-600 dark:text-blue-400"
+							textClass="text-sm"
+							class="py-8"
+						/>
 					{:else if filteredSubmissionVideos.length === 0}
 						<div class="text-muted-foreground flex flex-col items-center justify-center py-8">
 							<svg class="mb-2 h-12 w-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -462,12 +447,13 @@
 									disabled={isLoadingMore}
 								>
 									{#if isLoadingMore}
-										<div class="flex items-center gap-2">
-											<div
-												class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"
-											></div>
-											<span>加载中...</span>
-										</div>
+										<Loading
+											inline={true}
+											showSpinner={true}
+											spinnerClass="text-white"
+											textClass="text-white"
+											class="gap-2"
+										/>
 									{:else}
 										加载更多历史投稿 ({submissionVideos.length}/{submissionTotalCount})
 									{/if}
@@ -533,12 +519,13 @@
 										disabled={isLoadingMore}
 									>
 										{#if isLoadingMore}
-											<div class="flex items-center gap-2">
-												<div
-													class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"
-												></div>
-												<span>加载中...</span>
-											</div>
+											<Loading
+												inline={true}
+												showSpinner={true}
+												spinnerClass="text-white"
+												textClass="text-white"
+												class="gap-2"
+											/>
 										{:else}
 											加载更多 ({submissionVideos.length}/{submissionTotalCount})
 										{/if}

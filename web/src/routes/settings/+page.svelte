@@ -33,6 +33,7 @@
 	import { IsMobile, IsTablet } from '$lib/hooks/is-mobile.svelte.js';
 	// import type { Theme } from '$lib/stores/theme'; // 未使用，已注释
 	import ThemeToggle from '$lib/components/theme-toggle.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
 
 	let config: ConfigResponse | null = null;
 	let loading = false;
@@ -151,7 +152,8 @@
 	let folderStructure = 'Season {{season_pad}}';
 	let bangumiFolderName = '{{title}}';
 	let collectionFolderMode = 'unified';
-	let collectionUnifiedName = 'S01E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}';
+	let collectionUnifiedName =
+		'S01E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}';
 	let timeFormat = '%Y-%m-%d';
 	let interval = 1200;
 	let nfoTimeType = 'favtime';
@@ -1261,9 +1263,7 @@
 			</h1>
 
 			{#if loading}
-				<div class="flex items-center justify-center py-12">
-					<div class="text-muted-foreground">加载中...</div>
-				</div>
+				<Loading />
 			{:else}
 				<!-- 设置分类卡片列表 -->
 				<div
@@ -1324,10 +1324,7 @@
 		class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}"
 	>
 		<div class="min-h-0 flex-1 space-y-6 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
-			<SectionHeader
-				title="文件命名模板"
-				titleTooltip="配置视频、分页和番剧的命名模板与变量规则。"
-			>
+			<SectionHeader title="文件命名模板" titleTooltip="配置视频、分页和番剧的命名模板与变量规则。">
 				{#snippet actions()}
 					<button
 						type="button"
@@ -2227,8 +2224,10 @@
 
 				<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
 					<div class="space-y-2">
-						<Label for="danmaku-update-fresh-days" class="cursor-help" title={danmakuUpdateHelp.freshDays}
-							>新鲜期天数</Label
+						<Label
+							for="danmaku-update-fresh-days"
+							class="cursor-help"
+							title={danmakuUpdateHelp.freshDays}>新鲜期天数</Label
 						>
 						<Input
 							id="danmaku-update-fresh-days"
@@ -2295,8 +2294,10 @@
 					</div>
 
 					<div class="space-y-2">
-						<Label for="danmaku-update-cold-days" class="cursor-help" title={danmakuUpdateHelp.coldDays}
-							>老化期截至天数</Label
+						<Label
+							for="danmaku-update-cold-days"
+							class="cursor-help"
+							title={danmakuUpdateHelp.coldDays}>老化期截至天数</Label
 						>
 						<Input
 							id="danmaku-update-cold-days"
@@ -2649,7 +2650,8 @@
 					</div>
 					<div class="rounded-md bg-yellow-50 p-3 dark:bg-yellow-950/20">
 						<p class="text-xs text-yellow-800 dark:text-yellow-200">
-							动态API每次最多返回 12 条记录。首次全量扫描请求次数多，建议保持启用延迟，后续增量扫描耗时较小。
+							动态API每次最多返回 12
+							条记录。首次全量扫描请求次数多，建议保持启用延迟，后续增量扫描耗时较小。
 						</p>
 					</div>
 				</div>
@@ -3185,7 +3187,9 @@
 					<div class="space-y-1">
 						<h4 class="text-sm font-medium">快捷订阅路径模板</h4>
 						<p class="text-muted-foreground text-sm">
-							添加收藏夹、合集、UP主投稿、番剧源时可直接带出保存路径。支持使用 <code>{'{{name}}'}</code>
+							添加收藏夹、合集、UP主投稿、番剧源时可直接带出保存路径。支持使用 <code
+								>{'{{name}}'}</code
+							>
 							代表源名称。
 						</p>
 					</div>
@@ -3412,7 +3416,8 @@
 							<option value="custom">自定义 JSON</option>
 						</select>
 						<p class="text-muted-foreground text-sm">
-							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头；自定义 JSON 可自行定义 POST Body 结构
+							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头；自定义 JSON
+							可自行定义 POST Body 结构
 						</p>
 					</div>
 
@@ -3453,8 +3458,13 @@
 						/>
 						<div class="text-muted-foreground space-y-1 text-sm">
 							<p>请填写 JSON 对象，键和值都必须是字符串。</p>
-							<p>例如：<code>{'{"Authorization":"Bearer your-token","X-Channel":"clawbot"}'}</code></p>
-							<p>如与自动附带的 Bearer Token 或 openSend 的 apikey 同名，自定义 Headers 会覆盖默认值。</p>
+							<p>
+								例如：<code>{'{"Authorization":"Bearer your-token","X-Channel":"clawbot"}'}</code>
+							</p>
+							<p>
+								如与自动附带的 Bearer Token 或 openSend 的 apikey 同名，自定义 Headers
+								会覆盖默认值。
+							</p>
 						</div>
 					</div>
 
@@ -3481,14 +3491,19 @@
 								class="font-mono text-xs"
 							/>
 							<div class="text-muted-foreground space-y-1 text-sm">
-								<p>支持占位符：&#123;&#123;source&#125;&#125;、&#123;&#123;title&#125;&#125;、&#123;&#123;content&#125;&#125;、&#123;&#123;channel&#125;&#125;、&#123;&#123;event&#125;&#125;、&#123;&#123;sent_at&#125;&#125;</p>
+								<p>
+									支持占位符：&#123;&#123;source&#125;&#125;、&#123;&#123;title&#125;&#125;、&#123;&#123;content&#125;&#125;、&#123;&#123;channel&#125;&#125;、&#123;&#123;event&#125;&#125;、&#123;&#123;sent_at&#125;&#125;
+								</p>
 								<p>&#123;&#123;source&#125;&#125;：固定来源名，当前为 bili-sync</p>
 								<p>&#123;&#123;title&#125;&#125;：推送标题</p>
 								<p>&#123;&#123;content&#125;&#125;：推送正文内容</p>
 								<p>&#123;&#123;channel&#125;&#125;：当前通知渠道名称，例如 webhook</p>
 								<p>&#123;&#123;event&#125;&#125;：事件类型，例如 test_notification</p>
 								<p>&#123;&#123;sent_at&#125;&#125;：发送时间</p>
-								<p>请直接填写有效 JSON。若某个值只写占位符，发送时会按原始类型写入；若嵌在字符串中，则会按文本替换。</p>
+								<p>
+									请直接填写有效
+									JSON。若某个值只写占位符，发送时会按原始类型写入；若嵌在字符串中，则会按文本替换。
+								</p>
 							</div>
 						</div>
 					{/if}
