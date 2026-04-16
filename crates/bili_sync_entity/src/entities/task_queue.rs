@@ -18,6 +18,8 @@ pub enum TaskType {
     UpdateConfig,
     #[sea_orm(string_value = "reload_config")]
     ReloadConfig,
+    #[sea_orm(string_value = "refresh_danmaku")]
+    RefreshDanmaku,
 }
 
 /// 任务状态枚举

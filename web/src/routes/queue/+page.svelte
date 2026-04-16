@@ -123,7 +123,8 @@
 			delete_video: '删除视频',
 			add_video_source: '添加视频源',
 			update_config: '更新配置',
-			reload_config: '重载配置'
+			reload_config: '重载配置',
+			refresh_danmaku: '刷新弹幕'
 		};
 		return typeMap[taskType] || taskType;
 	}
@@ -136,7 +137,8 @@
 			delete_video: Trash2,
 			add_video_source: Plus,
 			update_config: Settings,
-			reload_config: RefreshCw
+			reload_config: RefreshCw,
+			refresh_danmaku: RefreshCw
 		};
 		return iconMap[taskType] || ListTodo;
 	}
@@ -336,6 +338,29 @@
 					</div>
 				</CardContent>
 			</Card>
+
+			<Card>
+				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
+					<CardTitle class="text-sm font-medium">弹幕刷新队列</CardTitle>
+					<RefreshCw class="text-muted-foreground h-4 w-4" />
+				</CardHeader>
+				<CardContent>
+					<div class="text-2xl font-bold">{queueStatus.danmaku_queue.length}</div>
+					<div class="flex items-center gap-2">
+						<Badge
+							variant={getQueueStatusVariant(
+								queueStatus.danmaku_queue.is_processing,
+								queueStatus.danmaku_queue.length > 0
+							)}
+						>
+							{getQueueStatusText(
+								queueStatus.danmaku_queue.is_processing,
+								queueStatus.danmaku_queue.length > 0
+							)}
+						</Badge>
+					</div>
+				</CardContent>
+			</Card>
 		</div>
 
 		<!-- 队列详情 -->
@@ -474,6 +499,60 @@
 						{:else}
 							<div class="space-y-3">
 								{#each queueStatus.add_queue.tasks as task (task.task_id)}
+									<div class="bg-muted/50 flex items-center justify-between rounded-lg p-3">
+										<div class="flex items-center gap-3">
+											<svelte:component
+												this={getTaskTypeIcon(task.task_type)}
+												class="text-muted-foreground h-4 w-4"
+											/>
+											<div>
+												<p class="text-sm font-medium">{getTaskTypeName(task.task_type)}</p>
+												<p class="text-muted-foreground text-xs">ID: {task.task_id}</p>
+											</div>
+										</div>
+										<div class="flex items-center gap-2">
+											<p class="text-muted-foreground text-xs">{formatTime(task.created_at)}</p>
+											<Button
+												variant="outline"
+												size="sm"
+												class="h-7 px-2 text-xs"
+												data-glossary-term="取消任务"
+												disabled={isCancelling(task.task_id)}
+												onclick={() => handleCancelTask(task.task_id)}
+											>
+												<X class="mr-1 h-3.5 w-3.5" />
+												{isCancelling(task.task_id) ? '取消中' : '取消'}
+											</Button>
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</CardContent>
+				</Card>
+
+				<Card>
+					<CardHeader>
+						<CardTitle class="flex items-center gap-2">
+							<RefreshCw class="h-5 w-5" />
+							弹幕刷新队列
+							{#if queueStatus.danmaku_queue.is_processing}
+								<Badge variant="destructive">处理中</Badge>
+							{/if}
+						</CardTitle>
+						<CardDescription>等待处理的手动弹幕刷新任务</CardDescription>
+					</CardHeader>
+					<CardContent>
+						{#if queueStatus.danmaku_queue.tasks.length === 0}
+							<div class="text-muted-foreground flex items-center justify-center py-8">
+								<div class="text-center">
+									<CheckCircle class="mx-auto mb-3 h-12 w-12 opacity-50" />
+									<p>队列为空</p>
+								</div>
+							</div>
+						{:else}
+							<div class="space-y-3">
+								{#each queueStatus.danmaku_queue.tasks as task (task.task_id)}
 									<div class="bg-muted/50 flex items-center justify-between rounded-lg p-3">
 										<div class="flex items-center gap-3">
 											<svelte:component

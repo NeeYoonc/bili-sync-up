@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use crate::bilibili::analyzer::PageAnalyzer;
 use crate::bilibili::client::BiliClient;
 use crate::bilibili::credential::encoded_query;
-use crate::bilibili::danmaku::{DanmakuElem, DanmakuWriter, DmSegMobileReply};
+use crate::bilibili::danmaku::{DanmakuElem, DmSegMobileReply};
 use crate::bilibili::subtitle::{SubTitle, SubTitleBody, SubTitleInfo, SubTitlesInfo};
 use crate::bilibili::{Validate, VideoInfo, MIXIN_KEY};
 use crate::hardware::HardwareFingerprint;
@@ -450,14 +450,6 @@ impl<'a> Video<'a> {
         debug!("弹幕获取完成，共{}条弹幕", all_danmaku.len());
 
         Ok(all_danmaku)
-    }
-
-    pub async fn get_danmaku_writer(&self, page: &'a PageInfo, token: CancellationToken) -> Result<DanmakuWriter<'a>> {
-        let all_danmaku = self.get_danmaku_elements(page, token).await?;
-        Ok(DanmakuWriter::new(
-            page,
-            all_danmaku.into_iter().map(|x| x.into()).collect(),
-        ))
     }
 
     /// 带重试机制的弹幕分段获取

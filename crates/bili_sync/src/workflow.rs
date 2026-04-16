@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use bili_sync_entity::*;
-use chrono::Datelike;
+use chrono::{Datelike, Utc};
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt, TryStreamExt};
 use sea_orm::entity::prelude::*;
@@ -804,6 +804,24 @@ pub async fn process_video_source(
         info!("任务已暂停/取消，跳过详情与下载阶段");
         return Ok((new_video_count, new_videos));
     }
+
+    if video_source.download_danmaku() && !(video_source.audio_only() && video_source.audio_only_m4a_only()) {
+        if let Err(err) = crate::workflow_danmaku::schedule_incremental_danmaku_for_source(
+            connection,
+            video_source.filter_expr(),
+            &crate::config::reload_config(),
+        )
+        .await
+        {
+            warn!(
+                "{}「{}」准备弹幕增量状态失败，将继续执行常规下载流程: {:#}",
+                video_source.source_type_display(),
+                video_source.source_name_display(),
+                err
+            );
+        }
+    }
+
     if new_video_count == 0 {
         let has_unfilled = !filter_unfilled_videos(video_source.filter_expr(), connection)
             .await?
@@ -6341,10 +6359,14 @@ async fn download_page(
         },
         collection_page_episode_number.or(submission_page_episode_number),
     ));
+    let danmaku_config = crate::config::reload_config();
     let res_4_fut = Box::pin(fetch_page_danmaku(
         separate_status[3],
         bili_client,
         video_model,
+        &page_model,
+        connection,
+        &danmaku_config,
         &page_info,
         danmaku_path,
         token.clone(),
@@ -6368,6 +6390,11 @@ async fn download_page(
             video_result.audio_stream_size_bytes,
         ),
         Err(err) => (Err(err), None, None, None),
+    };
+
+    let (res_4, danmaku_sync_update) = match res_4 {
+        Ok(danmaku_result) => (Ok(danmaku_result.status), danmaku_result.sync_update),
+        Err(err) => (Err(err), None),
     };
 
     let results = [res_1, res_2, res_3, res_4, res_5]
@@ -6675,6 +6702,9 @@ async fn download_page(
     let mut page_active_model: page::ActiveModel = page_model.into();
     page_active_model.download_status = Set(status.into());
     page_active_model.path = Set(Some(final_video_path_str));
+    if let Some(sync_update) = danmaku_sync_update.as_ref() {
+        sync_update.apply_to_active_model(&mut page_active_model);
+    }
     if let Some(file_size_bytes) = page_file_size_bytes {
         page_active_model.file_size_bytes = Set(Some(file_size_bytes));
     }
@@ -7525,18 +7555,29 @@ async fn fetch_page_video(
     })
 }
 
+pub struct PageDanmakuFetchResult {
+    pub status: ExecutionStatus,
+    pub sync_update: Option<crate::workflow_danmaku::PageDanmakuSyncUpdate>,
+}
+
 pub async fn fetch_page_danmaku(
     should_run: bool,
     bili_client: &BiliClient,
     video_model: &video::Model,
+    page_model: &page::Model,
+    _connection: &DatabaseConnection,
+    config: &crate::config::Config,
     page_info: &PageInfo,
     danmaku_path: PathBuf,
     token: CancellationToken,
-) -> Result<ExecutionStatus> {
+) -> Result<PageDanmakuFetchResult> {
     const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     if !should_run {
-        return Ok(ExecutionStatus::Skipped);
+        return Ok(PageDanmakuFetchResult {
+            status: ExecutionStatus::Skipped,
+            sync_update: None,
+        });
     }
 
     // 检查 CID 是否有效（-1 表示信息获取失败）
@@ -7545,7 +7586,10 @@ pub async fn fetch_page_danmaku(
             "视频 {} 的 CID 无效（{}），跳过弹幕下载",
             &video_model.name, page_info.cid
         );
-        return Ok(ExecutionStatus::Ignored(anyhow::anyhow!("CID 无效，无法下载弹幕")));
+        return Ok(PageDanmakuFetchResult {
+            status: ExecutionStatus::Ignored(anyhow::anyhow!("CID 无效，无法下载弹幕")),
+            sync_update: None,
+        });
     }
 
     // 检查是否为番剧，如果是番剧则需要从API获取正确的 aid
@@ -7575,12 +7619,22 @@ pub async fn fetch_page_danmaku(
         Video::new(bili_client, video_model.bvid.clone())
     };
 
-    let danmaku_writer = tokio::select! {
+    let sync_update = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
         res = tokio::time::timeout(
             SIDECAR_REQUEST_TIMEOUT,
-            bili_video.get_danmaku_writer(page_info, token.clone()),
+            crate::workflow_danmaku::sync_page_danmaku(
+                &bili_video,
+                config,
+                video_model,
+                page_model,
+                page_info,
+                &danmaku_path,
+                None,
+                Utc::now(),
+                token.clone(),
+            ),
         ) => match res {
             Ok(inner) => inner?,
             Err(_) => {
@@ -7593,18 +7647,10 @@ pub async fn fetch_page_danmaku(
             }
         },
     };
-
-    tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, danmaku_writer.write(danmaku_path))
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "弹幕写入超时（{} 秒）: 视频「{}」第 {} 页",
-                SIDECAR_REQUEST_TIMEOUT.as_secs(),
-                video_model.name,
-                page_info.page
-            )
-        })??;
-    Ok(ExecutionStatus::Succeeded)
+    Ok(PageDanmakuFetchResult {
+        status: ExecutionStatus::Succeeded,
+        sync_update: Some(sync_update),
+    })
 }
 
 pub async fn fetch_page_subtitle(

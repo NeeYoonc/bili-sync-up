@@ -7,16 +7,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use bili_sync_entity::{collection, favorite, page, submission, video, video_source, watch_later};
 use chrono::{DateTime, TimeZone, Utc};
 use sea_orm::entity::prelude::*;
+use sea_orm::sea_query::SimpleExpr;
 use sea_orm::{ActiveModelTrait, Condition, QueryFilter, QuerySelect, Set};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::info;
 
-use crate::bilibili::{
-    parse_event_name, BiliClient, DanmakuElem, DanmakuWriter, Dimension, PageInfo as BiliPageInfo, Video, VideoInfo,
-};
+use crate::bilibili::{parse_event_name, DanmakuElem, DanmakuWriter, Dimension, PageInfo as BiliPageInfo, Video};
 use crate::config::Config;
-use crate::utils::danmaku_schedule::{should_sync_danmaku, Decision, Stage};
-use crate::utils::status::STATUS_OK;
+use crate::utils::danmaku_schedule::{should_sync_danmaku, stage_for_age, Decision, Stage};
+use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK};
 use crate::utils::time_format::{beijing_timezone, parse_time_string, to_standard_string};
 
 /// 弹幕子任务在 download_status 中的位偏移（与 PageStatus 保持一致）。
@@ -28,23 +27,65 @@ struct ExistingDanmakuCursor {
     known_source_ids: HashSet<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PageDanmakuSyncUpdate {
+    pub danmaku_last_synced_at: String,
+    pub danmaku_sync_generation: u32,
+    pub danmaku_cid_snapshot: i64,
+    pub danmaku_last_write_count: u32,
+    pub duration: Option<u32>,
+    pub width: Option<Option<u32>>,
+    pub height: Option<Option<u32>>,
+    pub name: Option<String>,
+}
+
+impl PageDanmakuSyncUpdate {
+    pub fn apply_to_active_model(&self, active: &mut page::ActiveModel) {
+        active.danmaku_last_synced_at = Set(Some(self.danmaku_last_synced_at.clone()));
+        active.danmaku_sync_generation = Set(self.danmaku_sync_generation);
+        active.danmaku_cid_snapshot = Set(Some(self.danmaku_cid_snapshot));
+        active.danmaku_last_write_count = Set(self.danmaku_last_write_count);
+
+        if let Some(duration) = self.duration {
+            active.duration = Set(duration);
+        }
+        if let Some(width) = self.width {
+            active.width = Set(width);
+        }
+        if let Some(height) = self.height {
+            active.height = Set(height);
+        }
+        if let Some(name) = &self.name {
+            active.name = Set(name.clone());
+        }
+    }
+}
+
+#[cfg(test)]
 fn is_bili_request_failed_with_codes(err: &anyhow::Error, codes: &[i64]) -> bool {
     err.chain().any(|cause| {
-        cause.downcast_ref::<crate::bilibili::BiliError>().is_some_and(|e| match e {
-            crate::bilibili::BiliError::RequestFailed(code, _) => codes.contains(code),
-            _ => false,
-        })
+        cause
+            .downcast_ref::<crate::bilibili::BiliError>()
+            .is_some_and(|e| match e {
+                crate::bilibili::BiliError::RequestFailed(code, _) => codes.contains(code),
+                _ => false,
+            })
     })
 }
 
+#[cfg(test)]
 fn should_fallback_to_stored_pages(err: &anyhow::Error) -> bool {
     is_bili_request_failed_with_codes(err, &[-404, 62002, 62012])
 }
 
+#[cfg(test)]
 fn build_stored_page_info(page_model: &page::Model) -> Result<BiliPageInfo> {
     let cid = page_model.danmaku_cid_snapshot.unwrap_or(page_model.cid);
     if cid <= 0 {
-        bail!("分页 pid={} 缺少可用 cid，无法回退到数据库分页信息刷新弹幕", page_model.pid);
+        bail!(
+            "分页 pid={} 缺少可用 cid，无法回退到数据库分页信息刷新弹幕",
+            page_model.pid
+        );
     }
 
     let dimension = match (page_model.width, page_model.height) {
@@ -66,100 +107,99 @@ fn build_stored_page_info(page_model: &page::Model) -> Result<BiliPageInfo> {
     })
 }
 
-async fn load_fresh_pages_or_fallback(
-    bili_video: &Video<'_>,
-    video_model: &video::Model,
-    db_pages: &[page::Model],
-    error_context: &str,
-) -> Result<Vec<BiliPageInfo>> {
-    match bili_video.get_view_info().await {
-        Ok(VideoInfo::Detail { pages, .. }) => Ok(pages),
-        Ok(_) => {
-            info!(
-                "视频「{}」({}) 的 view_info 返回了非 Detail 类型，改用数据库已存分页信息继续刷新弹幕",
-                video_model.name, video_model.bvid
-            );
-            db_pages.iter().map(build_stored_page_info).collect()
-        }
-        Err(err) if should_fallback_to_stored_pages(&err) => {
-            info!(
-                "视频「{}」({}) 获取 view_info 失败，改用数据库已存分页信息继续刷新弹幕：{:#}",
-                video_model.name, video_model.bvid, err
-            );
-            db_pages.iter().map(build_stored_page_info).collect()
-        }
-        Err(err) => Err(err).with_context(|| error_context.to_string()),
-    }
-}
-
-pub async fn refresh_danmaku_incremental(
-    bili_client: &BiliClient,
+pub async fn initialize_danmaku_incremental_baseline(
     connection: &DatabaseConnection,
     config: &Config,
-) -> Result<()> {
+) -> Result<usize> {
     if !config.danmaku_update_policy.enabled {
-        return Ok(());
+        return Ok(0);
     }
-
-    info!("开始执行本轮弹幕增量更新");
 
     let candidates = load_candidate_videos(connection).await?;
     let now = Utc::now();
-    let mut processed = 0usize;
-    let mut refreshed = 0usize;
+    let now_str = to_standard_string(now.with_timezone(&beijing_timezone()));
+    let mut initialized = 0usize;
 
     for (video_model, pages) in candidates {
         let pubtime = stored_beijing_naive_to_utc(video_model.pubtime);
-        let selected = pages
-            .into_iter()
-            .filter_map(|page_model| {
-                let last_synced = page_model
-                    .danmaku_last_synced_at
-                    .as_deref()
-                    .and_then(parse_stored_datetime);
+        let generation = stage_for_age(&config.danmaku_update_policy, pubtime, now, true).as_generation();
 
-                match should_sync_danmaku(
+        for page_model in pages {
+            if page_model.danmaku_last_synced_at.is_some() {
+                continue;
+            }
+
+            let mut active: page::ActiveModel = page_model.clone().into();
+            active.danmaku_last_synced_at = Set(Some(now_str.clone()));
+            active.danmaku_sync_generation = Set(generation);
+            if page_model.cid > 0 && page_model.danmaku_cid_snapshot != Some(page_model.cid) {
+                active.danmaku_cid_snapshot = Set(Some(page_model.cid));
+            }
+            active
+                .update(connection)
+                .await
+                .with_context(|| format!("初始化分页 {} 的弹幕增量基线失败", page_model.id))?;
+            initialized += 1;
+        }
+    }
+
+    if initialized > 0 {
+        info!(
+            "弹幕增量更新首次启用：已为 {} 个已完成分页写入基线同步时间，避免立即扫全库",
+            initialized
+        );
+    } else {
+        info!("弹幕增量更新首次启用：没有需要初始化基线的已完成分页");
+    }
+
+    Ok(initialized)
+}
+
+pub async fn schedule_incremental_danmaku_for_source(
+    connection: &DatabaseConnection,
+    source_filter: SimpleExpr,
+    config: &Config,
+) -> Result<usize> {
+    if !config.danmaku_update_policy.enabled {
+        return Ok(0);
+    }
+
+    let candidates = load_candidate_videos_with_filter(connection, Condition::all().add(source_filter)).await?;
+    let now = Utc::now();
+    let mut selected_pages = Vec::new();
+
+    for (video_model, pages) in candidates {
+        let pubtime = stored_beijing_naive_to_utc(video_model.pubtime);
+        for page_model in pages {
+            let last_synced = page_model
+                .danmaku_last_synced_at
+                .as_deref()
+                .and_then(parse_stored_datetime);
+
+            if matches!(
+                should_sync_danmaku(
                     &config.danmaku_update_policy,
                     pubtime,
                     last_synced,
                     page_model.danmaku_sync_generation,
                     now,
-                ) {
-                    Decision::Sync { next_stage } => Some((page_model, Some(next_stage))),
-                    Decision::Skip => None,
-                }
-            })
-            .collect::<Vec<_>>();
-
-        if selected.is_empty() {
-            continue;
-        }
-
-        match refresh_video_pages(bili_client, connection, config, &video_model, selected, now).await {
-            Ok(count) => {
-                processed += 1;
-                refreshed += count;
-            }
-            Err(err) => {
-                error!(
-                    "刷新视频「{}」({}) 的弹幕失败：{:#}",
-                    video_model.name, video_model.bvid, err
-                );
+                ),
+                Decision::Sync { .. }
+            ) {
+                selected_pages.push(page_model);
             }
         }
     }
 
-    info!("弹幕增量更新结束：处理视频 {} 个，刷新分页 {} 个", processed, refreshed);
-    Ok(())
+    let scheduled = mark_pages_danmaku_pending(connection, selected_pages, false).await?;
+    if scheduled > 0 {
+        info!("已将 {} 个到期分页的弹幕并回主下载状态流，等待本轮下载阶段处理", scheduled);
+    }
+    Ok(scheduled)
 }
 
-pub async fn refresh_danmaku_for_video(
-    video_id: i32,
-    bili_client: &BiliClient,
-    connection: &DatabaseConnection,
-    config: &Config,
-) -> Result<usize> {
-    let video_model = video::Entity::find_by_id(video_id)
+pub async fn schedule_video_danmaku_refresh(connection: &DatabaseConnection, video_id: i32) -> Result<usize> {
+    video::Entity::find_by_id(video_id)
         .one(connection)
         .await?
         .ok_or_else(|| anyhow!("video {} 不存在", video_id))?;
@@ -167,64 +207,86 @@ pub async fn refresh_danmaku_for_video(
         .filter(page::Column::VideoId.eq(video_id))
         .all(connection)
         .await?;
-
-    if pages.is_empty() {
-        return Ok(0);
-    }
-
-    let now = Utc::now();
-    let selected = pages.into_iter().map(|page_model| (page_model, None)).collect();
-    refresh_video_pages(bili_client, connection, config, &video_model, selected, now).await
+    mark_pages_danmaku_pending(connection, pages, true).await
 }
 
-pub async fn refresh_danmaku_for_page(
-    page_id: i32,
-    bili_client: &BiliClient,
-    connection: &DatabaseConnection,
-    config: &Config,
-) -> Result<usize> {
+pub async fn schedule_page_danmaku_refresh(connection: &DatabaseConnection, page_id: i32) -> Result<usize> {
     let page_model = page::Entity::find_by_id(page_id)
         .one(connection)
         .await?
         .ok_or_else(|| anyhow!("page {} 不存在", page_id))?;
-    let video_model = video::Entity::find_by_id(page_model.video_id)
-        .one(connection)
-        .await?
-        .ok_or_else(|| anyhow!("page {} 的宿主 video 不存在", page_id))?;
+    mark_pages_danmaku_pending(connection, vec![page_model], true).await
+}
 
-    let bili_video = Video::new(bili_client, video_model.bvid.clone());
-    let fresh_pages = load_fresh_pages_or_fallback(
-        &bili_video,
-        &video_model,
-        std::slice::from_ref(&page_model),
-        &format!("获取视频 {} 的 view_info 失败", video_model.bvid),
-    )
-    .await?;
-    let fresh = fresh_pages
-        .iter()
-        .find(|page_info| page_info.page == page_model.pid)
-        .ok_or_else(|| {
-            anyhow!(
-                "视频「{}」({}) 的分页 pid={} 在最新 view_info 中已不存在",
-                video_model.name,
-                video_model.bvid,
-                page_model.pid
-            )
-        })?;
+async fn mark_pages_danmaku_pending(
+    connection: &DatabaseConnection,
+    pages: Vec<page::Model>,
+    force_auto_download: bool,
+) -> Result<usize> {
+    if pages.is_empty() {
+        return Ok(0);
+    }
 
-    refresh_one_page(
-        &bili_video,
-        connection,
-        config,
-        &video_model,
-        page_model,
-        fresh,
-        None,
-        Utc::now(),
-    )
-    .await?;
+    let mut page_updates = Vec::new();
+    let mut affected_video_ids = HashSet::new();
 
-    Ok(1)
+    for page_model in pages {
+        let mut page_status = PageStatus::from(page_model.download_status);
+        let was_pending = page_status.get(DANMAKU_STATUS_OFFSET) == 0;
+        if !was_pending {
+            page_status.set(DANMAKU_STATUS_OFFSET, 0);
+            let mut active: page::ActiveModel = page_model.clone().into();
+            active.download_status = Set(page_status.into());
+            page_updates.push(active);
+        }
+        affected_video_ids.insert(page_model.video_id);
+    }
+
+    if page_updates.is_empty() && !force_auto_download {
+        return Ok(0);
+    }
+
+    let videos = video::Entity::find()
+        .filter(video::Column::Id.is_in(affected_video_ids.iter().copied().collect::<Vec<_>>()))
+        .all(connection)
+        .await?;
+
+    let mut video_updates = Vec::new();
+    for video_model in videos {
+        let mut video_status = VideoStatus::from(video_model.download_status);
+        let mut changed = false;
+
+        if video_status.get(4) != 0 {
+            video_status.set(4, 0);
+            changed = true;
+        }
+
+        if changed || (force_auto_download && !video_model.auto_download) {
+            let mut active: video::ActiveModel = video_model.into();
+            active.download_status = Set(video_status.into());
+            if force_auto_download {
+                active.auto_download = Set(true);
+            }
+            active.valid = Set(true);
+            video_updates.push(active);
+        }
+    }
+
+    if page_updates.is_empty() && video_updates.is_empty() {
+        return Ok(0);
+    }
+
+    let scheduled_count = page_updates.len();
+    let txn = crate::database::begin_traced_transaction(connection, "workflow_danmaku.mark_pages_danmaku_pending").await?;
+    for update in video_updates {
+        update.update(&txn).await?;
+    }
+    for update in page_updates {
+        update.update(&txn).await?;
+    }
+    txn.commit().await?;
+
+    Ok(scheduled_count)
 }
 
 async fn load_candidate_videos(connection: &DatabaseConnection) -> Result<Vec<(video::Model, Vec<page::Model>)>> {
@@ -305,8 +367,15 @@ async fn load_candidate_videos(connection: &DatabaseConnection) -> Result<Vec<(v
         );
     }
 
+    load_candidate_videos_with_filter(connection, Condition::all().add(source_filter)).await
+}
+
+async fn load_candidate_videos_with_filter(
+    connection: &DatabaseConnection,
+    filter: Condition,
+) -> Result<Vec<(video::Model, Vec<page::Model>)>> {
     video::Entity::find()
-        .filter(Condition::all().add(video::Column::Valid.eq(true)).add(source_filter))
+        .filter(Condition::all().add(video::Column::Valid.eq(true)).add(filter))
         .find_with_related(page::Entity)
         .all(connection)
         .await
@@ -316,10 +385,7 @@ async fn load_candidate_videos(connection: &DatabaseConnection) -> Result<Vec<(v
                 .map(|(video_model, pages)| {
                     let filtered_pages = pages
                         .into_iter()
-                        .filter(|page_model| {
-                            danmaku_subtask_completed(page_model.download_status)
-                                && page_model.path.as_deref().is_some_and(|path| !path.is_empty())
-                        })
+                        .filter(|page_model| danmaku_subtask_completed(page_model.download_status))
                         .collect::<Vec<_>>();
                     (video_model, filtered_pages)
                 })
@@ -333,89 +399,17 @@ fn danmaku_subtask_completed(status: u32) -> bool {
     slot == STATUS_OK
 }
 
-fn reset_non_danmaku_subtasks(status: u32) -> u32 {
-    let mut next_status = status;
-    for offset in 0..5 {
-        if offset == DANMAKU_STATUS_OFFSET {
-            continue;
-        }
-        next_status &= !(0b111 << (offset * 3));
-    }
-    next_status & !(1 << 31)
-}
-
-fn reset_video_for_page_redownload(status: u32) -> u32 {
-    const PAGE_DOWNLOAD_OFFSET: usize = 4;
-    let cleared = status & !(0b111 << (PAGE_DOWNLOAD_OFFSET * 3));
-    cleared & !(1 << 31)
-}
-
-async fn refresh_video_pages(
-    bili_client: &BiliClient,
-    connection: &DatabaseConnection,
-    config: &Config,
-    video_model: &video::Model,
-    selected: Vec<(page::Model, Option<Stage>)>,
-    now: DateTime<Utc>,
-) -> Result<usize> {
-    let bili_video = Video::new(bili_client, video_model.bvid.clone());
-    let selected_pages = selected
-        .iter()
-        .map(|(page_model, _)| page_model.clone())
-        .collect::<Vec<_>>();
-    let fresh_pages = load_fresh_pages_or_fallback(
-        &bili_video,
-        video_model,
-        &selected_pages,
-        &format!("刷新视频 {} 时获取 view_info 失败", video_model.bvid),
-    )
-    .await?;
-
-    let mut success = 0usize;
-    for (db_page, next_stage) in selected {
-        let fresh = fresh_pages.iter().find(|page_info| page_info.page == db_page.pid);
-        let Some(fresh) = fresh else {
-            warn!(
-                "视频「{}」({}) 的分页 pid={} 在最新 view_info 中不存在，跳过",
-                video_model.name, video_model.bvid, db_page.pid
-            );
-            continue;
-        };
-
-        if let Err(err) = refresh_one_page(
-            &bili_video,
-            connection,
-            config,
-            video_model,
-            db_page,
-            fresh,
-            next_stage,
-            now,
-        )
-        .await
-        {
-            error!(
-                "刷新视频「{}」({}) 分页 pid={} 弹幕失败：{:#}",
-                video_model.name, video_model.bvid, fresh.page, err
-            );
-            continue;
-        }
-        success += 1;
-    }
-
-    Ok(success)
-}
-
-async fn refresh_one_page(
+pub async fn sync_page_danmaku(
     bili_video: &Video<'_>,
-    connection: &DatabaseConnection,
     config: &Config,
     video_model: &video::Model,
-    db_page: page::Model,
+    db_page: &page::Model,
     fresh: &BiliPageInfo,
+    danmaku_path: &Path,
     next_stage: Option<Stage>,
     now: DateTime<Utc>,
-) -> Result<()> {
+    token: CancellationToken,
+) -> Result<PageDanmakuSyncUpdate> {
     if fresh.cid <= 0 {
         bail!("分页 pid={} 返回了无效 cid", fresh.page);
     }
@@ -424,7 +418,6 @@ async fn refresh_one_page(
     let resolved_stage = next_stage.unwrap_or_else(|| {
         crate::utils::danmaku_schedule::stage_for_age(&config.danmaku_update_policy, pubtime, now, false)
     });
-    let danmaku_path = resolve_danmaku_path(&db_page)?;
     let (fresh_width, fresh_height) = extract_dimension(fresh.dimension.as_ref());
     let fresh_duration = if fresh.duration > 0 {
         fresh.duration
@@ -443,8 +436,8 @@ async fn refresh_one_page(
     let name_changed = db_page.name != fresh_name;
 
     if cid_changed {
-        warn!(
-            "检测到视频「{}」({}) 分页 pid={} 的 cid 发生变化 ({} -> {})，已重置相关下载状态",
+        info!(
+            "检测到视频「{}」({}) 分页 pid={} 的 cid 发生变化 ({} -> {})，本次仅更新弹幕快照，不重置视频下载任务，也不改写本地分页元数据",
             video_model.name, video_model.bvid, fresh.page, db_page.cid, fresh.cid
         );
     }
@@ -467,7 +460,7 @@ async fn refresh_one_page(
         .as_deref()
         .and_then(parse_stored_datetime);
     let danmaku_elems = bili_video
-        .get_danmaku_elements(&page_info_for_danmaku, CancellationToken::new())
+        .get_danmaku_elements(&page_info_for_danmaku, token)
         .await?;
     let file_exists = tokio::fs::metadata(&danmaku_path).await.is_ok();
     let fetched_danmaku_count = danmaku_elems.len() as u32;
@@ -481,7 +474,7 @@ async fn refresh_one_page(
                 &page_info_for_danmaku,
                 incremental_elems.into_iter().map(Into::into).collect(),
             );
-            writer.append(danmaku_path.clone()).await?;
+            writer.append(danmaku_path.to_path_buf()).await?;
         }
         incremental_count
     } else {
@@ -498,55 +491,6 @@ async fn refresh_one_page(
     };
 
     let now_str = to_standard_string(now.with_timezone(&beijing_timezone()));
-    let mut active: page::ActiveModel = db_page.clone().into();
-    active.danmaku_last_synced_at = Set(Some(now_str));
-    active.danmaku_sync_generation = Set(resolved_stage.as_generation());
-    active.danmaku_cid_snapshot = Set(Some(fresh.cid));
-    active.danmaku_last_write_count = Set(last_write_count);
-
-    if cid_changed {
-        active.cid = Set(fresh.cid);
-        active.download_status = Set(reset_non_danmaku_subtasks(db_page.download_status));
-        active.file_size_bytes = Set(None);
-        active.video_stream_size_bytes = Set(None);
-        active.audio_stream_size_bytes = Set(None);
-        active.play_video_streams = Set(None);
-        active.play_audio_streams = Set(None);
-        active.play_subtitle_streams = Set(None);
-        active.play_streams_updated_at = Set(None);
-
-        let mut video_active: video::ActiveModel = video_model.clone().into();
-        let new_video_status = reset_video_for_page_redownload(video_model.download_status);
-        let mut should_update_video = false;
-        if new_video_status != video_model.download_status {
-            video_active.download_status = Set(new_video_status);
-            should_update_video = true;
-        }
-        if video_model.single_page == Some(true) && video_model.cid != Some(fresh.cid) {
-            video_active.cid = Set(Some(fresh.cid));
-            should_update_video = true;
-        }
-        if should_update_video {
-            video_active
-                .update(connection)
-                .await
-                .context("cid 变化后更新 video 状态失败")?;
-        }
-    }
-
-    if duration_changed {
-        active.duration = Set(fresh_duration);
-    }
-    if dimension_changed {
-        active.width = Set(fresh_width);
-        active.height = Set(fresh_height);
-    }
-    if name_changed {
-        active.name = Set(fresh_name);
-    }
-
-    active.update(connection).await.context("更新 page 弹幕同步状态失败")?;
-
     info!(
         "视频「{}」({}) 分页 pid={} 弹幕已刷新 -> 阶段={}",
         video_model.name,
@@ -555,7 +499,16 @@ async fn refresh_one_page(
         resolved_stage.label()
     );
 
-    Ok(())
+    Ok(PageDanmakuSyncUpdate {
+        danmaku_last_synced_at: now_str,
+        danmaku_sync_generation: resolved_stage.as_generation(),
+        danmaku_cid_snapshot: fresh.cid,
+        danmaku_last_write_count: last_write_count,
+        duration: (!cid_changed && duration_changed).then_some(fresh_duration),
+        width: (!cid_changed && dimension_changed).then_some(fresh_width),
+        height: (!cid_changed && dimension_changed).then_some(fresh_height),
+        name: (!cid_changed && name_changed).then_some(fresh_name),
+    })
 }
 
 fn extract_dimension(dimension: Option<&Dimension>) -> (Option<u32>, Option<u32>) {
@@ -564,21 +517,6 @@ fn extract_dimension(dimension: Option<&Dimension>) -> (Option<u32>, Option<u32>
         Some(dimension) => (Some(dimension.height), Some(dimension.width)),
         None => (None, None),
     }
-}
-
-fn resolve_danmaku_path(page_model: &page::Model) -> Result<PathBuf> {
-    let video_path = page_model
-        .path
-        .as_deref()
-        .filter(|path| !path.is_empty())
-        .ok_or_else(|| anyhow!("page 未记录下载路径，无法推断弹幕位置"))?;
-    let video_path = Path::new(video_path);
-    let parent = video_path.parent().context("invalid page path format")?;
-    let file_stem = video_path
-        .file_stem()
-        .context("invalid page path format")?
-        .to_string_lossy();
-    Ok(parent.join(format!("{}.zh-CN.default.ass", file_stem)))
 }
 
 fn make_tmp_path(target: &Path) -> PathBuf {
@@ -689,6 +627,199 @@ fn parse_stored_datetime(value: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bili_sync_migration::{Migrator, MigratorTrait};
+    use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+    use sea_orm::{ActiveModelTrait, DatabaseBackend, DatabaseConnection, Set, SqlxSqliteConnector, Statement};
+    use std::fs;
+    use std::path::PathBuf;
+
+    use crate::config::DanmakuUpdatePolicy;
+    use crate::utils::status::STATUS_COMPLETED;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-danmaku-{}-{}", prefix, uuid::Uuid::new_v4()));
+        dir
+    }
+
+    async fn create_test_db(prefix: &str) -> DatabaseConnection {
+        let dir = unique_temp_dir(prefix);
+        fs::create_dir_all(&dir).expect("应能创建临时数据库目录");
+        let db_path = dir.join("data.sqlite");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("应能连接测试数据库");
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+        Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        db.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "ALTER TABLE page ADD COLUMN ai_renamed INTEGER DEFAULT 0",
+        ))
+        .await
+        .ok();
+        db
+    }
+
+    async fn insert_test_submission(db: &DatabaseConnection, id: i32) {
+        submission::ActiveModel {
+            id: Set(id),
+            upper_id: Set(10_000 + i64::from(id)),
+            upper_name: Set(format!("测试UP{id}")),
+            path: Set(format!("/tmp/submission-{id}")),
+            created_at: Set("2026-04-15 00:00:00".to_string()),
+            latest_row_at: Set("2026-04-15 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
+            selected_videos: Set(None),
+            keyword_filters: Set(None),
+            keyword_filter_mode: Set(None),
+            blacklist_keywords: Set(None),
+            whitelist_keywords: Set(None),
+            keyword_case_sensitive: Set(false),
+            min_duration_seconds: Set(None),
+            max_duration_seconds: Set(None),
+            published_after: Set(None),
+            published_before: Set(None),
+            audio_only: Set(false),
+            audio_only_m4a_only: Set(false),
+            flat_folder: Set(false),
+            download_danmaku: Set(true),
+            download_subtitle: Set(false),
+            ai_rename: Set(false),
+            ai_rename_video_prompt: Set(String::new()),
+            ai_rename_audio_prompt: Set(String::new()),
+            ai_rename_enable_multi_page: Set(false),
+            ai_rename_enable_collection: Set(false),
+            ai_rename_enable_bangumi: Set(false),
+            ai_rename_rename_parent_dir: Set(false),
+            use_dynamic_api: Set(false),
+            dynamic_api_full_synced: Set(false),
+            last_scan_at: Set(None),
+            next_scan_at: Set(None),
+            no_update_streak: Set(0),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试投稿源");
+    }
+
+    async fn insert_test_video(
+        db: &DatabaseConnection,
+        id: i32,
+        submission_id: i32,
+        bvid: &str,
+        title: &str,
+        pubtime: chrono::DateTime<Utc>,
+    ) {
+        let naive = pubtime.naive_utc();
+        video::ActiveModel {
+            id: Set(id),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(Some(submission_id)),
+            source_id: Set(None),
+            source_type: Set(None),
+            upper_id: Set(10_000 + i64::from(submission_id)),
+            upper_name: Set(format!("测试UP{submission_id}")),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set(title.to_string()),
+            path: Set("/tmp/video".to_string()),
+            category: Set(0),
+            bvid: Set(bvid.to_string()),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(naive),
+            pubtime: Set(naive),
+            favtime: Set(naive),
+            download_status: Set(completed_page_status()),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-04-15 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(true),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试视频");
+    }
+
+    async fn insert_test_page(
+        db: &DatabaseConnection,
+        id: i32,
+        video_id: i32,
+        pid: i32,
+        cid: i64,
+        path: &str,
+        last_synced: Option<&str>,
+        generation: u32,
+    ) {
+        page::ActiveModel {
+            id: Set(id),
+            video_id: Set(video_id),
+            cid: Set(cid),
+            pid: Set(pid),
+            name: Set(format!("P{pid}")),
+            width: Set(Some(1920)),
+            height: Set(Some(1080)),
+            duration: Set(120),
+            path: Set(Some(path.to_string())),
+            file_size_bytes: Set(Some(123)),
+            video_stream_size_bytes: Set(Some(456)),
+            audio_stream_size_bytes: Set(Some(789)),
+            image: Set(None),
+            download_status: Set(completed_page_status()),
+            created_at: Set("2026-04-15 00:00:00".to_string()),
+            play_video_streams: Set(Some("[\"cached-video\"]".to_string())),
+            play_audio_streams: Set(Some("[\"cached-audio\"]".to_string())),
+            play_subtitle_streams: Set(Some("[\"cached-subtitle\"]".to_string())),
+            play_streams_updated_at: Set(Some("2026-04-15 00:00:00".to_string())),
+            danmaku_last_synced_at: Set(last_synced.map(ToString::to_string)),
+            danmaku_sync_generation: Set(generation),
+            danmaku_cid_snapshot: Set(Some(cid)),
+            danmaku_last_write_count: Set(0),
+            ai_renamed: Set(Some(0)),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试分页");
+    }
+
+    fn completed_page_status() -> u32 {
+        STATUS_COMPLETED | (0..5).map(|index| STATUS_OK << (index * 3)).fold(0u32, |acc, item| acc | item)
+    }
+
+    fn enabled_policy() -> DanmakuUpdatePolicy {
+        DanmakuUpdatePolicy {
+            enabled: true,
+            ..DanmakuUpdatePolicy::default()
+        }
+    }
 
     #[test]
     fn danmaku_completed_detects_ok() {
@@ -698,32 +829,113 @@ mod tests {
         assert!(!danmaku_subtask_completed(without));
     }
 
-    #[test]
-    fn reset_non_danmaku_subtasks_keeps_only_danmaku_ok() {
-        let all_ok_completed: u32 = (1u32 << 31)
-            | (0..5)
-                .map(|index| STATUS_OK << (index * 3))
-                .fold(0u32, |acc, value| acc | value);
-        let reset = reset_non_danmaku_subtasks(all_ok_completed);
-        assert_eq!((reset >> 9) & 0b111, STATUS_OK);
-        for index in [0usize, 1, 2, 4] {
-            assert_eq!((reset >> (index * 3)) & 0b111, 0);
-        }
-        assert_eq!(reset >> 31, 0);
+    #[tokio::test]
+    async fn initialize_baseline_marks_existing_completed_pages_as_synced() {
+        let db = create_test_db("baseline").await;
+        insert_test_submission(&db, 3903).await;
+
+        let media_dir = unique_temp_dir("baseline-media");
+        fs::create_dir_all(&media_dir).expect("应能创建测试媒体目录");
+        let video_path = media_dir.join("baseline.mp4");
+        fs::write(&video_path, []).expect("应能创建测试视频文件");
+
+        let pubtime = Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        insert_test_video(&db, 1, 3903, "BVBASELINE0001", "基线测试", pubtime).await;
+        insert_test_page(
+            &db,
+            1,
+            1,
+            1,
+            334951837,
+            &video_path.to_string_lossy(),
+            None,
+            Stage::Initial.as_generation(),
+        )
+        .await;
+
+        let config = Config {
+            danmaku_update_policy: enabled_policy(),
+            ..Config::default()
+        };
+        let initialized = initialize_danmaku_incremental_baseline(&db, &config)
+            .await
+            .expect("初始化基线应成功");
+        assert_eq!(initialized, 1);
+
+        let page_model = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("查询分页应成功")
+            .expect("分页应存在");
+        assert!(page_model.danmaku_last_synced_at.is_some());
+        assert_eq!(page_model.danmaku_sync_generation, Stage::Fresh.as_generation());
+        assert_eq!(page_model.danmaku_cid_snapshot, Some(334951837));
+    }
+
+    #[tokio::test]
+    async fn schedule_page_refresh_marks_existing_status_flow_as_pending() {
+        let db = create_test_db("schedule-page-refresh").await;
+        insert_test_submission(&db, 3904).await;
+
+        let media_dir = unique_temp_dir("schedule-page-refresh-media");
+        fs::create_dir_all(&media_dir).expect("应能创建测试媒体目录");
+        let video_path = media_dir.join("refresh.mp4");
+        fs::write(&video_path, []).expect("应能创建测试视频文件");
+
+        let pubtime = Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        insert_test_video(&db, 2, 3904, "BVSCHEDULE0001", "待刷新测试", pubtime).await;
+        insert_test_page(
+            &db,
+            2,
+            2,
+            1,
+            334951838,
+            &video_path.to_string_lossy(),
+            Some("2026-04-14 08:00:00"),
+            Stage::Fresh.as_generation(),
+        )
+        .await;
+
+        let scheduled = schedule_page_danmaku_refresh(&db, 2)
+            .await
+            .expect("分页弹幕刷新应能重新标记为待处理");
+        assert_eq!(scheduled, 1);
+
+        let page_model = page::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("查询分页应成功")
+            .expect("分页应存在");
+        let video_model = video::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("查询视频应成功")
+            .expect("视频应存在");
+
+        let page_status = PageStatus::from(page_model.download_status);
+        let video_status = VideoStatus::from(video_model.download_status);
+        assert_eq!(page_status.get(DANMAKU_STATUS_OFFSET), 0);
+        assert_eq!(page_status.get(2), STATUS_OK);
+        assert_eq!(video_status.get(4), 0);
+        assert!(video_model.auto_download);
+        assert!(video_model.valid);
     }
 
     #[test]
-    fn reset_video_for_page_redownload_clears_page_download_and_completed_bit() {
-        let video_done: u32 = (1u32 << 31)
-            | (0..5)
-                .map(|index| STATUS_OK << (index * 3))
-                .fold(0u32, |acc, value| acc | value);
-        let reset = reset_video_for_page_redownload(video_done);
-        assert_eq!((reset >> 12) & 0b111, 0);
-        for index in [0usize, 1, 2, 3] {
-            assert_eq!((reset >> (index * 3)) & 0b111, STATUS_OK);
-        }
-        assert_eq!(reset >> 31, 0);
+    fn build_stored_page_info_prefers_snapshot_cid() {
+        let page_model = page::Model {
+            cid: 100,
+            pid: 1,
+            name: "P1".to_string(),
+            duration: 42,
+            danmaku_cid_snapshot: Some(200),
+            ..Default::default()
+        };
+
+        let page_info = build_stored_page_info(&page_model).expect("build page info");
+        assert_eq!(page_info.cid, 200);
+        assert_eq!(page_info.page, 1);
+        assert_eq!(page_info.name, "P1");
     }
 
     #[test]
@@ -813,4 +1025,5 @@ mod tests {
         let err = anyhow!(crate::bilibili::BiliError::RequestFailed(62012, "62012".to_string()));
         assert!(should_fallback_to_stored_pages(&err));
     }
+
 }

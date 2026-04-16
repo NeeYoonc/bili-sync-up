@@ -153,6 +153,14 @@ pub struct ReloadConfigTask {
     pub task_id: String, // 唯一任务ID，用于追踪
 }
 
+/// 手动刷新弹幕任务结构体
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshDanmakuTask {
+    pub video_id: Option<i32>,
+    pub page_id: Option<i32>,
+    pub task_id: String, // 唯一任务ID，用于追踪
+}
+
 /// 删除任务队列管理器
 pub struct DeleteTaskQueue {
     /// 待处理的删除任务队列（内存缓存）
@@ -1393,6 +1401,231 @@ async fn delete_video_files_from_pages_task(
     Ok(deleted_count)
 }
 
+/// 手动刷新弹幕任务队列管理器
+pub struct RefreshDanmakuTaskQueue {
+    queue: Mutex<VecDeque<RefreshDanmakuTask>>,
+    is_processing: AtomicBool,
+}
+
+impl RefreshDanmakuTaskQueue {
+    pub fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            is_processing: AtomicBool::new(false),
+        }
+    }
+
+    pub async fn has_pending_task(&self, task: &RefreshDanmakuTask, connection: &DatabaseConnection) -> Result<bool> {
+        let count = TaskQueueEntity::find()
+            .filter(task_queue::Column::TaskType.eq(TaskType::RefreshDanmaku))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .count(connection)
+            .await?;
+
+        if count == 0 {
+            return Ok(false);
+        }
+
+        let pending_tasks = TaskQueueEntity::find()
+            .filter(task_queue::Column::TaskType.eq(TaskType::RefreshDanmaku))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .all(connection)
+            .await?;
+
+        for task_record in pending_tasks {
+            if let Ok(task_data) = serde_json::from_str::<RefreshDanmakuTask>(&task_record.task_data) {
+                if task_data.video_id == task.video_id && task_data.page_id == task.page_id {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    pub async fn enqueue_task(&self, task: RefreshDanmakuTask, connection: &DatabaseConnection) -> Result<()> {
+        if self.has_pending_task(&task, connection).await? {
+            debug!(
+                "弹幕刷新任务已存在，跳过重复创建: video_id={:?}, page_id={:?}",
+                task.video_id, task.page_id
+            );
+            return Ok(());
+        }
+
+        let task_data = serde_json::to_string(&task)?;
+        let active_model = task_queue::ActiveModel {
+            task_type: Set(TaskType::RefreshDanmaku),
+            task_data: Set(task_data),
+            status: Set(TaskStatus::Pending),
+            retry_count: Set(0),
+            created_at: Set(now_standard_string()),
+            updated_at: Set(now_standard_string()),
+            ..Default::default()
+        };
+
+        let result = active_model.insert(connection).await?;
+
+        let mut queue = self.queue.lock().await;
+        info!(
+            "弹幕刷新任务已加入队列: video_id={:?}, page_id={:?}, 队列长度: {} (数据库ID: {})",
+            task.video_id,
+            task.page_id,
+            queue.len() + 1,
+            result.id
+        );
+        queue.push_back(task);
+        notify_queue_status_changed();
+        Ok(())
+    }
+
+    pub async fn dequeue_task(&self) -> Option<RefreshDanmakuTask> {
+        let mut queue = self.queue.lock().await;
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
+    }
+
+    pub async fn mark_task_completed(&self, task: &RefreshDanmakuTask, connection: &DatabaseConnection) -> Result<()> {
+        let task_data = serde_json::to_string(task)?;
+        if let Some(db_task) = TaskQueueEntity::find()
+            .filter(task_queue::Column::TaskType.eq(TaskType::RefreshDanmaku))
+            .filter(task_queue::Column::TaskData.eq(&task_data))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .one(connection)
+            .await?
+        {
+            let mut active_model: task_queue::ActiveModel = db_task.into();
+            active_model.status = Set(TaskStatus::Completed);
+            active_model.updated_at = Set(now_standard_string());
+            active_model.update(connection).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn mark_task_failed(&self, task: &RefreshDanmakuTask, connection: &DatabaseConnection) -> Result<()> {
+        let task_data = serde_json::to_string(task)?;
+        if let Some(db_task) = TaskQueueEntity::find()
+            .filter(task_queue::Column::TaskType.eq(TaskType::RefreshDanmaku))
+            .filter(task_queue::Column::TaskData.eq(&task_data))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .one(connection)
+            .await?
+        {
+            let retry_count = db_task.retry_count;
+            let mut active_model: task_queue::ActiveModel = db_task.into();
+            active_model.status = Set(TaskStatus::Failed);
+            active_model.retry_count = Set(retry_count + 1);
+            active_model.updated_at = Set(now_standard_string());
+            active_model.update(connection).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn queue_length(&self) -> usize {
+        let queue = self.queue.lock().await;
+        queue.len()
+    }
+
+    pub async fn list_tasks(&self) -> Vec<RefreshDanmakuTask> {
+        let queue = self.queue.lock().await;
+        queue.iter().cloned().collect()
+    }
+
+    pub async fn cancel_task(&self, task_id: &str, connection: &DatabaseConnection) -> Result<bool> {
+        let removed_task = {
+            let mut queue = self.queue.lock().await;
+            if let Some(index) = queue.iter().position(|task| task.task_id == task_id) {
+                queue.remove(index)
+            } else {
+                None
+            }
+        };
+
+        let Some(task) = removed_task else {
+            return Ok(false);
+        };
+
+        let task_data = serde_json::to_string(&task)?;
+        TaskQueueEntity::delete_many()
+            .filter(task_queue::Column::TaskType.eq(TaskType::RefreshDanmaku))
+            .filter(task_queue::Column::TaskData.eq(task_data))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .exec(connection)
+            .await?;
+
+        notify_queue_status_changed();
+        Ok(true)
+    }
+
+    pub fn is_processing(&self) -> bool {
+        self.is_processing.load(Ordering::SeqCst)
+    }
+
+    pub fn set_processing(&self, is_processing: bool) {
+        self.is_processing.store(is_processing, Ordering::SeqCst);
+        notify_queue_status_changed();
+    }
+
+    pub async fn process_all_tasks(&self, db: Arc<DatabaseConnection>) -> Result<u32, anyhow::Error> {
+        if self.is_processing() {
+            debug!("弹幕刷新任务队列正在处理中，跳过重复处理");
+            return Ok(0);
+        }
+
+        let queue_length = self.queue_length().await;
+        if queue_length == 0 {
+            return Ok(0);
+        }
+
+        self.set_processing(true);
+        let mut processed_count = 0u32;
+
+        info!("开始处理暂存的弹幕刷新任务，当前队列长度: {}", queue_length);
+
+        while let Some(task) = self.dequeue_task().await {
+            let result = match (task.video_id, task.page_id) {
+                (Some(video_id), None) => crate::workflow_danmaku::schedule_video_danmaku_refresh(db.as_ref(), video_id).await,
+                (None, Some(page_id)) => crate::workflow_danmaku::schedule_page_danmaku_refresh(db.as_ref(), page_id).await,
+                _ => Err(anyhow::anyhow!("无效的弹幕刷新任务：必须且只能指定 video_id 或 page_id")),
+            };
+
+            match result {
+                Ok(scheduled) => {
+                    info!(
+                        "弹幕刷新任务执行成功: video_id={:?}, page_id={:?}, 已标记分页 {} 个",
+                        task.video_id, task.page_id, scheduled
+                    );
+                    processed_count += 1;
+                    crate::task::resume_scanning();
+
+                    if let Err(e) = self.mark_task_completed(&task, &db).await {
+                        error!("更新弹幕刷新任务完成状态失败: {:#}", e);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "弹幕刷新任务执行失败: video_id={:?}, page_id={:?}, 错误: {:#}",
+                        task.video_id, task.page_id, e
+                    );
+                    if let Err(mark_err) = self.mark_task_failed(&task, &db).await {
+                        error!("更新弹幕刷新任务失败状态失败: {:#}", mark_err);
+                    }
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+
+        self.set_processing(false);
+        info!("弹幕刷新任务队列处理完成，共处理 {} 个任务", processed_count);
+        Ok(processed_count)
+    }
+}
+
 /// 添加任务队列管理器
 pub struct AddTaskQueue {
     /// 待处理的添加任务队列
@@ -2422,6 +2655,10 @@ pub static CONFIG_TASK_QUEUE: once_cell::sync::Lazy<Arc<ConfigTaskQueue>> =
 pub static VIDEO_DELETE_TASK_QUEUE: once_cell::sync::Lazy<Arc<VideoDeleteTaskQueue>> =
     once_cell::sync::Lazy::new(|| Arc::new(VideoDeleteTaskQueue::new()));
 
+/// 全局弹幕刷新任务队列实例
+pub static REFRESH_DANMAKU_TASK_QUEUE: once_cell::sync::Lazy<Arc<RefreshDanmakuTaskQueue>> =
+    once_cell::sync::Lazy::new(|| Arc::new(RefreshDanmakuTaskQueue::new()));
+
 /// 暂停定时扫描任务的便捷函数
 pub async fn pause_scanning() {
     TASK_CONTROLLER.pause().await;
@@ -2534,6 +2771,21 @@ pub async fn process_video_delete_tasks(db: Arc<DatabaseConnection>) -> Result<u
     VIDEO_DELETE_TASK_QUEUE.process_all_tasks(db).await
 }
 
+/// 添加弹幕刷新任务到队列的便捷函数
+pub async fn enqueue_refresh_danmaku_task(task: RefreshDanmakuTask, connection: &DatabaseConnection) -> Result<()> {
+    timeout(
+        TASK_ENQUEUE_TIMEOUT,
+        REFRESH_DANMAKU_TASK_QUEUE.enqueue_task(task, connection),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("弹幕刷新任务加入队列超时，请稍后重试"))?
+}
+
+/// 处理所有弹幕刷新任务的便捷函数
+pub async fn process_refresh_danmaku_tasks(db: Arc<DatabaseConnection>) -> Result<u32, anyhow::Error> {
+    REFRESH_DANMAKU_TASK_QUEUE.process_all_tasks(db).await
+}
+
 /// 取消指定任务（仅支持待处理且仍在内存等待队列中的任务）
 pub async fn cancel_pending_task(task_id: &str, connection: &DatabaseConnection) -> Result<bool, anyhow::Error> {
     if DELETE_TASK_QUEUE.cancel_task(task_id, connection).await? {
@@ -2549,6 +2801,10 @@ pub async fn cancel_pending_task(task_id: &str, connection: &DatabaseConnection)
     }
 
     if CONFIG_TASK_QUEUE.cancel_task(task_id, connection).await? {
+        return Ok(true);
+    }
+
+    if REFRESH_DANMAKU_TASK_QUEUE.cancel_task(task_id, connection).await? {
         return Ok(true);
     }
 
@@ -2623,6 +2879,16 @@ pub async fn recover_pending_tasks(connection: &DatabaseConnection) -> Result<()
                 }
                 Err(e) => {
                     error!("反序列化重载配置任务失败: {:#}", e);
+                }
+            },
+            TaskType::RefreshDanmaku => match serde_json::from_str::<RefreshDanmakuTask>(task_data) {
+                Ok(task) => {
+                    let mut queue = REFRESH_DANMAKU_TASK_QUEUE.queue.lock().await;
+                    queue.push_back(task);
+                    recovered_count += 1;
+                }
+                Err(e) => {
+                    error!("反序列化弹幕刷新任务失败: {:#}", e);
                 }
             },
         }
