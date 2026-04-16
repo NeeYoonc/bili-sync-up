@@ -19,6 +19,7 @@
 	import SubmissionSelectionDialog from '$lib/components/submission-selection-dialog.svelte';
 	import KeywordFilterDialog from '$lib/components/keyword-filter-dialog.svelte';
 	import AiPromptDialog from '$lib/components/ai-prompt-dialog.svelte';
+	import SectionHeader from '$lib/components/section-header.svelte';
 	import AiRenameHistoryDialog from '$lib/components/ai-rename-history-dialog.svelte';
 	import type { VideoSource, VideoSourcesResponse } from '$lib/types';
 
@@ -41,12 +42,13 @@
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import { goto } from '$app/navigation';
-	import { formatTimestamp } from '$lib/utils/timezone';
+	import { formatTimestampOrFallback } from '$lib/utils/timezone';
+	import { buildAuthenticatedStreamUrl } from '$lib/utils/live-stream';
+	import { createManagedEventSource } from '$lib/utils/live-event-source';
 
 	let loading = false;
 	let bulkUpdating = false;
-	let sourcesEventSource: EventSource | null = null;
-	let currentSourcesStreamUrl: string | null = null;
+	const videoSourcesStream = createManagedEventSource();
 	const queuedDeleteNoticeMap = new Map<
 		string,
 		{ sourceType: VideoSourceType; sourceId: number; sourceName: string }
@@ -139,9 +141,7 @@
 
 	function formatLatestVideoTime(value: string | null | undefined): string {
 		const normalized = normalizeBeijingDateTime(value);
-		if (!normalized) return '-';
-		const formatted = formatTimestamp(normalized, 'Asia/Shanghai', 'datetime');
-		return formatted === '无效时间' || formatted === '格式化失败' ? value ?? '-' : formatted;
+		return formatTimestampOrFallback(normalized, 'Asia/Shanghai', 'datetime', value ?? '-');
 	}
 
 	function getLatestVideoAgeDays(value: string | null | undefined): number | null {
@@ -180,13 +180,7 @@
 	}
 
 	function buildVideoSourcesStreamUrl(): string | null {
-		if (typeof localStorage === 'undefined') return null;
-		const token = localStorage.getItem('auth_token');
-		if (!token) return null;
-
-		const searchParams = new URLSearchParams();
-		searchParams.append('token', token);
-		return `/api/video-sources/live?${searchParams.toString()}`;
+		return buildAuthenticatedStreamUrl('/api/video-sources/live');
 	}
 
 	function sourceStillExists(
@@ -223,44 +217,27 @@
 	}
 
 	function stopVideoSourcesStream() {
-		if (sourcesEventSource) {
-			sourcesEventSource.close();
-			sourcesEventSource = null;
-		}
-		currentSourcesStreamUrl = null;
+		videoSourcesStream.stop();
 	}
 
 	function startVideoSourcesStream() {
-		const streamUrl = buildVideoSourcesStreamUrl();
-		if (!streamUrl) {
-			stopVideoSourcesStream();
-			return;
-		}
-
-		if (sourcesEventSource && currentSourcesStreamUrl === streamUrl) {
-			return;
-		}
-
-		stopVideoSourcesStream();
-		currentSourcesStreamUrl = streamUrl;
-
-		const eventSource = new EventSource(streamUrl);
-		sourcesEventSource = eventSource;
-
-		eventSource.addEventListener('sources', (event) => {
-			try {
-				const payload = JSON.parse((event as MessageEvent).data) as VideoSourcesResponse;
-				notifyCompletedQueuedDeletions(payload);
-				setVideoSources(payload);
-			} catch (error) {
-				console.error('解析视频源实时更新失败:', error);
+		videoSourcesStream.start({
+			url: buildVideoSourcesStreamUrl(),
+			handlers: {
+				sources: (event) => {
+					try {
+						const payload = JSON.parse(event.data) as VideoSourcesResponse;
+						notifyCompletedQueuedDeletions(payload);
+						setVideoSources(payload);
+					} catch (error) {
+						console.error('解析视频源实时更新失败:', error);
+					}
+				}
+			},
+			onError: () => {
+				console.warn('视频源实时更新连接异常，等待浏览器自动重连');
 			}
 		});
-
-		eventSource.onerror = () => {
-			if (sourcesEventSource !== eventSource) return;
-			console.warn('视频源实时更新连接异常，等待浏览器自动重连');
-		};
 	}
 
 	// 投稿源扫描策略配置（分批/自适应）
@@ -1096,27 +1073,25 @@
 
 <div class="space-y-6">
 	<!-- 页面头部 -->
-	<div class="flex {isMobile ? 'flex-col gap-4' : 'flex-row items-center justify-between gap-4'}">
-		<div>
-			<h1
-				class="{isMobile ? 'text-xl' : 'text-2xl'} font-bold"
-				title="管理和配置收藏夹、合集、投稿、番剧与稍后再看视频源"
+	<SectionHeader
+		as="h1"
+		title="视频源管理"
+		description="管理和配置您的视频源，包括收藏夹、合集、投稿和稍后再看。"
+		titleTooltip="管理和配置收藏夹、合集、投稿、番剧与稍后再看视频源"
+		titleClass="font-bold {isMobile ? 'text-xl' : 'text-2xl'}"
+		descriptionClass="text-muted-foreground {isMobile ? 'text-sm' : 'text-base'} mt-1"
+	>
+		{#snippet actions()}
+			<Button
+				onclick={navigateToAddSource}
+				class="flex items-center gap-2 {isMobile ? 'w-full' : 'w-auto'}"
+				title="添加新的视频源"
 			>
-				视频源管理
-			</h1>
-			<p class="{isMobile ? 'text-sm' : 'text-base'} text-muted-foreground">
-				管理和配置您的视频源，包括收藏夹、合集、投稿和稍后再看
-			</p>
-		</div>
-		<Button
-			onclick={navigateToAddSource}
-			class="flex items-center gap-2 {isMobile ? 'w-full' : 'w-auto'}"
-			title="添加新的视频源"
-		>
-			<PlusIcon class="h-4 w-4" />
-			添加视频源
-		</Button>
-	</div>
+				<PlusIcon class="h-4 w-4" />
+				添加视频源
+			</Button>
+		{/snippet}
+	</SectionHeader>
 
 	{#if loading}
 		<div class="flex items-center justify-center py-12">
@@ -1280,23 +1255,23 @@
 														{source.enabled ? '已启用' : '已禁用'}
 													</Badge>
 												</div>
-											<div class="text-muted-foreground truncate text-sm" title={source.path}>
-												{source.path || '未设置路径'}
-											</div>
-											<div
-												class="text-muted-foreground mt-1 flex items-center gap-2 text-xs"
-												title="该视频源当前已发现的最新一条视频发布时间。最近 7 天内为绿色，8 到 30 天为黄色，31 天及以上为红色，可用于判断这个源最近是否还有更新"
-											>
-												<span>最新视频时间：</span>
-												<Badge
-													variant="outline"
-													class={getLatestVideoTimeBadgeClass(source.latest_row_at)}
+												<div class="text-muted-foreground truncate text-sm" title={source.path}>
+													{source.path || '未设置路径'}
+												</div>
+												<div
+													class="text-muted-foreground mt-1 flex items-center gap-2 text-xs"
+													title="该视频源当前已发现的最新一条视频发布时间。最近 7 天内为绿色，8 到 30 天为黄色，31 天及以上为红色，可用于判断这个源最近是否还有更新"
 												>
-													{formatLatestVideoTime(source.latest_row_at)}
-												</Badge>
-											</div>
-											<!-- 显示对应类型的ID -->
-											<div class="text-muted-foreground mt-1 text-xs">
+													<span>最新视频时间：</span>
+													<Badge
+														variant="outline"
+														class={getLatestVideoTimeBadgeClass(source.latest_row_at)}
+													>
+														{formatLatestVideoTime(source.latest_row_at)}
+													</Badge>
+												</div>
+												<!-- 显示对应类型的ID -->
+												<div class="text-muted-foreground mt-1 text-xs">
 													{#if sourceConfig.type === 'favorite' && source.f_id}
 														收藏夹ID: {source.f_id}
 													{:else if sourceConfig.type === 'collection' && source.s_id}

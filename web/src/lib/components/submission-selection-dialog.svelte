@@ -7,7 +7,8 @@
 	import api from '$lib/api';
 	import type { SubmissionVideoInfo } from '$lib/types';
 	import { toast } from 'svelte-sonner';
-	import { formatTimestamp } from '$lib/utils/timezone';
+	import SubmissionSelectionToolbar from '$lib/components/submission-selection-toolbar.svelte';
+	import { formatSubmissionDateLabel, formatSubmissionMetricLabel } from '$lib/utils/submission';
 
 	export let isOpen = false;
 	export let sourceId: number;
@@ -53,23 +54,6 @@
 	// 已选中视频数量
 	$: selectedSubmissionCount = selectedSubmissionVideos.size;
 
-	// 格式化时间
-	function formatSubmissionDate(pubtime: string): string {
-		const formatted = formatTimestamp(pubtime, 'Asia/Shanghai', 'date');
-		if (formatted === '无效时间' || formatted === '格式化失败') {
-			return pubtime;
-		}
-		return formatted;
-	}
-
-	// 格式化播放量
-	function formatSubmissionPlayCount(count: number): string {
-		if (count >= 10000) {
-			return (count / 10000).toFixed(1) + '万';
-		}
-		return count.toString();
-	}
-
 	// 当对话框打开时加载数据
 	$: if (isOpen && upperId) {
 		resetAndLoad();
@@ -93,7 +77,6 @@
 		// 并行加载已下载视频和UP主投稿
 		await Promise.all([loadDownloadedVideos(), loadSubmissionVideos()]);
 		updateFilteredVideos();
-
 	}
 
 	// 加载该投稿源已下载的视频BVID列表
@@ -183,14 +166,13 @@
 		hasMoreVideos = submissionVideos.length < submissionTotalCount;
 		loadingProgress = '';
 		updateFilteredVideos();
-
 	}
 
 	// 更新过滤后的视频列表（排除已下载的）
 
 	function updateFilteredVideos() {
 		const baseVideos = submissionSearchQuery.trim()
-			? searchedSubmissionVideos ?? []
+			? (searchedSubmissionVideos ?? [])
 			: submissionVideos;
 		filteredSubmissionVideos = baseVideos.filter((video) => !downloadedBvids.has(video.bvid));
 
@@ -404,79 +386,23 @@
 				</div>
 			{:else}
 				<!-- 搜索和操作栏 -->
-				<div class="flex-shrink-0 space-y-2 px-1 sm:space-y-3">
-					<div class="flex gap-2">
-						<div class="relative flex-1">
-							<input
-								type="text"
-								bind:value={submissionSearchQuery}
-								placeholder="搜索视频标题..."
-								class="w-full rounded-md border border-gray-300 px-2 py-1.5 pr-8 text-xs focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none sm:px-3 sm:py-2 sm:text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
-								disabled={isSearching}
-							/>
-							{#if isSearching}
-								<div class="absolute inset-y-0 right-0 flex items-center pr-3">
-									<svg class="h-4 w-4 animate-spin text-blue-600" fill="none" viewBox="0 0 24 24">
-										<circle
-											class="opacity-25"
-											cx="12"
-											cy="12"
-											r="10"
-											stroke="currentColor"
-											stroke-width="4"
-										></circle>
-										<path
-											class="opacity-75"
-											fill="currentColor"
-											d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-										></path>
-									</svg>
-								</div>
-							{/if}
-						</div>
-					</div>
-
-					{#if submissionSearchQuery.trim()}
-						<div class="px-1 text-xs text-blue-600">
-							{isSearching
-								? '搜索中...'
-								: `搜索结果：在UP主所有视频中搜索 "${submissionSearchQuery}"`}
-						</div>
-					{/if}
-
-					<div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-						<div class="flex gap-1 sm:gap-2">
-							<button
-								type="button"
-								class="bg-card text-foreground hover:bg-muted rounded-md border border-gray-300 px-2 py-1 text-xs font-medium sm:px-3 sm:text-sm dark:border-gray-600"
-								onclick={selectAllSubmissions}
-								disabled={filteredSubmissionVideos.length === 0}
-							>
-								全选
-							</button>
-							<button
-								type="button"
-								class="bg-card text-foreground hover:bg-muted rounded-md border border-gray-300 px-2 py-1 text-xs font-medium sm:px-3 sm:text-sm dark:border-gray-600"
-								onclick={selectNoneSubmissions}
-								disabled={selectedSubmissionCount === 0}
-							>
-								全不选
-							</button>
-							<button
-								type="button"
-								class="bg-card text-foreground hover:bg-muted rounded-md border border-gray-300 px-2 py-1 text-xs font-medium sm:px-3 sm:text-sm dark:border-gray-600"
-								onclick={invertSubmissionSelection}
-								disabled={filteredSubmissionVideos.length === 0}
-							>
-								反选
-							</button>
-						</div>
-
-						<div class="text-muted-foreground text-xs sm:text-sm">
-							已选择 {selectedSubmissionCount} / {filteredSubmissionVideos.length} 个视频
-						</div>
-					</div>
-				</div>
+				<SubmissionSelectionToolbar
+					bind:query={submissionSearchQuery}
+					compact={true}
+					placeholder="搜索视频标题..."
+					{isSearching}
+					statusText={isSearching
+						? '搜索中...'
+						: `搜索结果：在UP主所有视频中搜索 \"${submissionSearchQuery}\"`}
+					selectedCount={selectedSubmissionCount}
+					totalCount={filteredSubmissionVideos.length}
+					onSelectAll={selectAllSubmissions}
+					onSelectNone={selectNoneSubmissions}
+					onInvert={invertSubmissionSelection}
+					selectAllDisabled={filteredSubmissionVideos.length === 0}
+					selectNoneDisabled={selectedSubmissionCount === 0}
+					invertDisabled={filteredSubmissionVideos.length === 0}
+				/>
 
 				<!-- 视频列表 -->
 				<div
@@ -588,9 +514,9 @@
 											{video.title}
 										</h4>
 										<div class="text-muted-foreground mt-1 flex items-center gap-1 text-[10px]">
-											<span>{formatSubmissionPlayCount(video.view)}播放</span>
+											<span>{formatSubmissionMetricLabel(video.view)}播放</span>
 											<span>·</span>
-											<span>{formatSubmissionDate(video.pubtime)}</span>
+											<span>{formatSubmissionDateLabel(video.pubtime)}</span>
 										</div>
 									</div>
 								</div>

@@ -5,6 +5,8 @@
 	import BiliImage from '$lib/components/bili-image.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import EmptyState from '$lib/components/empty-state.svelte';
+	import SectionHeader from '$lib/components/section-header.svelte';
+	import SubmissionSelectionToolbar from '$lib/components/submission-selection-toolbar.svelte';
 	import SelectableCardButton from '$lib/components/selectable-card-button.svelte';
 	import SidePanel from '$lib/components/side-panel.svelte';
 	import { Input } from '$lib/components/ui/input';
@@ -41,6 +43,7 @@
 	import { runRequest } from '$lib/utils/request.js';
 	import { IsMobile, IsTablet } from '$lib/hooks/is-mobile.svelte.js';
 	import { formatTimestamp } from '$lib/utils/timezone';
+	import { formatSubmissionDateLabel, formatSubmissionMetricLabel } from '$lib/utils/submission';
 
 	let sourceType: VideoCategory = 'collection';
 	let lastSourceType: VideoCategory = sourceType; // 记录上一次的源类型，用于检测切换
@@ -1970,23 +1973,6 @@
 		// 保留已有的选择，不做清空
 	}
 
-	// 格式化时间
-	function formatSubmissionDate(pubtime: string): string {
-		const formatted = formatTimestamp(pubtime, 'Asia/Shanghai', 'date');
-		if (formatted === '无效时间' || formatted === '格式化失败') {
-			return pubtime;
-		}
-		return formatted;
-	}
-
-	// 格式化播放量
-	function formatSubmissionPlayCount(count: number): string {
-		if (count >= 10000) {
-			return (count / 10000).toFixed(1) + '万';
-		}
-		return count.toString();
-	}
-
 	// 当显示投稿选择且有sourceId时加载数据
 	$: if (showSubmissionSelection && sourceId && sourceType === 'submission') {
 		resetSubmissionState();
@@ -2413,7 +2399,14 @@
 	<div class="mx-auto px-4">
 		<div class="bg-card rounded-lg border p-6 shadow-sm">
 			<div class="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-				<h1 class="text-2xl font-bold">添加新视频源</h1>
+				<SectionHeader
+					as="h1"
+					title="添加新视频源"
+					description="搜索并配置收藏夹、合集、投稿、番剧或稍后再看等视频源。"
+					titleClass="text-2xl font-bold"
+					descriptionClass="text-muted-foreground mt-1 text-sm"
+					class="flex-1"
+				/>
 				{#if sourceType !== 'bangumi' && sourceType !== 'watch_later'}
 					<Button
 						variant={batchMode ? 'default' : 'outline'}
@@ -2683,7 +2676,8 @@
 											按同UP合集绝对顺序聚合
 										</div>
 										<p class="mt-1 text-xs text-blue-600 dark:text-blue-300">
-											开启后，该合集会归并到“同UP合集根目录”，并按该UP远端全部合集/系列列表的绝对顺序映射 Season xx。
+											开启后，该合集会归并到“同UP合集根目录”，并按该UP远端全部合集/系列列表的绝对顺序映射
+											Season xx。
 										</p>
 									</div>
 									<label class="relative inline-flex cursor-pointer items-center">
@@ -2879,7 +2873,9 @@
 												如果使用 Docker 部署并设置了卷映射，请填写容器内路径。
 											</p>
 											<p class="text-muted-foreground mt-1 text-xs">
-												例如映射 <code class="bg-muted rounded px-1">/volume1/Videos:/Downloads</code>
+												例如映射 <code class="bg-muted rounded px-1"
+													>/volume1/Videos:/Downloads</code
+												>
 											</p>
 											<p class="text-muted-foreground text-xs">
 												则应填写 <code class="bg-muted rounded px-1">/Downloads</code>
@@ -3704,7 +3700,11 @@
 
 						<!-- 提交按钮 -->
 						<div class="flex {isMobile ? 'flex-col' : ''} gap-2">
-							<Button type="submit" disabled={loading || batchMode} class={isMobile ? 'w-full' : ''}>
+							<Button
+								type="submit"
+								disabled={loading || batchMode}
+								class={isMobile ? 'w-full' : ''}
+							>
 								{loading ? '添加中...' : '添加'}
 							</Button>
 							<Button
@@ -3861,7 +3861,7 @@
 												<p class="text-muted-foreground truncate text-xs">
 													{result.author}{#if result.result_type === 'bili_user' && result.follower !== undefined && result.follower !== null}
 														<span class="ml-2"
-															>· 粉丝: {formatSubmissionPlayCount(result.follower)}</span
+															>· 粉丝: {formatSubmissionMetricLabel(result.follower)}</span
 														>
 													{/if}
 												</p>
@@ -3971,7 +3971,7 @@
 												<p class="text-muted-foreground mb-1 truncate text-xs">
 													UID: {following.mid}{#if following.follower !== undefined && following.follower !== null}
 														<span class="ml-2"
-															>· 粉丝: {formatSubmissionPlayCount(following.follower)}</span
+															>· 粉丝: {formatSubmissionMetricLabel(following.follower)}</span
 														>
 													{/if}
 												</p>
@@ -4065,11 +4065,7 @@
 													>
 														{collection.collection_type === 'season' ? '合集' : '系列'}
 													</span>
-													{#if isCollectionExists(
-														collection.sid,
-														collection.mid.toString(),
-														collection.collection_type
-													)}
+													{#if isCollectionExists(collection.sid, collection.mid.toString(), collection.collection_type)}
 														<span
 															class="flex-shrink-0 rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-300"
 														>
@@ -4658,83 +4654,22 @@
 								</div>
 							{:else}
 								<!-- 搜索和操作栏 -->
-								<div class="flex-shrink-0 space-y-3 p-3">
-									<div class="flex gap-2">
-										<div class="relative flex-1">
-											<input
-												type="text"
-												bind:value={submissionSearchQuery}
-												placeholder="搜索视频标题（支持关键词搜索UP主所有视频）..."
-												class="w-full rounded-md border border-gray-300 px-3 py-2 pr-8 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-												disabled={isSearching}
-											/>
-											{#if isSearching}
-												<div class="absolute inset-y-0 right-0 flex items-center pr-3">
-													<svg
-														class="h-4 w-4 animate-spin text-blue-600"
-														fill="none"
-														viewBox="0 0 24 24"
-													>
-														<circle
-															class="opacity-25"
-															cx="12"
-															cy="12"
-															r="10"
-															stroke="currentColor"
-															stroke-width="4"
-														></circle>
-														<path
-															class="opacity-75"
-															fill="currentColor"
-															d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-														></path>
-													</svg>
-												</div>
-											{/if}
-										</div>
-									</div>
-
-									{#if submissionSearchQuery.trim()}
-										<div class="px-1 text-xs text-blue-600">
-											{isSearching
-												? '搜索中...'
-												: `搜索模式：在UP主所有视频中搜索 "${submissionSearchQuery}"`}
-										</div>
-									{/if}
-
-									<div class="flex items-center justify-between">
-										<div class="flex gap-2">
-											<button
-												type="button"
-												class="bg-card text-foreground hover:bg-muted rounded-md border border-gray-300 px-3 py-1 text-sm font-medium"
-												onclick={selectAllSubmissions}
-												disabled={filteredSubmissionVideos.length === 0}
-											>
-												全选
-											</button>
-											<button
-												type="button"
-												class="bg-card text-foreground hover:bg-muted rounded-md border border-gray-300 px-3 py-1 text-sm font-medium"
-												onclick={selectNoneSubmissions}
-												disabled={selectedSubmissionCount === 0}
-											>
-												全不选
-											</button>
-											<button
-												type="button"
-												class="bg-card text-foreground hover:bg-muted rounded-md border border-gray-300 px-3 py-1 text-sm font-medium"
-												onclick={invertSubmissionSelection}
-												disabled={filteredSubmissionVideos.length === 0}
-											>
-												反选
-											</button>
-										</div>
-
-										<div class="text-muted-foreground text-sm">
-											已选择 {selectedSubmissionCount} / {filteredSubmissionVideos.length} 个视频
-										</div>
-									</div>
-								</div>
+								<SubmissionSelectionToolbar
+									bind:query={submissionSearchQuery}
+									placeholder="搜索视频标题（支持关键词搜索UP主所有视频）..."
+									{isSearching}
+									statusText={isSearching
+										? '搜索中...'
+										: `搜索模式：在UP主所有视频中搜索 \"${submissionSearchQuery}\"`}
+									selectedCount={selectedSubmissionCount}
+									totalCount={filteredSubmissionVideos.length}
+									onSelectAll={selectAllSubmissions}
+									onSelectNone={selectNoneSubmissions}
+									onInvert={invertSubmissionSelection}
+									selectAllDisabled={filteredSubmissionVideos.length === 0}
+									selectNoneDisabled={selectedSubmissionCount === 0}
+									invertDisabled={filteredSubmissionVideos.length === 0}
+								/>
 
 								<!-- 视频列表 -->
 								<div
@@ -4803,7 +4738,9 @@
 														video.bvid
 													)
 														? 'border-blue-300 bg-blue-50 dark:border-blue-600 dark:bg-blue-950'
-														: 'border-gray-200 dark:border-gray-700'} {isMobile ? 'h-auto' : 'h-[100px]'}"
+														: 'border-gray-200 dark:border-gray-700'} {isMobile
+														? 'h-auto'
+														: 'h-[100px]'}"
 													onclick={() => toggleSubmissionVideo(video.bvid)}
 													onkeydown={(event) => handleSubmissionCardKeydown(event, video.bvid)}
 												>
@@ -4836,9 +4773,9 @@
 															</p>
 															<div class="text-muted-foreground mt-auto text-xs">
 																<div class="flex flex-wrap items-center gap-2">
-																	<span>🎬 {formatSubmissionPlayCount(video.view)}</span>
-																	<span>💬 {formatSubmissionPlayCount(video.danmaku)}</span>
-																	<span>📅 {formatSubmissionDate(video.pubtime)}</span>
+																	<span>🎬 {formatSubmissionMetricLabel(video.view)}</span>
+																	<span>💬 {formatSubmissionMetricLabel(video.danmaku)}</span>
+																	<span>📅 {formatSubmissionDateLabel(video.pubtime)}</span>
 																	<span class="font-mono text-xs">{video.bvid}</span>
 																</div>
 															</div>
@@ -5129,7 +5066,9 @@
 						class="mt-1"
 					/>
 					{#if batchSelectedTemplate}
-						<div class="mt-2 space-y-1 rounded-md border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-950/30">
+						<div
+							class="mt-2 space-y-1 rounded-md border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-950/30"
+						>
 							<p class="text-xs text-blue-700 dark:text-blue-300">
 								已从当前源类型的快捷订阅路径模板带入默认值，本次批量添加可临时改成任意路径或任意模板。
 							</p>
@@ -5139,7 +5078,9 @@
 						</div>
 					{:else}
 						<p class="text-muted-foreground mt-1 text-xs">
-							未配置快捷模板时，所有选中的视频源将保存到此路径。支持手动填写 <code>{'{{name}}'}</code> 变量。
+							未配置快捷模板时，所有选中的视频源将保存到此路径。支持手动填写 <code
+								>{'{{name}}'}</code
+							> 变量。
 						</p>
 					{/if}
 				</div>
@@ -5155,7 +5096,8 @@
 									按同UP合集绝对顺序聚合
 								</div>
 								<p class="mt-1 text-xs text-blue-600 dark:text-blue-300">
-									批量添加的合集源将按各自UP远端合集/系列列表顺序映射 Season xx，并归并到对应UP合集根目录。
+									批量添加的合集源将按各自UP远端合集/系列列表顺序映射 Season
+									xx，并归并到对应UP合集根目录。
 								</p>
 							</div>
 							<label class="relative inline-flex cursor-pointer items-center">

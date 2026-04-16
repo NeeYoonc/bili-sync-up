@@ -24,14 +24,16 @@
 	import type { QueueStatusResponse } from '$lib/types';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import { runRequest } from '$lib/utils/request.js';
-	import { formatTimestamp } from '$lib/utils/timezone';
+	import { formatTimestampOrFallback } from '$lib/utils/timezone';
+	import { buildAuthenticatedStreamUrl } from '$lib/utils/live-stream';
+	import { createManagedEventSource } from '$lib/utils/live-event-source';
+	import SectionHeader from '$lib/components/section-header.svelte';
 	import { toast } from 'svelte-sonner';
 
 	let queueStatus: QueueStatusResponse | null = null;
 	let loading = true;
 	let error: string | null = null;
-	let queueEventSource: EventSource | null = null;
-	let currentQueueStreamUrl: string | null = null;
+	const queueStream = createManagedEventSource();
 	let cancellingTaskIds: Record<string, boolean> = {};
 
 	// 设置面包屑
@@ -58,46 +60,28 @@
 	}
 
 	function buildQueueStreamUrl(): string | null {
-		const token = localStorage.getItem('auth_token');
-		if (!token) return null;
-
-		const params = new URLSearchParams();
-		params.append('token', token);
-		return `/api/queue/live?${params.toString()}`;
+		return buildAuthenticatedStreamUrl('/api/queue/live');
 	}
 
 	function stopQueueStream() {
-		if (queueEventSource) {
-			queueEventSource.close();
-			queueEventSource = null;
-		}
-		currentQueueStreamUrl = null;
+		queueStream.stop();
 	}
 
 	function startQueueStream() {
-		const streamUrl = buildQueueStreamUrl();
-		if (!streamUrl) return;
-		if (queueEventSource && currentQueueStreamUrl === streamUrl) return;
-
-		stopQueueStream();
-		currentQueueStreamUrl = streamUrl;
-
-		const eventSource = new EventSource(streamUrl);
-		queueEventSource = eventSource;
-
-		eventSource.addEventListener('queue', (event) => {
-			try {
-				queueStatus = JSON.parse((event as MessageEvent).data) as QueueStatusResponse;
-				error = null;
-				loading = false;
-			} catch (err) {
-				console.error('解析任务队列实时更新失败:', err);
+		queueStream.start({
+			url: buildQueueStreamUrl(),
+			handlers: {
+				queue: (event) => {
+					try {
+						queueStatus = JSON.parse(event.data) as QueueStatusResponse;
+						error = null;
+						loading = false;
+					} catch (err) {
+						console.error('解析任务队列实时更新失败:', err);
+					}
+				}
 			}
 		});
-
-		eventSource.onerror = () => {
-			if (queueEventSource !== eventSource) return;
-		};
 	}
 
 	// 手动刷新
@@ -109,11 +93,7 @@
 
 	// 格式化时间
 	function formatTime(timeString: string): string {
-		const formatted = formatTimestamp(timeString, 'Asia/Shanghai', 'time');
-		if (formatted === '无效时间' || formatted === '格式化失败') {
-			return '无效时间';
-		}
-		return formatted;
+		return formatTimestampOrFallback(timeString, 'Asia/Shanghai', 'time', '无效时间');
 	}
 
 	// 获取任务类型的显示名称
@@ -196,16 +176,21 @@
 </script>
 
 <div class="container mx-auto px-4">
-	<div class="mb-6 flex items-center justify-between">
-		<div>
-			<h1 class="text-3xl font-bold">任务队列</h1>
-			<p class="text-muted-foreground mt-2">查看和管理系统任务队列状态</p>
-		</div>
-		<Button variant="outline" size="sm" onclick={handleRefresh} disabled={loading}>
-			<RefreshCw class="mr-2 h-4 w-4 {loading ? 'animate-spin' : ''}" />
-			刷新
-		</Button>
-	</div>
+	<SectionHeader
+		as="h1"
+		title="任务队列"
+		description="查看和管理系统任务队列状态"
+		titleClass="text-3xl font-bold"
+		descriptionClass="text-muted-foreground mt-2"
+		class="mb-6"
+	>
+		{#snippet actions()}
+			<Button variant="outline" size="sm" onclick={handleRefresh} disabled={loading}>
+				<RefreshCw class="mr-2 h-4 w-4 {loading ? 'animate-spin' : ''}" />
+				刷新
+			</Button>
+		{/snippet}
+	</SectionHeader>
 
 	{#if error}
 		<Card class="border-destructive">

@@ -8,14 +8,18 @@
 		"dev": "vite dev",
 		"prebuild": "node scripts/generate-app-meta.mjs",
 		"build": "vite build",
+		"build:node20": "npx -y -p node@20 -c \"node --version && npm run build\"",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"precheck": "node scripts/generate-app-meta.mjs",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:node20": "npx -y -p node@20 -c \"node --version && npm run check\"",
 		"precheck:watch": "node scripts/generate-app-meta.mjs",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"format": "prettier --write .",
-		"lint": "prettier --check . && eslint ."
+		"lint": "prettier --check . && eslint .",
+		"validate:changed": "node scripts/validate-changed.mjs",
+		"validate:node20": "npx -y -p node@20 -c \"node --version && npm run check && npm run build && npm run validate:changed\""
 	},
 	"devDependencies": {
 		"@eslint/compat": "^1.2.5",

@@ -18,7 +18,7 @@
 	import InstallPrompt from '$lib/components/pwa/install-prompt.svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { APP_VERSION } from '$lib/generated/app-version';
-	import { formatTimestamp } from '$lib/utils/timezone';
+	import { formatTimestampOrFallback } from '$lib/utils/timezone';
 	import { installGlossaryTooltips } from '$lib/utils/glossary-tooltip';
 
 	let dataLoaded = false;
@@ -81,12 +81,10 @@
 		}
 
 		function formatUpdateTime(ts?: string | null): string {
-			if (!ts) return '未知';
-			const formatted = formatTimestamp(ts, 'Asia/Shanghai', 'datetime');
-			if (formatted === '无效时间' || formatted === '格式化失败') {
-				return ts;
-			}
-			return formatted.replaceAll('/', '-');
+			return formatTimestampOrFallback(ts, 'Asia/Shanghai', 'datetime', ts ?? '未知').replaceAll(
+				'/',
+				'-'
+			);
 		}
 
 		const channel = betaImageUpdateStatus.release_channel ?? '未知';

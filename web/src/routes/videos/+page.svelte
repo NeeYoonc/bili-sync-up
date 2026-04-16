@@ -5,6 +5,7 @@
 	import VideoCard from '$lib/components/video-card.svelte';
 	import Pagination from '$lib/components/pagination.svelte';
 	import SearchBar from '$lib/components/search-bar.svelte';
+	import SectionHeader from '$lib/components/section-header.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
@@ -19,6 +20,8 @@
 	import { VIDEO_SOURCES, type VideoSourceType } from '$lib/consts';
 	import { runRequest } from '$lib/utils/request.js';
 	import { buildVideosRequest } from '$lib/utils/videos.js';
+	import { buildAuthenticatedStreamUrl } from '$lib/utils/live-stream';
+	import { createManagedEventSource } from '$lib/utils/live-event-source';
 	import {
 		appStateStore,
 		resetCurrentPage,
@@ -45,8 +48,7 @@
 	let videoSources: VideoSourcesResponse | null = null;
 	let loading = false;
 	let lastSearch: string | null = null;
-	let videosEventSource: EventSource | null = null;
-	let currentVideosStreamUrl: string | null = null;
+	const videosStream = createManagedEventSource();
 	let liveUpdateStatus: 'idle' | 'connecting' | 'connected' | 'error' = 'idle';
 	let pendingInsertedCount = 0;
 
@@ -79,7 +81,7 @@
 		{ value: '1080', label: '1080p' },
 		{ value: '720', label: '720p' },
 		{ value: '480', label: '480p' },
-		{ value: '360', label: '360p' },
+		{ value: '360', label: '360p' }
 	];
 
 	const RESOLUTION_RANGES: Record<string, { min: number; max: number }> = {
@@ -228,8 +230,26 @@
 		const nextUrl = buildVideosUrl();
 		const currentUrl = `${$page.url.pathname}${$page.url.search}`;
 		if (currentUrl === nextUrl || currentUrl === `${nextUrl}?`) {
-			const { query, currentPage, videoSource, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight } = $appStateStore;
-			await loadVideos(query, currentPage, videoSource, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight);
+			const {
+				query,
+				currentPage,
+				videoSource,
+				showFailedOnly,
+				sortBy,
+				sortOrder,
+				minHeight,
+				maxHeight
+			} = $appStateStore;
+			await loadVideos(
+				query,
+				currentPage,
+				videoSource,
+				showFailedOnly,
+				sortBy,
+				sortOrder,
+				minHeight,
+				maxHeight
+			);
 		} else {
 			goto(nextUrl);
 		}
@@ -278,14 +298,15 @@
 		const resolutionRaw = searchParams.get('resolution');
 		const minHeightParsed = minHeightRaw ? Number.parseInt(minHeightRaw, 10) : Number.NaN;
 		const maxHeightParsed = maxHeightRaw ? Number.parseInt(maxHeightRaw, 10) : Number.NaN;
-		const minHeight = Number.isFinite(minHeightParsed) && minHeightParsed >= 0 ? minHeightParsed : null;
-		const maxHeight = Number.isFinite(maxHeightParsed) && maxHeightParsed >= 0 ? maxHeightParsed : null;
+		const minHeight =
+			Number.isFinite(minHeightParsed) && minHeightParsed >= 0 ? minHeightParsed : null;
+		const maxHeight =
+			Number.isFinite(maxHeightParsed) && maxHeightParsed >= 0 ? maxHeightParsed : null;
 		const hasMinMax = Number.isFinite(minHeightParsed) || Number.isFinite(maxHeightParsed);
-		const fallbackRange =
-			!hasMinMax && resolutionRaw ? getResolutionRange(resolutionRaw) : null;
+		const fallbackRange = !hasMinMax && resolutionRaw ? getResolutionRange(resolutionRaw) : null;
 		const normalized = normalizeResolutionRange(
-			hasMinMax ? minHeight : fallbackRange?.min ?? null,
-			hasMinMax ? maxHeight : fallbackRange?.max ?? null
+			hasMinMax ? minHeight : (fallbackRange?.min ?? null),
+			hasMinMax ? maxHeight : (fallbackRange?.max ?? null)
 		);
 
 		return {
@@ -310,10 +331,6 @@
 		minHeight: number | null = null,
 		maxHeight: number | null = null
 	): string | null {
-		if (typeof localStorage === 'undefined') return null;
-		const token = localStorage.getItem('auth_token');
-		if (!token) return null;
-
 		const params = buildVideosRequest({
 			page: pageNum,
 			pageSize,
@@ -326,22 +343,11 @@
 			maxHeight
 		}) as Record<string, string | number | boolean | null | undefined>;
 
-		const searchParams = new URLSearchParams();
-		Object.entries(params).forEach(([key, value]) => {
-			if (value !== undefined && value !== null) {
-				searchParams.append(key, String(value));
-			}
-		});
-		searchParams.append('token', token);
-		return `/api/videos/live?${searchParams.toString()}`;
+		return buildAuthenticatedStreamUrl('/api/videos/live', params);
 	}
 
 	function stopVideosStream() {
-		if (videosEventSource) {
-			videosEventSource.close();
-			videosEventSource = null;
-		}
-		currentVideosStreamUrl = null;
+		videosStream.stop();
 		liveUpdateStatus = 'idle';
 	}
 
@@ -427,41 +433,33 @@
 			maxHeight
 		);
 
-		if (!streamUrl) {
-			stopVideosStream();
-			return;
-		}
-
-		if (videosEventSource && currentVideosStreamUrl === streamUrl) {
-			return;
-		}
-
-		stopVideosStream();
-		currentVideosStreamUrl = streamUrl;
-		liveUpdateStatus = 'connecting';
-
-		const eventSource = new EventSource(streamUrl);
-		videosEventSource = eventSource;
-
-		eventSource.addEventListener('ready', () => {
-			liveUpdateStatus = 'connected';
-		});
-
-		eventSource.addEventListener('videos', (event) => {
-			try {
-				const payload = JSON.parse((event as MessageEvent).data) as VideosResponse;
-				applyLiveVideosUpdate(payload);
-				liveUpdateStatus = 'connected';
-			} catch (error) {
-				console.error('解析视频实时更新失败:', error);
-			}
-		});
-
-		eventSource.onerror = () => {
-			if (videosEventSource === eventSource) {
+		const started = videosStream.start({
+			url: streamUrl,
+			handlers: {
+				ready: () => {
+					liveUpdateStatus = 'connected';
+				},
+				videos: (event) => {
+					try {
+						const payload = JSON.parse(event.data) as VideosResponse;
+						applyLiveVideosUpdate(payload);
+						liveUpdateStatus = 'connected';
+					} catch (error) {
+						console.error('解析视频实时更新失败:', error);
+					}
+				}
+			},
+			onError: () => {
 				liveUpdateStatus = 'error';
+			},
+			onStop: () => {
+				liveUpdateStatus = 'idle';
 			}
-		};
+		});
+
+		if (streamUrl && started) {
+			liveUpdateStatus = 'connecting';
+		}
 	}
 
 	async function handlePendingInsertedClick() {
@@ -506,7 +504,16 @@
 			pageSize
 		);
 		pendingInsertedCount = 0;
-		startVideosStream(query, pageNum, filter, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight);
+		startVideosStream(
+			query,
+			pageNum,
+			filter,
+			showFailedOnly,
+			sortBy,
+			sortOrder,
+			minHeight,
+			maxHeight
+		);
 	}
 
 	async function loadVideoSources() {
@@ -534,7 +541,16 @@
 			minHeight,
 			maxHeight
 		} = getApiParams(searchParams);
-		setAll(query, pageNum, videoSource, showFailedOnlyParam, sortBy, sortOrder, minHeight, maxHeight);
+		setAll(
+			query,
+			pageNum,
+			videoSource,
+			showFailedOnlyParam,
+			sortBy,
+			sortOrder,
+			minHeight,
+			maxHeight
+		);
 
 		// 同步筛选状态
 		if (videoSource) {
@@ -549,7 +565,16 @@
 		currentSortOrder = sortOrder;
 		selectedResolution = getResolutionKey(minHeight, maxHeight);
 
-		loadVideos(query, pageNum, videoSource, showFailedOnlyParam, sortBy, sortOrder, minHeight, maxHeight);
+		loadVideos(
+			query,
+			pageNum,
+			videoSource,
+			showFailedOnlyParam,
+			sortBy,
+			sortOrder,
+			minHeight,
+			maxHeight
+		);
 	}
 
 	async function handleResetVideo(video: VideoInfo, forceReset: boolean) {
@@ -560,9 +585,26 @@
 				toast.success('重置成功', {
 					description: `视频「${video.name}」已重置`
 				});
-				const { query, currentPage, videoSource, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight } =
-					$appStateStore;
-				await loadVideos(query, currentPage, videoSource, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight);
+				const {
+					query,
+					currentPage,
+					videoSource,
+					showFailedOnly,
+					sortBy,
+					sortOrder,
+					minHeight,
+					maxHeight
+				} = $appStateStore;
+				await loadVideos(
+					query,
+					currentPage,
+					videoSource,
+					showFailedOnly,
+					sortBy,
+					sortOrder,
+					minHeight,
+					maxHeight
+				);
 			} else {
 				toast.info('重置无效', {
 					description: `视频「${video.name}」没有失败的状态，无需重置`
@@ -580,7 +622,13 @@
 		resettingAll = true;
 		try {
 			let result;
-			const { videoSource, query: queryWord, showFailedOnly, minHeight, maxHeight } = $appStateStore;
+			const {
+				videoSource,
+				query: queryWord,
+				showFailedOnly,
+				minHeight,
+				maxHeight
+			} = $appStateStore;
 
 			// 让“批量重置”遵循当前筛选（视频源 / 搜索关键词 / 失败筛选 / 分辨率筛选）
 			const filterParams = buildVideosRequest({
@@ -846,9 +894,26 @@
 				}
 
 				// 重新加载视频列表
-				const { query, currentPage, videoSource, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight } =
-					$appStateStore;
-				await loadVideos(query, currentPage, videoSource, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight);
+				const {
+					query,
+					currentPage,
+					videoSource,
+					showFailedOnly,
+					sortBy,
+					sortOrder,
+					minHeight,
+					maxHeight
+				} = $appStateStore;
+				await loadVideos(
+					query,
+					currentPage,
+					videoSource,
+					showFailedOnly,
+					sortBy,
+					sortOrder,
+					minHeight,
+					maxHeight
+				);
 
 				// 清空选择
 				clearSelection();
@@ -892,6 +957,14 @@
 </svelte:head>
 
 <div class="space-y-6">
+	<SectionHeader
+		as="h1"
+		title="视频管理"
+		description="搜索、筛选并批量管理已同步的视频列表。"
+		titleClass="text-2xl font-bold"
+		descriptionClass="text-muted-foreground mt-1 text-sm"
+	/>
+
 	<!-- 搜索和筛选栏 -->
 	<div class="flex flex-col gap-4">
 		<!-- 搜索栏 -->
@@ -938,7 +1011,7 @@
 					<!-- 显示数量设置 -->
 					<div class="grid grid-cols-2 gap-2 sm:flex sm:items-center sm:gap-2">
 						<label class="flex items-center gap-2">
-							<span class="text-muted-foreground whitespace-nowrap text-sm">每页</span>
+							<span class="text-muted-foreground text-sm whitespace-nowrap">每页</span>
 							<input
 								class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full min-w-0 rounded-md border px-2 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-24"
 								type="number"
@@ -949,7 +1022,7 @@
 							/>
 						</label>
 						<label class="flex items-center gap-2">
-							<span class="text-muted-foreground whitespace-nowrap text-sm">每行</span>
+							<span class="text-muted-foreground text-sm whitespace-nowrap">每行</span>
 							<input
 								class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full min-w-0 rounded-md border px-2 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-24"
 								type="number"
@@ -1054,7 +1127,6 @@
 					{/if}
 				</div>
 			</div>
-
 		</div>
 	{/if}
 
@@ -1117,7 +1189,6 @@
 					</select>
 				</div>
 			</div>
-
 		</div>
 	{/if}
 
@@ -1144,9 +1215,9 @@
 				{/if}
 			{/if}
 
-
 			{#if selectedResolution}
-				<Badge variant="secondary" class="flex items-center gap-1">分辨率 {getResolutionLabel(selectedResolution)}
+				<Badge variant="secondary" class="flex items-center gap-1"
+					>分辨率 {getResolutionLabel(selectedResolution)}
 					<button
 						onclick={() => handleResolutionChange('')}
 						class="hover:bg-muted-foreground/20 ml-1 rounded"
@@ -1271,7 +1342,6 @@
 				<div class="text-muted-foreground">暂无视频数据</div>
 				<p class="text-muted-foreground text-sm">尝试调整搜索条件或添加视频源</p>
 			</div>
-
 		</div>
 	{/if}
 </div>

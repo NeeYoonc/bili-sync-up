@@ -3,6 +3,10 @@
 // 固定使用北京时间
 const BEIJING_TIMEZONE = 'Asia/Shanghai';
 
+function isBlankTimestamp(timestamp: string | number | Date | null | undefined): boolean {
+	return timestamp === null || timestamp === undefined || timestamp === '';
+}
+
 // 格式化时间戳到北京时间
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -60,6 +64,28 @@ export function formatTimestamp(
 		console.error('时间格式化失败:', error);
 		return '格式化失败';
 	}
+}
+
+export function isInvalidFormattedTime(value: string): boolean {
+	return value === '无效时间' || value === '格式化失败';
+}
+
+export function formatTimestampOrFallback(
+	timestamp: string | number | Date | null | undefined,
+	_timezone: string = BEIJING_TIMEZONE,
+	format: 'datetime' | 'date' | 'time' = 'datetime',
+	fallback?: string
+): string {
+	if (isBlankTimestamp(timestamp)) {
+		return fallback ?? '';
+	}
+
+	const formatted = formatTimestamp(timestamp as string | number | Date, _timezone, format);
+	if (isInvalidFormattedTime(formatted)) {
+		return fallback ?? String(timestamp);
+	}
+
+	return formatted;
 }
 
 // 获取相对时间描述
