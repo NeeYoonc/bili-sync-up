@@ -8347,19 +8347,15 @@ pub async fn update_config_internal(
 
     // 获取当前配置的副本
     let mut config = crate::config::reload_config();
+    let default_config = crate::config::Config::default();
+    let default_ai_rename = crate::utils::ai_rename::AiRenameConfig::default();
     let mut updated_fields = Vec::new();
 
     // 记录原始的NFO时间类型，用于比较是否真正发生了变化
     let original_nfo_time_type = config.nfo_time_type.clone();
 
     // 记录原始的命名相关配置，用于比较是否真正发生了变化
-    let original_video_name = config.video_name.clone();
-    let original_page_name = config.page_name.clone();
-    let original_multi_page_name = config.multi_page_name.clone();
-    let original_bangumi_name = config.bangumi_name.clone();
-    let original_folder_structure = config.folder_structure.clone();
     let original_collection_folder_mode = config.collection_folder_mode.clone();
-    let original_collection_unified_name = config.collection_unified_name.clone();
     let original_favorite_quick_subscribe_path = config.favorite_quick_subscribe_path.clone();
     let original_collection_quick_subscribe_path = config.collection_quick_subscribe_path.clone();
     let original_submission_quick_subscribe_path = config.submission_quick_subscribe_path.clone();
@@ -8368,29 +8364,49 @@ pub async fn update_config_internal(
 
     // 更新配置字段
     if let Some(video_name) = params.video_name {
-        if !video_name.trim().is_empty() && video_name != original_video_name.as_ref() {
-            config.video_name = Cow::Owned(video_name);
+        let normalized_video_name = if video_name.trim().is_empty() {
+            default_config.video_name.clone()
+        } else {
+            Cow::Owned(video_name)
+        };
+        if normalized_video_name != config.video_name {
+            config.video_name = normalized_video_name;
             updated_fields.push("video_name");
         }
     }
 
     if let Some(page_name) = params.page_name {
-        if !page_name.trim().is_empty() && page_name != original_page_name.as_ref() {
-            config.page_name = Cow::Owned(page_name);
+        let normalized_page_name = if page_name.trim().is_empty() {
+            default_config.page_name.clone()
+        } else {
+            Cow::Owned(page_name)
+        };
+        if normalized_page_name != config.page_name {
+            config.page_name = normalized_page_name;
             updated_fields.push("page_name");
         }
     }
 
     if let Some(multi_page_name) = params.multi_page_name {
-        if !multi_page_name.trim().is_empty() && multi_page_name != original_multi_page_name.as_ref() {
-            config.multi_page_name = Cow::Owned(multi_page_name);
+        let normalized_multi_page_name = if multi_page_name.trim().is_empty() {
+            default_config.multi_page_name.clone()
+        } else {
+            Cow::Owned(multi_page_name)
+        };
+        if normalized_multi_page_name != config.multi_page_name {
+            config.multi_page_name = normalized_multi_page_name;
             updated_fields.push("multi_page_name");
         }
     }
 
     if let Some(folder_structure) = params.folder_structure {
-        if !folder_structure.trim().is_empty() && folder_structure != original_folder_structure.as_ref() {
-            config.folder_structure = Cow::Owned(folder_structure);
+        let normalized_folder_structure = if folder_structure.trim().is_empty() {
+            default_config.folder_structure.clone()
+        } else {
+            Cow::Owned(folder_structure)
+        };
+        if normalized_folder_structure != config.folder_structure {
+            config.folder_structure = normalized_folder_structure;
             updated_fields.push("folder_structure");
         }
     }
@@ -8432,8 +8448,13 @@ pub async fn update_config_internal(
         if has_path_separator_outside_handlebars(trimmed) {
             return Err(anyhow!("合集统一模式命名模板不应包含路径分隔符 / 或 \\").into());
         }
-        if !trimmed.is_empty() && trimmed != original_collection_unified_name.as_ref() {
-            config.collection_unified_name = Cow::Owned(trimmed.to_string());
+        let normalized_collection_unified_name = if trimmed.is_empty() {
+            default_config.collection_unified_name.clone()
+        } else {
+            Cow::Owned(trimmed.to_string())
+        };
+        if normalized_collection_unified_name != config.collection_unified_name {
+            config.collection_unified_name = normalized_collection_unified_name;
             updated_fields.push("collection_unified_name");
         }
     }
@@ -8471,8 +8492,13 @@ pub async fn update_config_internal(
     }
 
     if let Some(time_format) = params.time_format {
-        if !time_format.trim().is_empty() && time_format != config.time_format {
-            config.time_format = time_format;
+        let normalized_time_format = if time_format.trim().is_empty() {
+            default_config.time_format.clone()
+        } else {
+            time_format
+        };
+        if normalized_time_format != config.time_format {
+            config.time_format = normalized_time_format;
             updated_fields.push("time_format");
         }
     }
@@ -8499,15 +8525,25 @@ pub async fn update_config_internal(
     }
 
     if let Some(bangumi_name) = params.bangumi_name {
-        if !bangumi_name.trim().is_empty() && bangumi_name != original_bangumi_name.as_ref() {
-            config.bangumi_name = Cow::Owned(bangumi_name);
+        let normalized_bangumi_name = if bangumi_name.trim().is_empty() {
+            default_config.bangumi_name.clone()
+        } else {
+            Cow::Owned(bangumi_name)
+        };
+        if normalized_bangumi_name != config.bangumi_name {
+            config.bangumi_name = normalized_bangumi_name;
             updated_fields.push("bangumi_name");
         }
     }
 
     if let Some(bangumi_folder_name) = params.bangumi_folder_name {
-        if !bangumi_folder_name.trim().is_empty() && bangumi_folder_name != config.bangumi_folder_name.as_ref() {
-            config.bangumi_folder_name = Cow::Owned(bangumi_folder_name);
+        let normalized_bangumi_folder_name = if bangumi_folder_name.trim().is_empty() {
+            default_config.bangumi_folder_name.clone()
+        } else {
+            Cow::Owned(bangumi_folder_name)
+        };
+        if normalized_bangumi_folder_name != config.bangumi_folder_name {
+            config.bangumi_folder_name = normalized_bangumi_folder_name;
             updated_fields.push("bangumi_folder_name");
         }
     }
@@ -8626,8 +8662,13 @@ pub async fn update_config_internal(
     }
 
     if let Some(font) = params.danmaku_font {
-        if !font.trim().is_empty() && font != config.danmaku_option.font {
-            config.danmaku_option.font = font;
+        let normalized_font = if font.trim().is_empty() {
+            default_config.danmaku_option.font.clone()
+        } else {
+            font
+        };
+        if normalized_font != config.danmaku_option.font {
+            config.danmaku_option.font = normalized_font;
             updated_fields.push("danmaku_font");
         }
     }
@@ -9037,12 +9078,15 @@ pub async fn update_config_internal(
 
     // UP主头像保存路径
     if let Some(upper_path) = params.upper_path {
-        if !upper_path.trim().is_empty() {
-            let new_path = std::path::PathBuf::from(upper_path);
-            if new_path != config.upper_path {
-                config.upper_path = new_path;
-                updated_fields.push("upper_path");
-            }
+        let trimmed_upper_path = upper_path.trim();
+        let new_path = if trimmed_upper_path.is_empty() {
+            default_config.upper_path.clone()
+        } else {
+            std::path::PathBuf::from(trimmed_upper_path)
+        };
+        if new_path != config.upper_path {
+            config.upper_path = new_path;
+            updated_fields.push("upper_path");
         }
     }
 
@@ -9056,13 +9100,15 @@ pub async fn update_config_internal(
 
     // 服务器绑定地址配置
     if let Some(bind_address) = params.bind_address {
-        if !bind_address.trim().is_empty() {
-            let normalized_address = if bind_address.contains(':') {
+        let trimmed_bind_address = bind_address.trim();
+        let normalized_address = if trimmed_bind_address.is_empty() {
+            default_config.bind_address.clone()
+        } else if trimmed_bind_address.contains(':') {
                 // 已经包含端口，直接使用
-                bind_address.clone()
+                trimmed_bind_address.to_string()
             } else {
                 // 只有端口号，添加默认IP
-                if let Ok(port) = bind_address.parse::<u16>() {
+                if let Ok(port) = trimmed_bind_address.parse::<u16>() {
                     if port == 0 {
                         return Err(anyhow!("端口号不能为0").into());
                     }
@@ -9090,7 +9136,6 @@ pub async fn update_config_internal(
                 config.bind_address = normalized_address;
                 updated_fields.push("bind_address");
             }
-        }
     }
 
     // 风控验证配置
@@ -9154,20 +9199,21 @@ pub async fn update_config_internal(
     }
 
     if let Some(api_key) = params.risk_control_auto_solve_api_key {
-        if !api_key.trim().is_empty() {
+        let normalized_api_key = api_key.trim().to_string();
+        if config.risk_control.auto_solve.is_none() {
+            if !normalized_api_key.is_empty() {
             // 如果auto_solve配置不存在，创建一个新的
-            if config.risk_control.auto_solve.is_none() {
                 config.risk_control.auto_solve = Some(crate::config::AutoSolveConfig {
                     service: "2captcha".to_string(),
-                    api_key: api_key.clone(),
+                    api_key: normalized_api_key.clone(),
                     max_retries: 3,
                     solve_timeout: 120,
                 });
                 updated_fields.push("risk_control.auto_solve.api_key");
-            } else if config.risk_control.auto_solve.as_ref().unwrap().api_key != api_key {
-                config.risk_control.auto_solve.as_mut().unwrap().api_key = api_key;
-                updated_fields.push("risk_control.auto_solve.api_key");
             }
+        } else if config.risk_control.auto_solve.as_ref().unwrap().api_key != normalized_api_key {
+            config.risk_control.auto_solve.as_mut().unwrap().api_key = normalized_api_key;
+            updated_fields.push("risk_control.auto_solve.api_key");
         }
     }
 
@@ -9215,14 +9261,24 @@ pub async fn update_config_internal(
         }
     }
     if let Some(provider) = &params.ai_rename_provider {
-        if config.ai_rename.provider != *provider {
-            config.ai_rename.provider = provider.clone();
+        let normalized_provider = if provider.trim().is_empty() {
+            default_ai_rename.provider.clone()
+        } else {
+            provider.trim().to_string()
+        };
+        if config.ai_rename.provider != normalized_provider {
+            config.ai_rename.provider = normalized_provider;
             updated_fields.push("ai_rename");
         }
     }
     if let Some(base_url) = &params.ai_rename_base_url {
-        if config.ai_rename.base_url != *base_url {
-            config.ai_rename.base_url = base_url.clone();
+        let normalized_base_url = if base_url.trim().is_empty() {
+            default_ai_rename.base_url.clone()
+        } else {
+            base_url.trim().to_string()
+        };
+        if config.ai_rename.base_url != normalized_base_url {
+            config.ai_rename.base_url = normalized_base_url;
             updated_fields.push("ai_rename");
         }
     }
@@ -9245,8 +9301,13 @@ pub async fn update_config_internal(
         }
     }
     if let Some(model) = &params.ai_rename_model {
-        if config.ai_rename.model != *model {
-            config.ai_rename.model = model.clone();
+        let normalized_model = if model.trim().is_empty() {
+            default_ai_rename.model.clone()
+        } else {
+            model.trim().to_string()
+        };
+        if config.ai_rename.model != normalized_model {
+            config.ai_rename.model = normalized_model;
             updated_fields.push("ai_rename");
         }
     }
@@ -9257,14 +9318,24 @@ pub async fn update_config_internal(
         }
     }
     if let Some(video_prompt_hint) = &params.ai_rename_video_prompt_hint {
-        if config.ai_rename.video_prompt_hint != *video_prompt_hint {
-            config.ai_rename.video_prompt_hint = video_prompt_hint.clone();
+        let normalized_video_prompt_hint = if video_prompt_hint.trim().is_empty() {
+            default_ai_rename.video_prompt_hint.clone()
+        } else {
+            video_prompt_hint.clone()
+        };
+        if config.ai_rename.video_prompt_hint != normalized_video_prompt_hint {
+            config.ai_rename.video_prompt_hint = normalized_video_prompt_hint;
             updated_fields.push("ai_rename");
         }
     }
     if let Some(audio_prompt_hint) = &params.ai_rename_audio_prompt_hint {
-        if config.ai_rename.audio_prompt_hint != *audio_prompt_hint {
-            config.ai_rename.audio_prompt_hint = audio_prompt_hint.clone();
+        let normalized_audio_prompt_hint = if audio_prompt_hint.trim().is_empty() {
+            default_ai_rename.audio_prompt_hint.clone()
+        } else {
+            audio_prompt_hint.clone()
+        };
+        if config.ai_rename.audio_prompt_hint != normalized_audio_prompt_hint {
+            config.ai_rename.audio_prompt_hint = normalized_audio_prompt_hint;
             updated_fields.push("ai_rename");
         }
     }

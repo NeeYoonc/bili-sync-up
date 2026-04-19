@@ -144,6 +144,68 @@
 		return settingTooltips[id as keyof typeof settingTooltips] ?? '';
 	}
 
+	const DEFAULT_CONFIG_VALUES = {
+		interval: 1200,
+		bindAddress: '0.0.0.0:12345',
+		parallelDownloadThreads: 4,
+		codecs: ['AVC', 'HEV', 'AV1'],
+		danmakuDuration: 15.0,
+		danmakuFontSize: 25,
+		danmakuWidthRatio: 1.2,
+		danmakuHorizontalGap: 20.0,
+		danmakuLaneSize: 32,
+		danmakuFloatPercentage: 0.5,
+		danmakuBottomPercentage: 0.3,
+		danmakuOpacity: 76,
+		danmakuOutline: 0.8,
+		danmakuTimeOffset: 0.0,
+		danmakuUpdateFreshDays: 3,
+		danmakuUpdateFreshIntervalHours: 6,
+		danmakuUpdateMatureDays: 30,
+		danmakuUpdateMatureIntervalDays: 3,
+		danmakuUpdateColdDays: 180,
+		danmakuUpdateColdIntervalDays: 30,
+		concurrentVideo: 3,
+		concurrentPage: 2,
+		rateLimit: 4,
+		rateDuration: 250,
+		largeSubmissionThreshold: 80,
+		baseRequestDelay: 1000,
+		largeSubmissionDelayMultiplier: 2,
+		maxDelayMultiplier: 4,
+		batchSize: 3,
+		batchDelaySeconds: 2,
+		autoBackoffBaseSeconds: 10,
+		autoBackoffMaxMultiplier: 5,
+		sourceDelaySeconds: 2,
+		submissionSourceDelaySeconds: 5,
+		dynamicApiDelayMultiplier: 1.5,
+		aria2HealthCheckInterval: 300,
+		riskControlTimeout: 300,
+		autoSolveMaxRetries: 3,
+		autoSolveTimeout: 120,
+		aiRenameTimeoutSeconds: 20,
+		notificationMinVideos: 1
+	} as const;
+
+	function normalizeNumberInput(value: unknown, fallback: number): number {
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+
+		if (typeof value === 'string') {
+			const trimmed = value.trim();
+			if (trimmed) {
+				const parsed = Number(trimmed);
+				if (Number.isFinite(parsed)) {
+					return parsed;
+				}
+			}
+		}
+
+		return fallback;
+	}
+
 	// 表单数据
 	let videoName = '{{upper_name}}';
 	let pageName = '{{pubtime}}-{{bvid}}-{{truncate title 20}}';
@@ -703,9 +765,9 @@
 	function validateCollectionUnifiedName(value: string) {
 		const trimmed = value.trim();
 		if (!trimmed) {
-			collectionUnifiedNameError = '合集统一命名模板不能为空';
-			collectionUnifiedNameValid = false;
-			return false;
+			collectionUnifiedNameError = '';
+			collectionUnifiedNameValid = true;
+			return true;
 		}
 		if (hasPathSeparatorOutsideHandlebars(trimmed)) {
 			collectionUnifiedNameError = '合集统一命名模板不应包含路径分隔符 / 或 \\\\';
@@ -721,9 +783,9 @@
 	function validateBindAddress(value: string) {
 		const trimmedValue = value.trim();
 		if (!trimmedValue) {
-			bindAddressError = '绑定地址不能为空';
-			bindAddressValid = false;
-			return false;
+			bindAddressError = '';
+			bindAddressValid = true;
+			return true;
 		}
 
 		// 检查是否包含端口号
@@ -829,7 +891,7 @@
 			return;
 		}
 
-		const params = {
+		const params: UpdateConfigRequest = {
 			video_name: videoName,
 			page_name: pageName,
 			multi_page_name: multiPageName,
@@ -839,47 +901,104 @@
 			collection_folder_mode: collectionFolderMode,
 			collection_unified_name: collectionUnifiedName,
 			time_format: timeFormat,
-			interval: interval,
+			interval: normalizeNumberInput(interval, DEFAULT_CONFIG_VALUES.interval),
 			nfo_time_type: nfoTimeType,
 			bind_address: bindAddress,
 			parallel_download_enabled: parallelDownloadEnabled,
-			parallel_download_threads: parallelDownloadThreads,
+			parallel_download_threads: normalizeNumberInput(
+				parallelDownloadThreads,
+				DEFAULT_CONFIG_VALUES.parallelDownloadThreads
+			),
 			parallel_download_use_aria2: parallelDownloadUseAria2,
 			// 视频质量设置
 			video_max_quality: videoMaxQuality,
 			video_min_quality: videoMinQuality,
 			audio_max_quality: audioMaxQuality,
 			audio_min_quality: audioMinQuality,
-			codecs: codecs,
+			codecs: codecs.length > 0 ? codecs : [...DEFAULT_CONFIG_VALUES.codecs],
 			no_dolby_video: noDolbyVideo,
 			no_dolby_audio: noDolbyAudio,
 			no_hdr: noHdr,
 			no_hires: noHires,
 			// 弹幕设置
-			danmaku_duration: danmakuDuration,
+			danmaku_duration: normalizeNumberInput(
+				danmakuDuration,
+				DEFAULT_CONFIG_VALUES.danmakuDuration
+			),
 			danmaku_font: danmakuFont,
-			danmaku_font_size: danmakuFontSize,
-			danmaku_width_ratio: danmakuWidthRatio,
-			danmaku_horizontal_gap: danmakuHorizontalGap,
-			danmaku_lane_size: danmakuLaneSize,
-			danmaku_float_percentage: danmakuFloatPercentage,
-			danmaku_bottom_percentage: danmakuBottomPercentage,
-			danmaku_opacity: danmakuOpacity,
+			danmaku_font_size: normalizeNumberInput(
+				danmakuFontSize,
+				DEFAULT_CONFIG_VALUES.danmakuFontSize
+			),
+			danmaku_width_ratio: normalizeNumberInput(
+				danmakuWidthRatio,
+				DEFAULT_CONFIG_VALUES.danmakuWidthRatio
+			),
+			danmaku_horizontal_gap: normalizeNumberInput(
+				danmakuHorizontalGap,
+				DEFAULT_CONFIG_VALUES.danmakuHorizontalGap
+			),
+			danmaku_lane_size: normalizeNumberInput(
+				danmakuLaneSize,
+				DEFAULT_CONFIG_VALUES.danmakuLaneSize
+			),
+			danmaku_float_percentage: normalizeNumberInput(
+				danmakuFloatPercentage,
+				DEFAULT_CONFIG_VALUES.danmakuFloatPercentage
+			),
+			danmaku_bottom_percentage: normalizeNumberInput(
+				danmakuBottomPercentage,
+				DEFAULT_CONFIG_VALUES.danmakuBottomPercentage
+			),
+			danmaku_opacity: normalizeNumberInput(
+				danmakuOpacity,
+				DEFAULT_CONFIG_VALUES.danmakuOpacity
+			),
 			danmaku_bold: danmakuBold,
-			danmaku_outline: danmakuOutline,
-			danmaku_time_offset: danmakuTimeOffset,
+			danmaku_outline: normalizeNumberInput(
+				danmakuOutline,
+				DEFAULT_CONFIG_VALUES.danmakuOutline
+			),
+			danmaku_time_offset: normalizeNumberInput(
+				danmakuTimeOffset,
+				DEFAULT_CONFIG_VALUES.danmakuTimeOffset
+			),
 			danmaku_update_enabled: danmakuUpdateEnabled,
-			danmaku_update_fresh_days: danmakuUpdateFreshDays,
-			danmaku_update_fresh_interval_hours: danmakuUpdateFreshIntervalHours,
-			danmaku_update_mature_days: danmakuUpdateMatureDays,
-			danmaku_update_mature_interval_days: danmakuUpdateMatureIntervalDays,
-			danmaku_update_cold_days: danmakuUpdateColdDays,
-			danmaku_update_cold_interval_days: danmakuUpdateColdIntervalDays,
+			danmaku_update_fresh_days: normalizeNumberInput(
+				danmakuUpdateFreshDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateFreshDays
+			),
+			danmaku_update_fresh_interval_hours: normalizeNumberInput(
+				danmakuUpdateFreshIntervalHours,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateFreshIntervalHours
+			),
+			danmaku_update_mature_days: normalizeNumberInput(
+				danmakuUpdateMatureDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateMatureDays
+			),
+			danmaku_update_mature_interval_days: normalizeNumberInput(
+				danmakuUpdateMatureIntervalDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateMatureIntervalDays
+			),
+			danmaku_update_cold_days: normalizeNumberInput(
+				danmakuUpdateColdDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateColdDays
+			),
+			danmaku_update_cold_interval_days: normalizeNumberInput(
+				danmakuUpdateColdIntervalDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateColdIntervalDays
+			),
 			// 并发控制设置
-			concurrent_video: concurrentVideo,
-			concurrent_page: concurrentPage,
-			rate_limit: rateLimit,
-			rate_duration: rateDuration,
+			concurrent_video: normalizeNumberInput(
+				concurrentVideo,
+				DEFAULT_CONFIG_VALUES.concurrentVideo
+			),
+			concurrent_page: normalizeNumberInput(
+				concurrentPage,
+				DEFAULT_CONFIG_VALUES.concurrentPage
+			),
+			rate_limit: normalizeNumberInput(rateLimit, DEFAULT_CONFIG_VALUES.rateLimit),
+			rate_duration: normalizeNumberInput(rateDuration, DEFAULT_CONFIG_VALUES.rateDuration),
 			// 其他设置
 			cdn_sorting: cdnSorting,
 			scan_deleted_videos: scanDeletedVideos,
@@ -890,27 +1009,60 @@
 			bangumi_quick_subscribe_path: bangumiQuickSubscribePath,
 			ffmpeg_path: ffmpegPath,
 			// UP主投稿风控配置
-			large_submission_threshold: largeSubmissionThreshold,
-			base_request_delay: baseRequestDelay,
-			large_submission_delay_multiplier: largeSubmissionDelayMultiplier,
+			large_submission_threshold: normalizeNumberInput(
+				largeSubmissionThreshold,
+				DEFAULT_CONFIG_VALUES.largeSubmissionThreshold
+			),
+			base_request_delay: normalizeNumberInput(
+				baseRequestDelay,
+				DEFAULT_CONFIG_VALUES.baseRequestDelay
+			),
+			large_submission_delay_multiplier: normalizeNumberInput(
+				largeSubmissionDelayMultiplier,
+				DEFAULT_CONFIG_VALUES.largeSubmissionDelayMultiplier
+			),
 			enable_progressive_delay: enableProgressiveDelay,
-			max_delay_multiplier: maxDelayMultiplier,
+			max_delay_multiplier: normalizeNumberInput(
+				maxDelayMultiplier,
+				DEFAULT_CONFIG_VALUES.maxDelayMultiplier
+			),
 			enable_incremental_fetch: enableIncrementalFetch,
 			incremental_fallback_to_full: incrementalFallbackToFull,
 			enable_batch_processing: enableBatchProcessing,
-			batch_size: batchSize,
-			batch_delay_seconds: batchDelaySeconds,
+			batch_size: normalizeNumberInput(batchSize, DEFAULT_CONFIG_VALUES.batchSize),
+			batch_delay_seconds: normalizeNumberInput(
+				batchDelaySeconds,
+				DEFAULT_CONFIG_VALUES.batchDelaySeconds
+			),
 			enable_auto_backoff: enableAutoBackoff,
-			auto_backoff_base_seconds: autoBackoffBaseSeconds,
-			auto_backoff_max_multiplier: autoBackoffMaxMultiplier,
-			source_delay_seconds: sourceDelaySeconds,
-			submission_source_delay_seconds: submissionSourceDelaySeconds,
+			auto_backoff_base_seconds: normalizeNumberInput(
+				autoBackoffBaseSeconds,
+				DEFAULT_CONFIG_VALUES.autoBackoffBaseSeconds
+			),
+			auto_backoff_max_multiplier: normalizeNumberInput(
+				autoBackoffMaxMultiplier,
+				DEFAULT_CONFIG_VALUES.autoBackoffMaxMultiplier
+			),
+			source_delay_seconds: normalizeNumberInput(
+				sourceDelaySeconds,
+				DEFAULT_CONFIG_VALUES.sourceDelaySeconds
+			),
+			submission_source_delay_seconds: normalizeNumberInput(
+				submissionSourceDelaySeconds,
+				DEFAULT_CONFIG_VALUES.submissionSourceDelaySeconds
+			),
 			enable_dynamic_api_delay: enableDynamicApiDelay,
-			dynamic_api_delay_multiplier: dynamicApiDelayMultiplier,
+			dynamic_api_delay_multiplier: normalizeNumberInput(
+				dynamicApiDelayMultiplier,
+				DEFAULT_CONFIG_VALUES.dynamicApiDelayMultiplier
+			),
 			// aria2监控配置
 			enable_aria2_health_check: enableAria2HealthCheck,
 			enable_aria2_auto_restart: enableAria2AutoRestart,
-			aria2_health_check_interval: aria2HealthCheckInterval,
+			aria2_health_check_interval: normalizeNumberInput(
+				aria2HealthCheckInterval,
+				DEFAULT_CONFIG_VALUES.aria2HealthCheckInterval
+			),
 			// 多P视频目录结构配置
 			multi_page_use_season_structure: multiPageUseSeasonStructure,
 			// 合集目录结构配置
@@ -920,7 +1072,10 @@
 			// 风控验证配置
 			risk_control_enabled: riskControlEnabled,
 			risk_control_mode: riskControlMode,
-			risk_control_timeout: riskControlTimeout
+			risk_control_timeout: normalizeNumberInput(
+				riskControlTimeout,
+				DEFAULT_CONFIG_VALUES.riskControlTimeout
+			)
 		};
 
 		const response = await runRequest(() => api.updateConfig(params), {
@@ -931,7 +1086,14 @@
 
 		if (response.data.success) {
 			// 检查是否修改了bind_address，如果是则提醒需要重启
-			if (params.bind_address && params.bind_address !== config?.bind_address) {
+			const trimmedBindAddress = bindAddress.trim();
+			const nextBindAddress = trimmedBindAddress
+				? trimmedBindAddress.includes(':')
+					? trimmedBindAddress
+					: `0.0.0.0:${trimmedBindAddress}`
+				: DEFAULT_CONFIG_VALUES.bindAddress;
+
+			if (nextBindAddress !== (config?.bind_address ?? DEFAULT_CONFIG_VALUES.bindAddress)) {
 				toast.success('保存成功', {
 					description: '端口配置已更新，请重启程序使配置生效',
 					duration: 8000 // 延长显示时间
@@ -1033,40 +1195,29 @@
 		const config: NotificationUpdateConfig = {
 			active_channel: activeNotificationChannel,
 			enable_scan_notifications: notificationEnabled,
-			notification_min_videos: notificationMinVideos
+			notification_min_videos: normalizeNumberInput(
+				notificationMinVideos,
+				DEFAULT_CONFIG_VALUES.notificationMinVideos
+			)
 		};
 
 		// 根据选择的渠道提交相应配置
 		if (activeNotificationChannel === 'serverchan') {
-			if (serverchanKey.trim()) {
-				config.serverchan_key = serverchanKey.trim();
-			}
+			config.serverchan_key = serverchanKey.trim();
 		} else if (activeNotificationChannel === 'serverchan3') {
-			if (serverchan3Uid.trim()) {
-				config.serverchan3_uid = serverchan3Uid.trim();
-			}
-			if (serverchan3Sendkey.trim()) {
-				config.serverchan3_sendkey = serverchan3Sendkey.trim();
-			}
+			config.serverchan3_uid = serverchan3Uid.trim();
+			config.serverchan3_sendkey = serverchan3Sendkey.trim();
 		} else if (activeNotificationChannel === 'wecom') {
-			if (wecomWebhookUrl.trim()) {
-				config.wecom_webhook_url = wecomWebhookUrl.trim();
-			}
+			config.wecom_webhook_url = wecomWebhookUrl.trim();
 			config.wecom_msgtype = wecomMsgtype;
 			config.wecom_mention_all = wecomMentionAll;
-			if (wecomMentionedList.trim()) {
-				config.wecom_mentioned_list = wecomMentionedList
-					.split(',')
-					.map((s) => s.trim())
-					.filter((s) => s);
-			}
+			config.wecom_mentioned_list = wecomMentionedList
+				.split(',')
+				.map((s) => s.trim())
+				.filter((s) => s);
 		} else if (activeNotificationChannel === 'webhook') {
-			if (webhookUrl.trim()) {
-				config.webhook_url = webhookUrl.trim();
-			}
-			if (webhookBearerToken.trim()) {
-				config.webhook_bearer_token = webhookBearerToken.trim();
-			}
+			config.webhook_url = webhookUrl.trim();
+			config.webhook_bearer_token = webhookBearerToken.trim();
 			config.webhook_custom_headers = webhookCustomHeaders.trim();
 			config.webhook_format = webhookFormat;
 			config.webhook_custom_body = webhookCustomBody.trim();
@@ -1094,11 +1245,20 @@
 		const config: UpdateConfigRequest = {
 			risk_control_enabled: riskControlEnabled,
 			risk_control_mode: riskControlMode,
-			risk_control_timeout: riskControlTimeout,
+			risk_control_timeout: normalizeNumberInput(
+				riskControlTimeout,
+				DEFAULT_CONFIG_VALUES.riskControlTimeout
+			),
 			risk_control_auto_solve_service: autoSolveService,
-			risk_control_auto_solve_api_key: autoSolveApiKey,
-			risk_control_auto_solve_max_retries: autoSolveMaxRetries,
-			risk_control_auto_solve_timeout: autoSolveTimeout
+			risk_control_auto_solve_api_key: autoSolveApiKey.trim(),
+			risk_control_auto_solve_max_retries: normalizeNumberInput(
+				autoSolveMaxRetries,
+				DEFAULT_CONFIG_VALUES.autoSolveMaxRetries
+			),
+			risk_control_auto_solve_timeout: normalizeNumberInput(
+				autoSolveTimeout,
+				DEFAULT_CONFIG_VALUES.autoSolveTimeout
+			)
 		};
 
 		const response = await runRequest(() => api.updateConfig(config), {
@@ -1121,14 +1281,17 @@
 	async function saveAiRenameConfig() {
 		const config: UpdateConfigRequest = {
 			ai_rename_enabled: aiRenameEnabled,
-			ai_rename_provider: aiRenameProvider,
-			ai_rename_base_url: aiRenameBaseUrl,
-			ai_rename_api_key: aiRenameApiKey || undefined,
-			ai_rename_deepseek_web_token: aiRenameDeepseekWebToken || undefined,
-			ai_rename_model: aiRenameModel,
-			ai_rename_timeout_seconds: aiRenameTimeoutSeconds,
-			ai_rename_video_prompt_hint: aiRenameVideoPromptHint || undefined,
-			ai_rename_audio_prompt_hint: aiRenameAudioPromptHint || undefined,
+			ai_rename_provider: aiRenameProvider.trim(),
+			ai_rename_base_url: aiRenameBaseUrl.trim(),
+			ai_rename_api_key: aiRenameApiKey.trim(),
+			ai_rename_deepseek_web_token: aiRenameDeepseekWebToken.trim(),
+			ai_rename_model: aiRenameModel.trim(),
+			ai_rename_timeout_seconds: normalizeNumberInput(
+				aiRenameTimeoutSeconds,
+				DEFAULT_CONFIG_VALUES.aiRenameTimeoutSeconds
+			),
+			ai_rename_video_prompt_hint: aiRenameVideoPromptHint,
+			ai_rename_audio_prompt_hint: aiRenameAudioPromptHint,
 			ai_rename_rename_parent_dir: aiRenameRenameParentDir
 		};
 
