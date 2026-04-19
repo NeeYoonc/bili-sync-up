@@ -103,6 +103,28 @@ fn get_submission_upper_intro_load_lock(upper_id: i64) -> Arc<TokioMutex<()>> {
         .clone()
 }
 
+async fn fetch_collection_cover_url(
+    bili_client: &crate::bilibili::BiliClient,
+    up_mid: i64,
+    collection_sid: i64,
+    collection_type: i32,
+) -> Result<String> {
+    let collection = crate::bilibili::CollectionItem {
+        mid: up_mid.to_string(),
+        sid: collection_sid.to_string(),
+        collection_type: if collection_type == 1 {
+            crate::bilibili::CollectionType::Series
+        } else {
+            crate::bilibili::CollectionType::Season
+        },
+    };
+
+    crate::bilibili::Collection::new(bili_client, &collection)
+        .get_cover_url()
+        .await
+        .with_context(|| format!("直连获取合集封面失败: sid={}, up_mid={}", collection_sid, up_mid))
+}
+
 fn get_root_alias_asset_write_lock(root_dir: &Path) -> Arc<TokioMutex<()>> {
     let key = root_dir.to_string_lossy().to_string();
     let mut locks = ROOT_ALIAS_ASSET_WRITE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
@@ -4313,39 +4335,25 @@ pub async fn download_video_pages(
                             info!("合集「{}」使用数据库保存的封面: {}", fresh_collection.name, cover_url);
                             Some(cover_url.clone())
                         }
-                        _ => match bili_client.get_user_collections(fresh_collection.m_id, 1, 50).await {
-                            Ok(collections_response) => {
-                                let fetched_cover = collections_response
-                                    .collections
-                                    .iter()
-                                    .find(|item| item.sid.parse::<i64>().ok() == Some(fresh_collection.s_id))
-                                    .and_then(|item| {
-                                        let cover = item.cover.trim();
-                                        if cover.is_empty() {
-                                            None
-                                        } else {
-                                            Some(cover.to_string())
-                                        }
-                                    });
-
-                                if let Some(ref cover_url) = fetched_cover {
-                                    info!("合集「{}」运行时回查封面成功: {}", fresh_collection.name, cover_url);
-                                    let mut active_model: collection::ActiveModel = fresh_collection.clone().into();
-                                    active_model.cover = Set(Some(cover_url.clone()));
-                                    if let Err(err) = active_model.update(connection).await {
-                                        warn!(
-                                                "回写合集封面到数据库失败（将继续使用本次结果）: collection_id={}, sid={}, err={}",
-                                                collection_source.id, collection_source.s_id, err
-                                            );
-                                    }
-                                } else {
-                                    info!(
-                                            "合集「{}」数据库和API中都没有稳定封面；若由非首集补封面，将不再回退为当前分集封面",
-                                            fresh_collection.name
+                        _ => match fetch_collection_cover_url(
+                            bili_client,
+                            fresh_collection.m_id,
+                            fresh_collection.s_id,
+                            fresh_collection.r#type,
+                        )
+                        .await
+                        {
+                            Ok(cover_url) => {
+                                info!("合集「{}」运行时回查封面成功: {}", fresh_collection.name, cover_url);
+                                let mut active_model: collection::ActiveModel = fresh_collection.clone().into();
+                                active_model.cover = Set(Some(cover_url.clone()));
+                                if let Err(err) = active_model.update(connection).await {
+                                    warn!(
+                                            "回写合集封面到数据库失败（将继续使用本次结果）: collection_id={}, sid={}, err={}",
+                                            collection_source.id, collection_source.s_id, err
                                         );
                                 }
-
-                                fetched_cover
+                                Some(cover_url)
                             }
                             Err(err) => {
                                 warn!(

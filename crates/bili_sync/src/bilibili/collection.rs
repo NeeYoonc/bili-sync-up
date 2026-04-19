@@ -123,6 +123,21 @@ impl<'a> Collection<'a> {
         Self { client, collection }
     }
 
+    pub async fn get_cover_url(&self) -> Result<String> {
+        let meta = match self.collection.collection_type {
+            CollectionType::Season => self.get_videos(1).await?["data"]["meta"].clone(),
+            CollectionType::Series => self.get_series_info().await?["data"]["meta"].clone(),
+        };
+
+        meta.get("cover")
+            .and_then(|v| v.as_str())
+            .or_else(|| meta.get("square_cover").and_then(|v| v.as_str()))
+            .or_else(|| meta.get("horizontal_cover").and_then(|v| v.as_str()))
+            .filter(|cover| !cover.trim().is_empty())
+            .map(|cover| cover.to_string())
+            .ok_or_else(|| anyhow!("合集封面URL为空"))
+    }
+
     pub async fn get_info(&self) -> Result<CollectionInfo> {
         let meta = match self.collection.collection_type {
             // 没有找到专门获取 Season 信息的接口，所以直接获取第一页，从里面取 meta 信息

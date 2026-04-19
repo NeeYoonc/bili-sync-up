@@ -630,6 +630,9 @@ impl BiliClient {
         page_size: u32,
     ) -> Result<crate::api::response::UserCollectionsResponse> {
         use serde_json::Value;
+        // 该接口在部分特殊账号上对较大的 page_size 会直接返回 -400。
+        // 这里统一收紧到 10，换取稳定性；调用方本身会聚合所有页面，不依赖单页大小语义。
+        let page_size = page_size.clamp(1, 10);
 
         // 同时获取合集(seasons)和系列(series)
         let mut all_collections = Vec::new();
