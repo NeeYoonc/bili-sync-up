@@ -629,10 +629,51 @@ impl BiliClient {
         _page: u32,
         page_size: u32,
     ) -> Result<crate::api::response::UserCollectionsResponse> {
+        let normalized_page_size = page_size.clamp(1, 30);
+        let mut page_size_candidates = vec![normalized_page_size];
+        for fallback_page_size in [20, 10] {
+            if normalized_page_size > fallback_page_size {
+                page_size_candidates.push(fallback_page_size);
+            }
+        }
+
+        let mut last_err = None;
+        for (index, candidate_page_size) in page_size_candidates.iter().copied().enumerate() {
+            let is_final_candidate = index + 1 == page_size_candidates.len();
+            match self
+                .get_user_collections_with_page_size(mid, candidate_page_size, is_final_candidate)
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    last_err = Some(err);
+                    if let Some(next_page_size) = page_size_candidates.get(index + 1) {
+                        info!(
+                            "UP主 {} 使用 page_size={} 获取合集失败，将降级重试为 page_size={}",
+                            mid, candidate_page_size, next_page_size
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(ref err) = last_err {
+            warn!(
+                "UP主 {} 获取合集失败，已依次尝试 page_size={:?}: {}",
+                mid, page_size_candidates, err
+            );
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("获取合集失败")))
+    }
+
+    async fn get_user_collections_with_page_size(
+        &self,
+        mid: i64,
+        page_size: u32,
+        emit_warning: bool,
+    ) -> Result<crate::api::response::UserCollectionsResponse> {
         use serde_json::Value;
-        // 该接口在部分特殊账号上对较大的 page_size 会直接返回 -400。
-        // 这里统一收紧到 10，换取稳定性；调用方本身会聚合所有页面，不依赖单页大小语义。
-        let page_size = page_size.clamp(1, 10);
 
         // 同时获取合集(seasons)和系列(series)
         let mut all_collections = Vec::new();
@@ -669,34 +710,56 @@ impl BiliClient {
                             Ok(json) => match json.validate() {
                                 Ok(validated) => break validated,
                                 Err(e) => {
-                                    warn!("UP主 {} 合集响应验证失败: {}", mid, e);
+                                    if emit_warning {
+                                        warn!("UP主 {} 合集响应验证失败: {}", mid, e);
+                                    } else {
+                                        info!("UP主 {} 合集响应验证失败: {}", mid, e);
+                                    }
                                     if retry_count >= max_retries {
                                         return Err(e.context("合集响应验证失败"));
                                     }
                                 }
                             },
                             Err(e) => {
-                                warn!("UP主 {} 合集JSON解析失败: {}", mid, e);
+                                if emit_warning {
+                                    warn!("UP主 {} 合集JSON解析失败: {}", mid, e);
+                                } else {
+                                    info!("UP主 {} 合集JSON解析失败: {}", mid, e);
+                                }
                                 if retry_count >= max_retries {
                                     return Err(anyhow!("解析合集响应JSON失败: {}", e));
                                 }
                             }
                         },
                         Err(e) => {
-                            warn!("UP主 {} 合集请求状态错误: {}", mid, e);
+                            if emit_warning {
+                                warn!("UP主 {} 合集请求状态错误: {}", mid, e);
+                            } else {
+                                info!("UP主 {} 合集请求状态错误: {}", mid, e);
+                            }
                             if retry_count >= max_retries {
                                 return Err(anyhow!("合集请求返回错误状态: {}", e));
                             }
                         }
                     },
                     Err(e) => {
-                        warn!(
-                            "UP主 {} 合集请求失败 (重试 {}/{}): {}",
-                            mid,
-                            retry_count + 1,
-                            max_retries + 1,
-                            e
-                        );
+                        if emit_warning {
+                            warn!(
+                                "UP主 {} 合集请求失败 (重试 {}/{}): {}",
+                                mid,
+                                retry_count + 1,
+                                max_retries + 1,
+                                e
+                            );
+                        } else {
+                            info!(
+                                "UP主 {} 合集请求失败 (重试 {}/{}): {}",
+                                mid,
+                                retry_count + 1,
+                                max_retries + 1,
+                                e
+                            );
+                        }
                         if retry_count >= max_retries {
                             return Err(anyhow!("发送合集请求失败: {}", e));
                         }

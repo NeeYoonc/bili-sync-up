@@ -16200,20 +16200,26 @@ async fn get_collection_cover_from_api(
     collection_type: i32,
     client: &crate::bilibili::BiliClient,
 ) -> Result<String, anyhow::Error> {
-    let collection = crate::bilibili::CollectionItem {
-        mid: up_id.to_string(),
-        sid: collection_id.to_string(),
-        collection_type: if collection_type == 1 {
-            crate::bilibili::CollectionType::Series
-        } else {
-            crate::bilibili::CollectionType::Season
-        },
-    };
-
-    crate::bilibili::Collection::new(client, &collection)
-        .get_cover_url()
+    let expected_collection_type = if collection_type == 1 { "series" } else { "season" };
+    let collections_response = client
+        .get_user_collections(up_id, 1, 30)
         .await
-        .with_context(|| format!("获取合集 {} 封面失败 (UP主: {})", collection_id, up_id))
+        .with_context(|| format!("获取UP主 {} 的合集列表失败", up_id))?;
+    let collection = collections_response
+        .collections
+        .iter()
+        .find(|item| {
+            item.collection_type == expected_collection_type
+                && item.sid.parse::<i64>().ok() == Some(collection_id)
+        })
+        .ok_or_else(|| anyhow!("未在合集列表中找到目标合集"))?;
+    let cover_url = collection.cover.trim();
+    if cover_url.is_empty() {
+        Err(anyhow!("合集封面URL为空"))
+    } else {
+        Ok(cover_url.to_string())
+    }
+    .with_context(|| format!("获取合集 {} 封面失败 (UP主: {})", collection_id, up_id))
 }
 
 /// 处理番剧合并到现有源的逻辑

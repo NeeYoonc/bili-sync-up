@@ -109,20 +109,26 @@ async fn fetch_collection_cover_url(
     collection_sid: i64,
     collection_type: i32,
 ) -> Result<String> {
-    let collection = crate::bilibili::CollectionItem {
-        mid: up_mid.to_string(),
-        sid: collection_sid.to_string(),
-        collection_type: if collection_type == 1 {
-            crate::bilibili::CollectionType::Series
-        } else {
-            crate::bilibili::CollectionType::Season
-        },
-    };
-
-    crate::bilibili::Collection::new(bili_client, &collection)
-        .get_cover_url()
+    let expected_collection_type = if collection_type == 1 { "series" } else { "season" };
+    let collections_response = bili_client
+        .get_user_collections(up_mid, 1, 30)
         .await
-        .with_context(|| format!("直连获取合集封面失败: sid={}, up_mid={}", collection_sid, up_mid))
+        .with_context(|| format!("获取合集列表失败: up_mid={}", up_mid))?;
+    let collection = collections_response
+        .collections
+        .iter()
+        .find(|item| {
+            item.collection_type == expected_collection_type
+                && item.sid.parse::<i64>().ok() == Some(collection_sid)
+        })
+        .ok_or_else(|| anyhow!("未在合集列表中找到目标合集"))?;
+    let cover_url = collection.cover.trim();
+    if cover_url.is_empty() {
+        Err(anyhow!("合集封面URL为空"))
+    } else {
+        Ok(cover_url.to_string())
+    }
+    .with_context(|| format!("从合集列表获取封面失败: sid={}, up_mid={}", collection_sid, up_mid))
 }
 
 fn get_root_alias_asset_write_lock(root_dir: &Path) -> Arc<TokioMutex<()>> {
