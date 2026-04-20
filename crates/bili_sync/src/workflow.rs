@@ -3895,34 +3895,32 @@ pub async fn download_video_pages(
         true // 番剧不在此处检查
     };
 
+    let multi_page_use_season_nfo_route =
+        !is_single_page && season_folder.is_some() && crate::config::reload_config().multi_page_use_season_structure;
+    let submission_up_seasonal_nfo_route = matches!(video_source, VideoSourceEnum::Submission(_))
+        && !is_submission_collection_video
+        && !is_single_page
+        && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal";
+    let collection_like_nfo_route = (is_collection && collection_use_season_structure)
+        || submission_up_seasonal_nfo_route
+        || multi_page_use_season_nfo_route;
+
     // 合集/多P Season结构下，若目录级元数据缺失，允许本轮任意分集补齐。
-    let should_backfill_collection_root_assets = if !disable_tvshow_assets
-        && season_folder.is_some()
-        && ((is_collection && collection_use_season_structure)
-            || (matches!(video_source, VideoSourceEnum::Submission(_))
-                && !is_submission_collection_video
-                && !is_single_page
-                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"))
-    {
-        let root_dir = base_path.parent().unwrap_or(&base_path);
-        !root_dir.join("tvshow.nfo").exists()
-            || !root_dir.join("poster.jpg").exists()
-            || !root_dir.join("folder.jpg").exists()
-    } else {
-        false
-    };
-    let should_backfill_collection_season_nfo = if !disable_tvshow_assets
-        && season_folder.is_some()
-        && ((is_collection && collection_use_season_structure)
-            || (matches!(video_source, VideoSourceEnum::Submission(_))
-                && !is_submission_collection_video
-                && !is_single_page
-                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"))
-    {
-        !base_path.join("season.nfo").exists()
-    } else {
-        false
-    };
+    let should_backfill_collection_root_assets =
+        if !disable_tvshow_assets && season_folder.is_some() && collection_like_nfo_route {
+            let root_dir = base_path.parent().unwrap_or(&base_path);
+            !root_dir.join("tvshow.nfo").exists()
+                || !root_dir.join("poster.jpg").exists()
+                || !root_dir.join("folder.jpg").exists()
+        } else {
+            false
+        };
+    let should_backfill_collection_season_nfo =
+        if !disable_tvshow_assets && season_folder.is_some() && collection_like_nfo_route {
+            !base_path.join("season.nfo").exists()
+        } else {
+            false
+        };
 
     // 先处理NFO生成（独立执行，避免tokio::join!类型问题）
     let nfo_result = if is_bangumi && season_info.is_some() {
@@ -3941,12 +3939,7 @@ pub async fn download_video_pages(
         let should_generate_nfo = if is_bangumi {
             // 番剧：只有在文件不存在时才生成，放在番剧文件夹根目录
             separate_status[2] && bangumi_folder_path.is_some() && should_download_bangumi_nfo
-        } else if is_collection
-            || (matches!(video_source, VideoSourceEnum::Submission(_))
-                && !is_submission_collection_video
-                && !is_single_page
-                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal")
-        {
+        } else if is_collection || submission_up_seasonal_nfo_route {
             // 合集：只有第一个视频时生成tvshow.nfo
             if !disable_tvshow_assets && separate_status[2] && collection_use_season_structure {
                 // 检查是否为第一个视频
@@ -3983,16 +3976,13 @@ pub async fn download_video_pages(
             separate_status[2] && !is_single_page && !disable_tvshow_assets
         };
 
-        let is_collection_like_nfo_target = is_collection
-            || (matches!(video_source, VideoSourceEnum::Submission(_))
-                && !is_submission_collection_video
-                && !is_single_page
-                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal");
-        let should_generate_collection_tvshow_nfo = should_generate_nfo && is_collection_like_nfo_target;
-        let should_generate_collection_season_nfo = is_collection_like_nfo_target
+        let should_generate_collection_tvshow_nfo = should_generate_nfo && collection_like_nfo_route;
+        let should_generate_collection_season_nfo = collection_like_nfo_route
             && !disable_tvshow_assets
             && separate_status[2]
-            && collection_use_season_structure
+            && ((is_collection && collection_use_season_structure)
+                || submission_up_seasonal_nfo_route
+                || multi_page_use_season_nfo_route)
             && season_folder.is_some();
 
         if should_generate_collection_tvshow_nfo || should_generate_collection_season_nfo {
@@ -4094,10 +4084,28 @@ pub async fn download_video_pages(
                         .or_else(|| name.clone());
                     (name, season_name, None, None)
                 }
+                _ if multi_page_use_season_nfo_route => {
+                    let root_name = base_path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|s| s.to_string_lossy().to_string())
+                        .filter(|s| !s.trim().is_empty());
+                    let name = root_name
+                        .clone()
+                        .or_else(|| Some(final_video_model.name.clone()).filter(|s| !s.trim().is_empty()));
+                    let season_name = Some(final_video_model.name.clone())
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| name.clone());
+                    (name, season_name, None, None)
+                }
                 _ => (None, None, None, None),
             };
 
-            let upper_intro = get_submission_upper_intro(bili_client, final_video_model.upper_id, token.clone()).await;
+            let tvshow_intro = if multi_page_use_season_nfo_route {
+                Some(final_video_model.intro.clone()).filter(|s| !s.trim().is_empty())
+            } else {
+                get_submission_upper_intro(bili_client, final_video_model.upper_id, token.clone()).await
+            };
 
             let current_nfo_season_number = season_folder
                 .as_deref()
@@ -4129,6 +4137,14 @@ pub async fn download_video_pages(
                                 season_total_episodes: 1,
                             }
                         }
+                    }
+                }
+                _ if multi_page_use_season_nfo_route => {
+                    let total_episodes = i32::try_from(pages.len()).unwrap_or(1).max(1);
+                    CollectionNfoStats {
+                        total_seasons: 1,
+                        total_episodes,
+                        season_total_episodes: total_episodes,
                     }
                 }
                 _ => match get_collection_nfo_stats(connection, video_source, &final_video_model).await {
@@ -4202,7 +4218,7 @@ pub async fn download_video_pages(
                 collection_name.as_deref(),
                 season_collection_name.as_deref(),
                 collection_cover.as_deref(),
-                upper_intro.as_deref(),
+                tvshow_intro.as_deref(),
                 collection_plot_link_override.as_deref(),
                 collection_uniqueid_override.as_deref(),
                 season_lists_link_override.as_deref(),
@@ -12365,6 +12381,77 @@ mod tests {
 
         let total = merge_video_total_file_size_bytes(&[first_page, second_page], &[]);
         assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_multi_page_season_structure_tvshow_nfo_uses_video_intro() {
+        let dir = unique_temp_dir("multi-page-season-nfo");
+        fs::create_dir_all(&dir).expect("应能创建临时目录");
+
+        let video = video::Model {
+            name: "测试多P视频".to_string(),
+            intro: "测试简介".to_string(),
+            upper_id: 123456,
+            upper_name: "测试UP".to_string(),
+            bvid: "BV1MultiPageSeason".to_string(),
+            category: 1,
+            season_number: Some(1),
+            favtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 20)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+            pubtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 20)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+            ..Default::default()
+        };
+
+        let tvshow_path = dir.join("tvshow.nfo");
+        let season_path = dir.join("Season 01").join("season.nfo");
+
+        let status = generate_collection_video_nfo(
+            true,
+            true,
+            true,
+            &video,
+            Some("多P系列根目录"),
+            Some("测试多P视频"),
+            None,
+            Some("测试简介"),
+            None,
+            None,
+            None,
+            None,
+            tvshow_path.clone(),
+            1,
+            Some(1),
+            Some(3),
+            Some(3),
+            Some(season_path.clone()),
+        )
+        .await
+        .expect("生成多P Season 结构 NFO不应失败");
+
+        assert!(matches!(status, ExecutionStatus::Succeeded), "生成状态应为 Succeeded");
+        assert!(tvshow_path.exists(), "应生成根目录 tvshow.nfo");
+        assert!(season_path.exists(), "应生成 Season 目录 season.nfo");
+
+        let tvshow_nfo = fs::read_to_string(&tvshow_path).expect("应能读取生成的 tvshow.nfo");
+        assert!(
+            tvshow_nfo.contains("测试简介"),
+            "多P Season 结构 tvshow.nfo 应写入当前视频简介"
+        );
+        assert!(
+            !tvshow_nfo.contains("这是UP主简介"),
+            "多P Season 结构 tvshow.nfo 不应写入UP简介"
+        );
+
+        let season_nfo = fs::read_to_string(&season_path).expect("应能读取生成的 season.nfo");
+        assert!(
+            season_nfo.contains("<title>测试多P视频</title>"),
+            "多P Season 结构 season.nfo 应使用视频标题"
+        );
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测

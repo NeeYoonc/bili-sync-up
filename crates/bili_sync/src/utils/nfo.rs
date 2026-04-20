@@ -150,6 +150,21 @@ pub struct Season<'a> {
 }
 
 impl NFO<'_> {
+    fn is_valid_xml_char(ch: char) -> bool {
+        matches!(ch, '\u{9}' | '\u{A}' | '\u{D}')
+            || ('\u{20}'..='\u{D7FF}').contains(&ch)
+            || ('\u{E000}'..='\u{FFFD}').contains(&ch)
+            || ('\u{10000}'..='\u{10FFFF}').contains(&ch)
+    }
+
+    fn sanitize_xml_str(input: &str) -> Cow<'_, str> {
+        if input.chars().all(Self::is_valid_xml_char) {
+            Cow::Borrowed(input)
+        } else {
+            Cow::Owned(input.chars().filter(|&ch| Self::is_valid_xml_char(ch)).collect())
+        }
+    }
+
     pub async fn generate_nfo(self) -> Result<String> {
         let config = crate::config::reload_config();
         let mut buffer = r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>
@@ -176,7 +191,8 @@ impl NFO<'_> {
             }
         }
         tokio_buffer.flush().await?;
-        Ok(String::from_utf8(buffer)?)
+        let xml = String::from_utf8(buffer)?;
+        Ok(Self::sanitize_xml_str(&xml).into_owned())
     }
 
     async fn write_movie_nfo(
@@ -2597,6 +2613,46 @@ mod tests {
         assert!(generated_episode.contains("<season>1</season>"));
         assert!(generated_episode.contains("<episode>3</episode>"));
         assert!(generated_episode.contains(r#"<uniqueid type="bilibili" default="true">3</uniqueid>"#));
+    }
+
+    #[tokio::test]
+    async fn test_nfo_strips_invalid_xml_control_chars() {
+        let video = video::Model {
+            intro: "简介里有非法字符\u{000b}这里".to_string(),
+            name: "标题\u{000b}异常".to_string(),
+            upper_id: 1,
+            upper_name: "upper\u{000b}name".to_string(),
+            cover: "https://example.com/cover.jpg".to_string(),
+            favtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2022, 2, 2).unwrap(),
+                chrono::NaiveTime::from_hms_opt(2, 2, 2).unwrap(),
+            ),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2033, 3, 3).unwrap(),
+                chrono::NaiveTime::from_hms_opt(3, 3, 3).unwrap(),
+            ),
+            bvid: "BV1InvalidXml".to_string(),
+            ..Default::default()
+        };
+
+        let generated_tvshow = NFO::TVShow((&video).into()).generate_nfo().await.unwrap();
+        assert!(!generated_tvshow.contains('\u{000b}'));
+        assert!(generated_tvshow.contains("<title>标题异常</title>"));
+        assert!(generated_tvshow.contains("简介里有非法字符这里"));
+        assert!(generated_tvshow.contains("<name>uppername</name>"));
+
+        let page = page::Model {
+            name: "分页\u{000b}标题".to_string(),
+            pid: 1,
+            ..Default::default()
+        };
+        let generated_episode = NFO::Episode(Episode::from_video_and_page(&video, &page))
+            .generate_nfo()
+            .await
+            .unwrap();
+        assert!(!generated_episode.contains('\u{000b}'));
+        assert!(generated_episode.contains("<title>标题异常 - 分页标题</title>"));
+        assert!(generated_episode.contains("简介里有非法字符这里"));
     }
 
     #[tokio::test]
