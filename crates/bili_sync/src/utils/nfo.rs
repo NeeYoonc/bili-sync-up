@@ -108,8 +108,13 @@ pub struct Episode<'a> {
     pub country: Option<&'a str>,    // 国家
     pub studio: Option<&'a str>,     // 制作工作室
     pub genres: Option<Vec<String>>, // 类型标签
+    pub upper_id: i64,               // UP主UID
+    pub upper_name: &'a str,         // UP主名称
+    pub actors_info: Option<String>, // 演员信息字符串
+    pub staff_info: Option<&'a serde_json::Value>, // 联合投稿成员信息
     pub thumb_url: Option<&'a str>,  // 缩略图URL
     pub fanart_url: Option<&'a str>, // 背景图URL
+    pub upper_face_url: Option<&'a str>, // UP主头像URL（用于演员thumb）
 }
 
 pub struct Season<'a> {
@@ -1157,6 +1162,116 @@ impl NFO<'_> {
                         .create_element("credits")
                         .write_text_content_async(BytesText::new(credits))
                         .await?;
+                }
+
+                // 演员信息（优先使用真实演员信息，其次联合投稿staff，最后UP主）
+                if config.include_actor_info {
+                    if let Some(ref actors_str) = episode.actors_info {
+                        let actors = Self::parse_actors_string(actors_str);
+                        for (index, (character, actor)) in actors.iter().enumerate() {
+                            writer
+                                .create_element("actor")
+                                .write_inner_content_async::<_, _, Error>(|writer| async move {
+                                    writer
+                                        .create_element("name")
+                                        .write_text_content_async(BytesText::new(actor))
+                                        .await?;
+                                    writer
+                                        .create_element("role")
+                                        .write_text_content_async(BytesText::new(character))
+                                        .await?;
+                                    writer
+                                        .create_element("order")
+                                        .write_text_content_async(BytesText::new(&(index + 1).to_string()))
+                                        .await?;
+                                    Ok(writer)
+                                })
+                                .await?;
+                        }
+                    } else if let Some(ref staff_info) = episode.staff_info {
+                        let staff_list = Self::parse_staff_info(staff_info);
+                        for (index, (mid, name, title, face)) in staff_list.iter().enumerate() {
+                            let mid_value = *mid;
+                            let name_clone = name.clone();
+                            let title_clone = title.clone();
+                            let face_clone = face.clone();
+                            writer
+                                .create_element("actor")
+                                .write_inner_content_async::<_, _, Error>(|writer| async move {
+                                    writer
+                                        .create_element("name")
+                                        .write_text_content_async(BytesText::new(&name_clone))
+                                        .await?;
+                                    writer
+                                        .create_element("role")
+                                        .write_text_content_async(BytesText::new(&title_clone))
+                                        .await?;
+                                    if let Some(ref thumb) = face_clone {
+                                        if !thumb.is_empty() {
+                                            writer
+                                                .create_element("thumb")
+                                                .write_text_content_async(BytesText::new(thumb))
+                                                .await?;
+                                        }
+                                    }
+                                    if mid_value > 0 {
+                                        writer
+                                            .create_element("profile")
+                                            .write_text_content_async(BytesText::new(&format!(
+                                                "https://space.bilibili.com/{}",
+                                                mid_value
+                                            )))
+                                            .await?;
+                                    }
+                                    writer
+                                        .create_element("order")
+                                        .write_text_content_async(BytesText::new(&(index + 1).to_string()))
+                                        .await?;
+                                    Ok(writer)
+                                })
+                                .await?;
+                        }
+                    } else {
+                        let actor_info = Self::get_actor_info(episode.upper_id, episode.upper_name, config);
+                        if let Some((actor_name, role_name)) = actor_info {
+                            let upper_id = episode.upper_id;
+                            writer
+                                .create_element("actor")
+                                .write_inner_content_async::<_, _, Error>(|writer| async move {
+                                    writer
+                                        .create_element("name")
+                                        .write_text_content_async(BytesText::new(&actor_name))
+                                        .await?;
+                                    writer
+                                        .create_element("role")
+                                        .write_text_content_async(BytesText::new(&role_name))
+                                        .await?;
+                                    if let Some(thumb) = episode.upper_face_url {
+                                        if !thumb.is_empty() {
+                                            writer
+                                                .create_element("thumb")
+                                                .write_text_content_async(BytesText::new(thumb))
+                                                .await?;
+                                        }
+                                    }
+                                    if upper_id > 0 {
+                                        writer
+                                            .create_element("profile")
+                                            .write_text_content_async(BytesText::new(&format!(
+                                                "https://space.bilibili.com/{}",
+                                                upper_id
+                                            )))
+                                            .await?;
+                                    }
+                                    writer
+                                        .create_element("order")
+                                        .write_text_content_async(BytesText::new("1"))
+                                        .await?;
+                                    Ok(writer)
+                                })
+                                .await?;
+                        }
+                    }
                 }
 
                 // 缩略图（本地文件路径优先）
@@ -2239,8 +2354,13 @@ impl<'a> From<&'a page::Model> for Episode<'a> {
             country: None,                             // 使用默认国家
             studio: None,                              // 使用默认制作工作室
             genres: None,                              // 无类型标签
+            upper_id: 0,                               // 默认UP主UID
+            upper_name: "",                            // 默认UP主名称
+            actors_info: None,                         // 默认无演员信息
+            staff_info: None,                          // 默认无联合投稿成员信息
             thumb_url: None,                           // 暂不设置本地路径
             fanart_url: None,                          // 暂不设置本地路径
+            upper_face_url: None,                      // 默认无UP主头像
         }
     }
 }
@@ -2298,8 +2418,17 @@ impl<'a> Episode<'a> {
                 .tags
                 .as_ref()
                 .and_then(|tags| serde_json::from_value(tags.clone()).ok()), // 从视频标签提取类型
+            upper_id: video.upper_id,                                 // UP主UID
+            upper_name: &video.upper_name,                            // UP主名称
+            actors_info: video.actors.clone(),                        // 演员信息
+            staff_info: video.staff_info.as_ref(),                    // 联合投稿成员信息
             thumb_url: None,                                          // 暂不设置本地路径
             fanart_url: None,                                         // 暂不设置本地路径
+            upper_face_url: if !video.upper_face.is_empty() {
+                Some(&video.upper_face)
+            } else {
+                None
+            },
         }
     }
 }
@@ -2653,6 +2782,46 @@ mod tests {
         assert!(!generated_episode.contains('\u{000b}'));
         assert!(generated_episode.contains("<title>标题异常 - 分页标题</title>"));
         assert!(generated_episode.contains("简介里有非法字符这里"));
+    }
+
+    #[tokio::test]
+    async fn test_episode_nfo_includes_upper_actor_fallback() {
+        let video = video::Model {
+            intro: "测试视频简介".to_string(),
+            name: "测试多P视频".to_string(),
+            upper_id: 5328643,
+            upper_name: "まん酱".to_string(),
+            upper_face: "https://i1.hdslb.com/bfs/face/test-face.jpg".to_string(),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+                chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            ),
+            bvid: "BV1EpisodeActor".to_string(),
+            ..Default::default()
+        };
+
+        let page = page::Model {
+            name: "P01.欣赏版".to_string(),
+            pid: 1,
+            duration: 240,
+            ..Default::default()
+        };
+
+        let generated_episode = NFO::Episode(Episode::from_video_and_page(&video, &page))
+            .generate_nfo()
+            .await
+            .unwrap();
+
+        assert!(generated_episode.contains("<actor>"));
+        assert!(generated_episode.contains("<name>まん酱</name>"));
+        assert!(generated_episode.contains("<role>UP主</role>"));
+        assert!(generated_episode.contains(
+            "<thumb>https://i1.hdslb.com/bfs/face/test-face.jpg</thumb>"
+        ));
+        assert!(generated_episode.contains(
+            "<profile>https://space.bilibili.com/5328643</profile>"
+        ));
+        assert!(generated_episode.contains("<order>1</order>"));
     }
 
     #[tokio::test]
