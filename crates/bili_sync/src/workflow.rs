@@ -327,6 +327,21 @@ fn is_bili_request_failed_inaccessible(err: &anyhow::Error) -> bool {
     is_bili_request_failed_with_codes(err, &[-404, 62002, 62012])
 }
 
+fn first_inaccessible_page_error(results: &[Result<ExecutionStatus>; 5]) -> Option<&anyhow::Error> {
+    results
+        .iter()
+        .filter_map(|res| res.as_ref().err())
+        .find(|err| is_bili_request_failed_inaccessible(err))
+}
+
+fn inaccessible_reason_from_error(err: &anyhow::Error) -> &'static str {
+    if is_bili_request_failed_with_codes(err, &[62002, 62012]) {
+        "稿件不可见或仅自己可见"
+    } else {
+        "已在B站删除/不可访问"
+    }
+}
+
 fn is_database_locked_error(err: &anyhow::Error) -> bool {
     let err_text = format!("{:#}", err);
     err_text.contains("database is locked") || err_text.contains("Database is locked")
@@ -6443,10 +6458,34 @@ async fn download_page(
         Err(err) => (Err(err), None),
     };
 
-    let results = [res_1, res_2, res_3, res_4, res_5]
-        .into_iter()
-        .map(Into::into)
-        .collect::<Vec<_>>();
+    let raw_results = [res_1, res_2, res_3, res_4, res_5];
+    let inaccessible_reason = first_inaccessible_page_error(&raw_results).map(inaccessible_reason_from_error);
+    let mut results = raw_results.into_iter().map(Into::into).collect::<Vec<_>>();
+
+    if let Some(inaccessible_reason) = inaccessible_reason {
+        use sea_orm::{Set, Unchanged};
+
+        info!(
+            "视频「{}」第 {} 页{}，已标记为无效并跳过后续处理",
+            &video_model.name, page_model.pid, inaccessible_reason
+        );
+
+        video::Entity::update(video::ActiveModel {
+            id: Unchanged(video_model.id),
+            valid: Set(false),
+            ..Default::default()
+        })
+        .exec(connection)
+        .await?;
+
+        status = PageStatus::from([STATUS_OK; 5]);
+        for (idx, should_run) in separate_status.iter().enumerate() {
+            if *should_run {
+                results[idx] = ExecutionStatus::Skipped;
+            }
+        }
+    }
+
     status.update_status(&results);
 
     // 充电视频在获取详情时已经被upower字段检测并处理，无需分页级别的后期检测
@@ -6738,16 +6777,24 @@ async fn download_page(
     let final_video_path = video_path.clone();
 
     let final_video_path_str = final_video_path.to_string_lossy().to_string();
-    if page_model.path.as_deref() != Some(final_video_path_str.as_str()) {
+    let final_page_path = if inaccessible_reason.is_some() {
+        original_page_model
+            .path
+            .clone()
+            .or_else(|| final_video_path.exists().then_some(final_video_path_str.clone()))
+    } else {
+        Some(final_video_path_str.clone())
+    };
+    if page_model.path.as_deref() != final_page_path.as_deref() {
         debug!(
-            "分页路径已更新并将写入数据库: page_id={}, old={:?}, new={}",
-            page_model.id, page_model.path, final_video_path_str
+            "分页路径已更新并将写入数据库: page_id={}, old={:?}, new={:?}",
+            page_model.id, page_model.path, final_page_path
         );
     }
 
     let mut page_active_model: page::ActiveModel = page_model.into();
     page_active_model.download_status = Set(status.into());
-    page_active_model.path = Set(Some(final_video_path_str));
+    page_active_model.path = Set(final_page_path);
     if let Some(sync_update) = danmaku_sync_update.as_ref() {
         sync_update.apply_to_active_model(&mut page_active_model);
     }
@@ -12269,6 +12316,40 @@ mod tests {
         assert!(is_bili_request_failed_inaccessible(&invisible_err));
         assert!(is_bili_request_failed_inaccessible(&self_only_err));
         assert!(!is_bili_request_failed_inaccessible(&other_err));
+    }
+
+    #[test]
+    fn test_first_inaccessible_page_error_extracts_62012_reason() {
+        let results = [
+            Ok(ExecutionStatus::Succeeded),
+            Err(anyhow!(crate::bilibili::BiliError::RequestFailed(
+                62012,
+                "62012".to_string()
+            ))),
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+        ];
+
+        let err = first_inaccessible_page_error(&results).expect("应识别到 62012 不可访问错误");
+        assert_eq!(inaccessible_reason_from_error(err), "稿件不可见或仅自己可见");
+    }
+
+    #[test]
+    fn test_first_inaccessible_page_error_extracts_404_reason() {
+        let results = [
+            Err(anyhow!(crate::bilibili::BiliError::RequestFailed(
+                -404,
+                "not found".to_string()
+            ))),
+            Ok(ExecutionStatus::Succeeded),
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+        ];
+
+        let err = first_inaccessible_page_error(&results).expect("应识别到 -404 不可访问错误");
+        assert_eq!(inaccessible_reason_from_error(err), "已在B站删除/不可访问");
     }
 
     #[test]
