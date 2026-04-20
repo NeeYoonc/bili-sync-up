@@ -286,7 +286,7 @@ impl NFO<'_> {
                 // 剧情简介
                 writer
                     .create_element("plot")
-                    .write_cdata_content_async(BytesCData::new(Self::format_plot(movie.bvid, movie.intro)))
+                    .write_cdata_content_async(BytesCData::new(movie.intro))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
 
@@ -662,17 +662,9 @@ impl NFO<'_> {
                 }
 
                 // 剧情简介
-                let plot_link = tvshow
-                    .plot_link_override
-                    .clone()
-                    .unwrap_or_else(|| format!("https://www.bilibili.com/video/{}/", tvshow.bvid));
                 writer
                     .create_element("plot")
-                    .write_cdata_content_async(BytesCData::new(Self::format_plot_with_link(
-                        &plot_link,
-                        tvshow.bvid,
-                        tvshow.intro,
-                    )))
+                    .write_cdata_content_async(BytesCData::new(tvshow.intro))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
 
@@ -1391,11 +1383,7 @@ impl NFO<'_> {
                 }
 
                 // 剧情简介 - 为Season添加季度特定的前缀
-                let season_plot_link = season
-                    .plot_link_override
-                    .clone()
-                    .unwrap_or_else(|| format!("https://www.bilibili.com/video/{}/", season.bvid));
-                let season_plot_base = Self::format_plot_with_link(&season_plot_link, season.bvid, season.intro);
+                let season_plot_base = season.intro.to_string();
                 let season_plot = if Self::is_bangumi_video(season.category) {
                     if let Some(season_title) = Self::extract_season_title_from_full_name(season.name) {
                         format!("【{}】{}", season_title, season_plot_base)
@@ -1688,17 +1676,6 @@ impl NFO<'_> {
             })
             .await?;
         Ok(())
-    }
-
-    #[inline]
-    fn format_plot(bvid: &str, intro: &str) -> String {
-        let url = format!("https://www.bilibili.com/video/{}/", bvid);
-        Self::format_plot_with_link(&url, bvid, intro)
-    }
-
-    #[inline]
-    fn format_plot_with_link(link: &str, link_text: &str, intro: &str) -> String {
-        format!(r#"原始视频：<a href="{}">{}</a><br/><br/>{}"#, link, link_text, intro,)
     }
 
     /// 检测是否为番剧视频（基于 category 字段）
@@ -2701,6 +2678,8 @@ mod tests {
         assert!(generated_movie.contains("<name>1</name>")); // upper_id=1
         assert!(generated_movie.contains("<role>upper_name</role>"));
         assert!(generated_movie.contains("<thumb>https://example.com/cover.jpg</thumb>"));
+        assert!(!generated_movie.contains("原始视频："));
+        assert!(!generated_movie.contains("https://www.bilibili.com/video/"));
 
         let generated_tvshow = NFO::TVShow((&video).into()).generate_nfo().await.unwrap();
         // 检查TVShow的关键字段
@@ -2714,6 +2693,8 @@ mod tests {
         assert!(generated_tvshow.contains("<name>1</name>")); // upper_id=1
         assert!(generated_tvshow.contains("<role>upper_name</role>"));
         assert!(generated_tvshow.contains("<thumb>https://example.com/cover.jpg</thumb>"));
+        assert!(!generated_tvshow.contains("原始视频："));
+        assert!(!generated_tvshow.contains("https://www.bilibili.com/video/"));
 
         assert_eq!(
             NFO::Upper((&video).into()).generate_nfo().await.unwrap(),
@@ -2782,6 +2763,37 @@ mod tests {
         assert!(!generated_episode.contains('\u{000b}'));
         assert!(generated_episode.contains("<title>标题异常 - 分页标题</title>"));
         assert!(generated_episode.contains("简介里有非法字符这里"));
+    }
+
+    #[tokio::test]
+    async fn test_season_nfo_does_not_embed_original_video_link() {
+        let video = video::Model {
+            intro: "测试简介正文".to_string(),
+            name: "测试合集视频".to_string(),
+            upper_id: 1,
+            upper_name: "测试UP".to_string(),
+            category: 3,
+            season_number: Some(1),
+            favtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+                chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            ),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+                chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            ),
+            bvid: "BV1SeasonNoLink".to_string(),
+            ..Default::default()
+        };
+
+        let season = Season::from_video_with_collection(&video, Some("测试合集"), None, 1, Some(2));
+        let season_nfo = NFO::Season(season).generate_nfo().await.unwrap();
+
+        assert!(season_nfo.contains("测试简介正文"));
+        assert!(!season_nfo.contains("原始视频："));
+        assert!(!season_nfo.contains("https://www.bilibili.com/video/"));
+        assert!(!season_nfo.contains("<a href="));
+        assert!(!season_nfo.contains("<br/>"));
     }
 
     #[tokio::test]
