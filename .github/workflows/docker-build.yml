@@ -1,15 +1,25 @@
-name: Build and Push Docker Image
+name: 构建并推送 Docker 镜像
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+      && format(
+        '镜像构建 / {0} / {1}',
+        github.ref_name,
+        github.event.inputs.custom_tags != ''
+          && format('自定义标签: {0}', github.event.inputs.custom_tags)
+          || format('自动前缀: {0}', github.event.inputs.tag_prefix)
+      )
+      || format('镜像构建 / {0}', github.ref_name) }}
 
 on:
   workflow_dispatch:
     inputs:
       custom_tags:
-        description: Custom image tags, separated by commas
+        description: 自定义镜像标签，多个标签请用英文逗号分隔
         required: false
         default: ''
         type: string
       tag_prefix:
-        description: Prefix used when generating tags automatically
+        description: 自动生成标签时使用的前缀
         required: false
         default: manual
         type: choice
@@ -22,22 +32,22 @@ on:
           - hotfix
           - feature
       include_beta_tags:
-        description: Include default channel tags
+        description: 同时附带默认频道标签
         required: false
         default: true
         type: boolean
       push_to_dockerhub:
-        description: Push to Docker Hub
+        description: 推送到 Docker Hub
         required: false
         default: true
         type: boolean
       push_to_cnb:
-        description: Push to CNB.Cool
+        description: 推送到 CNB.Cool
         required: false
         default: true
         type: boolean
       platforms:
-        description: Docker platforms to build
+        description: 要构建的 Docker 平台
         required: false
         default: linux/amd64,linux/arm64
         type: choice
