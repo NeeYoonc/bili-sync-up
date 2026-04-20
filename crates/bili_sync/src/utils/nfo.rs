@@ -102,19 +102,19 @@ pub struct Episode<'a> {
     pub user_rating: Option<f32>,
     pub director: Option<&'a str>,
     pub credits: Option<&'a str>,
-    pub bvid: &'a str,               // B站视频ID
-    pub category: i32,               // 视频分类（用于番剧检测）
-    pub mpaa: Option<&'a str>,       // 年龄分级
-    pub country: Option<&'a str>,    // 国家
-    pub studio: Option<&'a str>,     // 制作工作室
-    pub genres: Option<Vec<String>>, // 类型标签
-    pub upper_id: i64,               // UP主UID
-    pub upper_name: &'a str,         // UP主名称
-    pub actors_info: Option<String>, // 演员信息字符串
+    pub bvid: &'a str,                             // B站视频ID
+    pub category: i32,                             // 视频分类（用于番剧检测）
+    pub mpaa: Option<&'a str>,                     // 年龄分级
+    pub country: Option<&'a str>,                  // 国家
+    pub studio: Option<&'a str>,                   // 制作工作室
+    pub genres: Option<Vec<String>>,               // 类型标签
+    pub upper_id: i64,                             // UP主UID
+    pub upper_name: &'a str,                       // UP主名称
+    pub actors_info: Option<String>,               // 演员信息字符串
     pub staff_info: Option<&'a serde_json::Value>, // 联合投稿成员信息
-    pub thumb_url: Option<&'a str>,  // 缩略图URL
-    pub fanart_url: Option<&'a str>, // 背景图URL
-    pub upper_face_url: Option<&'a str>, // UP主头像URL（用于演员thumb）
+    pub thumb_url: Option<&'a str>,                // 缩略图URL
+    pub fanart_url: Option<&'a str>,               // 背景图URL
+    pub upper_face_url: Option<&'a str>,           // UP主头像URL（用于演员thumb）
 }
 
 pub struct Season<'a> {
@@ -168,6 +168,42 @@ impl NFO<'_> {
         } else {
             Cow::Owned(input.chars().filter(|&ch| Self::is_valid_xml_char(ch)).collect())
         }
+    }
+
+    async fn write_genre_tag(
+        writer: &mut Writer<&mut BufWriter<&mut Vec<u8>>>,
+        genre: &str,
+        config: &NFOConfig,
+    ) -> std::result::Result<(), Error> {
+        if !config.include_genre {
+            return Ok(());
+        }
+
+        writer
+            .create_element("genre")
+            .write_text_content_async(BytesText::new(genre))
+            .await?;
+
+        Ok(())
+    }
+
+    async fn write_genre_tags<'a, I>(
+        writer: &mut Writer<&mut BufWriter<&mut Vec<u8>>>,
+        genres: I,
+        config: &NFOConfig,
+    ) -> std::result::Result<(), Error>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        if !config.include_genre {
+            return Ok(());
+        }
+
+        for genre in genres {
+            Self::write_genre_tag(writer, genre, config).await?;
+        }
+
+        Ok(())
     }
 
     pub async fn generate_nfo(self) -> Result<String> {
@@ -307,25 +343,14 @@ impl NFO<'_> {
                     .await?;
 
                 // 类型标签
-                if let Some(tags) = movie.tags {
-                    for tag in tags {
-                        writer
-                            .create_element("genre")
-                            .write_text_content_async(BytesText::new(&tag))
-                            .await?;
-                    }
+                if let Some(ref tags) = movie.tags {
+                    Self::write_genre_tags(writer, tags.iter().map(String::as_str), config).await?;
                 }
 
                 // 为番剧剧场版添加默认类型标签
                 if Self::is_bangumi_video(movie.category) {
-                    writer
-                        .create_element("genre")
-                        .write_text_content_async(BytesText::new("动画"))
-                        .await?;
-                    writer
-                        .create_element("genre")
-                        .write_text_content_async(BytesText::new("剧场版"))
-                        .await?;
+                    Self::write_genre_tag(writer, "动画", config).await?;
+                    Self::write_genre_tag(writer, "剧场版", config).await?;
                 }
 
                 // 国家信息
@@ -712,13 +737,8 @@ impl NFO<'_> {
                 }
 
                 // 类型标签
-                if let Some(tags) = tvshow.tags {
-                    for tag in tags {
-                        writer
-                            .create_element("genre")
-                            .write_text_content_async(BytesText::new(&tag))
-                            .await?;
-                    }
+                if let Some(ref tags) = tvshow.tags {
+                    Self::write_genre_tags(writer, tags.iter().map(String::as_str), config).await?;
                 }
 
                 // 国家信息
@@ -1061,20 +1081,12 @@ impl NFO<'_> {
 
                 // 类型标签
                 if let Some(ref genres) = episode.genres {
-                    for genre in genres {
-                        writer
-                            .create_element("genre")
-                            .write_text_content_async(BytesText::new(genre))
-                            .await?;
-                    }
+                    Self::write_genre_tags(writer, genres.iter().map(String::as_str), config).await?;
                 }
 
                 // 为番剧添加默认类型标签
                 if Self::is_bangumi_video(episode.category) {
-                    writer
-                        .create_element("genre")
-                        .write_text_content_async(BytesText::new("动画"))
-                        .await?;
+                    Self::write_genre_tag(writer, "动画", config).await?;
                 }
 
                 // 国家信息
@@ -1443,13 +1455,8 @@ impl NFO<'_> {
                 }
 
                 // 类型标签
-                if let Some(tags) = season.tags {
-                    for tag in tags {
-                        writer
-                            .create_element("genre")
-                            .write_text_content_async(BytesText::new(&tag))
-                            .await?;
-                    }
+                if let Some(ref tags) = season.tags {
+                    Self::write_genre_tags(writer, tags.iter().map(String::as_str), config).await?;
                 }
 
                 // 国家信息
@@ -2646,6 +2653,18 @@ impl<'a> Season<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn render_movie_nfo_with_config(movie: Movie<'_>, config: &NFOConfig) -> String {
+        let mut buffer = Vec::new();
+        let mut tokio_buffer = BufWriter::new(&mut buffer);
+        let writer = Writer::new_with_indent(&mut tokio_buffer, b' ', 4);
+
+        NFO::write_movie_nfo(writer, movie, config).await.unwrap();
+        tokio_buffer.flush().await.unwrap();
+
+        String::from_utf8(buffer).unwrap()
+    }
 
     #[tokio::test]
     async fn test_generate_nfo() {
@@ -2827,12 +2846,8 @@ mod tests {
         assert!(generated_episode.contains("<actor>"));
         assert!(generated_episode.contains("<name>まん酱</name>"));
         assert!(generated_episode.contains("<role>UP主</role>"));
-        assert!(generated_episode.contains(
-            "<thumb>https://i1.hdslb.com/bfs/face/test-face.jpg</thumb>"
-        ));
-        assert!(generated_episode.contains(
-            "<profile>https://space.bilibili.com/5328643</profile>"
-        ));
+        assert!(generated_episode.contains("<thumb>https://i1.hdslb.com/bfs/face/test-face.jpg</thumb>"));
+        assert!(generated_episode.contains("<profile>https://space.bilibili.com/5328643</profile>"));
         assert!(generated_episode.contains("<order>1</order>"));
     }
 
@@ -3081,6 +3096,40 @@ mod tests {
         assert_eq!(actor_info, Some(("测试UP主".to_string(), "UP主".to_string())));
 
         println!("空UP主处理策略测试通过");
+    }
+
+    #[tokio::test]
+    async fn test_genre_tags_can_be_disabled() {
+        use crate::config::NFOConfig;
+
+        let video = video::Model {
+            intro: "测试关闭genre标签".to_string(),
+            name: "《名侦探柯南 水平线上的阴谋》".to_string(),
+            upper_id: 0,
+            upper_name: "".to_string(),
+            category: 1,
+            show_season_type: Some(2),
+            favtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2020, 5, 22).unwrap(),
+                chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            ),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2020, 5, 22).unwrap(),
+                chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            ),
+            bvid: "BV1Hz411q7vB".to_string(),
+            tags: Some(serde_json::json!(["推理", "悬疑"])),
+            ..Default::default()
+        };
+
+        let config = NFOConfig {
+            include_genre: false,
+            ..Default::default()
+        };
+
+        let movie_nfo = render_movie_nfo_with_config(Movie::from(&video), &config).await;
+
+        assert!(!movie_nfo.contains("<genre>"));
     }
 
     #[tokio::test]

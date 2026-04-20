@@ -8225,6 +8225,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         time_format: config.time_format.clone(),
         interval: config.interval,
         nfo_time_type: nfo_time_type.to_string(),
+        nfo_include_genre: config.nfo_config.include_genre,
         parallel_download_enabled: config.concurrent_limit.parallel_download.enabled,
         parallel_download_threads: config.concurrent_limit.parallel_download.threads,
         parallel_download_use_aria2: config.concurrent_limit.parallel_download.use_aria2,
@@ -8402,6 +8403,7 @@ pub async fn update_config(
             time_format: params.time_format.clone(),
             interval: params.interval,
             nfo_time_type: params.nfo_time_type.clone(),
+            nfo_include_genre: params.nfo_include_genre,
             parallel_download_enabled: params.parallel_download_enabled,
             parallel_download_threads: params.parallel_download_threads,
             parallel_download_use_aria2: params.parallel_download_use_aria2,
@@ -8690,6 +8692,7 @@ pub async fn update_config_internal(
 
     // 记录原始的NFO时间类型，用于比较是否真正发生了变化
     let original_nfo_time_type = config.nfo_time_type.clone();
+    let original_nfo_include_genre = config.nfo_config.include_genre;
 
     // 记录原始的命名相关配置，用于比较是否真正发生了变化
     let original_collection_folder_mode = config.collection_folder_mode.clone();
@@ -8858,6 +8861,13 @@ pub async fn update_config_internal(
         if original_nfo_time_type != new_nfo_time_type {
             config.nfo_time_type = new_nfo_time_type;
             updated_fields.push("nfo_time_type");
+        }
+    }
+
+    if let Some(nfo_include_genre) = params.nfo_include_genre {
+        if original_nfo_include_genre != nfo_include_genre {
+            config.nfo_config.include_genre = nfo_include_genre;
+            updated_fields.push("nfo_include_genre");
         }
     }
 
@@ -9829,6 +9839,11 @@ pub async fn update_config_internal(
                         .update_config_item("nfo_time_type", serde_json::to_value(&config.nfo_time_type)?)
                         .await
                 }
+                "nfo_include_genre" => {
+                    manager
+                        .update_config_item("nfo_config", serde_json::to_value(&config.nfo_config)?)
+                        .await
+                }
                 "upper_path" => {
                     manager
                         .update_config_item("upper_path", serde_json::to_value(&config.upper_path)?)
@@ -10161,7 +10176,7 @@ pub async fn update_config_internal(
     }
 
     // 检查是否需要重置NFO任务状态
-    let should_reset_nfo = updated_fields.contains(&"nfo_time_type");
+    let should_reset_nfo = updated_fields.contains(&"nfo_time_type") || updated_fields.contains(&"nfo_include_genre");
     let mut resetted_nfo_videos_count = 0;
     let mut resetted_nfo_pages_count = 0;
 

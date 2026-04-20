@@ -146,6 +146,7 @@
 
 	const DEFAULT_CONFIG_VALUES = {
 		interval: 1200,
+		nfoIncludeGenre: true,
 		bindAddress: '0.0.0.0:12345',
 		parallelDownloadThreads: 4,
 		codecs: ['AVC', 'HEV', 'AV1'],
@@ -219,6 +220,7 @@
 	let timeFormat = '%Y-%m-%d';
 	let interval = 1200;
 	let nfoTimeType = 'favtime';
+	let nfoIncludeGenre = true;
 	let bindAddress = '0.0.0.0:12345';
 	let parallelDownloadEnabled = false;
 	let parallelDownloadThreads = 4;
@@ -580,6 +582,7 @@
 		timeFormat = config.time_format || '';
 		interval = config.interval || 1200;
 		nfoTimeType = config.nfo_time_type || 'favtime';
+		nfoIncludeGenre = config.nfo_include_genre ?? DEFAULT_CONFIG_VALUES.nfoIncludeGenre;
 		bindAddress = config.bind_address || '0.0.0.0:12345';
 		parallelDownloadEnabled = config.parallel_download_enabled || false;
 		parallelDownloadThreads = config.parallel_download_threads || 4;
@@ -903,6 +906,7 @@
 			time_format: timeFormat,
 			interval: normalizeNumberInput(interval, DEFAULT_CONFIG_VALUES.interval),
 			nfo_time_type: nfoTimeType,
+			nfo_include_genre: nfoIncludeGenre,
 			bind_address: bindAddress,
 			parallel_download_enabled: parallelDownloadEnabled,
 			parallel_download_threads: normalizeNumberInput(
@@ -950,15 +954,9 @@
 				danmakuBottomPercentage,
 				DEFAULT_CONFIG_VALUES.danmakuBottomPercentage
 			),
-			danmaku_opacity: normalizeNumberInput(
-				danmakuOpacity,
-				DEFAULT_CONFIG_VALUES.danmakuOpacity
-			),
+			danmaku_opacity: normalizeNumberInput(danmakuOpacity, DEFAULT_CONFIG_VALUES.danmakuOpacity),
 			danmaku_bold: danmakuBold,
-			danmaku_outline: normalizeNumberInput(
-				danmakuOutline,
-				DEFAULT_CONFIG_VALUES.danmakuOutline
-			),
+			danmaku_outline: normalizeNumberInput(danmakuOutline, DEFAULT_CONFIG_VALUES.danmakuOutline),
 			danmaku_time_offset: normalizeNumberInput(
 				danmakuTimeOffset,
 				DEFAULT_CONFIG_VALUES.danmakuTimeOffset
@@ -993,10 +991,7 @@
 				concurrentVideo,
 				DEFAULT_CONFIG_VALUES.concurrentVideo
 			),
-			concurrent_page: normalizeNumberInput(
-				concurrentPage,
-				DEFAULT_CONFIG_VALUES.concurrentPage
-			),
+			concurrent_page: normalizeNumberInput(concurrentPage, DEFAULT_CONFIG_VALUES.concurrentPage),
 			rate_limit: normalizeNumberInput(rateLimit, DEFAULT_CONFIG_VALUES.rateLimit),
 			rate_duration: normalizeNumberInput(rateDuration, DEFAULT_CONFIG_VALUES.rateDuration),
 			// 其他设置
@@ -1803,6 +1798,23 @@
 					选择NFO文件中使用的时间类型。
 					<span class="font-medium text-amber-600">注意：</span>
 					更改此设置后，系统会自动重置所有NFO相关任务状态，并立即开始重新生成NFO文件以应用新的时间类型。
+				</p>
+			</div>
+
+			<div class="space-y-2">
+				<div class="flex items-center space-x-2">
+					<input
+						type="checkbox"
+						id="nfo-include-genre"
+						bind:checked={nfoIncludeGenre}
+						class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+					/>
+					<Label for="nfo-include-genre" class="text-sm">NFO写入&lt;genre&gt;标签</Label>
+				</div>
+				<p class="text-muted-foreground text-sm">
+					关闭后，新生成的 NFO 不再写入 <code>&lt;genre&gt;</code> 标签。
+					<span class="font-medium text-amber-600">注意：</span>
+					更改此设置后，系统会自动重置所有NFO相关任务状态，并立即开始重新生成NFO文件。
 				</p>
 			</div>
 

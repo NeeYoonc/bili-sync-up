@@ -195,6 +195,8 @@ pub struct UpdateConfigRequest {
     pub interval: Option<u64>,
     // NFO时间类型
     pub nfo_time_type: Option<String>,
+    // NFO是否写入genre标签
+    pub nfo_include_genre: Option<bool>,
     // 多线程下载配置
     pub parallel_download_enabled: Option<bool>,
     pub parallel_download_threads: Option<usize>,

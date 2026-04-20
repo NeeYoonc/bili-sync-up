@@ -6,7 +6,14 @@ export interface ApiResponse<T> {
 }
 
 // 排序字段枚举
-export type SortBy = 'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime' | 'is_charge_video' | 'file_size';
+export type SortBy =
+	| 'id'
+	| 'name'
+	| 'upper_name'
+	| 'created_at'
+	| 'pubtime'
+	| 'is_charge_video'
+	| 'file_size';
 
 // 排序顺序枚举
 export type SortOrder = 'asc' | 'desc';
@@ -264,6 +271,7 @@ export interface ConfigResponse {
 	time_format: string;
 	interval: number;
 	nfo_time_type: string;
+	nfo_include_genre: boolean;
 	parallel_download_enabled: boolean;
 	parallel_download_threads: number;
 	parallel_download_use_aria2: boolean;
@@ -402,6 +410,7 @@ export interface UpdateConfigRequest {
 	time_format?: string;
 	interval?: number;
 	nfo_time_type?: string;
+	nfo_include_genre?: boolean;
 	parallel_download_enabled?: boolean;
 	parallel_download_threads?: number;
 	parallel_download_use_aria2?: boolean;

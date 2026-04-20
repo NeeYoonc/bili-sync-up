@@ -69,6 +69,7 @@ pub struct UpdateConfigTask {
     pub time_format: Option<String>,
     pub interval: Option<u64>,
     pub nfo_time_type: Option<String>,
+    pub nfo_include_genre: Option<bool>,
     pub parallel_download_enabled: Option<bool>,
     pub parallel_download_threads: Option<usize>,
     pub parallel_download_use_aria2: Option<bool>,
@@ -1588,9 +1589,15 @@ impl RefreshDanmakuTaskQueue {
 
         while let Some(task) = self.dequeue_task().await {
             let result = match (task.video_id, task.page_id) {
-                (Some(video_id), None) => crate::workflow_danmaku::schedule_video_danmaku_refresh(db.as_ref(), video_id).await,
-                (None, Some(page_id)) => crate::workflow_danmaku::schedule_page_danmaku_refresh(db.as_ref(), page_id).await,
-                _ => Err(anyhow::anyhow!("无效的弹幕刷新任务：必须且只能指定 video_id 或 page_id")),
+                (Some(video_id), None) => {
+                    crate::workflow_danmaku::schedule_video_danmaku_refresh(db.as_ref(), video_id).await
+                }
+                (None, Some(page_id)) => {
+                    crate::workflow_danmaku::schedule_page_danmaku_refresh(db.as_ref(), page_id).await
+                }
+                _ => Err(anyhow::anyhow!(
+                    "无效的弹幕刷新任务：必须且只能指定 video_id 或 page_id"
+                )),
             };
 
             match result {
@@ -2295,6 +2302,7 @@ impl ConfigTaskQueue {
                 time_format: task.time_format.clone(),
                 interval: task.interval,
                 nfo_time_type: task.nfo_time_type.clone(),
+                nfo_include_genre: task.nfo_include_genre,
                 parallel_download_enabled: task.parallel_download_enabled,
                 parallel_download_threads: task.parallel_download_threads,
                 parallel_download_use_aria2: task.parallel_download_use_aria2,

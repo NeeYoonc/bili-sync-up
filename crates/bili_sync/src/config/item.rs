@@ -44,6 +44,9 @@ pub struct NFOConfig {
     /// 是否生成 NFO 文件
     #[serde(default = "default_nfo_enabled")]
     pub enabled: bool,
+    /// 是否写入 <genre> 标签
+    #[serde(default = "default_include_genre")]
+    pub include_genre: bool,
     /// NFO 文件格式类型
     #[serde(default)]
     pub format_type: NFOFormatType,
@@ -80,6 +83,10 @@ fn default_nfo_enabled() -> bool {
     true
 }
 
+fn default_include_genre() -> bool {
+    true
+}
+
 fn default_include_bilibili_info() -> bool {
     true
 }
@@ -112,6 +119,7 @@ impl Default for NFOConfig {
     fn default() -> Self {
         Self {
             enabled: default_nfo_enabled(),
+            include_genre: default_include_genre(),
             format_type: NFOFormatType::default(),
             time_type: NFOTimeType::default(),
             include_bilibili_info: default_include_bilibili_info(),
