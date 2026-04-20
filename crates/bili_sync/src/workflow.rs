@@ -3679,7 +3679,7 @@ pub async fn download_video_pages(
     };
     let path_changed = !path_to_save.is_empty() && final_video_model.path != path_to_save;
 
-    // 为多P视频生成基于视频名称的文件名
+    // 为多P视频生成目录级 sidecar 文件名前缀
     let video_base_name = if !is_single_page {
         // 多P视频启用Season结构时，使用视频根目录的文件夹名作为系列级封面的文件名
         let config = crate::config::reload_config();
@@ -3714,9 +3714,24 @@ pub async fn download_video_pages(
                 final_video_model.name.clone() // 回退到视频标题
             }
         } else {
-            // 不使用Season结构时，使用模板渲染
-            crate::config::with_config(|bundle| bundle.render_video_template(&video_format_args(&final_video_model)))
-                .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?
+            // 不使用Season结构时，sidecar 文件名前缀只取最终目录的末级名称，
+            // 避免视频目录模板包含子路径时再次拼接出嵌套目录。
+            let rendered_video_base_name = crate::config::with_config(|bundle| {
+                bundle.render_video_template(&video_format_args(&final_video_model))
+            })
+            .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?;
+            let resolved_video_base_name = resolve_sidecar_base_name(
+                &base_path,
+                Some(&rendered_video_base_name),
+                &final_video_model.name,
+            );
+            if resolved_video_base_name != rendered_video_base_name {
+                debug!(
+                    "多P sidecar 文件名前缀改用目录末级名称，避免嵌套目录: rendered='{}', resolved='{}'",
+                    rendered_video_base_name, resolved_video_base_name
+                );
+            }
+            resolved_video_base_name
         }
     } else if is_collection {
         // 合集中的单页视频：检查是否启用Season结构
@@ -11941,6 +11956,29 @@ fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Mode
     false
 }
 
+fn resolve_sidecar_base_name(
+    base_path: &std::path::Path,
+    rendered_name: Option<&str>,
+    fallback_title: &str,
+) -> String {
+    let from_base_path = base_path.file_name().and_then(|name| {
+        let value = name.to_string_lossy().trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+
+    let from_rendered_name = rendered_name.and_then(|name| {
+        name.rsplit(|c| c == '/' || c == '\\').find_map(|segment| {
+            let value = segment.trim();
+            (!value.is_empty()).then_some(value.to_string())
+        })
+    });
+
+    from_base_path
+        .or(from_rendered_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| fallback_title.to_string())
+}
+
 /// 生成唯一的文件夹名称，避免同名冲突（增强版）
 pub fn generate_unique_folder_name(
     parent_dir: &std::path::Path,
@@ -12395,6 +12433,29 @@ mod tests {
 
         let total = merge_video_total_file_size_bytes(&[first_page, second_page], &[]);
         assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_resolve_sidecar_base_name_uses_final_folder_name_for_nested_template() {
+        let base_path = PathBuf::from("まん酱").join("BV1us411z7wA");
+        let resolved = resolve_sidecar_base_name(
+            &base_path,
+            Some("まん酱/BV1us411z7wA"),
+            "【完整版MV】柯南ED50",
+        );
+
+        assert_eq!(resolved, "BV1us411z7wA");
+    }
+
+    #[test]
+    fn test_resolve_sidecar_base_name_falls_back_to_rendered_leaf_when_base_path_missing() {
+        let resolved = resolve_sidecar_base_name(
+            std::path::Path::new(""),
+            Some("まん酱/BV1us411z7wA"),
+            "【完整版MV】柯南ED50",
+        );
+
+        assert_eq!(resolved, "BV1us411z7wA");
     }
 
     #[tokio::test]
