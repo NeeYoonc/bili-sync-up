@@ -790,6 +790,9 @@ mod cleanup_tests {
 #[cfg(test)]
 mod reset_path_tests {
     use super::*;
+    use chrono::DateTime;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn remap_page_path_preserves_multipage_subdirectories_and_extension() {
@@ -828,6 +831,136 @@ mod reset_path_tests {
             remapped.as_deref(),
             Some(r"G:\library\收藏夹\合集A\Season 01\S01E001 - 测试页.m4a")
         );
+    }
+
+    fn sample_video_model(path: String) -> video::Model {
+        let test_time = DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc();
+        video::Model {
+            id: 1,
+            collection_id: None,
+            favorite_id: None,
+            watch_later_id: Some(1),
+            submission_id: None,
+            source_id: None,
+            source_type: None,
+            upper_id: 1000,
+            upper_name: "测试UP".to_string(),
+            upper_face: String::new(),
+            staff_info: None,
+            source_submission_id: None,
+            name: "测试视频".to_string(),
+            path,
+            category: 1,
+            bvid: "BV1xx411c7mD".to_string(),
+            intro: String::new(),
+            cover: String::new(),
+            ctime: test_time,
+            pubtime: test_time,
+            favtime: test_time,
+            download_status: 0,
+            valid: true,
+            tags: None,
+            single_page: Some(true),
+            created_at: "2026-04-20 00:00:00".to_string(),
+            season_id: None,
+            submission_membership_state: 0,
+            submission_membership_checked_at: None,
+            ep_id: None,
+            season_number: None,
+            episode_number: None,
+            deleted: 0,
+            share_copy: None,
+            show_season_type: None,
+            actors: None,
+            auto_download: false,
+            cid: None,
+            is_charge_video: false,
+            charge_can_play: false,
+            total_file_size_bytes: None,
+        }
+    }
+
+    fn sample_page_model(video_id: i32, path: String) -> page::Model {
+        page::Model {
+            id: 1,
+            video_id,
+            cid: 1,
+            pid: 1,
+            name: "P1".to_string(),
+            width: None,
+            height: None,
+            duration: 60,
+            path: Some(path),
+            file_size_bytes: None,
+            video_stream_size_bytes: None,
+            audio_stream_size_bytes: None,
+            image: None,
+            download_status: 31,
+            created_at: "2026-04-20 00:00:00".to_string(),
+            play_video_streams: None,
+            play_audio_streams: None,
+            play_subtitle_streams: None,
+            play_streams_updated_at: None,
+            danmaku_last_synced_at: None,
+            danmaku_sync_generation: 0,
+            danmaku_cid_snapshot: None,
+            danmaku_last_write_count: 0,
+            ai_renamed: None,
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-reset-path-{prefix}-{}", uuid::Uuid::new_v4()));
+        dir
+    }
+
+    #[tokio::test]
+    async fn move_flat_folder_video_files_moves_media_and_sidecars_into_new_base() {
+        let root = unique_temp_dir("flat-folder");
+        let old_base = root.join("downloads");
+        let new_base = old_base.join("稍后观看");
+        fs::create_dir_all(&old_base).expect("应能创建旧目录");
+
+        let page_file = old_base.join("2026-04-20-BV1xx411c7mD-测试视频.mp4");
+        let nfo_file = old_base.join("2026-04-20-BV1xx411c7mD-测试视频.nfo");
+        let thumb_file = old_base.join("2026-04-20-BV1xx411c7mD-测试视频-thumb.jpg");
+        fs::write(&page_file, b"video").expect("应能写入视频文件");
+        fs::write(&nfo_file, b"nfo").expect("应能写入nfo文件");
+        fs::write(&thumb_file, b"thumb").expect("应能写入封面文件");
+
+        let video = sample_video_model(old_base.to_string_lossy().to_string());
+        let pages = vec![sample_page_model(1, page_file.to_string_lossy().to_string())];
+
+        let (moved_count, cleaned_count) = move_flat_folder_video_files_to_new_path(
+            &video,
+            &pages,
+            &old_base.to_string_lossy(),
+            &new_base.to_string_lossy(),
+            true,
+        )
+        .await
+        .expect("平铺目录迁移应成功");
+
+        assert_eq!(moved_count, 3, "应移动主文件和配套文件");
+        assert_eq!(cleaned_count, 0, "目标目录在旧目录里面时不应清空旧根目录");
+        assert!(!page_file.exists(), "旧位置主文件应已移走");
+        assert!(!nfo_file.exists(), "旧位置nfo应已移走");
+        assert!(!thumb_file.exists(), "旧位置封面应已移走");
+        assert!(
+            new_base.join("2026-04-20-BV1xx411c7mD-测试视频.mp4").exists(),
+            "新目录应有视频文件"
+        );
+        assert!(
+            new_base.join("2026-04-20-BV1xx411c7mD-测试视频.nfo").exists(),
+            "新目录应有nfo文件"
+        );
+        assert!(
+            new_base.join("2026-04-20-BV1xx411c7mD-测试视频-thumb.jpg").exists(),
+            "新目录应有封面文件"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
@@ -7319,8 +7452,15 @@ pub async fn reset_video_source_path_internal(
 
                 for video in &videos {
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
-                        .await
+                    match move_video_files_to_new_path(
+                        video,
+                        &old_path,
+                        &request.new_path,
+                        collection.flat_folder,
+                        request.clean_empty_folders,
+                        &txn,
+                    )
+                    .await
                     {
                         Ok((moved, cleaned)) => {
                             moved_files_count += moved;
@@ -7330,7 +7470,14 @@ pub async fn reset_video_source_path_internal(
                     }
 
                     // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                    if let Err(e) = regenerate_video_and_page_paths_correctly(
+                        &txn,
+                        video.id,
+                        &request.new_path,
+                        collection.flat_folder,
+                    )
+                    .await
+                    {
                         warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                     }
                 }
@@ -7372,8 +7519,15 @@ pub async fn reset_video_source_path_internal(
 
                 for video in &videos {
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
-                        .await
+                    match move_video_files_to_new_path(
+                        video,
+                        &old_path,
+                        &request.new_path,
+                        favorite.flat_folder,
+                        request.clean_empty_folders,
+                        &txn,
+                    )
+                    .await
                     {
                         Ok((moved, cleaned)) => {
                             moved_files_count += moved;
@@ -7383,7 +7537,14 @@ pub async fn reset_video_source_path_internal(
                     }
 
                     // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                    if let Err(e) = regenerate_video_and_page_paths_correctly(
+                        &txn,
+                        video.id,
+                        &request.new_path,
+                        favorite.flat_folder,
+                    )
+                    .await
+                    {
                         warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                     }
                 }
@@ -7424,8 +7585,15 @@ pub async fn reset_video_source_path_internal(
 
                 for video in &videos {
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
-                        .await
+                    match move_video_files_to_new_path(
+                        video,
+                        &old_path,
+                        &request.new_path,
+                        submission.flat_folder,
+                        request.clean_empty_folders,
+                        &txn,
+                    )
+                    .await
                     {
                         Ok((moved, cleaned)) => {
                             moved_files_count += moved;
@@ -7435,7 +7603,14 @@ pub async fn reset_video_source_path_internal(
                     }
 
                     // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                    if let Err(e) = regenerate_video_and_page_paths_correctly(
+                        &txn,
+                        video.id,
+                        &request.new_path,
+                        submission.flat_folder,
+                    )
+                    .await
+                    {
                         warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                     }
                 }
@@ -7476,8 +7651,15 @@ pub async fn reset_video_source_path_internal(
 
                 for video in &videos {
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
-                        .await
+                    match move_video_files_to_new_path(
+                        video,
+                        &old_path,
+                        &request.new_path,
+                        watch_later.flat_folder,
+                        request.clean_empty_folders,
+                        &txn,
+                    )
+                    .await
                     {
                         Ok((moved, cleaned)) => {
                             moved_files_count += moved;
@@ -7487,7 +7669,14 @@ pub async fn reset_video_source_path_internal(
                     }
 
                     // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                    if let Err(e) = regenerate_video_and_page_paths_correctly(
+                        &txn,
+                        video.id,
+                        &request.new_path,
+                        watch_later.flat_folder,
+                    )
+                    .await
+                    {
                         warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                     }
                 }
@@ -7534,6 +7723,7 @@ pub async fn reset_video_source_path_internal(
                         first_video,
                         &old_path,
                         &request.new_path,
+                        bangumi.flat_folder,
                         request.clean_empty_folders,
                         &txn,
                     )
@@ -7545,8 +7735,13 @@ pub async fn reset_video_source_path_internal(
 
                             // 移动成功后，更新所有视频的数据库路径到相同的新路径
                             for video in &videos {
-                                if let Err(e) =
-                                    update_bangumi_video_path_in_database(&txn, video, &request.new_path).await
+                                if let Err(e) = update_bangumi_video_path_in_database(
+                                    &txn,
+                                    video,
+                                    &request.new_path,
+                                    bangumi.flat_folder,
+                                )
+                                .await
                                 {
                                     warn!("更新番剧视频 {} 数据库路径失败: {:?}", video.id, e);
                                 }
@@ -7650,14 +7845,152 @@ async fn move_files_with_four_step_rename(old_path: &str, target_path: &str) -> 
     Ok(final_path.to_string_lossy().to_string())
 }
 
-/// 移动视频文件到新路径结构，返回(移动的文件数量, 清理的文件夹数量)
-async fn move_video_files_to_new_path(
+fn build_flat_folder_target_path(
+    current_file_path: &str,
+    old_base_path: &str,
+    new_base_path: &str,
+) -> Result<std::path::PathBuf, std::io::Error> {
+    if let Some(remapped_path) = remap_page_path_with_video_prefix(current_file_path, old_base_path, new_base_path) {
+        return Ok(std::path::PathBuf::from(remapped_path));
+    }
+
+    let file_name = std::path::Path::new(current_file_path)
+        .file_name()
+        .ok_or_else(|| std::io::Error::other(format!("无法从路径提取文件名: {current_file_path}")))?;
+    Ok(std::path::Path::new(new_base_path).join(file_name))
+}
+
+async fn move_flat_folder_file(
+    source_path: &std::path::Path,
+    target_path: &std::path::Path,
+    cleanup_candidates: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Result<usize, std::io::Error> {
+    if !source_path.exists() || source_path == target_path {
+        return Ok(0);
+    }
+
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::rename(source_path, target_path)?;
+    if let Some(parent) = source_path.parent() {
+        cleanup_candidates.insert(parent.to_path_buf());
+    }
+    Ok(1)
+}
+
+async fn move_flat_folder_page_files(
+    page_path: &std::path::Path,
+    target_page_path: &std::path::Path,
+    cleanup_candidates: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Result<usize, std::io::Error> {
+    let source_dir = page_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other(format!("无法获取分页文件父目录: {}", page_path.display())))?;
+    let target_dir = target_page_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other(format!("无法获取目标文件父目录: {}", target_page_path.display())))?;
+    let source_stem = page_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| std::io::Error::other(format!("无法获取分页文件名: {}", page_path.display())))?;
+    let target_stem = target_page_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| std::io::Error::other(format!("无法获取目标文件名: {}", target_page_path.display())))?;
+
+    let mut moved_count = move_flat_folder_file(page_path, target_page_path, cleanup_candidates).await?;
+
+    for suffix in [".nfo", ".zh-CN.default.ass", ".ass", ".srt", ".xml"] {
+        let source_companion = source_dir.join(format!("{source_stem}{suffix}"));
+        let target_companion = target_dir.join(format!("{target_stem}{suffix}"));
+        moved_count += move_flat_folder_file(&source_companion, &target_companion, cleanup_candidates).await?;
+    }
+
+    for cover_suffix in ["fanart", "thumb", "poster"] {
+        for ext in ["jpg", "jpeg", "png", "webp"] {
+            let source_cover = source_dir.join(format!("{source_stem}-{cover_suffix}.{ext}"));
+            let target_cover = target_dir.join(format!("{target_stem}-{cover_suffix}.{ext}"));
+            moved_count += move_flat_folder_file(&source_cover, &target_cover, cleanup_candidates).await?;
+        }
+    }
+
+    Ok(moved_count)
+}
+
+async fn move_flat_folder_video_files_to_new_path(
     video: &video::Model,
-    _old_base_path: &str,
+    pages: &[page::Model],
+    old_base_path: &str,
     new_base_path: &str,
     clean_empty_folders: bool,
 ) -> Result<(usize, usize), std::io::Error> {
+    let new_base_dir = std::path::Path::new(new_base_path);
+    std::fs::create_dir_all(new_base_dir)?;
+
+    let mut moved_count = 0;
+    let mut cleaned_count = 0;
+    let mut cleanup_candidates = std::collections::HashSet::new();
+
+    for page_model in pages {
+        let Some(current_page_path) = page_model.path.as_deref().filter(|path| !path.is_empty()) else {
+            continue;
+        };
+
+        let target_page_path = build_flat_folder_target_path(current_page_path, old_base_path, new_base_path)?;
+        moved_count += move_flat_folder_page_files(
+            std::path::Path::new(current_page_path),
+            &target_page_path,
+            &mut cleanup_candidates,
+        )
+        .await?;
+    }
+
+    if clean_empty_folders {
+        let mut cleanup_dirs: Vec<_> = cleanup_candidates.into_iter().collect();
+        cleanup_dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+
+        for dir in cleanup_dirs {
+            if let Ok(count) = cleanup_empty_directory(&dir).await {
+                cleaned_count += count;
+            }
+        }
+    }
+
+    if moved_count == 0 && pages.is_empty() {
+        debug!("平铺目录视频 {} 没有分页路径，跳过文件迁移", video.id);
+    }
+
+    Ok((moved_count, cleaned_count))
+}
+
+/// 移动视频文件到新路径结构，返回(移动的文件数量, 清理的文件夹数量)
+async fn move_video_files_to_new_path(
+    video: &video::Model,
+    old_base_path: &str,
+    new_base_path: &str,
+    flat_folder: bool,
+    clean_empty_folders: bool,
+    txn: &sea_orm::DatabaseTransaction,
+) -> Result<(usize, usize), std::io::Error> {
     use std::path::Path;
+
+    if flat_folder {
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.eq(video.id))
+            .all(txn)
+            .await
+            .map_err(|e| std::io::Error::other(format!("查询分页路径失败: {e}")))?;
+        return move_flat_folder_video_files_to_new_path(
+            video,
+            &pages,
+            old_base_path,
+            new_base_path,
+            clean_empty_folders,
+        )
+        .await;
+    }
 
     let mut moved_count = 0;
     let mut cleaned_count = 0;
@@ -7752,6 +8085,7 @@ async fn regenerate_video_and_page_paths_correctly(
     txn: &sea_orm::DatabaseTransaction,
     video_id: i32,
     new_base_path: &str,
+    flat_folder: bool,
 ) -> Result<(), ApiError> {
     use std::path::Path;
 
@@ -7763,13 +8097,16 @@ async fn regenerate_video_and_page_paths_correctly(
     let old_video_path = video.path.clone();
 
     // 重新生成视频路径
-    let new_video_path = crate::config::with_config(|bundle| {
-        let video_args = crate::utils::format_arg::video_format_args(&video);
-        bundle.render_video_template(&video_args)
-    })
-    .map_err(|e| anyhow!("视频路径模板渲染失败: {}", e))?;
-
-    let full_new_video_path = Path::new(new_base_path).join(&new_video_path);
+    let full_new_video_path = if flat_folder {
+        Path::new(new_base_path).to_path_buf()
+    } else {
+        let new_video_path = crate::config::with_config(|bundle| {
+            let video_args = crate::utils::format_arg::video_format_args(&video);
+            bundle.render_video_template(&video_args)
+        })
+        .map_err(|e| anyhow!("视频路径模板渲染失败: {}", e))?;
+        Path::new(new_base_path).join(&new_video_path)
+    };
 
     // 更新视频路径
     video::Entity::update_many()
@@ -9101,9 +9438,9 @@ pub async fn update_config_internal(
     // 服务器绑定地址配置
     if let Some(bind_address) = params.bind_address {
         let trimmed_bind_address = bind_address.trim();
-        let normalized_address = if trimmed_bind_address.is_empty() {
-            default_config.bind_address.clone()
-        } else if trimmed_bind_address.contains(':') {
+            let normalized_address = if trimmed_bind_address.is_empty() {
+                default_config.bind_address.clone()
+            } else if trimmed_bind_address.contains(':') {
                 // 已经包含端口，直接使用
                 trimmed_bind_address.to_string()
             } else {
@@ -14859,8 +15196,19 @@ async fn update_bangumi_video_path_in_database(
     txn: &sea_orm::DatabaseTransaction,
     video: &video::Model,
     new_base_path: &str,
+    flat_folder: bool,
 ) -> Result<(), ApiError> {
     use std::path::Path;
+
+    if flat_folder {
+        let video_path_str = Path::new(new_base_path).to_string_lossy().to_string();
+        video::Entity::update_many()
+            .filter(video::Column::Id.eq(video.id))
+            .col_expr(video::Column::Path, Expr::value(video_path_str.clone()))
+            .exec(txn)
+            .await?;
+        return Ok(());
+    }
 
     // 计算该视频的新路径（与move_bangumi_files_to_new_path使用相同逻辑）
     let new_video_dir = Path::new(new_base_path);
@@ -14991,12 +15339,29 @@ async fn update_bangumi_video_path_in_database(
 /// 番剧专用的文件移动函数，避免BVID后缀污染
 async fn move_bangumi_files_to_new_path(
     video: &video::Model,
-    _old_base_path: &str,
+    old_base_path: &str,
     new_base_path: &str,
+    flat_folder: bool,
     clean_empty_folders: bool,
     txn: &sea_orm::DatabaseTransaction,
 ) -> Result<(usize, usize), std::io::Error> {
     use std::path::Path;
+
+    if flat_folder {
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.eq(video.id))
+            .all(txn)
+            .await
+            .map_err(|e| std::io::Error::other(format!("查询番剧分页路径失败: {e}")))?;
+        return move_flat_folder_video_files_to_new_path(
+            video,
+            &pages,
+            old_base_path,
+            new_base_path,
+            clean_empty_folders,
+        )
+        .await;
+    }
 
     let mut moved_count = 0;
     let mut cleaned_count = 0;
