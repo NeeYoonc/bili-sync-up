@@ -247,8 +247,7 @@ impl NotificationClient {
                 error!("企业微信推送发送失败，已达最大重试次数");
             }
             "webhook" => {
-                let Some(ref webhook_url) = self.config.webhook_url else {
-                    warn!("Webhook渠道已激活但未配置URL");
+                let Some(webhook_url) = self.get_runtime_webhook_url("扫描完成通知") else {
                     return Ok(());
                 };
 
@@ -454,6 +453,26 @@ impl NotificationClient {
                 }
             }
         }
+    }
+
+    fn get_runtime_webhook_url(&self, notification_name: &str) -> Option<&str> {
+        let Some(webhook_url) = self.config.webhook_url.as_deref() else {
+            debug!("Webhook渠道未配置URL，跳过{}", notification_name);
+            return None;
+        };
+
+        if Self::resolve_webhook_format(self.config.webhook_format.as_str(), webhook_url) == "custom"
+            && self
+                .config
+                .webhook_custom_body
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            debug!("Webhook渠道使用自定义 JSON 但未配置 POST Body，跳过{}", notification_name);
+            return None;
+        }
+
+        Some(webhook_url)
     }
 
     fn build_webhook_headers(&self, is_open_send: bool) -> Result<HeaderMap> {
@@ -894,6 +913,15 @@ impl NotificationClient {
                 let Some(ref webhook_url) = self.config.webhook_url else {
                     return Err(anyhow!("Webhook渠道已选择但未配置URL"));
                 };
+                if Self::resolve_webhook_format(self.config.webhook_format.as_str(), webhook_url) == "custom"
+                    && self
+                        .config
+                        .webhook_custom_body
+                        .as_ref()
+                        .is_none_or(|value| value.trim().is_empty())
+                {
+                    return Err(anyhow!("Webhook渠道已选择自定义 JSON 但未配置 POST Body"));
+                }
 
                 let title = "Bili Sync 测试推送";
                 let content = "这是一条Webhook测试推送消息。\n\n如果您收到此消息，说明Webhook推送配置正确。\n\n🎉 推送功能工作正常！";
@@ -947,6 +975,15 @@ impl NotificationClient {
                 let Some(ref webhook_url) = self.config.webhook_url else {
                     return Err(anyhow!("Webhook渠道已选择但未配置URL"));
                 };
+                if Self::resolve_webhook_format(self.config.webhook_format.as_str(), webhook_url) == "custom"
+                    && self
+                        .config
+                        .webhook_custom_body
+                        .as_ref()
+                        .is_none_or(|value| value.trim().is_empty())
+                {
+                    return Err(anyhow!("Webhook渠道已选择自定义 JSON 但未配置 POST Body"));
+                }
                 self.send_to_webhook(webhook_url, title, &content, "custom_test_notification")
                     .await?;
                 info!("Webhook自定义测试推送发送成功");
@@ -1017,8 +1054,7 @@ impl NotificationClient {
                 }
             }
             "webhook" => {
-                let Some(ref webhook_url) = self.config.webhook_url else {
-                    warn!("Webhook渠道已激活但未配置URL，跳过风控通知");
+                let Some(webhook_url) = self.get_runtime_webhook_url("风控通知") else {
                     return Ok(());
                 };
                 match self.send_to_webhook(webhook_url, title, &content, "risk_control").await {
@@ -1115,8 +1151,7 @@ impl NotificationClient {
                 }
             }
             "webhook" => {
-                let Some(ref webhook_url) = self.config.webhook_url else {
-                    warn!("Webhook渠道已激活但未配置URL，跳过单P变多P通知");
+                let Some(webhook_url) = self.get_runtime_webhook_url("单P变多P通知") else {
                     return Ok(());
                 };
                 match self
@@ -1209,8 +1244,7 @@ impl NotificationClient {
                 }
             }
             "webhook" => {
-                let Some(ref webhook_url) = self.config.webhook_url else {
-                    warn!("Webhook渠道已激活但未配置URL，跳过错误通知");
+                let Some(webhook_url) = self.get_runtime_webhook_url("错误通知") else {
                     return Ok(());
                 };
                 match self.send_to_webhook(webhook_url, &title, &content, "error").await {
@@ -1501,5 +1535,39 @@ mod tests {
         );
         assert_eq!(request.body.get("proxy").and_then(|v| v.as_bool()), Some(false));
         assert!(request.body.get("imageUrl").is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_send_error_skips_webhook_when_custom_body_missing() {
+        let (url, captured) = spawn_capture_server("/notify").await.expect("start capture server");
+
+        let mut config = NotificationConfig::default();
+        config.active_channel = "webhook".to_string();
+        config.webhook_url = Some(url);
+        config.webhook_format = "custom".to_string();
+
+        let client = NotificationClient::new(config);
+        client
+            .send_error("测试错误", "测试内容", Some("这是一条运行时错误通知"))
+            .await
+            .expect("skip incomplete webhook config");
+
+        assert!(captured.lock().await.is_none(), "incomplete custom webhook should not send any request");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_test_notification_errors_when_custom_body_missing() {
+        let mut config = NotificationConfig::default();
+        config.active_channel = "webhook".to_string();
+        config.webhook_url = Some("http://127.0.0.1:65535/notify".to_string());
+        config.webhook_format = "custom".to_string();
+
+        let client = NotificationClient::new(config);
+        let err = client
+            .test_notification()
+            .await
+            .expect_err("test notification should reject incomplete custom webhook config");
+
+        assert!(err.to_string().contains("未配置 POST Body"));
     }
 }
