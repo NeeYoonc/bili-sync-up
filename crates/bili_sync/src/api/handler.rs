@@ -8623,6 +8623,26 @@ fn format_config_update_fields_display(updated_fields: &[&str]) -> Vec<String> {
     result
 }
 
+fn should_reset_nfo_tasks(updated_fields: &[&str]) -> bool {
+    updated_fields.contains(&"nfo_time_type")
+}
+
+#[cfg(test)]
+mod config_update_tests {
+    use super::should_reset_nfo_tasks;
+
+    #[test]
+    fn changing_nfo_genre_toggle_does_not_reset_nfo_tasks() {
+        assert!(!should_reset_nfo_tasks(&["nfo_include_genre"]));
+    }
+
+    #[test]
+    fn changing_nfo_time_type_still_resets_nfo_tasks() {
+        assert!(should_reset_nfo_tasks(&["nfo_time_type"]));
+        assert!(should_reset_nfo_tasks(&["nfo_include_genre", "nfo_time_type"]));
+    }
+}
+
 pub async fn update_config_internal(
     db: Arc<DatabaseConnection>,
     params: crate::api::request::UpdateConfigRequest,
@@ -10176,7 +10196,7 @@ pub async fn update_config_internal(
     }
 
     // 检查是否需要重置NFO任务状态
-    let should_reset_nfo = updated_fields.contains(&"nfo_time_type") || updated_fields.contains(&"nfo_include_genre");
+    let should_reset_nfo = should_reset_nfo_tasks(&updated_fields);
     let mut resetted_nfo_videos_count = 0;
     let mut resetted_nfo_pages_count = 0;
 

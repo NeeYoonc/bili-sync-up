@@ -1814,7 +1814,7 @@
 				<p class="text-muted-foreground text-sm">
 					关闭后，新生成的 NFO 不再写入 <code>&lt;genre&gt;</code> 标签。
 					<span class="font-medium text-amber-600">注意：</span>
-					更改此设置后，系统会自动重置所有NFO相关任务状态，并立即开始重新生成NFO文件。
+					更改此设置不会改动已有 NFO 文件，只会影响之后新生成的 NFO。
 				</p>
 			</div>
 
