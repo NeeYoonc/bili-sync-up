@@ -324,7 +324,7 @@ fn is_bili_request_failed_with_codes(err: &anyhow::Error, codes: &[i64]) -> bool
 }
 
 fn is_bili_request_failed_inaccessible(err: &anyhow::Error) -> bool {
-    is_bili_request_failed_with_codes(err, &[-404, 62002])
+    is_bili_request_failed_with_codes(err, &[-404, 62002, 62012])
 }
 
 fn is_database_locked_error(err: &anyhow::Error) -> bool {
@@ -1616,7 +1616,7 @@ pub async fn fetch_video_details(
                                 &video_model.bvid, &video_model.name, e
                             );
                             if is_bili_request_failed_inaccessible(&e) {
-                                // 404 / 62002：视频已被删除、不可访问或稿件不可见
+                                // -404 / 62002 / 62012：视频已被删除、不可访问、稿件不可见或仅自己可见
                                 // 若这是“重置详情”导致的回填（数据库里已有 page.path），则需要：
                                 // - 跳过本次重置
                                 // - 恢复为未重置（把状态置为完成，避免每轮都重复尝试）
@@ -1624,9 +1624,10 @@ pub async fn fetch_video_details(
                                 use sea_orm::sea_query::Expr;
                                 use sea_orm::{Set, Unchanged};
 
-                                let is_invisible = is_bili_request_failed_with_codes(&e, &[62002]);
+                                let is_invisible =
+                                    is_bili_request_failed_with_codes(&e, &[62002, 62012]);
                                 let inaccessible_reason = if is_invisible {
-                                    "稿件不可见"
+                                    "稿件不可见或仅自己可见"
                                 } else {
                                     "已在B站删除/不可访问"
                                 };
@@ -12252,16 +12253,21 @@ mod tests {
     }
 
     #[test]
-    fn test_is_bili_request_failed_inaccessible_matches_404_and_62002() {
+    fn test_is_bili_request_failed_inaccessible_matches_deleted_and_invisible_codes() {
         let deleted_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-404, "not found".to_string()));
         let invisible_err = anyhow!(crate::bilibili::BiliError::RequestFailed(
             62002,
             "稿件不可见".to_string()
         ));
+        let self_only_err = anyhow!(crate::bilibili::BiliError::RequestFailed(
+            62012,
+            "62012".to_string()
+        ));
         let other_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-352, "风控".to_string()));
 
         assert!(is_bili_request_failed_inaccessible(&deleted_err));
         assert!(is_bili_request_failed_inaccessible(&invisible_err));
+        assert!(is_bili_request_failed_inaccessible(&self_only_err));
         assert!(!is_bili_request_failed_inaccessible(&other_err));
     }
 
