@@ -1085,7 +1085,7 @@ pub struct LatestIngestItemResponse {
     pub ingested_at: String,
     /// 平均下载速度（Bytes/s），仅统计媒体流下载阶段
     pub download_speed_bps: Option<u64>,
-    /// 状态：success, failed, deleted
+    /// 状态：success, failed, deleted, pending
     pub status: String,
     /// 番剧系列名称（从share_copy的《》中提取）
     pub series_name: Option<String>,

@@ -44,6 +44,7 @@ use crate::api::handler::{
     get_notification_config,
     get_notification_status,
     get_queue_status,
+    get_recent_ingests,
     get_submission_videos,
     get_subscribed_collections,
     get_task_control_status,
@@ -274,6 +275,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/task-control/resume", post(resume_scanning_endpoint))
         .route("/api/task-control/refresh", post(refresh_scanning_endpoint))
         .route("/api/ingest/latest", get(get_latest_ingests))
+        .route("/api/ingest/recent", get(get_recent_ingests))
         // 推送通知API
         .route("/api/notification/test", post(test_notification_handler))
         .route("/api/config/notification", get(get_notification_config))
