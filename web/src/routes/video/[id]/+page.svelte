@@ -16,7 +16,7 @@
 		ToQuery
 	} from '$lib/stores/filter';
 	import { buildVideosRequest } from '$lib/utils/videos.js';
-	import type { ApiError, UpdateVideoStatusRequest, VideoResponse } from '$lib/types';
+	import type { ApiError, UpdateVideoStatusRequest, VideoResponse, VideoSourceTag } from '$lib/types';
 	import { IsMobile } from '$lib/hooks/is-mobile.svelte.js';
 	import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
@@ -170,6 +170,24 @@
 		return path ? path.replace(/\\/g, '/') : '';
 	}
 
+	function getVideoMetaBadges(author?: string | null, source?: VideoSourceTag | null) {
+		const badges: Array<{ label: string; value: string; title?: string }> = [];
+		if (author) {
+			badges.push({
+				label: 'UP',
+				value: author,
+				title: `当前 UP：${author}`
+			});
+		}
+		if (source) {
+			badges.push({
+				label: '视频源',
+				value: `${source.source_type_label} · ${source.source_name}`,
+				title: `该视频来自 ${source.source_type_label}：${source.source_name}`
+			});
+		}
+		return badges;
+	}
 	function isRefreshingPage(pageId: number) {
 		return refreshingPageIds.has(pageId);
 	}
@@ -640,7 +658,7 @@
 	<!-- 视频信息区域 -->
 	<section>
 		<div class="mb-4 flex {isMobile ? 'flex-col gap-3' : 'items-center justify-between'}">
-			<div class="flex items-center gap-2">
+			<div class="flex flex-wrap items-center gap-2">
 				{#if totalCount > 1}
 					<Button
 						size="sm"
@@ -727,6 +745,8 @@
 				}}
 				mode="detail"
 				showActions={true}
+				customSubtitle=""
+				customMetaBadges={getVideoMetaBadges(videoData.video.upper_name, videoData.source)}
 				progressHeight="h-3"
 				gap="gap-2"
 				taskNames={videoTaskNames}

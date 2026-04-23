@@ -12,11 +12,18 @@
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
 	import { toast } from 'svelte-sonner';
 
+	type VideoMetaBadge = {
+		label: string;
+		value: string;
+		title?: string;
+	};
+
 	export let video: VideoInfo;
 	export let showActions: boolean = true; // 控制是否显示操作按钮
 	export let mode: 'default' | 'detail' | 'page' = 'default'; // 卡片模式
 	export let customTitle: string = ''; // 自定义标题
-	export let customSubtitle: string = ''; // 自定义副标题
+	export let customSubtitle: string | null = null; // 自定义副标题，传空字符串可显式隐藏
+	export let customMetaBadges: VideoMetaBadge[] = []; // 卡片内附加标签
 	export let taskNames: string[] = []; // 自定义任务名称
 	export let showProgress: boolean = true; // 是否显示进度信息
 	export let progressHeight: string = 'h-2'; // 进度条高度
@@ -163,7 +170,7 @@
 
 	// 根据模式确定显示的标题和副标题
 	$: displayTitle = customTitle || getEnhancedVideoTitle(video);
-	$: displaySubtitle = customSubtitle || video.upper_name;
+	$: displaySubtitle = customSubtitle ?? video.upper_name;
 	$: showUserIcon = mode === 'default';
 	$: cardClasses =
 		mode === 'default'
@@ -362,6 +369,19 @@
 				<span class="min-w-0 cursor-default truncate" title={displaySubtitle}>
 					{displaySubtitle}
 				</span>
+			</div>
+		{/if}
+		{#if customMetaBadges.length > 0}
+			<div class="flex flex-wrap gap-2">
+				{#each customMetaBadges as badge (badge.label)}
+					<div
+						class="bg-muted/70 flex min-w-0 max-w-full items-center gap-1 rounded-md border px-2 py-1 text-xs"
+						title={badge.title ?? `${badge.label}：${badge.value}`}
+					>
+						<span class="text-muted-foreground shrink-0">{badge.label}</span>
+						<span class="text-foreground min-w-0 truncate font-medium">{badge.value}</span>
+					</div>
+				{/each}
 			</div>
 		{/if}
 	</CardHeader>

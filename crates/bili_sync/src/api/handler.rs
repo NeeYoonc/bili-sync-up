@@ -42,7 +42,8 @@ use crate::api::response::{
     HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse,
     QRUserInfo, RefreshDanmakuResponse, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse,
     SetupAuthTokenResponse, SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse,
-    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourcesResponse, VideosResponse,
+    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourceTag, VideoSourcesResponse,
+    VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::utils::live_updates::{
@@ -1475,7 +1476,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -2491,6 +2492,84 @@ async fn build_queue_status_sse_event(last_snapshot: &mut String) -> Option<Even
     }
 }
 
+fn build_video_source_tag(
+    source_id: i32,
+    source_type: &str,
+    source_type_label: &str,
+    source_name: String,
+) -> VideoSourceTag {
+    VideoSourceTag {
+        source_id,
+        source_type: source_type.to_string(),
+        source_type_label: source_type_label.to_string(),
+        source_name,
+    }
+}
+
+async fn resolve_video_source_tag(
+    db: &DatabaseConnection,
+    video: &video::Model,
+) -> Result<Option<VideoSourceTag>> {
+    if video.source_type == Some(1) {
+        if let Some(source_id) = video.source_id {
+            let source_name = video_source::Entity::find_by_id(source_id)
+                .one(db)
+                .await?
+                .map(|source| source.name)
+                .unwrap_or_else(|| format!("已删除番剧源 #{}", source_id));
+            return Ok(Some(build_video_source_tag(source_id, "bangumi", "番剧", source_name)));
+        }
+    }
+
+    if let Some(source_id) = video.collection_id {
+        let source_name = collection::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|source| source.name)
+            .unwrap_or_else(|| format!("已删除合集源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(
+            source_id,
+            "collection",
+            "合集 / 列表",
+            source_name,
+        )));
+    }
+
+    if let Some(source_id) = video.favorite_id {
+        let source_name = favorite::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|source| source.name)
+            .unwrap_or_else(|| format!("已删除收藏夹源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(source_id, "favorite", "收藏夹", source_name)));
+    }
+
+    if let Some(source_id) = video.submission_id {
+        let source_name = submission::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|source| source.upper_name)
+            .unwrap_or_else(|| format!("已删除投稿源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(source_id, "submission", "UP主投稿", source_name)));
+    }
+
+    if let Some(source_id) = video.watch_later_id {
+        let source_name = watch_later::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|_| "稍后再看".to_string())
+            .unwrap_or_else(|| format!("已删除稍后再看源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(
+            source_id,
+            "watch_later",
+            "稍后再看",
+            source_name,
+        )));
+    }
+
+    Ok(None)
+}
+
 #[utoipa::path(
     get,
     path = "/api/videos/{id}",
@@ -2502,75 +2581,28 @@ pub async fn get_video(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<VideoResponse>, ApiError> {
-    let raw_video = video::Entity::find_by_id(id)
-        .select_only()
-        .columns([
-            video::Column::Id,
-            video::Column::Bvid,
-            video::Column::Name,
-            video::Column::UpperName,
-            video::Column::Path,
-            video::Column::Category,
-            video::Column::DownloadStatus,
-            video::Column::Cover,
-            video::Column::Valid,
-            video::Column::IsChargeVideo,
-            video::Column::SeasonId,
-            video::Column::SourceType,
-        ])
-        .into_tuple::<(
-            i32,
-            String,
-            String,
-            String,
-            String,
-            i32,
-            u32,
-            String,
-            bool,
-            bool,
-            Option<String>,
-            Option<i32>,
-        )>()
-        .one(db.as_ref())
-        .await?;
-
-    let Some((
-        _id,
-        bvid,
-        name,
-        upper_name,
-        path,
-        category,
-        download_status,
-        cover,
-        valid,
-        is_charge_video,
-        season_id,
-        source_type,
-    )) = raw_video
-    else {
+    let Some(raw_video) = video::Entity::find_by_id(id).one(db.as_ref()).await? else {
         return Err(InnerApiError::NotFound(id).into());
     };
 
     // 创建VideoInfo并填充bangumi_title
     let mut video_info = VideoInfo::from((
-        _id,
-        bvid,
-        name,
-        upper_name,
-        path,
-        category,
-        download_status,
-        cover,
-        valid,
-        is_charge_video,
+        raw_video.id,
+        raw_video.bvid.clone(),
+        raw_video.name.clone(),
+        raw_video.upper_name.clone(),
+        raw_video.path.clone(),
+        raw_video.category,
+        raw_video.download_status,
+        raw_video.cover.clone(),
+        raw_video.valid,
+        raw_video.is_charge_video,
     ));
 
     // 为番剧类型的视频填充真实标题
-    if source_type == Some(1) && season_id.is_some() {
+    if raw_video.source_type == Some(1) && raw_video.season_id.is_some() {
         // 番剧类型且有season_id，尝试获取真实标题
-        if let Some(ref season_id_str) = season_id {
+        if let Some(ref season_id_str) = raw_video.season_id {
             // 先从缓存获取
             if let Some(title) = get_cached_season_title(season_id_str).await {
                 video_info.bangumi_title = Some(title);
@@ -2582,6 +2614,7 @@ pub async fn get_video(
             }
         }
     }
+    let source = resolve_video_source_tag(db.as_ref(), &raw_video).await?;
     let pages = page::Entity::find()
         .filter(page::Column::VideoId.eq(id))
         .order_by_asc(page::Column::Pid)
@@ -2616,6 +2649,7 @@ pub async fn get_video(
     Ok(ApiResponse::ok(VideoResponse {
         video: video_info,
         pages,
+        source,
     }))
 }
 
@@ -2649,7 +2683,10 @@ pub async fn refresh_video_danmaku(
         crate::task::resume_scanning();
         (
             refreshed_pages,
-            format!("已将 {} 个分页的弹幕标记为待刷新，下一轮扫描会按现有下载流程处理", refreshed_pages),
+            format!(
+                "已将 {} 个分页的弹幕标记为待刷新，下一轮扫描会按现有下载流程处理",
+                refreshed_pages
+            ),
         )
     };
 
@@ -9468,41 +9505,41 @@ pub async fn update_config_internal(
     // 服务器绑定地址配置
     if let Some(bind_address) = params.bind_address {
         let trimmed_bind_address = bind_address.trim();
-            let normalized_address = if trimmed_bind_address.is_empty() {
-                default_config.bind_address.clone()
-            } else if trimmed_bind_address.contains(':') {
-                // 已经包含端口，直接使用
-                trimmed_bind_address.to_string()
-            } else {
-                // 只有端口号，添加默认IP
-                if let Ok(port) = trimmed_bind_address.parse::<u16>() {
-                    if port == 0 {
-                        return Err(anyhow!("端口号不能为0").into());
-                    }
-                    format!("0.0.0.0:{}", port)
-                } else {
-                    return Err(anyhow!("无效的端口号格式").into());
+        let normalized_address = if trimmed_bind_address.is_empty() {
+            default_config.bind_address.clone()
+        } else if trimmed_bind_address.contains(':') {
+            // 已经包含端口，直接使用
+            trimmed_bind_address.to_string()
+        } else {
+            // 只有端口号，添加默认IP
+            if let Ok(port) = trimmed_bind_address.parse::<u16>() {
+                if port == 0 {
+                    return Err(anyhow!("端口号不能为0").into());
                 }
-            };
+                format!("0.0.0.0:{}", port)
+            } else {
+                return Err(anyhow!("无效的端口号格式").into());
+            }
+        };
 
-            // 验证地址格式
-            if let Some(colon_pos) = normalized_address.rfind(':') {
-                let (_ip, port_str) = normalized_address.split_at(colon_pos + 1);
-                if let Ok(port) = port_str.parse::<u16>() {
-                    if port == 0 {
-                        return Err(anyhow!("端口号不能为0").into());
-                    }
-                } else {
-                    return Err(anyhow!("无效的端口号格式").into());
+        // 验证地址格式
+        if let Some(colon_pos) = normalized_address.rfind(':') {
+            let (_ip, port_str) = normalized_address.split_at(colon_pos + 1);
+            if let Ok(port) = port_str.parse::<u16>() {
+                if port == 0 {
+                    return Err(anyhow!("端口号不能为0").into());
                 }
             } else {
-                return Err(anyhow!("绑定地址格式无效，应为 'IP:端口' 或 '端口'").into());
+                return Err(anyhow!("无效的端口号格式").into());
             }
+        } else {
+            return Err(anyhow!("绑定地址格式无效，应为 'IP:端口' 或 '端口'").into());
+        }
 
-            if normalized_address != config.bind_address {
-                config.bind_address = normalized_address;
-                updated_fields.push("bind_address");
-            }
+        if normalized_address != config.bind_address {
+            config.bind_address = normalized_address;
+            updated_fields.push("bind_address");
+        }
     }
 
     // 风控验证配置
@@ -9569,7 +9606,7 @@ pub async fn update_config_internal(
         let normalized_api_key = api_key.trim().to_string();
         if config.risk_control.auto_solve.is_none() {
             if !normalized_api_key.is_empty() {
-            // 如果auto_solve配置不存在，创建一个新的
+                // 如果auto_solve配置不存在，创建一个新的
                 config.risk_control.auto_solve = Some(crate::config::AutoSolveConfig {
                     service: "2captcha".to_string(),
                     api_key: normalized_api_key.clone(),
@@ -13578,7 +13615,72 @@ pub struct LatestIngestQuery {
     pub limit: Option<usize>,
 }
 
-/// 获取首页「最新入库」列表
+fn extract_series_name_from_share_copy(share_copy: &Option<String>) -> Option<String> {
+    share_copy.as_ref().and_then(|s| {
+        if let Some(start) = s.find('《') {
+            if let Some(end) = s.find('》') {
+                if end > start {
+                    return Some(s[start + 3..end].to_string()); // UTF-8 《 is 3 bytes
+                }
+            }
+        }
+        None
+    })
+}
+
+fn status_label_from_video(v: &video::Model) -> String {
+    if v.deleted != 0 {
+        return "deleted".to_string();
+    }
+
+    let st = VideoStatus::from(v.download_status);
+    let bits: [u32; 5] = st.into();
+    if bits.iter().all(|&b| b == crate::utils::status::STATUS_OK) {
+        "success".to_string()
+    } else if st.get_completed() {
+        "failed".to_string()
+    } else {
+        "pending".to_string()
+    }
+}
+
+fn video_to_ingest_item(
+    v: video::Model,
+    ingested_at: String,
+    download_speed_bps: Option<u64>,
+) -> crate::api::response::LatestIngestItemResponse {
+    crate::api::response::LatestIngestItemResponse {
+        video_id: v.id,
+        video_name: v.name.clone(),
+        upper_name: v.upper_name.clone(),
+        path: v.path.clone(),
+        ingested_at,
+        download_speed_bps,
+        status: status_label_from_video(&v),
+        series_name: extract_series_name_from_share_copy(&v.share_copy),
+    }
+}
+
+fn ingest_event_to_response(e: crate::ingest_log::IngestEvent) -> crate::api::response::LatestIngestItemResponse {
+    use crate::ingest_log::IngestStatus;
+    let status_str = match e.status {
+        IngestStatus::Success => "success",
+        IngestStatus::Failed => "failed",
+        IngestStatus::Deleted => "deleted",
+    };
+    crate::api::response::LatestIngestItemResponse {
+        video_id: e.video_id,
+        video_name: e.video_name,
+        upper_name: e.upper_name,
+        path: e.path,
+        ingested_at: e.ingested_at,
+        download_speed_bps: e.download_speed_bps,
+        status: status_str.to_string(),
+        series_name: e.series_name,
+    }
+}
+
+/// 获取首页「最新入库」列表（只按数据库新增时间排序）
 #[utoipa::path(
     get,
     path = "/api/ingest/latest",
@@ -13596,10 +13698,49 @@ pub async fn get_latest_ingests(
 ) -> Result<ApiResponse<crate::api::response::LatestIngestResponse>, ApiError> {
     let limit = query.limit.unwrap_or(10).clamp(1, 100);
 
+    let videos = video::Entity::find()
+        .order_by_desc(video::Column::CreatedAt)
+        .order_by_desc(video::Column::Id)
+        .limit(limit as u64)
+        .all(db.as_ref())
+        .await
+        .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
+
+    let resp_items = videos
+        .into_iter()
+        .map(|v| {
+            let created_at = v.created_at.clone();
+            video_to_ingest_item(v, created_at, None)
+        })
+        .collect();
+
+    Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
+        items: resp_items,
+    }))
+}
+
+/// 获取首页「最近处理」列表（下载/修复/弹幕等任务完成事件）
+#[utoipa::path(
+    get,
+    path = "/api/ingest/recent",
+    params(
+        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100")
+    ),
+    responses(
+        (status = 200, description = "获取成功", body = crate::api::response::LatestIngestResponse),
+        (status = 500, description = "内部错误")
+    )
+)]
+pub async fn get_recent_ingests(
+    Query(query): Query<LatestIngestQuery>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<crate::api::response::LatestIngestResponse>, ApiError> {
+    let limit = query.limit.unwrap_or(10).clamp(1, 100);
+
     // 1) 先取内存事件（带速度）
     let mut items = crate::ingest_log::INGEST_LOG.list_latest(limit).await;
 
-    // 2) 不足时再用 DB 补齐（速度可能为空，但保证首页总能显示）
+    // 2) 不足时再用 DB 补齐。DB 没有持久化“处理完成时间”，这里用新增时间兜底。
     if items.len() < limit {
         let need = limit - items.len();
         let mut existing_ids = std::collections::HashSet::new();
@@ -13620,32 +13761,7 @@ pub async fn get_latest_ingests(
             if existing_ids.contains(&v.id) {
                 continue;
             }
-            // 通过 deleted 字段和 status bits 判断状态
-            use crate::ingest_log::IngestStatus;
-            let status = if v.deleted != 0 {
-                IngestStatus::Deleted
-            } else {
-                let st = VideoStatus::from(v.download_status);
-                let bits: [u32; 5] = st.into();
-                if bits.iter().all(|&b| b == crate::utils::status::STATUS_OK) {
-                    IngestStatus::Success
-                } else {
-                    IngestStatus::Failed
-                }
-            };
-
-            // 从 share_copy 提取番剧系列名称（《剧名》格式）
-            let series_name = v.share_copy.as_ref().and_then(|s| {
-                if let Some(start) = s.find('《') {
-                    if let Some(end) = s.find('》') {
-                        if end > start {
-                            return Some(s[start + 3..end].to_string()); // UTF-8 《 is 3 bytes
-                        }
-                    }
-                }
-                None
-            });
-
+            let status = status_label_from_video(&v);
             items.push(crate::ingest_log::IngestEvent {
                 video_id: v.id,
                 video_name: v.name.clone(),
@@ -13653,34 +13769,18 @@ pub async fn get_latest_ingests(
                 path: v.path.clone(),
                 ingested_at: v.created_at.clone(),
                 download_speed_bps: None,
-                status,
-                series_name,
+                status: match status.as_str() {
+                    "deleted" => crate::ingest_log::IngestStatus::Deleted,
+                    "success" => crate::ingest_log::IngestStatus::Success,
+                    _ => crate::ingest_log::IngestStatus::Failed,
+                },
+                series_name: extract_series_name_from_share_copy(&v.share_copy),
             });
         }
     }
 
     // 3) 转响应结构
-    let resp_items = items
-        .into_iter()
-        .map(|e| {
-            use crate::ingest_log::IngestStatus;
-            let status_str = match e.status {
-                IngestStatus::Success => "success",
-                IngestStatus::Failed => "failed",
-                IngestStatus::Deleted => "deleted",
-            };
-            crate::api::response::LatestIngestItemResponse {
-                video_id: e.video_id,
-                video_name: e.video_name,
-                upper_name: e.upper_name,
-                path: e.path,
-                ingested_at: e.ingested_at,
-                download_speed_bps: e.download_speed_bps,
-                status: status_str.to_string(),
-                series_name: e.series_name,
-            }
-        })
-        .collect();
+    let resp_items = items.into_iter().map(ingest_event_to_response).collect();
 
     Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
         items: resp_items,
@@ -16609,8 +16709,7 @@ async fn get_collection_cover_from_api(
         .collections
         .iter()
         .find(|item| {
-            item.collection_type == expected_collection_type
-                && item.sid.parse::<i64>().ok() == Some(collection_id)
+            item.collection_type == expected_collection_type && item.sid.parse::<i64>().ok() == Some(collection_id)
         })
         .ok_or_else(|| anyhow!("未在合集列表中找到目标合集"))?;
     let cover_url = collection.cover.trim();

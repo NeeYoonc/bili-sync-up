@@ -849,6 +849,13 @@ class ApiClient {
 	}
 
 	/**
+	 * 获取首页最近处理列表
+	 */
+	async getRecentIngests(limit: number = 10): Promise<ApiResponse<LatestIngestResponse>> {
+		return this.get<LatestIngestResponse>('/ingest/recent', { limit });
+	}
+
+	/**
 	 * 检查 beta 镜像是否有更新（用于角标提示）
 	 */
 	async getBetaImageUpdateStatus(): Promise<ApiResponse<BetaImageUpdateStatusResponse>> {
@@ -1320,6 +1327,11 @@ export const api = {
 	 * 获取首页最新入库列表
 	 */
 	getLatestIngests: (limit: number = 10) => apiClient.getLatestIngests(limit),
+
+	/**
+	 * 获取首页最近处理列表
+	 */
+	getRecentIngests: (limit: number = 10) => apiClient.getRecentIngests(limit),
 
 	/**
 	 * 检查 beta 镜像是否有更新（用于角标提示）
