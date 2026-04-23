@@ -166,6 +166,10 @@
 		return `${Math.max(0, count ?? 0)} 条`;
 	}
 
+	function normalizeDisplayPath(path?: string | null) {
+		return path ? path.replace(/\\/g, '/') : '';
+	}
+
 	function isRefreshingPage(pageId: number) {
 		return refreshingPageIds.has(pageId);
 	}
@@ -730,17 +734,35 @@
 		</div>
 
 		<!-- 下载路径信息 -->
-		{#if videoData.pages && videoData.pages.length > 0 && videoData.pages[0].path}
+		{#if videoData.video.path || (videoData.pages && videoData.pages.length > 0 && videoData.pages[0].path)}
 			<div class="bg-muted mb-4 rounded-lg border {isMobile ? 'p-3' : 'p-4'}">
 				<h3 class="text-foreground mb-2 text-sm font-medium">📁 下载保存路径</h3>
-				<div
-					class="bg-card rounded border {isMobile ? 'px-2 py-2' : 'px-3 py-2'} font-mono {isMobile
-						? 'text-xs'
-						: 'text-sm'} break-all"
-				>
-					{videoData.pages[0].path}
+				<div class="space-y-3">
+					{#if videoData.video.path}
+						<div class="space-y-1">
+							<div class="text-muted-foreground text-xs">保存路径</div>
+							<div
+								class="bg-card rounded border {isMobile ? 'px-2 py-2' : 'px-3 py-2'} font-mono {isMobile
+									? 'text-xs'
+									: 'text-sm'} break-all"
+							>
+								{normalizeDisplayPath(videoData.video.path)}
+							</div>
+						</div>
+					{/if}
+					{#if videoData.pages && videoData.pages.length > 0 && videoData.pages[0].path}
+						<div class="space-y-1">
+							<div class="text-muted-foreground text-xs">视频文件路径</div>
+							<div
+								class="bg-card rounded border {isMobile ? 'px-2 py-2' : 'px-3 py-2'} font-mono {isMobile
+									? 'text-xs'
+									: 'text-sm'} break-all"
+							>
+								{normalizeDisplayPath(videoData.pages[0].path)}
+							</div>
+						</div>
+					{/if}
 				</div>
-				<p class="text-muted-foreground mt-1 text-xs">视频文件将保存到此路径下</p>
 			</div>
 		{/if}
 	</section>
