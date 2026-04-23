@@ -29,6 +29,15 @@ pub struct VideosResponse {
 pub struct VideoResponse {
     pub video: VideoInfo,
     pub pages: Vec<PageInfo>,
+    pub source: Option<VideoSourceTag>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct VideoSourceTag {
+    pub source_id: i32,
+    pub source_type: String,
+    pub source_type_label: String,
+    pub source_name: String,
 }
 
 #[derive(Serialize, ToSchema)]
