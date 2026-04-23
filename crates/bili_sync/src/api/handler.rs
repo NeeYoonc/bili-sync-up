@@ -42,7 +42,8 @@ use crate::api::response::{
     HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse,
     QRUserInfo, RefreshDanmakuResponse, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse,
     SetupAuthTokenResponse, SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse,
-    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourcesResponse, VideosResponse,
+    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourceTag, VideoSourcesResponse,
+    VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::utils::live_updates::{
@@ -2491,6 +2492,84 @@ async fn build_queue_status_sse_event(last_snapshot: &mut String) -> Option<Even
     }
 }
 
+fn build_video_source_tag(
+    source_id: i32,
+    source_type: &str,
+    source_type_label: &str,
+    source_name: String,
+) -> VideoSourceTag {
+    VideoSourceTag {
+        source_id,
+        source_type: source_type.to_string(),
+        source_type_label: source_type_label.to_string(),
+        source_name,
+    }
+}
+
+async fn resolve_video_source_tag(
+    db: &DatabaseConnection,
+    video: &video::Model,
+) -> Result<Option<VideoSourceTag>> {
+    if video.source_type == Some(1) {
+        if let Some(source_id) = video.source_id {
+            let source_name = video_source::Entity::find_by_id(source_id)
+                .one(db)
+                .await?
+                .map(|source| source.name)
+                .unwrap_or_else(|| format!("已删除番剧源 #{}", source_id));
+            return Ok(Some(build_video_source_tag(source_id, "bangumi", "番剧", source_name)));
+        }
+    }
+
+    if let Some(source_id) = video.collection_id {
+        let source_name = collection::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|source| source.name)
+            .unwrap_or_else(|| format!("已删除合集源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(
+            source_id,
+            "collection",
+            "合集 / 列表",
+            source_name,
+        )));
+    }
+
+    if let Some(source_id) = video.favorite_id {
+        let source_name = favorite::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|source| source.name)
+            .unwrap_or_else(|| format!("已删除收藏夹源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(source_id, "favorite", "收藏夹", source_name)));
+    }
+
+    if let Some(source_id) = video.submission_id {
+        let source_name = submission::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|source| source.upper_name)
+            .unwrap_or_else(|| format!("已删除投稿源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(source_id, "submission", "UP主投稿", source_name)));
+    }
+
+    if let Some(source_id) = video.watch_later_id {
+        let source_name = watch_later::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|_| "稍后再看".to_string())
+            .unwrap_or_else(|| format!("已删除稍后再看源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(
+            source_id,
+            "watch_later",
+            "稍后再看",
+            source_name,
+        )));
+    }
+
+    Ok(None)
+}
+
 #[utoipa::path(
     get,
     path = "/api/videos/{id}",
@@ -2502,75 +2581,28 @@ pub async fn get_video(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<VideoResponse>, ApiError> {
-    let raw_video = video::Entity::find_by_id(id)
-        .select_only()
-        .columns([
-            video::Column::Id,
-            video::Column::Bvid,
-            video::Column::Name,
-            video::Column::UpperName,
-            video::Column::Path,
-            video::Column::Category,
-            video::Column::DownloadStatus,
-            video::Column::Cover,
-            video::Column::Valid,
-            video::Column::IsChargeVideo,
-            video::Column::SeasonId,
-            video::Column::SourceType,
-        ])
-        .into_tuple::<(
-            i32,
-            String,
-            String,
-            String,
-            String,
-            i32,
-            u32,
-            String,
-            bool,
-            bool,
-            Option<String>,
-            Option<i32>,
-        )>()
-        .one(db.as_ref())
-        .await?;
-
-    let Some((
-        _id,
-        bvid,
-        name,
-        upper_name,
-        path,
-        category,
-        download_status,
-        cover,
-        valid,
-        is_charge_video,
-        season_id,
-        source_type,
-    )) = raw_video
-    else {
+    let Some(raw_video) = video::Entity::find_by_id(id).one(db.as_ref()).await? else {
         return Err(InnerApiError::NotFound(id).into());
     };
 
     // 创建VideoInfo并填充bangumi_title
     let mut video_info = VideoInfo::from((
-        _id,
-        bvid,
-        name,
-        upper_name,
-        path,
-        category,
-        download_status,
-        cover,
-        valid,
-        is_charge_video,
+        raw_video.id,
+        raw_video.bvid.clone(),
+        raw_video.name.clone(),
+        raw_video.upper_name.clone(),
+        raw_video.path.clone(),
+        raw_video.category,
+        raw_video.download_status,
+        raw_video.cover.clone(),
+        raw_video.valid,
+        raw_video.is_charge_video,
     ));
 
     // 为番剧类型的视频填充真实标题
-    if source_type == Some(1) && season_id.is_some() {
+    if raw_video.source_type == Some(1) && raw_video.season_id.is_some() {
         // 番剧类型且有season_id，尝试获取真实标题
-        if let Some(ref season_id_str) = season_id {
+        if let Some(ref season_id_str) = raw_video.season_id {
             // 先从缓存获取
             if let Some(title) = get_cached_season_title(season_id_str).await {
                 video_info.bangumi_title = Some(title);
@@ -2582,6 +2614,7 @@ pub async fn get_video(
             }
         }
     }
+    let source = resolve_video_source_tag(db.as_ref(), &raw_video).await?;
     let pages = page::Entity::find()
         .filter(page::Column::VideoId.eq(id))
         .order_by_asc(page::Column::Pid)
@@ -2616,6 +2649,7 @@ pub async fn get_video(
     Ok(ApiResponse::ok(VideoResponse {
         video: video_info,
         pages,
+        source,
     }))
 }
 

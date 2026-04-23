@@ -130,10 +130,19 @@ export interface PageInfo {
 	danmaku_last_write_count: number;
 }
 
+// 视频所属来源标签
+export interface VideoSourceTag {
+	source_id: number;
+	source_type: string;
+	source_type_label: string;
+	source_name: string;
+}
+
 // 单个视频响应类型
 export interface VideoResponse {
 	video: VideoInfo;
 	pages: PageInfo[];
+	source?: VideoSourceTag | null;
 }
 
 // 重置视频响应类型
