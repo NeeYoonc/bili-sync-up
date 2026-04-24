@@ -362,7 +362,7 @@
 	let aiRenameBaseUrl = 'https://api.deepseek.com/v1';
 	let aiRenameApiKey = '';
 	let aiRenameDeepseekWebToken = '';
-	let aiRenameModel = 'deepseek-chat';
+	let aiRenameModel = 'deepseek-v4-flash';
 	let aiRenameTimeoutSeconds = 30;
 	let aiRenameVideoPromptHint = '';
 	let aiRenameAudioPromptHint = '';
@@ -695,7 +695,7 @@
 		aiRenameBaseUrl = config.ai_rename?.base_url || 'https://api.deepseek.com/v1';
 		aiRenameApiKey = config.ai_rename?.api_key || '';
 		aiRenameDeepseekWebToken = config.ai_rename?.deepseek_web_token || '';
-		aiRenameModel = config.ai_rename?.model || 'deepseek-chat';
+		aiRenameModel = config.ai_rename?.model || 'deepseek-v4-flash';
 		aiRenameTimeoutSeconds = config.ai_rename?.timeout_seconds ?? 30;
 		aiRenameVideoPromptHint = config.ai_rename?.video_prompt_hint || '';
 		aiRenameAudioPromptHint = config.ai_rename?.audio_prompt_hint || '';
@@ -4249,10 +4249,10 @@
 							id="ai-rename-model"
 							type="text"
 							bind:value={aiRenameModel}
-							placeholder="deepseek-chat"
+							placeholder="deepseek-v4-flash"
 						/>
 						<p class="text-muted-foreground text-xs">
-							DeepSeek推荐: deepseek-chat | OpenAI推荐: gpt-4o-mini 或 gpt-3.5-turbo
+							DeepSeek推荐: deepseek-v4-flash；高质量可用 deepseek-v4-pro。旧的 deepseek-chat / deepseek-reasoner 将于 2026-07-24 停用。
 						</p>
 					</div>
 				{/if}
