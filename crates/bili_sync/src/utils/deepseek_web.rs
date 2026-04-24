@@ -116,6 +116,79 @@ pub fn reset_token_expired_flag() {
     TOKEN_EXPIRED_NOTIFIED.store(false, Ordering::SeqCst);
 }
 
+fn extract_response_snapshot_content(data: &serde_json::Value) -> Option<String> {
+    let fragments = data
+        .get("v")
+        .and_then(|v| v.get("response"))
+        .and_then(|r| r.get("fragments"))
+        .and_then(|f| f.as_array())?;
+
+    let contents = collect_fragment_content(&serde_json::Value::Array(fragments.clone()));
+
+    (!contents.is_empty()).then_some(contents)
+}
+
+fn collect_fragment_content(value: &serde_json::Value) -> String {
+    fn collect(value: &serde_json::Value, output: &mut String) {
+        match value {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect(item, output);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                if let Some(content) = map.get("content").and_then(|content| content.as_str()) {
+                    output.push_str(content);
+                }
+                if let Some(nested) = map.get("v") {
+                    collect(nested, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut contents = String::new();
+    collect(value, &mut contents);
+    contents
+}
+
+fn preload_response_snapshot(body: &str) -> String {
+    for line in body.lines() {
+        if !line.starts_with("data:") {
+            continue;
+        }
+
+        let data_str = line[5..].trim();
+        if !data_str.contains("\"response\"") || !data_str.contains("\"fragments\"") {
+            continue;
+        }
+
+        match serde_json::from_str::<serde_json::Value>(data_str) {
+            Ok(data) => {
+                if let Some(contents) = extract_response_snapshot_content(&data) {
+                    return contents;
+                }
+            }
+            Err(e) => debug!("SSE response fragments 快照预读解析失败: {}", e),
+        }
+    }
+
+    String::new()
+}
+
+fn log_raw_sse_stream(body: &str) {
+    debug!(
+        "DeepSeek SSE 原始流开始: bytes={}, lines={}",
+        body.len(),
+        body.lines().count()
+    );
+    for (index, line) in body.lines().enumerate() {
+        debug!("DeepSeek SSE 原始流[{}]: {}", index + 1, line);
+    }
+    debug!("DeepSeek SSE 原始流结束");
+}
+
 /// DeepSeek Web API 客户端
 pub struct DeepSeekWebClient {
     client: Client,
@@ -335,6 +408,7 @@ impl DeepSeekWebClient {
             }
         };
 
+        log_raw_sse_stream(&body);
         let (response_text, message_id) = self.parse_sse_response(&body)?;
 
         Ok((response_text, message_id))
@@ -363,7 +437,14 @@ impl DeepSeekWebClient {
             }
         }
 
-        let mut full_response = String::new();
+        let mut full_response = preload_response_snapshot(body);
+        if !full_response.is_empty() {
+            debug!(
+                "SSE response fragments 快照预读: content='{}', 初始长度={}",
+                full_response,
+                full_response.len()
+            );
+        }
         let mut message_id: Option<String> = None;
         let mut chunk_count = 0;
         let mut current_event_type: Option<String> = None;
@@ -438,6 +519,25 @@ impl DeepSeekWebClient {
 
                 // 提取文本内容 - 多种格式处理
 
+                // 格式0: response 快照。DeepSeek Web 会先在这里给出已有 fragments，
+                // 后续再通过 APPEND/直接输出继续增量推送。
+                if let Some(contents) = extract_response_snapshot_content(&data) {
+                    if !contents.is_empty() {
+                        debug!(
+                            "SSE response fragments 快照: content='{}', 累计长度={}",
+                            contents,
+                            full_response.len()
+                        );
+                        if full_response.is_empty() || contents.starts_with(&full_response) {
+                            full_response = contents;
+                        } else if full_response.starts_with(&contents) {
+                            debug!("SSE response fragments 快照已包含在当前响应中，忽略");
+                        } else {
+                            debug!("SSE response fragments 快照与当前响应不连续，保留当前流式响应");
+                        }
+                    }
+                }
+
                 // 格式1: BATCH 操作（包含 fragments 数组）
                 // 例: p="response", o="BATCH", v=[{"o":"APPEND","p":"fragments","v":[{"content":"庄",...}]}]
                 if p_field == Some("response") && o_field == Some("BATCH") {
@@ -445,16 +545,15 @@ impl DeepSeekWebClient {
                         for item in v_array {
                             // 查找 fragments 的 APPEND 操作
                             if item.get("p").and_then(|p| p.as_str()) == Some("fragments") {
-                                if let Some(fragments) = item.get("v").and_then(|v| v.as_array()) {
-                                    for fragment in fragments {
-                                        if let Some(content) = fragment.get("content").and_then(|c| c.as_str()) {
-                                            debug!(
-                                                "SSE BATCH/fragments: content='{}', 累计长度={}",
-                                                content,
-                                                full_response.len()
-                                            );
-                                            full_response.push_str(content);
-                                        }
+                                if let Some(value) = item.get("v") {
+                                    let content = collect_fragment_content(value);
+                                    if !content.is_empty() {
+                                        debug!(
+                                            "SSE BATCH/fragments: content='{}', 累计长度={}",
+                                            content,
+                                            full_response.len()
+                                        );
+                                        full_response.push_str(&content);
                                     }
                                 }
                             }
@@ -519,6 +618,40 @@ impl DeepSeekWebClient {
         );
 
         Ok((full_response, message_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeepSeekWebClient;
+
+    #[test]
+    fn parse_sse_response_keeps_initial_response_fragment_snapshot() {
+        let client = DeepSeekWebClient::new("token", 10).expect("client should build");
+        let body = r#"event: ready
+data: {"request_message_id":9,"response_message_id":10,"model_type":"default"}
+data: {"v":{"response":{"message_id":10,"fragments":[{"id":2,"type":"RESPONSE","content":"[\"","references":[],"stage_id":1}]}}}
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":"Z"}
+data: {"v":"HY2020_2024-06-09\", \"三国bigbig_2024-06-09\"]"}
+"#;
+
+        let (response, message_id) = client.parse_sse_response(body).expect("sse should parse");
+
+        assert_eq!(message_id, Some("10".to_string()));
+        assert_eq!(response, r#"["ZHY2020_2024-06-09", "三国bigbig_2024-06-09"]"#);
+    }
+
+    #[test]
+    fn parse_sse_response_keeps_nested_batch_fragment_prefix() {
+        let client = DeepSeekWebClient::new("token", 10).expect("client should build");
+        let body = r#"data: {"p":"response","o":"BATCH","v":[{"p":"fragments","o":"BATCH","v":[{"o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"[\"","references":[],"stage_id":2}]},{"p":"-2/status","o":"SET","v":"FINISHED"}]},{"p":"has_pending_fragment","o":"SET","v":false}]}
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":"Z"}
+data: {"v":"HY2020 2024-06-09\", \"三国bigbig 2024-06-09\"]"}
+"#;
+
+        let (response, _) = client.parse_sse_response(body).expect("sse should parse");
+
+        assert_eq!(response, r#"["ZHY2020 2024-06-09", "三国bigbig 2024-06-09"]"#);
     }
 }
 

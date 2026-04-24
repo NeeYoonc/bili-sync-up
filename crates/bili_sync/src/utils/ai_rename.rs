@@ -357,7 +357,7 @@ pub struct AiRenameConfig {
     /// 从浏览器开发者工具中获取
     #[serde(default)]
     pub deepseek_web_token: Option<String>,
-    /// 模型名，例如 gpt-4o-mini / deepseek-chat
+    /// 模型名，例如 deepseek-v4-flash / gpt-4o-mini
     pub model: String,
     /// 请求超时（秒）
     pub timeout_seconds: u64,
@@ -387,7 +387,7 @@ impl Default for AiRenameConfig {
             base_url: "https://api.deepseek.com/v1".to_string(),
             api_key: None,
             deepseek_web_token: None,
-            model: "deepseek-chat".to_string(),
+            model: "deepseek-v4-flash".to_string(),
             timeout_seconds: 20,
             // 视频命名规则
             video_prompt_hint: "【命名结构】精简标题-作者-时间(YYYYMMDD)；\
@@ -927,6 +927,7 @@ async fn ai_generate_filenames_batch_openai(
 
 /// 解析批量响应的 JSON 数组
 fn parse_batch_response(response: &str, expected_count: usize) -> Result<Vec<String>> {
+    let response = response.trim();
     // 尝试提取 JSON 数组
     let json_str = if let Some(start) = response.find('[') {
         if let Some(end) = response.rfind(']') {
@@ -961,6 +962,27 @@ fn parse_batch_response(response: &str, expected_count: usize) -> Result<Vec<Str
         .collect();
 
     Ok(cleaned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_batch_response;
+
+    #[test]
+    fn parse_batch_response_accepts_json_array() {
+        let names = parse_batch_response(r#"["ZHY20202024-06-09", "三国bigbig2024-06-09"]"#, 2)
+            .expect("valid json array should parse");
+
+        assert_eq!(names, vec!["ZHY20202024-06-09", "三国bigbig2024-06-09"]);
+    }
+
+    #[test]
+    fn parse_batch_response_rejects_missing_array_prefix() {
+        let err = parse_batch_response(r#"ZHY20202024-06-09", "三国bigbig2024-06-09"]"#, 2)
+            .expect_err("truncated json array should stay invalid");
+
+        assert!(err.to_string().contains("解析 JSON 数组失败"));
+    }
 }
 
 /// 批量重命名视频源下的历史文件
