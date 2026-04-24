@@ -172,6 +172,19 @@ pub struct DeleteTaskQueue {
     is_processing: AtomicBool,
 }
 
+pub struct DeleteTaskProcessingGuard<'a> {
+    queue: &'a DeleteTaskQueue,
+}
+
+impl Drop for DeleteTaskProcessingGuard<'_> {
+    fn drop(&mut self) {
+        self.queue.set_processing(false);
+        if let Ok(mut current_task) = self.queue.current_task.try_lock() {
+            *current_task = None;
+        }
+    }
+}
+
 impl DeleteTaskQueue {
     pub fn new() -> Self {
         Self {
@@ -381,6 +394,11 @@ impl DeleteTaskQueue {
         notify_queue_status_changed();
     }
 
+    pub fn processing_guard(&self) -> DeleteTaskProcessingGuard<'_> {
+        self.set_processing(true);
+        DeleteTaskProcessingGuard { queue: self }
+    }
+
     /// 设置当前正在执行的删除任务
     pub async fn set_current_task(&self, task: Option<DeleteVideoSourceTask>) {
         let mut current_task = self.current_task.lock().await;
@@ -401,7 +419,7 @@ impl DeleteTaskQueue {
             return Ok(0);
         }
 
-        self.set_processing(true);
+        let _processing_guard = self.processing_guard();
         let mut processed_count = 0u32;
 
         info!("开始处理暂存的删除任务，当前队列长度: {}", queue_length);
@@ -465,7 +483,6 @@ impl DeleteTaskQueue {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
 
-        self.set_processing(false);
         self.set_current_task(None).await;
 
         info!("删除任务队列处理完成，共处理 {} 个任务", processed_count);
@@ -480,6 +497,16 @@ pub struct VideoDeleteTaskQueue {
     queue: Mutex<VecDeque<DeleteVideoTask>>,
     /// 是否正在处理视频删除任务
     is_processing: AtomicBool,
+}
+
+pub struct VideoDeleteTaskProcessingGuard<'a> {
+    queue: &'a VideoDeleteTaskQueue,
+}
+
+impl Drop for VideoDeleteTaskProcessingGuard<'_> {
+    fn drop(&mut self) {
+        self.queue.set_processing(false);
+    }
 }
 
 impl VideoDeleteTaskQueue {
@@ -666,6 +693,11 @@ impl VideoDeleteTaskQueue {
         notify_queue_status_changed();
     }
 
+    pub fn processing_guard(&self) -> VideoDeleteTaskProcessingGuard<'_> {
+        self.set_processing(true);
+        VideoDeleteTaskProcessingGuard { queue: self }
+    }
+
     /// 处理队列中的所有视频删除任务
     pub async fn process_all_tasks(&self, db: Arc<DatabaseConnection>) -> Result<u32, anyhow::Error> {
         if self.is_processing() {
@@ -678,7 +710,7 @@ impl VideoDeleteTaskQueue {
             return Ok(0);
         }
 
-        self.set_processing(true);
+        let _processing_guard = self.processing_guard();
         let mut processed_count = 0u32;
 
         info!("开始处理暂存的视频删除任务，当前队列长度: {}", queue_length);
@@ -739,8 +771,6 @@ impl VideoDeleteTaskQueue {
             // 每个任务之间稍作间隔，避免过于频繁的数据库操作
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
-
-        self.set_processing(false);
 
         info!("视频删除任务队列处理完成，共处理 {} 个任务", processed_count);
 
@@ -2712,6 +2742,39 @@ mod tests {
         controller.trigger_scan_now();
 
         assert!(controller.take_just_resumed(), "立即刷新后应保留待消费的刷新标记");
+    }
+
+    #[tokio::test]
+    async fn delete_source_processing_guard_resets_state_on_drop() {
+        let queue = DeleteTaskQueue::new();
+        queue
+            .set_current_task(Some(DeleteVideoSourceTask {
+                source_type: "submission".to_string(),
+                source_id: 1,
+                delete_local_files: true,
+                task_id: "test".to_string(),
+            }))
+            .await;
+
+        {
+            let _guard = queue.processing_guard();
+            assert!(queue.is_processing(), "保护存在时应显示处理中");
+        }
+
+        assert!(!queue.is_processing(), "保护释放后应清除处理中状态");
+        assert!(queue.current_task.lock().await.is_none(), "保护释放后应清除当前任务");
+    }
+
+    #[test]
+    fn video_delete_processing_guard_resets_state_on_drop() {
+        let queue = VideoDeleteTaskQueue::new();
+
+        {
+            let _guard = queue.processing_guard();
+            assert!(queue.is_processing(), "保护存在时应显示处理中");
+        }
+
+        assert!(!queue.is_processing(), "保护释放后应清除处理中状态");
     }
 }
 

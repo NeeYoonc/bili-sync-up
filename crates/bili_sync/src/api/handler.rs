@@ -4926,14 +4926,14 @@ pub async fn delete_video_source(
         delete_local_files,
         task_id: "direct-delete".to_string(),
     };
-    crate::task::DELETE_TASK_QUEUE.set_processing(true);
+    let delete_processing_guard = crate::task::DELETE_TASK_QUEUE.processing_guard();
     crate::task::DELETE_TASK_QUEUE
         .set_current_task(Some(direct_delete_task))
         .await;
     let direct_delete_result =
         delete_video_source_internal(db.clone(), source_type.clone(), id, delete_local_files).await;
     crate::task::DELETE_TASK_QUEUE.set_current_task(None).await;
-    crate::task::DELETE_TASK_QUEUE.set_processing(false);
+    drop(delete_processing_guard);
 
     // 直删期间若有新请求入队，立即后台处理，避免堆积到下一轮扫描。
     if !crate::task::is_scanning()
@@ -5073,9 +5073,9 @@ pub async fn delete_video(
     }
 
     // 没有扫描且没有在执行/排队：直接执行删除，并标记“删除处理中”状态。
-    crate::task::VIDEO_DELETE_TASK_QUEUE.set_processing(true);
+    let video_delete_processing_guard = crate::task::VIDEO_DELETE_TASK_QUEUE.processing_guard();
     let direct_delete_result = delete_video_internal(db.clone(), id).await;
-    crate::task::VIDEO_DELETE_TASK_QUEUE.set_processing(false);
+    drop(video_delete_processing_guard);
 
     // 直删期间若有新请求入队，立即后台处理，避免等待下一轮扫描。
     if !crate::task::is_scanning()
