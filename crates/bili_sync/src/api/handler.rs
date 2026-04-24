@@ -4852,9 +4852,10 @@ pub async fn delete_video_source(
     let delete_queue_busy = crate::task::DELETE_TASK_QUEUE.is_processing();
     let has_pending_delete_tasks = crate::task::DELETE_TASK_QUEUE.queue_length().await > 0;
     let scanning = crate::task::is_scanning();
+    let task_running = crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running();
 
     // 扫描中、删除处理中，或已有待删任务时：统一入队，避免并发删除触发 database is locked。
-    if scanning || delete_queue_busy || has_pending_delete_tasks {
+    if scanning || task_running || delete_queue_busy || has_pending_delete_tasks {
         if crate::task::DELETE_TASK_QUEUE
             .has_pending_delete_task(source_type.as_str(), id, &db)
             .await?
@@ -4879,6 +4880,15 @@ pub async fn delete_video_source(
 
         if scanning {
             info!("检测到正在扫描，删除任务已加入队列等待处理: {} ID={}", source_type, id);
+            if !crate::task::DELETE_TASK_QUEUE.is_processing() {
+                schedule_delete_tasks_after_active_work_finishes(db.clone());
+            }
+        } else if task_running {
+            info!("检测到后台任务仍在运行，删除任务已加入队列等待处理: {} ID={}", source_type, id);
+
+            if !crate::task::DELETE_TASK_QUEUE.is_processing() {
+                schedule_delete_tasks_after_active_work_finishes(db.clone());
+            }
         } else {
             info!(
                 "检测到删除任务正在执行/排队，删除任务已加入队列等待处理: {} ID={}",
@@ -4901,6 +4911,8 @@ pub async fn delete_video_source(
             source_type,
             message: if scanning {
                 "正在扫描中，删除任务已加入队列，将在扫描完成后自动处理".to_string()
+            } else if task_running {
+                "后台任务仍在结束中，删除任务已加入队列，将在当前任务结束后自动处理".to_string()
             } else {
                 "删除任务已加入队列，正在按顺序处理".to_string()
             },
@@ -4925,6 +4937,7 @@ pub async fn delete_video_source(
 
     // 直删期间若有新请求入队，立即后台处理，避免堆积到下一轮扫描。
     if !crate::task::is_scanning()
+        && !crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running()
         && crate::task::DELETE_TASK_QUEUE.queue_length().await > 0
         && !crate::task::DELETE_TASK_QUEUE.is_processing()
     {
@@ -5018,7 +5031,18 @@ pub async fn delete_video(
         crate::task::enqueue_video_delete_task(delete_task, &db).await?;
 
         if scanning || task_running {
-            info!("检测到扫描任务正在运行，视频删除任务已加入队列等待处理: 视频ID={}", id);
+            if scanning {
+                info!("检测到扫描任务正在运行，视频删除任务已加入队列等待处理: 视频ID={}", id);
+                if !crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing() {
+                    schedule_video_delete_tasks_after_active_work_finishes(db.clone());
+                }
+            } else {
+                info!("检测到后台任务仍在运行，视频删除任务已加入队列等待处理: 视频ID={}", id);
+
+                if !crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing() {
+                    schedule_video_delete_tasks_after_active_work_finishes(db.clone());
+                }
+            }
         } else {
             info!(
                 "检测到视频删除任务正在执行/排队，视频删除任务已加入队列等待处理: 视频ID={}",
@@ -5038,8 +5062,10 @@ pub async fn delete_video(
         return Ok(ApiResponse::ok(crate::api::response::DeleteVideoResponse {
             success: true,
             video_id: id,
-            message: if scanning || task_running {
+            message: if scanning {
                 "正在扫描中，视频删除任务已加入队列，将在扫描完成后自动处理".to_string()
+            } else if task_running {
+                "后台任务仍在结束中，视频删除任务已加入队列，将在当前任务结束后自动处理".to_string()
             } else {
                 "视频删除任务已加入队列，正在按顺序处理".to_string()
             },
@@ -6089,6 +6115,30 @@ pub async fn delete_video_source_internal(
     }
 
     Ok(result)
+}
+
+fn schedule_delete_tasks_after_active_work_finishes(db: Arc<DatabaseConnection>) {
+    tokio::spawn(async move {
+        while crate::task::is_scanning() || crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running() {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        if let Err(err) = crate::task::process_delete_tasks(db).await {
+            error!("后台处理删除任务队列失败: {:#}", err);
+        }
+    });
+}
+
+fn schedule_video_delete_tasks_after_active_work_finishes(db: Arc<DatabaseConnection>) {
+    tokio::spawn(async move {
+        while crate::task::is_scanning() || crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running() {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        if let Err(err) = crate::task::process_video_delete_tasks(db).await {
+            error!("后台处理视频删除任务队列失败: {:#}", err);
+        }
+    });
 }
 
 /// 更新视频源扫描已删除视频设置
