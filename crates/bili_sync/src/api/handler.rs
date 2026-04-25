@@ -583,63 +583,6 @@ fn cleanup_empty_parent_dirs(deleted_path: &str, stop_at: &str) {
     }
 }
 
-/// 递归清理基础目录下已空的子目录。
-///
-/// 用于处理“先批量删除视频，再删除视频源”时遗留的上层空目录。
-/// 这类目录已经不再对应任何视频根目录，无法再通过单次视频删除回收。
-fn cleanup_empty_subdirs_under(base_path: &str) {
-    use std::fs;
-    use std::path::PathBuf;
-
-    let base_norm = normalize_file_path(base_path).trim_end_matches('/').to_string();
-    if base_norm.is_empty() || is_dangerous_path_for_deletion(&base_norm) {
-        return;
-    }
-
-    let base = PathBuf::from(&base_norm);
-    if !base.exists() || !base.is_dir() {
-        return;
-    }
-
-    let mut dirs = Vec::new();
-    let mut stack = vec![base.clone()];
-    while let Some(current) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&current) else {
-            continue;
-        };
-
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path.clone());
-                dirs.push(path);
-            }
-        }
-    }
-
-    dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-
-    for dir in dirs {
-        let dir_str = dir.to_string_lossy().to_string();
-        let dir_norm = normalize_file_path(&dir_str).trim_end_matches('/').to_string();
-        if dir_norm == base_norm {
-            continue;
-        }
-
-        match fs::read_dir(&dir) {
-            Ok(mut entries) => {
-                if entries.next().is_none() {
-                    match fs::remove_dir(&dir) {
-                        Ok(_) => info!("清理空子目录: {}", dir_str),
-                        Err(e) => warn!("无法删除空子目录 {}: {}", dir_str, e),
-                    }
-                }
-            }
-            Err(e) => warn!("无法读取子目录 {}: {}", dir_str, e),
-        }
-    }
-}
-
 async fn collect_video_source_base_paths(
     conn: &impl ConnectionTrait,
     video: &video::Model,
@@ -5764,7 +5707,6 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
         }
     }
 
-    cleanup_empty_subdirs_under(&base_path);
     cleanup_empty_dir_if_empty(&base_path, base_dir_label);
 }
 
