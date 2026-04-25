@@ -84,9 +84,14 @@
 	function getOverallStatus(downloadStatus: number[]): {
 		text: string;
 		color: 'default' | 'secondary' | 'destructive' | 'outline';
+		description: string;
 	} {
 		if (video.valid === false) {
-			return { text: '无效', color: 'outline' };
+			return {
+				text: '无效',
+				color: 'outline',
+				description: 'B站已返回视频失效状态，已下载的本地文件和封面会继续保留显示。'
+			};
 		}
 
 		const completed = downloadStatus.filter((status) => status === 7).length;
@@ -94,11 +99,15 @@
 		const failed = downloadStatus.filter((status) => status !== 7 && status !== 0).length;
 
 		if (completed === total) {
-			return { text: '全部完成', color: 'default' };
+			return { text: '全部完成', color: 'default', description: '所有下载任务已完成。' };
 		} else if (failed > 0) {
-			return { text: '部分失败', color: 'destructive' };
+			return {
+				text: '部分失败',
+				color: 'destructive',
+				description: '有下载任务失败，可进入详情页查看或重置。'
+			};
 		} else {
-			return { text: '进行中', color: 'secondary' };
+			return { text: '进行中', color: 'secondary', description: '仍有下载任务未完成。' };
 		}
 	}
 
@@ -331,9 +340,20 @@
 
 			<!-- 状态徽章覆盖在封面上 -->
 			<div class="absolute top-2 right-2 z-20">
-				<Badge variant={overallStatus.color} class="shrink-0 text-xs shadow-md">
-					{overallStatus.text}
-				</Badge>
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						<Badge
+							variant={overallStatus.color}
+							class="cursor-help text-xs shadow-md"
+							title={overallStatus.description}
+						>
+							{overallStatus.text}
+						</Badge>
+					</Tooltip.Trigger>
+					<Tooltip.Content>
+						<p>{overallStatus.description}</p>
+					</Tooltip.Content>
+				</Tooltip.Root>
 			</div>
 		</div>
 	{/if}
@@ -378,9 +398,20 @@
 				{/if}
 			</CardTitle>
 			{#if coverFailed || mode !== 'default'}
-				<Badge variant={overallStatus.color} class="shrink-0 text-xs">
-					{overallStatus.text}
-				</Badge>
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						<Badge
+							variant={overallStatus.color}
+							class="cursor-help text-xs"
+							title={overallStatus.description}
+						>
+							{overallStatus.text}
+						</Badge>
+					</Tooltip.Trigger>
+					<Tooltip.Content>
+						<p>{overallStatus.description}</p>
+					</Tooltip.Content>
+				</Tooltip.Root>
 			{/if}
 		</div>
 		{#if displaySubtitle}
