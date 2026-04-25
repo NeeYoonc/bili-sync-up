@@ -1419,7 +1419,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -12790,6 +12790,216 @@ async fn store_proxy_image_cache(
     );
 
     Ok(())
+}
+
+fn is_remote_url(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+fn image_candidate_key(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn push_unique_image_candidate(candidates: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: PathBuf) {
+    let key = image_candidate_key(&path);
+    if !key.trim().is_empty() && seen.insert(key) {
+        candidates.push(path);
+    }
+}
+
+fn push_sidecar_cover_candidates(
+    candidates: &mut Vec<PathBuf>,
+    seen: &mut HashSet<String>,
+    media_path: &std::path::Path,
+) {
+    let Some(parent) = media_path.parent() else {
+        return;
+    };
+    let Some(stem) = media_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+    else {
+        return;
+    };
+
+    for suffix in ["thumb", "poster", "fanart"] {
+        for ext in ["jpg", "jpeg", "png", "webp"] {
+            push_unique_image_candidate(candidates, seen, parent.join(format!("{stem}-{suffix}.{ext}")));
+        }
+    }
+}
+
+fn push_directory_cover_candidates(
+    candidates: &mut Vec<PathBuf>,
+    seen: &mut HashSet<String>,
+    dir_path: &std::path::Path,
+    season_number: Option<i32>,
+) {
+    for file_name in ["folder", "poster", "thumb", "fanart"] {
+        for ext in ["jpg", "jpeg", "png", "webp"] {
+            push_unique_image_candidate(candidates, seen, dir_path.join(format!("{file_name}.{ext}")));
+        }
+    }
+
+    if let Some(name) = dir_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+    {
+        for suffix in ["thumb", "poster", "fanart"] {
+            for ext in ["jpg", "jpeg", "png", "webp"] {
+                push_unique_image_candidate(candidates, seen, dir_path.join(format!("{name}-{suffix}.{ext}")));
+            }
+        }
+    }
+
+    if let Some(season_number) = season_number.filter(|number| *number > 0) {
+        for suffix in ["thumb", "poster", "fanart"] {
+            for ext in ["jpg", "jpeg", "png", "webp"] {
+                push_unique_image_candidate(
+                    candidates,
+                    seen,
+                    dir_path.join(format!("Season{season_number:02}-{suffix}.{ext}")),
+                );
+            }
+        }
+    }
+}
+
+fn is_existing_image_file(path: &std::path::Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    if !matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "webp") {
+        return false;
+    }
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
+}
+
+fn find_local_video_cover(video_model: &video::Model, pages: &[page::Model]) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for page_model in pages {
+        if let Some(image_path) = page_model
+            .image
+            .as_deref()
+            .map(str::trim)
+            .filter(|image_path| !image_path.is_empty() && !is_remote_url(image_path))
+        {
+            push_unique_image_candidate(&mut candidates, &mut seen, PathBuf::from(image_path));
+        }
+
+        if let Some(page_path) = page_model
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|page_path| !page_path.is_empty())
+        {
+            push_sidecar_cover_candidates(&mut candidates, &mut seen, std::path::Path::new(page_path));
+        }
+    }
+
+    let video_path_text = video_model.path.trim();
+    if !video_path_text.is_empty() {
+        let video_path = std::path::Path::new(video_path_text);
+        if video_path.extension().is_some() {
+            push_sidecar_cover_candidates(&mut candidates, &mut seen, video_path);
+            if let Some(parent) = video_path.parent() {
+                push_directory_cover_candidates(&mut candidates, &mut seen, parent, video_model.season_number);
+            }
+        } else {
+            push_directory_cover_candidates(&mut candidates, &mut seen, video_path, video_model.season_number);
+        }
+    }
+
+    candidates.into_iter().find(|path| is_existing_image_file(path))
+}
+
+fn local_cover_not_found_response() -> axum::response::Response {
+    axum::response::Response::builder()
+        .status(404)
+        .header("Cache-Control", "no-store")
+        .body(axum::body::Body::empty())
+        .unwrap()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/videos/{video_id}/cover",
+    params(
+        ("video_id" = i32, Path, description = "视频ID")
+    ),
+    responses(
+        (status = 200, description = "本地封面图片", content_type = "image/*"),
+        (status = 404, description = "没有可用的本地封面")
+    )
+)]
+pub async fn get_video_local_cover(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path(video_id): Path<i32>,
+) -> Result<axum::response::Response, ApiError> {
+    let Some(video_model) = video::Entity::find_by_id(video_id).one(db.as_ref()).await? else {
+        debug!("本地封面兜底未命中：视频不存在 video_id={}", video_id);
+        return Ok(local_cover_not_found_response());
+    };
+
+    let pages = page::Entity::find()
+        .filter(page::Column::VideoId.eq(video_id))
+        .order_by_asc(page::Column::Pid)
+        .all(db.as_ref())
+        .await?;
+
+    let Some(cover_path) = find_local_video_cover(&video_model, &pages) else {
+        debug!("本地封面兜底未命中：没有找到本地封面 video_id={}", video_id);
+        return Ok(local_cover_not_found_response());
+    };
+
+    let image_data = match tokio::fs::read(&cover_path).await {
+        Ok(image_data) if !image_data.is_empty() => image_data,
+        Ok(_) => {
+            debug!(
+                "本地封面兜底未命中：封面文件为空 video_id={}, path={}",
+                video_id,
+                cover_path.display()
+            );
+            return Ok(local_cover_not_found_response());
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            debug!(
+                "本地封面兜底未命中：封面文件不存在 video_id={}, path={}",
+                video_id,
+                cover_path.display()
+            );
+            return Ok(local_cover_not_found_response());
+        }
+        Err(err) => return Err(anyhow!("读取本地封面失败: {} ({})", cover_path.display(), err).into()),
+    };
+
+    let content_type = mime_guess::from_path(&cover_path)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
+    debug!(
+        "本地封面兜底命中: video_id={}, path={}, content_type={}, bytes={}",
+        video_id,
+        cover_path.display(),
+        content_type,
+        image_data.len()
+    );
+
+    Ok(axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", content_type)
+        .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+        .header("X-Image-Cache", "LOCAL")
+        .body(axum::body::Body::from(image_data))
+        .unwrap())
 }
 
 #[utoipa::path(

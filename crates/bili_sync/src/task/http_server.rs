@@ -54,6 +54,7 @@ use crate::api::handler::{
     get_user_followings,
     get_video,
     get_video_bvid,
+    get_video_local_cover,
     get_video_play_info,
     get_video_source_keyword_filters,
     get_video_sources,
@@ -286,6 +287,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         // 视频流API
         .route("/api/videos/stream/{video_id}", get(stream_video))
         // 新增在线播放API
+        .route("/api/videos/{video_id}/cover", get(get_video_local_cover))
         .route("/api/videos/{video_id}/play-info", get(get_video_play_info))
         .route("/api/videos/{video_id}/bvid", get(get_video_bvid))
         .route("/api/videos/proxy-stream", get(proxy_video_stream))

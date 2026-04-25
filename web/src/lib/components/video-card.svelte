@@ -34,6 +34,13 @@
 	export let selectionMode: boolean = false; // 是否为选择模式
 	export let selected: boolean = false; // 是否被选中
 	export let onSelectionChange: ((videoId: number, selected: boolean) => void) | null = null; // 选择状态变化回调
+	let coverFailed = false;
+	let lastVideoId: number | null = null;
+
+	$: if (lastVideoId !== video.id) {
+		lastVideoId = video.id;
+		coverFailed = false;
+	}
 
 	function shouldIgnoreSelectionToggle(target: EventTarget | null): boolean {
 		if (!target || !(target instanceof HTMLElement)) return false;
@@ -247,6 +254,25 @@
 		// 使用后端代理端点
 		return `/api/proxy/image?url=${encodeURIComponent(originalUrl)}`;
 	}
+
+	function getLocalCoverUrl(videoId: number): string {
+		return `/api/videos/${videoId}/cover`;
+	}
+
+	function getInitialCoverUrl(video: VideoInfo): string {
+		return video.cover ? getProxiedImageUrl(video.cover) : getLocalCoverUrl(video.id);
+	}
+
+	function handleCoverImageError(event: Event) {
+		const target = event.currentTarget as HTMLImageElement;
+		if (video.cover && target.dataset.coverFallback !== 'local') {
+			target.dataset.coverFallback = 'local';
+			target.src = getLocalCoverUrl(video.id);
+			return;
+		}
+
+		coverFailed = true;
+	}
 </script>
 
 <Card
@@ -266,22 +292,15 @@
 	{/if}
 
 	<!-- 封面图片 -->
-	{#if video.cover && mode === 'default'}
+	{#if mode === 'default' && !coverFailed}
 		<div class="relative z-10 overflow-hidden rounded-t-lg">
 			<!-- 前景清晰图片 -->
 			<img
-				src={getProxiedImageUrl(video.cover)}
+				src={getInitialCoverUrl(video)}
 				alt={displayTitle}
 				class="aspect-[4/3] w-full object-cover transition-transform duration-200 group-hover:scale-105"
 				loading="lazy"
-				on:error={(e) => {
-					// 封面加载失败时隐藏整个封面容器
-					const target = e.currentTarget as HTMLImageElement;
-					const container = target.closest('.relative') as HTMLElement;
-					if (container) {
-						container.style.display = 'none';
-					}
-				}}
+				on:error={handleCoverImageError}
 			/>
 			<!-- 选择模式复选框覆盖在封面左上角 -->
 			{#if selectionMode}
@@ -319,7 +338,7 @@
 	<CardHeader class="{mode === 'default' ? 'flex-shrink-0 pb-3' : 'pb-3'} relative z-10">
 		<div class="flex min-w-0 items-start justify-between gap-2">
 			<!-- 选择模式复选框（无封面时显示） -->
-			{#if selectionMode && (!video.cover || mode !== 'default')}
+			{#if selectionMode && (coverFailed || mode !== 'default')}
 				<input
 					type="checkbox"
 					checked={selected}
@@ -328,7 +347,7 @@
 					class="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
 				/>
 			{/if}
-			{#if (!video.cover || mode !== 'default') && video.is_charge_video}
+			{#if (coverFailed || mode !== 'default') && video.is_charge_video}
 				<Badge
 					class="mt-0.5 shrink-0 bg-amber-500 text-xs text-white hover:bg-amber-500"
 					title="充电专属视频，播放前需先为 UP 主充电"
@@ -355,7 +374,7 @@
 					<div class="text-primary line-clamp-2 leading-tight font-medium">{displayTitle}</div>
 				{/if}
 			</CardTitle>
-			{#if !video.cover || mode !== 'default'}
+			{#if coverFailed || mode !== 'default'}
 				<Badge variant={overallStatus.color} class="shrink-0 text-xs">
 					{overallStatus.text}
 				</Badge>
