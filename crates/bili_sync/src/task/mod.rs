@@ -27,6 +27,7 @@ const TASK_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(8);
 pub struct DeleteVideoSourceTask {
     pub source_type: String,
     pub source_id: i32,
+    #[serde(default)]
     pub delete_local_files: bool,
     pub task_id: String, // 唯一任务ID，用于追踪
 }
@@ -2902,6 +2903,10 @@ pub async fn recover_pending_tasks(connection: &DatabaseConnection) -> Result<()
             TaskType::DeleteVideoSource => {
                 match serde_json::from_str::<DeleteVideoSourceTask>(task_data) {
                     Ok(task) => {
+                        debug!(
+                            "恢复删除视频源任务: {} ID={} (是否删除本地文件: {})",
+                            task.source_type, task.source_id, task.delete_local_files
+                        );
                         // 直接添加到内存队列，不再写入数据库
                         let mut queue = DELETE_TASK_QUEUE.queue.lock().await;
                         queue.push_back(task);

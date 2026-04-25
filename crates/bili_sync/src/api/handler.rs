@@ -5368,6 +5368,13 @@ struct LocalSourceCleanupPlan {
     pages_by_video_id: HashMap<i32, Vec<page::Model>>,
 }
 
+#[derive(Debug, Clone)]
+struct OrphanVideoCleanupPlan {
+    log_name: String,
+    orphaned_videos: Vec<video::Model>,
+    pages_by_video_id: HashMap<i32, Vec<page::Model>>,
+}
+
 async fn build_local_source_cleanup_plan(
     conn: &impl ConnectionTrait,
     log_name: String,
@@ -5395,6 +5402,32 @@ async fn build_local_source_cleanup_plan(
         base_path,
         base_dir_label,
         flat_folder,
+        orphaned_videos: orphaned_videos.to_vec(),
+        pages_by_video_id,
+    })
+}
+
+async fn build_orphan_video_cleanup_plan(
+    conn: &impl ConnectionTrait,
+    log_name: String,
+    orphaned_videos: &[video::Model],
+) -> Result<OrphanVideoCleanupPlan, ApiError> {
+    let video_ids: Vec<i32> = orphaned_videos.iter().map(|video| video.id).collect();
+    let mut pages_by_video_id: HashMap<i32, Vec<page::Model>> = HashMap::new();
+
+    if !video_ids.is_empty() {
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.is_in(video_ids))
+            .all(conn)
+            .await?;
+
+        for page in pages {
+            pages_by_video_id.entry(page.video_id).or_default().push(page);
+        }
+    }
+
+    Ok(OrphanVideoCleanupPlan {
+        log_name,
         orphaned_videos: orphaned_videos.to_vec(),
         pages_by_video_id,
     })
@@ -5735,6 +5768,27 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
     cleanup_empty_dir_if_empty(&base_path, base_dir_label);
 }
 
+async fn execute_orphan_video_cleanup_plan(conn: &impl ConnectionTrait, plan: OrphanVideoCleanupPlan) {
+    if plan.orphaned_videos.is_empty() {
+        info!("{} 没有找到需要删除的本地文件", plan.log_name);
+        return;
+    }
+
+    info!("开始删除{}残留孤儿视频的本地文件", plan.log_name);
+    let mut deleted_files = 0usize;
+
+    for video in &plan.orphaned_videos {
+        let pages = plan.pages_by_video_id.get(&video.id).map(Vec::as_slice).unwrap_or(&[]);
+
+        match delete_video_files_from_video_and_pages(conn, video, pages).await {
+            Ok(count) => deleted_files += count,
+            Err(e) => warn!("删除残留孤儿视频文件失败: video_id={} - {:?}", video.id, e),
+        }
+    }
+
+    info!("{} 残留孤儿视频本地文件删除完成，共删除 {} 个文件", plan.log_name, deleted_files);
+}
+
 async fn delete_orphaned_videos_from_db(
     conn: &impl ConnectionTrait,
     orphaned_videos: &[video::Model],
@@ -5757,6 +5811,201 @@ async fn delete_orphaned_videos_from_db(
 }
 
 /// 内部删除视频源函数（用于队列处理和直接调用）
+fn is_supported_delete_video_source_type(source_type: &str) -> bool {
+    matches!(
+        source_type,
+        "collection" | "favorite" | "submission" | "watch_later" | "bangumi"
+    )
+}
+
+fn delete_video_source_missing_message(source_type: &str) -> String {
+    match source_type {
+        "collection" => "未找到指定的合集".to_string(),
+        "favorite" => "未找到指定的收藏夹".to_string(),
+        "submission" => "未找到指定的UP主投稿".to_string(),
+        "watch_later" => "未找到指定的稍后再看".to_string(),
+        "bangumi" => "未找到指定的番剧".to_string(),
+        _ => format!("不支持的视频源类型: {}", source_type),
+    }
+}
+
+async fn delete_video_source_record_exists(
+    db: &impl ConnectionTrait,
+    source_type: &str,
+    id: i32,
+) -> Result<bool> {
+    match source_type {
+        "collection" => Ok(collection::Entity::find_by_id(id).one(db).await?.is_some()),
+        "favorite" => Ok(favorite::Entity::find_by_id(id).one(db).await?.is_some()),
+        "submission" => Ok(submission::Entity::find_by_id(id).one(db).await?.is_some()),
+        "watch_later" => Ok(watch_later::Entity::find_by_id(id).one(db).await?.is_some()),
+        "bangumi" => Ok(video_source::Entity::find_by_id(id).one(db).await?.is_some()),
+        _ => Err(anyhow!("不支持的视频源类型: {}", source_type)),
+    }
+}
+
+async fn find_videos_by_source_relation(
+    conn: &impl ConnectionTrait,
+    source_type: &str,
+    id: i32,
+) -> Result<Vec<video::Model>> {
+    let query = match source_type {
+        "collection" => video::Entity::find().filter(video::Column::CollectionId.eq(id)),
+        "favorite" => video::Entity::find().filter(video::Column::FavoriteId.eq(id)),
+        "submission" => video::Entity::find().filter(video::Column::SubmissionId.eq(id)),
+        "watch_later" => video::Entity::find().filter(video::Column::WatchLaterId.eq(id)),
+        "bangumi" => video::Entity::find()
+            .filter(video::Column::SourceId.eq(id))
+            .filter(video::Column::SourceType.eq(1)),
+        _ => return Err(anyhow!("不支持的视频源类型: {}", source_type)),
+    };
+
+    Ok(query.all(conn).await?)
+}
+
+async fn clear_video_source_relation(conn: &impl ConnectionTrait, source_type: &str, id: i32) -> Result<()> {
+    match source_type {
+        "collection" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::CollectionId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::CollectionId.eq(id))
+                .exec(conn)
+                .await?;
+        }
+        "favorite" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::FavoriteId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::FavoriteId.eq(id))
+                .exec(conn)
+                .await?;
+        }
+        "submission" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::SubmissionId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::SubmissionId.eq(id))
+                .exec(conn)
+                .await?;
+        }
+        "watch_later" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::WatchLaterId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::WatchLaterId.eq(id))
+                .exec(conn)
+                .await?;
+        }
+        "bangumi" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::SourceId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .col_expr(
+                    video::Column::SourceType,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::SourceId.eq(id))
+                .filter(video::Column::SourceType.eq(1))
+                .exec(conn)
+                .await?;
+        }
+        _ => return Err(anyhow!("不支持的视频源类型: {}", source_type)),
+    }
+
+    Ok(())
+}
+
+async fn find_orphaned_videos_by_ids(conn: &impl ConnectionTrait, video_ids: Vec<i32>) -> Result<Vec<video::Model>> {
+    if video_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(video::Entity::find()
+        .filter(video::Column::Id.is_in(video_ids))
+        .filter(
+            video::Column::CollectionId
+                .is_null()
+                .and(video::Column::FavoriteId.is_null())
+                .and(video::Column::WatchLaterId.is_null())
+                .and(video::Column::SubmissionId.is_null())
+                .and(video::Column::SourceId.is_null()),
+        )
+        .all(conn)
+        .await?)
+}
+
+async fn cleanup_missing_video_source_references(
+    conn: &impl ConnectionTrait,
+    source_type: &str,
+    id: i32,
+    delete_local_files: bool,
+) -> std::result::Result<(
+    crate::api::response::DeleteVideoSourceResponse,
+    Option<OrphanVideoCleanupPlan>,
+), ApiError> {
+    let related_videos = find_videos_by_source_relation(conn, source_type, id).await?;
+    let related_video_count = related_videos.len();
+
+    if related_videos.is_empty() {
+        return Ok((
+            crate::api::response::DeleteVideoSourceResponse {
+                success: true,
+                source_id: id,
+                source_type: source_type.to_string(),
+                message: format!("{}，没有发现残留关联", delete_video_source_missing_message(source_type)),
+            },
+            None,
+        ));
+    }
+
+    clear_video_source_relation(conn, source_type, id).await?;
+
+    let affected_video_ids: Vec<i32> = related_videos.iter().map(|video| video.id).collect();
+    let orphaned_videos = find_orphaned_videos_by_ids(conn, affected_video_ids).await?;
+    let orphaned_video_count = orphaned_videos.len();
+
+    let cleanup_plan = if delete_local_files && !orphaned_videos.is_empty() {
+        Some(
+            build_orphan_video_cleanup_plan(
+                conn,
+                format!("已删除的视频源 {} ID={}", source_type, id),
+                &orphaned_videos,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    delete_orphaned_videos_from_db(conn, &orphaned_videos).await?;
+
+    Ok((
+        crate::api::response::DeleteVideoSourceResponse {
+            success: true,
+            source_id: id,
+            source_type: source_type.to_string(),
+            message: format!(
+                "{}，已清理 {} 个残留关联视频，其中 {} 个孤儿视频和分页已移除",
+                delete_video_source_missing_message(source_type),
+                related_video_count,
+                orphaned_video_count
+            ),
+        },
+        cleanup_plan,
+    ))
+}
+
 pub async fn delete_video_source_internal(
     db: Arc<DatabaseConnection>,
     source_type: String,
@@ -5767,8 +6016,26 @@ pub async fn delete_video_source_internal(
     let mut upper_id_to_clear: Option<i64> = None;
     let mut cleanup_plan: Option<LocalSourceCleanupPlan> = None;
 
+    if !is_supported_delete_video_source_type(source_type.as_str()) {
+        return Err(anyhow!("不支持的视频源类型: {}", source_type).into());
+    }
+
     // 使用主数据库连接
     let txn = crate::database::begin_traced_transaction(&db, "api.handler.delete_video_source").await?;
+
+    if !delete_video_source_record_exists(&txn, source_type.as_str(), id).await? {
+        let (response, orphan_cleanup_plan) =
+            cleanup_missing_video_source_references(&txn, source_type.as_str(), id, delete_local_files).await?;
+        txn.commit().await?;
+        notify_video_sources_changed();
+        notify_videos_changed();
+
+        if let Some(plan) = orphan_cleanup_plan {
+            execute_orphan_video_cleanup_plan(db.as_ref(), plan).await;
+        }
+
+        return Ok(response);
+    }
 
     // 根据不同类型的视频源执行不同的删除操作
     let result = match source_type.as_str() {
