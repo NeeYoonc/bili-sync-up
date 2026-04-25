@@ -80,6 +80,46 @@ fn extract_duration_seconds(video_info: &VideoInfo) -> Option<i32> {
     }
 }
 
+fn video_info_is_valid(video_info: &VideoInfo) -> bool {
+    match video_info {
+        VideoInfo::Favorite { attr, .. } => *attr == 0 || *attr == 4,
+        VideoInfo::WatchLater { state, .. } | VideoInfo::Detail { state, .. } => *state == 0,
+        _ => true,
+    }
+}
+
+fn is_unidentified_invalid_video(video_info: &VideoInfo) -> bool {
+    extract_bvid(video_info).trim().is_empty() && !video_info_is_valid(video_info)
+}
+
+fn model_marks_video_invalid(model: &video::ActiveModel) -> bool {
+    matches!(model.valid, sea_orm::ActiveValue::Set(false))
+}
+
+fn metadata_updates_for_list_item(
+    existing: &video::Model,
+    model: &video::ActiveModel,
+    new_name: sea_orm::ActiveValue<String>,
+) -> (
+    sea_orm::ActiveValue<String>,
+    sea_orm::ActiveValue<String>,
+    sea_orm::ActiveValue<String>,
+) {
+    if model_marks_video_invalid(model) {
+        debug!(
+            "B站列表返回失效占位，保留本地已有标题和封面: video_id={}, name={}, bvid={}",
+            existing.id, existing.name, existing.bvid
+        );
+        (
+            sea_orm::ActiveValue::NotSet,
+            sea_orm::ActiveValue::NotSet,
+            sea_orm::ActiveValue::NotSet,
+        )
+    } else {
+        (new_name, model.intro.clone(), model.cover.clone())
+    }
+}
+
 /// 根据show_season_type和其他字段重新计算番剧的智能命名
 fn recalculate_bangumi_name(
     title: &str,
@@ -370,6 +410,15 @@ pub async fn create_videos(
     if scan_deleted {
         // 启用扫描已删除视频：需要特别处理已删除的视频
         for video_info in final_videos_info {
+            if is_unidentified_invalid_video(&video_info) {
+                warn!(
+                    "跳过B站返回的失效占位视频：{}「{}」未提供BVID，无法可靠关联本地记录",
+                    video_source.source_type_display(),
+                    video_source.source_name_display()
+                );
+                continue;
+            }
+
             // 选择性下载逻辑：针对 submission 类型视频源 - 需要在 into_simple_model() 之前获取信息
             let should_store_video = if let Some(selected_videos) = video_source.get_selected_videos() {
                 // 获取创建时间来判断是否为新投稿
@@ -579,6 +628,8 @@ pub async fn create_videos(
                         } else {
                             model.name.clone()
                         };
+                        let (name_update, intro_update, cover_update) =
+                            metadata_updates_for_list_item(&existing, &model, new_name);
 
                         let update_model = video::ActiveModel {
                             id: Unchanged(existing.id),
@@ -586,9 +637,9 @@ pub async fn create_videos(
                             share_copy: model.share_copy.clone(),
                             show_season_type: model.show_season_type.clone(),
                             actors: model.actors.clone(),
-                            name: new_name,
-                            intro: model.intro.clone(),
-                            cover: model.cover.clone(),
+                            name: name_update,
+                            intro: intro_update,
+                            cover: cover_update,
                             ..Default::default()
                         };
 
@@ -633,6 +684,15 @@ pub async fn create_videos(
     } else {
         // 未启用扫描已删除视频：使用原有逻辑，但增加 share_copy 更新检查
         for video_info in final_videos_info {
+            if is_unidentified_invalid_video(&video_info) {
+                warn!(
+                    "跳过B站返回的失效占位视频：{}「{}」未提供BVID，无法可靠关联本地记录",
+                    video_source.source_type_display(),
+                    video_source.source_name_display()
+                );
+                continue;
+            }
+
             // 选择性下载逻辑：针对 submission 类型视频源 - 需要在 into_simple_model() 之前获取信息
             let should_store_video = if let Some(selected_videos) = video_source.get_selected_videos() {
                 // 获取创建时间来判断是否为新投稿
@@ -867,6 +927,8 @@ pub async fn create_videos(
                             } else {
                                 model.name.clone()
                             };
+                            let (name_update, intro_update, cover_update) =
+                                metadata_updates_for_list_item(&existing, &model, new_name);
 
                             let update_model = video::ActiveModel {
                                 id: Unchanged(existing.id),
@@ -874,9 +936,9 @@ pub async fn create_videos(
                                 share_copy: model.share_copy.clone(),
                                 show_season_type: model.show_season_type.clone(),
                                 actors: model.actors.clone(),
-                                name: new_name,
-                                intro: model.intro.clone(),
-                                cover: model.cover.clone(),
+                                name: name_update,
+                                intro: intro_update,
+                                cover: cover_update,
                                 ..Default::default()
                             };
 
