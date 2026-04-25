@@ -260,12 +260,15 @@
 	}
 
 	function getInitialCoverUrl(video: VideoInfo): string {
+		if (video.valid === false) {
+			return getLocalCoverUrl(video.id);
+		}
 		return video.cover ? getProxiedImageUrl(video.cover) : getLocalCoverUrl(video.id);
 	}
 
 	function handleCoverImageError(event: Event) {
 		const target = event.currentTarget as HTMLImageElement;
-		if (video.cover && target.dataset.coverFallback !== 'local') {
+		if (video.valid !== false && video.cover && target.dataset.coverFallback !== 'local') {
 			target.dataset.coverFallback = 'local';
 			target.src = getLocalCoverUrl(video.id);
 			return;
@@ -284,10 +287,10 @@
 	onkeydown={handleCardKeydown}
 >
 	<!-- 整个卡片的背景模糊图片 -->
-	{#if video.cover && mode === 'default'}
+	{#if mode === 'default' && !coverFailed}
 		<div
 			class="absolute inset-0 scale-110 bg-cover bg-center opacity-20 blur-[2px]"
-			style="background-image: url('{getProxiedImageUrl(video.cover)}')"
+			style="background-image: url('{getInitialCoverUrl(video)}')"
 		></div>
 	{/if}
 

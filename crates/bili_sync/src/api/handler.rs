@@ -72,6 +72,48 @@ type VideoListRow = (
     Option<i32>,
 );
 
+fn is_invalid_video_placeholder_title(name: &str) -> bool {
+    matches!(name.trim(), "" | "已失效视频" | "失效视频")
+}
+
+fn title_from_local_file_path(path: &str) -> Option<String> {
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty())?;
+
+    let trimmed = stem.trim();
+    if is_invalid_video_placeholder_title(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn fallback_invalid_video_title(page_name: &str, page_path: Option<&str>) -> Option<String> {
+    let page_name = page_name.trim();
+    if !is_invalid_video_placeholder_title(page_name) {
+        return Some(page_name.to_string());
+    }
+
+    page_path.and_then(title_from_local_file_path)
+}
+
+fn apply_invalid_video_title_fallback(video_info: &mut VideoInfo, fallback_title: Option<String>) {
+    if video_info.valid || !is_invalid_video_placeholder_title(&video_info.name) {
+        return;
+    }
+
+    if let Some(fallback_title) = fallback_title {
+        debug!(
+            "失效视频标题使用本地分页信息兜底: video_id={}, bvid={}, old_name={}, new_name={}",
+            video_info.id, video_info.bvid, video_info.name, fallback_title
+        );
+        video_info.name = fallback_title;
+    }
+}
+
 mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
@@ -2196,6 +2238,42 @@ pub async fn get_videos(
                 )
                 .collect();
 
+            let invalid_placeholder_video_ids = videos
+                .iter()
+                .filter(|video| !video.valid && is_invalid_video_placeholder_title(&video.name))
+                .map(|video| video.id)
+                .collect::<Vec<_>>();
+
+            if !invalid_placeholder_video_ids.is_empty() {
+                let fallback_rows = page::Entity::find()
+                    .filter(page::Column::VideoId.is_in(invalid_placeholder_video_ids))
+                    .order_by_asc(page::Column::VideoId)
+                    .order_by_asc(page::Column::Pid)
+                    .select_only()
+                    .columns([page::Column::VideoId, page::Column::Name, page::Column::Path])
+                    .into_tuple::<(i32, String, Option<String>)>()
+                    .all(db.as_ref())
+                    .await?;
+                let mut title_fallbacks = HashMap::new();
+                for (video_id, page_name, page_path) in fallback_rows {
+                    if title_fallbacks.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(title) =
+                        fallback_invalid_video_title(&page_name, page_path.as_deref())
+                    {
+                        title_fallbacks.insert(video_id, title);
+                    }
+                }
+
+                for video in &mut videos {
+                    apply_invalid_video_title_fallback(
+                        video,
+                        title_fallbacks.get(&video.id).cloned(),
+                    );
+                }
+            }
+
             // 为番剧类型的视频填充真实标题
             for (
                 i,
@@ -2588,7 +2666,13 @@ pub async fn get_video(
         .await?
         .into_iter()
         .map(PageInfo::from)
-        .collect();
+        .collect::<Vec<_>>();
+
+    let detail_title_fallback = pages
+        .iter()
+        .find_map(|page| fallback_invalid_video_title(&page.name, page.path.as_deref()));
+    apply_invalid_video_title_fallback(&mut video_info, detail_title_fallback);
+
     Ok(ApiResponse::ok(VideoResponse {
         video: video_info,
         pages,
