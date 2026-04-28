@@ -84,7 +84,7 @@ pub use crate::config::manager::ConfigManager;
 // }
 
 fn default_time_format() -> String {
-    "%Y-%m-%d".to_string()
+    "%Y%m%d%H%M%S".to_string()
 }
 
 /// 默认的 auth_token 实现，首次使用时返回None，需要用户主动设置
@@ -102,7 +102,7 @@ fn default_video_name() -> Cow<'static, str> {
 }
 
 fn default_page_name() -> Cow<'static, str> {
-    Cow::Borrowed("{{pubtime}}-{{bvid}}-{{truncate title 20}}")
+    Cow::Borrowed("{{pubtime}}-{{bvid}}")
 }
 
 fn default_interval() -> u64 {
@@ -717,7 +717,7 @@ impl Default for Config {
             danmaku_option: DanmakuOption::default(),
             danmaku_update_policy: DanmakuUpdatePolicy::default(),
             video_name: Cow::Borrowed("{{upper_name}}/{{title}}"),
-            page_name: Cow::Borrowed("{{pubtime}}-{{bvid}}-{{truncate title 20}}"),
+            page_name: Cow::Borrowed("{{pubtime}}-{{bvid}}"),
             multi_page_name: Cow::Borrowed("P{{pid_pad}}.{{ptitle}}"),
             bangumi_name: Cow::Borrowed("S{{season_pad}}E{{pid_pad}}"),
             folder_structure: Cow::Borrowed("Season {{season_pad}}"),

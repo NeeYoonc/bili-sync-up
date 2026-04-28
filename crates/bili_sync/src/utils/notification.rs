@@ -121,6 +121,17 @@ pub struct ScanSummary {
     pub source_results: Vec<SourceScanResult>,
 }
 
+fn compact_pubtime_text(pubtime: &str) -> String {
+    let value = pubtime.trim();
+    if value.len() == 14 && value.chars().all(|ch| ch.is_ascii_digit()) {
+        return value.to_string();
+    }
+    if let Ok(datetime) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
+        return datetime.format("%Y%m%d%H%M%S").to_string();
+    }
+    value.to_string()
+}
+
 impl NotificationClient {
     pub fn new(config: NotificationConfig) -> Self {
         let client = Client::builder()
@@ -468,7 +479,10 @@ impl NotificationClient {
                 .as_ref()
                 .is_none_or(|value| value.trim().is_empty())
         {
-            debug!("Webhook渠道使用自定义 JSON 但未配置 POST Body，跳过{}", notification_name);
+            debug!(
+                "Webhook渠道使用自定义 JSON 但未配置 POST Body，跳过{}",
+                notification_name
+            );
             return None;
         }
 
@@ -821,19 +835,12 @@ impl NotificationClient {
                         // 添加额外信息
                         if source_result.source_type == "番剧" && video.episode_number.is_some() {
                             video_line.push_str(&format!(" (第{}集", video.episode_number.unwrap()));
-                            // 番剧也显示时间戳
                             if let Some(pubtime) = &video.pubtime {
-                                // 只显示日期部分，不显示时间
-                                if let Some(date_part) = pubtime.split(' ').next() {
-                                    video_line.push_str(&format!(", {}", date_part));
-                                }
+                                video_line.push_str(&format!(", {}", compact_pubtime_text(pubtime)));
                             }
                             video_line.push(')');
                         } else if let Some(pubtime) = &video.pubtime {
-                            // 只显示日期部分，不显示时间
-                            if let Some(date_part) = pubtime.split(' ').next() {
-                                video_line.push_str(&format!(" ({})", date_part));
-                            }
+                            video_line.push_str(&format!(" ({})", compact_pubtime_text(pubtime)));
                         }
 
                         content.push_str(&video_line);
@@ -1552,7 +1559,10 @@ mod tests {
             .await
             .expect("skip incomplete webhook config");
 
-        assert!(captured.lock().await.is_none(), "incomplete custom webhook should not send any request");
+        assert!(
+            captured.lock().await.is_none(),
+            "incomplete custom webhook should not send any request"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

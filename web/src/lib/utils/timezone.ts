@@ -88,6 +88,57 @@ export function formatTimestampOrFallback(
 	return formatted;
 }
 
+export function formatCompactTimestampOrFallback(
+	timestamp: string | number | Date | null | undefined,
+	_timezone: string = BEIJING_TIMEZONE,
+	fallback?: string
+): string {
+	if (isBlankTimestamp(timestamp)) {
+		return fallback ?? '';
+	}
+
+	const rawValue = String(timestamp).trim();
+	if (/^\d{14}$/.test(rawValue)) {
+		return rawValue;
+	}
+
+	try {
+		let date: Date;
+		if (typeof timestamp === 'string') {
+			const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(rawValue)
+				? `${rawValue.replace(' ', 'T')}+08:00`
+				: rawValue;
+			date = new Date(normalized);
+		} else if (typeof timestamp === 'number') {
+			date = new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);
+		} else {
+			date = timestamp as Date;
+		}
+
+		if (isNaN(date.getTime())) {
+			return fallback ?? String(timestamp);
+		}
+
+		const parts = new Intl.DateTimeFormat('en-US', {
+			timeZone: BEIJING_TIMEZONE,
+			year: 'numeric',
+			month: '2-digit',
+			day: '2-digit',
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			hour12: false,
+			hourCycle: 'h23'
+		}).formatToParts(date);
+
+		const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+		return `${values.year}${values.month}${values.day}${values.hour}${values.minute}${values.second}`;
+	} catch (error) {
+		console.error('紧凑时间戳格式化失败:', error);
+		return fallback ?? String(timestamp);
+	}
+}
+
 // 获取相对时间描述
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

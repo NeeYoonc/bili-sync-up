@@ -118,8 +118,7 @@ async fn fetch_collection_cover_url(
         .collections
         .iter()
         .find(|item| {
-            item.collection_type == expected_collection_type
-                && item.sid.parse::<i64>().ok() == Some(collection_sid)
+            item.collection_type == expected_collection_type && item.sid.parse::<i64>().ok() == Some(collection_sid)
         })
         .ok_or_else(|| anyhow!("未在合集列表中找到目标合集"))?;
     let cover_url = collection.cover.trim();
@@ -1205,7 +1204,7 @@ pub async fn refresh_video_source<'a>(
                     let (title, _, _upper_name, bangumi_episode, _) = &temp_video_infos[idx];
 
                     // 使用数据库中的发布时间（已经是北京时间）
-                    let pubtime = new_video.pubtime.format("%Y-%m-%d %H:%M:%S").to_string();
+                    let pubtime = new_video.pubtime.format("%Y%m%d%H%M%S").to_string();
 
                     // 获取集数信息
                     let episode_number = if let Some(ep) = bangumi_episode {
@@ -1639,8 +1638,7 @@ pub async fn fetch_video_details(
                                 use sea_orm::sea_query::Expr;
                                 use sea_orm::{Set, Unchanged};
 
-                                let is_invisible =
-                                    is_bili_request_failed_with_codes(&e, &[62002, 62012]);
+                                let is_invisible = is_bili_request_failed_with_codes(&e, &[62002, 62012]);
                                 let inaccessible_reason = if is_invisible {
                                     "稿件不可见或仅自己可见"
                                 } else {
@@ -2465,7 +2463,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
                 owner: video_model.upper_name.clone(),
                 tname: String::new(),
                 duration: latest_page.duration as u32,
-                pubdate: video_model.pubtime.format("%Y-%m-%d").to_string(),
+                pubdate: video_model.pubtime.format("%Y%m%d%H%M%S").to_string(),
                 dimension: match (latest_page.width, latest_page.height) {
                     (Some(w), Some(h)) => format!("{}x{}", w, h),
                     _ => String::new(),
@@ -3432,8 +3430,7 @@ pub async fn download_video_pages(
                         // **智能判断：根据模板内容决定是否需要去重**
                         let video_template =
                             crate::config::with_config(|bundle| bundle.config.video_name.as_ref().to_string());
-                        let needs_deduplication = video_template.contains("title")
-                            || (video_template.contains("name") && !video_template.contains("upper_name"));
+                        let needs_deduplication = video_template_uses_video_title(&video_template);
 
                         if needs_deduplication {
                             // 智能去重：检查文件夹名是否已存在，如果存在则追加唯一标识符
@@ -3441,7 +3438,7 @@ pub async fn download_video_pages(
                                 video_source_base_path,
                                 &base_folder_name,
                                 &video_model,
-                                &video_model.pubtime.format("%Y-%m-%d").to_string(),
+                                &video_model.pubtime.format("%Y%m%d%H%M%S").to_string(),
                             );
                             video_source_base_path.join(&unique_folder_name)
                         } else {
@@ -3518,8 +3515,7 @@ pub async fn download_video_pages(
 
             // **智能判断：根据模板内容决定是否需要去重**
             let video_template = crate::config::with_config(|bundle| bundle.config.video_name.as_ref().to_string());
-            let needs_deduplication = video_template.contains("title")
-                || (video_template.contains("name") && !video_template.contains("upper_name"));
+            let needs_deduplication = video_template_uses_video_title(&video_template);
 
             if needs_deduplication {
                 // 智能去重：检查文件夹名是否已存在，如果存在则追加唯一标识符
@@ -3527,7 +3523,7 @@ pub async fn download_video_pages(
                     video_source_base_path,
                     &base_folder_name,
                     &final_video_model,
-                    &final_video_model.pubtime.format("%Y-%m-%d").to_string(),
+                    &final_video_model.pubtime.format("%Y%m%d%H%M%S").to_string(),
                 );
                 debug!("使用去重文件夹名: '{}'", unique_folder_name);
                 let final_path = video_source_base_path.join(&unique_folder_name);
@@ -3736,11 +3732,8 @@ pub async fn download_video_pages(
                 bundle.render_video_template(&video_format_args(&final_video_model))
             })
             .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?;
-            let resolved_video_base_name = resolve_sidecar_base_name(
-                &base_path,
-                Some(&rendered_video_base_name),
-                &final_video_model.name,
-            );
+            let resolved_video_base_name =
+                resolve_sidecar_base_name(&base_path, Some(&rendered_video_base_name), &final_video_model.name);
             if resolved_video_base_name != rendered_video_base_name {
                 debug!(
                     "多P sidecar 文件名前缀改用目录末级名称，避免嵌套目录: rendered='{}', resolved='{}'",
@@ -6275,6 +6268,19 @@ async fn download_page(
                 format!("S{:02}E{:02}-{:02}", season_number, episode_number, episode_number)
             }
         }
+    } else if let Some(clean_name) = single_page_file_name_for_dedicated_folder(
+        base_path,
+        video_model,
+        &page_model,
+        crate::config::with_config(|bundle| video_template_uses_video_title(bundle.config.video_name.as_ref())),
+    ) {
+        debug!(
+            "单P视频使用独立目录，文件名改用标题: bvid={}, base_path={}, file_name={}",
+            video_model.bvid,
+            base_path.display(),
+            clean_name
+        );
+        clean_name
     } else {
         // 单P视频使用最新配置的page_name模板
         crate::config::with_config(|bundle| bundle.render_page_template(&page_format_args(video_model, &page_model)))
@@ -11861,6 +11867,9 @@ pub async fn populate_missing_video_cids(
 /// 检查文件夹是否为同一视频的文件夹
 fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Model) -> bool {
     use std::fs;
+    use std::sync::OnceLock;
+
+    static BVID_RE: OnceLock<regex::Regex> = OnceLock::new();
 
     if !folder_path.exists() {
         debug!("文件夹不存在: {:?}", folder_path);
@@ -11871,7 +11880,111 @@ fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Mode
     debug!("检查文件夹: {:?}", folder_path);
     debug!("数据库存储路径: {}", video_model.path);
     debug!("视频BVID: {}", video_model.bvid);
+    debug!("视频CID: {:?}", video_model.cid);
     debug!("视频标题: {}", video_model.name);
+
+    let cid_marker = video_model.cid.filter(|cid| *cid > 0).map(|cid| format!("cid{}", cid));
+    let current_bvid = video_model.bvid.to_lowercase();
+    if let Some(cid_marker) = &cid_marker {
+        if folder_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase().contains(cid_marker))
+            .unwrap_or(false)
+        {
+            debug!("✓ 通过CID目录名匹配确认为同一视频文件夹");
+            return true;
+        }
+    }
+    if folder_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase().contains(&current_bvid))
+        .unwrap_or(false)
+    {
+        debug!("✓ 通过BVID目录名匹配确认为同一视频文件夹");
+        return true;
+    }
+
+    let mut found_media_files = false;
+    let mut found_bvid_files = false;
+    let mut found_title_files = false;
+    let mut found_other_bvid_files = false;
+
+    // 先看目录内是否已有明确的视频身份。若目录里是别的 BVID，不能再用同标题/同 DB 路径误判。
+    if let Ok(entries) = fs::read_dir(folder_path) {
+        let bvid_re = BVID_RE.get_or_init(|| regex::Regex::new(r"bv[0-9a-z]{10}").expect("valid bvid regex"));
+
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy().to_lowercase();
+
+            if cid_marker
+                .as_ref()
+                .map(|marker| file_name_str.contains(marker))
+                .unwrap_or(false)
+            {
+                debug!(
+                    "✓ 通过CID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
+                    folder_path.display(),
+                    file_name_str
+                );
+                return true;
+            }
+
+            if file_name_str.contains(&current_bvid) {
+                debug!(
+                    "✓ 通过BVID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
+                    folder_path.display(),
+                    file_name_str
+                );
+                return true;
+            }
+
+            if bvid_re
+                .find_iter(&file_name_str)
+                .any(|matched| matched.as_str() != current_bvid)
+            {
+                found_other_bvid_files = true;
+                found_bvid_files = true;
+            }
+
+            if file_name_str.ends_with(".tmp_video")
+                || file_name_str.ends_with(".tmp_audio")
+                || file_name_str.ends_with(".mp4")
+                || file_name_str.ends_with(".mkv")
+                || file_name_str.ends_with(".flv")
+                || file_name_str.ends_with(".webm")
+                || file_name_str.ends_with(".nfo")
+                || file_name_str.ends_with(".jpg")
+                || file_name_str.ends_with(".png")
+                || file_name_str.ends_with(".ass")
+                || file_name_str.ends_with(".srt")
+            {
+                found_media_files = true;
+            }
+
+            let video_title_clean = video_model
+                .name
+                .to_lowercase()
+                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "");
+            if !video_title_clean.is_empty() && video_title_clean.len() > 3 {
+                let title_keywords: Vec<&str> = video_title_clean.split_whitespace().take(3).collect();
+                if title_keywords
+                    .iter()
+                    .any(|keyword| keyword.len() > 2 && file_name_str.contains(keyword))
+                {
+                    found_title_files = true;
+                }
+            }
+        }
+    }
+
+    if found_other_bvid_files {
+        debug!(
+            "✗ 文件夹 {:?} 已包含其他BVID文件，不能判定为当前视频文件夹",
+            folder_path
+        );
+        return false;
+    }
 
     // 方法1：增强的数据库路径匹配
     let db_path = std::path::Path::new(&video_model.path);
@@ -11910,93 +12023,14 @@ fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Mode
 
     debug!("⚠ 数据库路径匹配失败，尝试文件内容检测");
 
-    // 方法2：扩展的文件内容检测
-    if let Ok(entries) = fs::read_dir(folder_path) {
-        let mut found_media_files = false;
-        let mut found_bvid_files = false;
-        let mut found_title_files = false;
+    debug!(
+        "文件检测结果: 媒体文件={}, BVID文件={}, 标题文件={}",
+        found_media_files, found_bvid_files, found_title_files
+    );
 
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let file_name_str = file_name.to_string_lossy().to_lowercase();
-
-            // 2.1 检查包含BVID的文件（扩展文件类型）
-            if file_name_str.contains(&video_model.bvid.to_lowercase()) {
-                if file_name_str.ends_with(".tmp_video")
-                    || file_name_str.ends_with(".tmp_audio")
-                    || file_name_str.ends_with(".mp4")
-                    || file_name_str.ends_with(".mkv")
-                    || file_name_str.ends_with(".flv")
-                    || file_name_str.ends_with(".webm")
-                    || file_name_str.ends_with(".nfo")
-                    || file_name_str.ends_with(".jpg")
-                    || file_name_str.ends_with(".png")
-                    || file_name_str.ends_with(".ass")
-                    || file_name_str.ends_with(".srt")
-                {
-                    debug!(
-                        "✓ 通过BVID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
-                        folder_path.display(),
-                        file_name_str
-                    );
-                    return true;
-                }
-                found_bvid_files = true;
-            }
-
-            // 2.2 检查包含视频标题关键词的文件
-            let video_title_clean = video_model
-                .name
-                .to_lowercase()
-                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "");
-            if !video_title_clean.is_empty() && video_title_clean.len() > 3 {
-                // 提取标题的前几个字符作为关键词
-                let title_keywords: Vec<&str> = video_title_clean.split_whitespace().take(3).collect();
-                for keyword in title_keywords {
-                    if keyword.len() > 2 && file_name_str.contains(keyword) {
-                        if file_name_str.ends_with(".mp4")
-                            || file_name_str.ends_with(".mkv")
-                            || file_name_str.ends_with(".flv")
-                            || file_name_str.ends_with(".webm")
-                            || file_name_str.ends_with(".nfo")
-                        {
-                            debug!(
-                                "✓ 通过标题关键词匹配确认为同一视频文件夹: {} (匹配关键词: {}, 文件: {})",
-                                folder_path.display(),
-                                keyword,
-                                file_name_str
-                            );
-                            return true;
-                        }
-                        found_title_files = true;
-                    }
-                }
-            }
-
-            // 2.3 检查是否有媒体相关文件（降低要求）
-            if file_name_str.ends_with(".mp4")
-                || file_name_str.ends_with(".mkv")
-                || file_name_str.ends_with(".flv")
-                || file_name_str.ends_with(".webm")
-                || file_name_str.ends_with(".nfo")
-                || file_name_str.ends_with(".jpg")
-                || file_name_str.ends_with(".png")
-                || file_name_str.ends_with(".ass")
-                || file_name_str.ends_with(".srt")
-            {
-                found_media_files = true;
-            }
-        }
-
-        debug!(
-            "文件检测结果: 媒体文件={}, BVID文件={}, 标题文件={}",
-            found_media_files, found_bvid_files, found_title_files
-        );
-
-        // 如果找到了相关文件但没有精确匹配，记录为可疑
-        if found_media_files || found_bvid_files || found_title_files {
-            debug!("⚠ 文件夹包含相关文件但无法确认为同一视频文件夹: {:?}", folder_path);
-        }
+    // 标题相同不能证明是同一个视频，只作为可疑信息记录。
+    if found_media_files || found_bvid_files || found_title_files {
+        debug!("⚠ 文件夹包含相关文件但无法确认为同一视频文件夹: {:?}", folder_path);
     }
 
     debug!("✗ 无法确认为同一视频文件夹: {:?}", folder_path);
@@ -12004,11 +12038,7 @@ fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Mode
     false
 }
 
-fn resolve_sidecar_base_name(
-    base_path: &std::path::Path,
-    rendered_name: Option<&str>,
-    fallback_title: &str,
-) -> String {
+fn resolve_sidecar_base_name(base_path: &std::path::Path, rendered_name: Option<&str>, fallback_title: &str) -> String {
     let from_base_path = base_path.file_name().and_then(|name| {
         let value = name.to_string_lossy().trim().to_string();
         (!value.is_empty()).then_some(value)
@@ -12027,6 +12057,65 @@ fn resolve_sidecar_base_name(
         .unwrap_or_else(|| fallback_title.to_string())
 }
 
+fn video_identity_suffix(video_model: &video::Model, pubtime: &str) -> String {
+    let bvid = video_model.bvid.trim();
+    if bvid.is_empty() {
+        pubtime.to_string()
+    } else {
+        format!("{}-{}", pubtime, bvid)
+    }
+}
+
+fn video_template_uses_video_title(video_template: &str) -> bool {
+    video_template.contains("title") || (video_template.contains("name") && !video_template.contains("upper_name"))
+}
+
+fn folder_leaf_contains_video_identity(base_path: &std::path::Path, video_model: &video::Model) -> bool {
+    let Some(folder_name) = base_path.file_name() else {
+        return false;
+    };
+    let folder_name = folder_name.to_string_lossy().to_lowercase();
+    let bvid = video_model.bvid.trim().to_lowercase();
+    let pubtime = video_model.pubtime.format("%Y%m%d%H%M%S").to_string();
+
+    if !bvid.is_empty() && folder_name.contains(&bvid) {
+        return true;
+    }
+    if !pubtime.is_empty() && folder_name.contains(&pubtime) {
+        return true;
+    }
+    if let Some(cid_marker) = video_model.cid.filter(|cid| *cid > 0).map(|cid| format!("cid{}", cid)) {
+        if folder_name.contains(&cid_marker) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn single_page_file_name_for_dedicated_folder(
+    base_path: &std::path::Path,
+    video_model: &video::Model,
+    page_model: &page::Model,
+    video_folder_is_dedicated: bool,
+) -> Option<String> {
+    if !video_folder_is_dedicated && !folder_leaf_contains_video_identity(base_path, video_model) {
+        return None;
+    }
+
+    let clean_video_name = crate::utils::filenamify::filenamify(video_model.name.trim());
+    if !clean_video_name.trim().is_empty() {
+        return Some(clean_video_name);
+    }
+
+    let clean_page_name = crate::utils::filenamify::filenamify(page_model.name.trim());
+    if clean_page_name.trim().is_empty() {
+        None
+    } else {
+        Some(clean_page_name)
+    }
+}
+
 /// 生成唯一的文件夹名称，避免同名冲突（增强版）
 pub fn generate_unique_folder_name(
     parent_dir: &std::path::Path,
@@ -12035,7 +12124,6 @@ pub fn generate_unique_folder_name(
     pubtime: &str,
 ) -> String {
     let mut unique_name = base_name.to_string();
-    let mut counter = 0;
 
     // 检查基础名称是否已存在
     let base_path = parent_dir.join(&unique_name);
@@ -12052,43 +12140,23 @@ pub fn generate_unique_folder_name(
     // 确认是真正的冲突，开始生成唯一名称
     debug!("检测到真实的文件夹名冲突，开始生成唯一名称: {}", base_name);
 
-    // 如果存在真正冲突，先尝试追加发布时间
-    unique_name = format!("{}-{}", base_name, pubtime);
-    let time_path = parent_dir.join(&unique_name);
-    if !time_path.exists() {
-        info!("检测到下载文件夹名冲突，追加发布时间: {} -> {}", base_name, unique_name);
+    // 真实冲突时固定使用完整发布时间+BVID，同一个视频永远落到同一个目录。
+    unique_name = format!("{}-{}", base_name, video_identity_suffix(video_model, pubtime));
+    let identity_path = parent_dir.join(&unique_name);
+    if is_same_video_folder(&identity_path, video_model) {
+        debug!("文件夹 {:?} 已是当前视频的文件夹，无需生成新名称", identity_path);
+        return unique_name;
+    }
+    if !identity_path.exists() {
+        info!("检测到下载文件夹名冲突，追加唯一标识: {} -> {}", base_name, unique_name);
         return unique_name;
     }
 
-    // 如果发布时间也冲突，追加BVID
-    unique_name = format!("{}-{}", base_name, &video_model.bvid);
-    let bvid_path = parent_dir.join(&unique_name);
-    if !bvid_path.exists() {
-        info!("检测到下载文件夹名冲突，追加BVID: {} -> {}", base_name, unique_name);
-        return unique_name;
-    }
-
-    // 如果都冲突，使用数字后缀
-    loop {
-        counter += 1;
-        unique_name = format!("{}-{}", base_name, counter);
-        let numbered_path = parent_dir.join(&unique_name);
-        if !numbered_path.exists() {
-            warn!(
-                "检测到严重下载文件夹名冲突，使用数字后缀: {} -> {}",
-                base_name, unique_name
-            );
-            return unique_name;
-        }
-
-        // 防止无限循环，使用随机后缀
-        if counter > 1000 {
-            warn!("下载文件夹名冲突解决失败，使用随机后缀");
-            let random_suffix: u32 = rand::random::<u32>() % 90000 + 10000;
-            unique_name = format!("{}-{}", base_name, random_suffix);
-            return unique_name;
-        }
-    }
+    info!(
+        "检测到下载文件夹名冲突，固定使用完整发布时间+BVID后缀: {} -> {}",
+        base_name, unique_name
+    );
+    unique_name
 }
 
 #[cfg(test)]
@@ -12306,10 +12374,7 @@ mod tests {
             62002,
             "稿件不可见".to_string()
         ));
-        let self_only_err = anyhow!(crate::bilibili::BiliError::RequestFailed(
-            62012,
-            "62012".to_string()
-        ));
+        let self_only_err = anyhow!(crate::bilibili::BiliError::RequestFailed(62012, "62012".to_string()));
         let other_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-352, "风控".to_string()));
 
         assert!(is_bili_request_failed_inaccessible(&deleted_err));
@@ -12525,11 +12590,7 @@ mod tests {
     #[test]
     fn test_resolve_sidecar_base_name_uses_final_folder_name_for_nested_template() {
         let base_path = PathBuf::from("まん酱").join("BV1us411z7wA");
-        let resolved = resolve_sidecar_base_name(
-            &base_path,
-            Some("まん酱/BV1us411z7wA"),
-            "【完整版MV】柯南ED50",
-        );
+        let resolved = resolve_sidecar_base_name(&base_path, Some("まん酱/BV1us411z7wA"), "【完整版MV】柯南ED50");
 
         assert_eq!(resolved, "BV1us411z7wA");
     }
@@ -12543,6 +12604,177 @@ mod tests {
         );
 
         assert_eq!(resolved, "BV1us411z7wA");
+    }
+
+    #[test]
+    fn test_single_page_file_name_for_identity_folder_uses_title() {
+        let video = video::Model {
+            name: "ψ(｀∇´)ψ".to_string(),
+            bvid: "BV1TestSplit001".to_string(),
+            pubtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 28)
+                .unwrap()
+                .and_hms_opt(17, 8, 30)
+                .unwrap(),
+            ..Default::default()
+        };
+        let page = page::Model {
+            name: "ψ(｀∇´)ψ".to_string(),
+            ..Default::default()
+        };
+        let base_path = PathBuf::from("测试UP").join("ψ(｀∇´)ψ-20260428170830-BV1TestSplit001");
+
+        let file_name = single_page_file_name_for_dedicated_folder(&base_path, &video, &page, false);
+
+        assert_eq!(file_name.as_deref(), Some("ψ(｀∇´)ψ"));
+    }
+
+    #[test]
+    fn test_single_page_file_name_for_plain_dedicated_folder_uses_title() {
+        let video = video::Model {
+            name: "ψ(｀∇´)ψ".to_string(),
+            bvid: "BV1TestSplit002".to_string(),
+            ..Default::default()
+        };
+        let page = page::Model {
+            name: "ψ(｀∇´)ψ".to_string(),
+            ..Default::default()
+        };
+        let base_path = PathBuf::from("测试UP").join("ψ(｀∇´)ψ");
+
+        let file_name = single_page_file_name_for_dedicated_folder(&base_path, &video, &page, true);
+
+        assert_eq!(file_name.as_deref(), Some("ψ(｀∇´)ψ"));
+    }
+
+    #[test]
+    fn test_single_page_file_name_for_shared_folder_keeps_template() {
+        let video = video::Model {
+            name: "ψ(｀∇´)ψ".to_string(),
+            bvid: "BV1TestSplit003".to_string(),
+            ..Default::default()
+        };
+        let page = page::Model {
+            name: "ψ(｀∇´)ψ".to_string(),
+            ..Default::default()
+        };
+        let base_path = PathBuf::from("测试UP").join("ψ(｀∇´)ψ");
+
+        let file_name = single_page_file_name_for_dedicated_folder(&base_path, &video, &page, false);
+
+        assert_eq!(file_name, None);
+    }
+
+    #[test]
+    fn test_generate_unique_folder_name_locks_severe_conflict_to_timestamp_bvid_suffix() {
+        let parent_dir = unique_temp_dir("dedup-timestamp-bvid-locked");
+        let upper_dir = parent_dir.join("测试UP");
+        fs::create_dir_all(upper_dir.join("喵")).expect("应能创建基础冲突目录");
+        fs::create_dir_all(upper_dir.join("喵-20260428170830-BV1TestReuse001")).expect("应能创建唯一标识冲突目录");
+        fs::create_dir_all(upper_dir.join("喵-1")).expect("应能创建数字冲突目录");
+
+        let video = video::Model {
+            name: "喵".to_string(),
+            upper_name: "测试UP".to_string(),
+            bvid: "BV1TestReuse001".to_string(),
+            cid: Some(123456),
+            path: "/stale/path/喵-2".to_string(),
+            ..Default::default()
+        };
+
+        let unique_name = generate_unique_folder_name(&parent_dir, "测试UP/喵", &video, "20260428170830");
+
+        assert_eq!(unique_name, "测试UP/喵-20260428170830-BV1TestReuse001");
+        fs::remove_dir_all(parent_dir).expect("应能清理临时目录");
+    }
+
+    #[test]
+    fn test_generate_unique_folder_name_uses_timestamp_bvid_suffix_before_numbered_suffix() {
+        let parent_dir = unique_temp_dir("dedup-timestamp-bvid-before-number");
+        let upper_dir = parent_dir.join("测试UP");
+        fs::create_dir_all(upper_dir.join("喵")).expect("应能创建基础冲突目录");
+        fs::create_dir_all(upper_dir.join("喵-1")).expect("应能创建数字冲突目录");
+
+        let video = video::Model {
+            name: "喵".to_string(),
+            upper_name: "测试UP".to_string(),
+            bvid: "BV1TestReuse002".to_string(),
+            cid: Some(234567),
+            path: "/stale/path/喵-2".to_string(),
+            ..Default::default()
+        };
+
+        let unique_name = generate_unique_folder_name(&parent_dir, "测试UP/喵", &video, "20260428170830");
+
+        assert_eq!(unique_name, "测试UP/喵-20260428170830-BV1TestReuse002");
+        fs::remove_dir_all(parent_dir).expect("应能清理临时目录");
+    }
+
+    #[test]
+    fn test_generate_unique_folder_name_uses_bvid_when_cid_missing() {
+        let parent_dir = unique_temp_dir("dedup-bvid-fallback");
+        let upper_dir = parent_dir.join("测试UP");
+        fs::create_dir_all(upper_dir.join("喵")).expect("应能创建基础冲突目录");
+        fs::create_dir_all(upper_dir.join("喵-1")).expect("应能创建数字冲突目录");
+
+        let video = video::Model {
+            name: "喵".to_string(),
+            upper_name: "测试UP".to_string(),
+            bvid: "BV1TestFallback".to_string(),
+            cid: None,
+            path: "/stale/path/喵-2".to_string(),
+            ..Default::default()
+        };
+
+        let unique_name = generate_unique_folder_name(&parent_dir, "测试UP/喵", &video, "20260428170830");
+
+        assert_eq!(unique_name, "测试UP/喵-20260428170830-BV1TestFallback");
+        fs::remove_dir_all(parent_dir).expect("应能清理临时目录");
+    }
+
+    #[test]
+    fn test_generate_unique_folder_name_does_not_trust_same_db_path_when_folder_has_other_bvid() {
+        let parent_dir = unique_temp_dir("dedup-other-bvid");
+        let upper_dir = parent_dir.join("测试UP");
+        let title_dir = upper_dir.join("喵");
+        fs::create_dir_all(&title_dir).expect("应能创建基础冲突目录");
+        fs::write(title_dir.join("20260401010101-BV1OldVideo1-喵.mp4"), b"old").expect("应能创建旧视频文件");
+
+        let video = video::Model {
+            name: "喵".to_string(),
+            upper_name: "测试UP".to_string(),
+            bvid: "BV1NewVideo1".to_string(),
+            cid: Some(345678),
+            path: title_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let unique_name = generate_unique_folder_name(&parent_dir, "测试UP/喵", &video, "20260428170830");
+
+        assert_eq!(unique_name, "测试UP/喵-20260428170830-BV1NewVideo1");
+        fs::remove_dir_all(parent_dir).expect("应能清理临时目录");
+    }
+
+    #[test]
+    fn test_generate_unique_folder_name_reuses_same_db_path_when_folder_has_current_bvid() {
+        let parent_dir = unique_temp_dir("dedup-current-bvid");
+        let upper_dir = parent_dir.join("测试UP");
+        let title_dir = upper_dir.join("喵");
+        fs::create_dir_all(&title_dir).expect("应能创建基础目录");
+        fs::write(title_dir.join("20260428170830-BV1SameVideo-喵.mp4"), b"same").expect("应能创建当前视频文件");
+
+        let video = video::Model {
+            name: "喵".to_string(),
+            upper_name: "测试UP".to_string(),
+            bvid: "BV1SameVideo".to_string(),
+            cid: Some(456789),
+            path: title_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let unique_name = generate_unique_folder_name(&parent_dir, "测试UP/喵", &video, "20260428170830");
+
+        assert_eq!(unique_name, "测试UP/喵");
+        fs::remove_dir_all(parent_dir).expect("应能清理临时目录");
     }
 
     #[tokio::test]

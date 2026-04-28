@@ -1,7 +1,7 @@
-import { formatTimestampOrFallback } from './timezone';
+import { formatCompactTimestampOrFallback } from './timezone';
 
 export function formatSubmissionDateLabel(pubtime: string): string {
-	return formatTimestampOrFallback(pubtime, 'Asia/Shanghai', 'date', pubtime);
+	return formatCompactTimestampOrFallback(pubtime, 'Asia/Shanghai', pubtime);
 }
 
 export function formatSubmissionMetricLabel(count: number): string {

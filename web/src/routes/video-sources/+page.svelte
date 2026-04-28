@@ -45,7 +45,7 @@
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import { goto } from '$app/navigation';
-	import { formatTimestampOrFallback } from '$lib/utils/timezone';
+	import { formatCompactTimestampOrFallback } from '$lib/utils/timezone';
 	import { buildAuthenticatedStreamUrl } from '$lib/utils/live-stream';
 	import { createManagedEventSource } from '$lib/utils/live-event-source';
 
@@ -144,7 +144,7 @@
 
 	function formatLatestVideoTime(value: string | null | undefined): string {
 		const normalized = normalizeBeijingDateTime(value);
-		return formatTimestampOrFallback(normalized, 'Asia/Shanghai', 'datetime', value ?? '-');
+		return formatCompactTimestampOrFallback(normalized, 'Asia/Shanghai', value ?? '-');
 	}
 
 	function getLatestVideoAgeDays(value: string | null | undefined): number | null {

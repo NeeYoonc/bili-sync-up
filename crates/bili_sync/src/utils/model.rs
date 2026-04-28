@@ -319,6 +319,12 @@ pub async fn create_videos(
     let has_legacy = keyword_filters.is_some();
     let has_duration_filter = min_duration_seconds.is_some() || max_duration_seconds.is_some();
     let has_published_filter = published_after.is_some() || published_before.is_some();
+    let published_after_date = published_after
+        .as_deref()
+        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok());
+    let published_before_date = published_before
+        .as_deref()
+        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok());
 
     let final_videos_info = if has_dual_list || has_legacy || has_duration_filter || has_published_filter {
         use crate::utils::keyword_filter::{should_filter_video_dual_list, should_filter_video_with_mode};
@@ -355,22 +361,17 @@ pub async fn create_videos(
 
                 if !should_filter && has_published_filter {
                     let beijing_tz = crate::utils::time_format::beijing_timezone();
-                    let published_date = extract_pubtime(info)
-                        .with_timezone(&beijing_tz)
-                        .format("%Y-%m-%d")
-                        .to_string();
-                    if published_after
-                        .as_ref()
-                        .map(|start| published_date < *start)
+                    let published_at = extract_pubtime(info).with_timezone(&beijing_tz);
+                    let published_date = published_at.date_naive();
+                    let published_time = published_at.format("%Y%m%d%H%M%S").to_string();
+                    if published_after_date
+                        .map(|start| published_date < start)
                         .unwrap_or(false)
-                        || published_before
-                            .as_ref()
-                            .map(|end| published_date > *end)
-                            .unwrap_or(false)
+                        || published_before_date.map(|end| published_date > end).unwrap_or(false)
                     {
                         info!(
-                            "视频 '{}' 投稿日期 {} 不在过滤范围内，跳过: {}",
-                            title, published_date, bvid
+                            "视频 '{}' 发布时间 {} 不在过滤范围内，跳过: {}",
+                            title, published_time, bvid
                         );
                         should_filter = true;
                     }

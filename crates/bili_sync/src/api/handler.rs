@@ -819,6 +819,55 @@ mod reset_path_tests {
         );
     }
 
+    #[test]
+    fn remap_existing_video_dir_to_new_base_preserves_ai_renamed_folder_name() {
+        let remapped = remap_existing_video_dir_to_new_base(
+            std::path::Path::new(
+                r"F:\Downloads\测试987423\幼犬酱-单纯的男朋友\幼犬酱-单纯的男朋友-白丝-favorite-高清-BV1pwdDBJExA",
+            ),
+            r"F:\Downloads\测试987423",
+            r"F:\Downloads\测试-new",
+        );
+
+        assert_eq!(
+            remapped.as_ref().map(|path| path.to_string_lossy().to_string()),
+            Some(
+                r"F:\Downloads\测试-new\幼犬酱-单纯的男朋友\幼犬酱-单纯的男朋友-白丝-favorite-高清-BV1pwdDBJExA"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn remap_existing_video_dir_to_new_base_is_case_insensitive_on_windows() {
+        let remapped = remap_existing_video_dir_to_new_base(
+            std::path::Path::new(
+                r"F:\Downloads\测试987423\幼犬酱-单纯的男朋友\幼犬酱-单纯的男朋友-白丝-favorite-高清-BV1pwdDBJExA",
+            ),
+            r"f:\downloads\测试987423",
+            r"G:\Media\测试987423",
+        );
+
+        assert_eq!(
+            remapped.as_ref().map(|path| path.to_string_lossy().to_string()),
+            Some(
+                r"G:\Media\测试987423\幼犬酱-单纯的男朋友\幼犬酱-单纯的男朋友-白丝-favorite-高清-BV1pwdDBJExA"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn remap_existing_video_dir_to_new_base_ignores_source_root_itself() {
+        let remapped = remap_existing_video_dir_to_new_base(
+            std::path::Path::new(r"F:\Downloads\测试987423"),
+            r"F:\Downloads\测试987423",
+            r"F:\Downloads\测试-new",
+        );
+
+        assert_eq!(remapped, None);
+    }
+
     fn sample_video_model(path: String) -> video::Model {
         let test_time = DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc();
         video::Model {
@@ -918,7 +967,7 @@ mod reset_path_tests {
         let video = sample_video_model(old_base.to_string_lossy().to_string());
         let pages = vec![sample_page_model(1, page_file.to_string_lossy().to_string())];
 
-        let (moved_count, cleaned_count) = move_flat_folder_video_files_to_new_path(
+        let (moved_count, cleaned_count, actual_path) = move_flat_folder_video_files_to_new_path(
             &video,
             &pages,
             &old_base.to_string_lossy(),
@@ -930,6 +979,7 @@ mod reset_path_tests {
 
         assert_eq!(moved_count, 3, "应移动主文件和配套文件");
         assert_eq!(cleaned_count, 0, "目标目录在旧目录里面时不应清空旧根目录");
+        assert_eq!(actual_path, None, "平铺目录迁移不返回视频目录路径");
         assert!(!page_file.exists(), "旧位置主文件应已移走");
         assert!(!nfo_file.exists(), "旧位置nfo应已移走");
         assert!(!thumb_file.exists(), "旧位置封面应已移走");
@@ -2259,18 +2309,13 @@ pub async fn get_videos(
                     if title_fallbacks.contains_key(&video_id) {
                         continue;
                     }
-                    if let Some(title) =
-                        fallback_invalid_video_title(&page_name, page_path.as_deref())
-                    {
+                    if let Some(title) = fallback_invalid_video_title(&page_name, page_path.as_deref()) {
                         title_fallbacks.insert(video_id, title);
                     }
                 }
 
                 for video in &mut videos {
-                    apply_invalid_video_title_fallback(
-                        video,
-                        title_fallbacks.get(&video.id).cloned(),
-                    );
+                    apply_invalid_video_title_fallback(video, title_fallbacks.get(&video.id).cloned());
                 }
             }
 
@@ -2527,10 +2572,7 @@ fn build_video_source_tag(
     }
 }
 
-async fn resolve_video_source_tag(
-    db: &DatabaseConnection,
-    video: &video::Model,
-) -> Result<Option<VideoSourceTag>> {
+async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model) -> Result<Option<VideoSourceTag>> {
     if video.source_type == Some(1) {
         if let Some(source_id) = video.source_id {
             let source_name = video_source::Entity::find_by_id(source_id)
@@ -2562,7 +2604,12 @@ async fn resolve_video_source_tag(
             .await?
             .map(|source| source.name)
             .unwrap_or_else(|| format!("已删除收藏夹源 #{}", source_id));
-        return Ok(Some(build_video_source_tag(source_id, "favorite", "收藏夹", source_name)));
+        return Ok(Some(build_video_source_tag(
+            source_id,
+            "favorite",
+            "收藏夹",
+            source_name,
+        )));
     }
 
     if let Some(source_id) = video.submission_id {
@@ -2571,7 +2618,12 @@ async fn resolve_video_source_tag(
             .await?
             .map(|source| source.upper_name)
             .unwrap_or_else(|| format!("已删除投稿源 #{}", source_id));
-        return Ok(Some(build_video_source_tag(source_id, "submission", "UP主投稿", source_name)));
+        return Ok(Some(build_video_source_tag(
+            source_id,
+            "submission",
+            "UP主投稿",
+            source_name,
+        )));
     }
 
     if let Some(source_id) = video.watch_later_id {
@@ -4911,7 +4963,10 @@ pub async fn delete_video_source(
                 schedule_delete_tasks_after_active_work_finishes(db.clone());
             }
         } else if task_running {
-            info!("检测到后台任务仍在运行，删除任务已加入队列等待处理: {} ID={}", source_type, id);
+            info!(
+                "检测到后台任务仍在运行，删除任务已加入队列等待处理: {} ID={}",
+                source_type, id
+            );
 
             if !crate::task::DELETE_TASK_QUEUE.is_processing() {
                 schedule_delete_tasks_after_active_work_finishes(db.clone());
@@ -5812,7 +5867,10 @@ async fn execute_orphan_video_cleanup_plan(conn: &impl ConnectionTrait, plan: Or
         }
     }
 
-    info!("{} 残留孤儿视频本地文件删除完成，共删除 {} 个文件", plan.log_name, deleted_files);
+    info!(
+        "{} 残留孤儿视频本地文件删除完成，共删除 {} 个文件",
+        plan.log_name, deleted_files
+    );
 }
 
 async fn delete_orphaned_videos_from_db(
@@ -5855,11 +5913,7 @@ fn delete_video_source_missing_message(source_type: &str) -> String {
     }
 }
 
-async fn delete_video_source_record_exists(
-    db: &impl ConnectionTrait,
-    source_type: &str,
-    id: i32,
-) -> Result<bool> {
+async fn delete_video_source_record_exists(db: &impl ConnectionTrait, source_type: &str, id: i32) -> Result<bool> {
     match source_type {
         "collection" => Ok(collection::Entity::find_by_id(id).one(db).await?.is_some()),
         "favorite" => Ok(favorite::Entity::find_by_id(id).one(db).await?.is_some()),
@@ -5976,10 +6030,13 @@ async fn cleanup_missing_video_source_references(
     source_type: &str,
     id: i32,
     delete_local_files: bool,
-) -> std::result::Result<(
-    crate::api::response::DeleteVideoSourceResponse,
-    Option<OrphanVideoCleanupPlan>,
-), ApiError> {
+) -> std::result::Result<
+    (
+        crate::api::response::DeleteVideoSourceResponse,
+        Option<OrphanVideoCleanupPlan>,
+    ),
+    ApiError,
+> {
     let related_videos = find_videos_by_source_relation(conn, source_type, id).await?;
     let related_video_count = related_videos.len();
 
@@ -7832,7 +7889,7 @@ pub async fn reset_video_source_path_internal(
 
                 for video in &videos {
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(
+                    let moved_video_path = match move_video_files_to_new_path(
                         video,
                         &old_path,
                         &request.new_path,
@@ -7842,22 +7899,29 @@ pub async fn reset_video_source_path_internal(
                     )
                     .await
                     {
-                        Ok((moved, cleaned)) => {
+                        Ok((moved, cleaned, moved_path)) => {
                             moved_files_count += moved;
                             cleaned_folders_count += cleaned;
+                            moved_path
                         }
-                        Err(e) => warn!("移动视频 {} 文件失败: {}", video.id, e),
-                    }
+                        Err(e) => {
+                            warn!("移动视频 {} 文件失败: {}", video.id, e);
+                            None
+                        }
+                    };
 
-                    // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(
-                        &txn,
-                        video.id,
-                        &request.new_path,
-                        collection.flat_folder,
-                    )
-                    .await
-                    {
+                    let update_result = if let Some(actual_path) = moved_video_path {
+                        update_video_and_page_paths_to_actual_path(&txn, video.id, &video.path, &actual_path).await
+                    } else {
+                        regenerate_video_and_page_paths_correctly(
+                            &txn,
+                            video.id,
+                            &request.new_path,
+                            collection.flat_folder,
+                        )
+                        .await
+                    };
+                    if let Err(e) = update_result {
                         warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                     }
                 }
@@ -7899,7 +7963,7 @@ pub async fn reset_video_source_path_internal(
 
                 for video in &videos {
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(
+                    let moved_video_path = match move_video_files_to_new_path(
                         video,
                         &old_path,
                         &request.new_path,
@@ -7909,22 +7973,29 @@ pub async fn reset_video_source_path_internal(
                     )
                     .await
                     {
-                        Ok((moved, cleaned)) => {
+                        Ok((moved, cleaned, moved_path)) => {
                             moved_files_count += moved;
                             cleaned_folders_count += cleaned;
+                            moved_path
                         }
-                        Err(e) => warn!("移动视频 {} 文件失败: {}", video.id, e),
-                    }
+                        Err(e) => {
+                            warn!("移动视频 {} 文件失败: {}", video.id, e);
+                            None
+                        }
+                    };
 
-                    // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(
-                        &txn,
-                        video.id,
-                        &request.new_path,
-                        favorite.flat_folder,
-                    )
-                    .await
-                    {
+                    let update_result = if let Some(actual_path) = moved_video_path {
+                        update_video_and_page_paths_to_actual_path(&txn, video.id, &video.path, &actual_path).await
+                    } else {
+                        regenerate_video_and_page_paths_correctly(
+                            &txn,
+                            video.id,
+                            &request.new_path,
+                            favorite.flat_folder,
+                        )
+                        .await
+                    };
+                    if let Err(e) = update_result {
                         warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                     }
                 }
@@ -7965,7 +8036,7 @@ pub async fn reset_video_source_path_internal(
 
                 for video in &videos {
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(
+                    let moved_video_path = match move_video_files_to_new_path(
                         video,
                         &old_path,
                         &request.new_path,
@@ -7975,22 +8046,29 @@ pub async fn reset_video_source_path_internal(
                     )
                     .await
                     {
-                        Ok((moved, cleaned)) => {
+                        Ok((moved, cleaned, moved_path)) => {
                             moved_files_count += moved;
                             cleaned_folders_count += cleaned;
+                            moved_path
                         }
-                        Err(e) => warn!("移动视频 {} 文件失败: {}", video.id, e),
-                    }
+                        Err(e) => {
+                            warn!("移动视频 {} 文件失败: {}", video.id, e);
+                            None
+                        }
+                    };
 
-                    // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(
-                        &txn,
-                        video.id,
-                        &request.new_path,
-                        submission.flat_folder,
-                    )
-                    .await
-                    {
+                    let update_result = if let Some(actual_path) = moved_video_path {
+                        update_video_and_page_paths_to_actual_path(&txn, video.id, &video.path, &actual_path).await
+                    } else {
+                        regenerate_video_and_page_paths_correctly(
+                            &txn,
+                            video.id,
+                            &request.new_path,
+                            submission.flat_folder,
+                        )
+                        .await
+                    };
+                    if let Err(e) = update_result {
                         warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                     }
                 }
@@ -8031,7 +8109,7 @@ pub async fn reset_video_source_path_internal(
 
                 for video in &videos {
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(
+                    let moved_video_path = match move_video_files_to_new_path(
                         video,
                         &old_path,
                         &request.new_path,
@@ -8041,22 +8119,29 @@ pub async fn reset_video_source_path_internal(
                     )
                     .await
                     {
-                        Ok((moved, cleaned)) => {
+                        Ok((moved, cleaned, moved_path)) => {
                             moved_files_count += moved;
                             cleaned_folders_count += cleaned;
+                            moved_path
                         }
-                        Err(e) => warn!("移动视频 {} 文件失败: {}", video.id, e),
-                    }
+                        Err(e) => {
+                            warn!("移动视频 {} 文件失败: {}", video.id, e);
+                            None
+                        }
+                    };
 
-                    // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(
-                        &txn,
-                        video.id,
-                        &request.new_path,
-                        watch_later.flat_folder,
-                    )
-                    .await
-                    {
+                    let update_result = if let Some(actual_path) = moved_video_path {
+                        update_video_and_page_paths_to_actual_path(&txn, video.id, &video.path, &actual_path).await
+                    } else {
+                        regenerate_video_and_page_paths_correctly(
+                            &txn,
+                            video.id,
+                            &request.new_path,
+                            watch_later.flat_folder,
+                        )
+                        .await
+                    };
+                    if let Err(e) = update_result {
                         warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                     }
                 }
@@ -8305,7 +8390,7 @@ async fn move_flat_folder_video_files_to_new_path(
     old_base_path: &str,
     new_base_path: &str,
     clean_empty_folders: bool,
-) -> Result<(usize, usize), std::io::Error> {
+) -> Result<(usize, usize, Option<String>), std::io::Error> {
     let new_base_dir = std::path::Path::new(new_base_path);
     std::fs::create_dir_all(new_base_dir)?;
 
@@ -8342,7 +8427,7 @@ async fn move_flat_folder_video_files_to_new_path(
         debug!("平铺目录视频 {} 没有分页路径，跳过文件迁移", video.id);
     }
 
-    Ok((moved_count, cleaned_count))
+    Ok((moved_count, cleaned_count, None))
 }
 
 /// 移动视频文件到新路径结构，返回(移动的文件数量, 清理的文件夹数量)
@@ -8353,7 +8438,7 @@ async fn move_video_files_to_new_path(
     flat_folder: bool,
     clean_empty_folders: bool,
     txn: &sea_orm::DatabaseTransaction,
-) -> Result<(usize, usize), std::io::Error> {
+) -> Result<(usize, usize, Option<String>), std::io::Error> {
     use std::path::Path;
 
     if flat_folder {
@@ -8362,52 +8447,63 @@ async fn move_video_files_to_new_path(
             .all(txn)
             .await
             .map_err(|e| std::io::Error::other(format!("查询分页路径失败: {e}")))?;
-        return move_flat_folder_video_files_to_new_path(
-            video,
-            &pages,
-            old_base_path,
-            new_base_path,
-            clean_empty_folders,
-        )
-        .await;
+        let (moved, cleaned, _) =
+            move_flat_folder_video_files_to_new_path(video, &pages, old_base_path, new_base_path, clean_empty_folders)
+                .await?;
+        return Ok((moved, cleaned, None));
     }
 
-    let mut moved_count = 0;
     let mut cleaned_count = 0;
 
     // 获取当前视频的存储路径
     let current_video_path = Path::new(&video.path);
     if !current_video_path.exists() {
-        return Ok((0, 0)); // 如果视频文件夹不存在，跳过
+        return Ok((0, 0, None)); // 如果视频文件夹不存在，跳过
     }
 
-    // 使用模板重新生成视频在新基础路径下的目标路径
-    let new_video_dir = Path::new(new_base_path);
+    let target_video_dir = if let Some(remapped_path) =
+        remap_existing_video_dir_to_new_base(current_video_path, old_base_path, new_base_path)
+    {
+        remapped_path
+    } else {
+        // 兜底：旧路径不在旧视频源路径下时，才按当前模板重新生成。
+        let new_video_dir = Path::new(new_base_path);
+        let new_video_path = crate::config::with_config(|bundle| {
+            let video_args = crate::utils::format_arg::video_format_args(video);
+            bundle.render_video_template(&video_args)
+        })
+        .map_err(|e| std::io::Error::other(format!("模板渲染失败: {}", e)))?;
 
-    // 基于视频模型重新生成路径结构
-    let new_video_path = crate::config::with_config(|bundle| {
-        let video_args = crate::utils::format_arg::video_format_args(video);
-        bundle.render_video_template(&video_args)
-    })
-    .map_err(|e| std::io::Error::other(format!("模板渲染失败: {}", e)))?;
-
-    let target_video_dir = new_video_dir.join(&new_video_path);
+        let raw_target_video_dir = new_video_dir.join(&new_video_path);
+        let video_template = crate::config::with_config(|bundle| bundle.config.video_name.as_ref().to_string());
+        if video_template_uses_video_title(&video_template) {
+            let unique_video_path = generate_unique_folder_name(
+                new_video_dir,
+                &new_video_path,
+                &video.bvid,
+                &video.pubtime.format("%Y%m%d%H%M%S").to_string(),
+            );
+            new_video_dir.join(unique_video_path)
+        } else {
+            raw_target_video_dir
+        }
+    };
 
     // 如果目标路径和当前路径相同，无需移动
-    if current_video_path == target_video_dir {
-        return Ok((0, 0));
+    if same_path_for_reset(
+        current_video_path.to_string_lossy().as_ref(),
+        target_video_dir.to_string_lossy().as_ref(),
+    ) {
+        return Ok((0, 0, Some(target_video_dir.to_string_lossy().to_string())));
     }
 
     // 使用四步重命名原则移动整个视频文件夹
-    if (move_files_with_four_step_rename(
+    let actual_target_path = move_files_with_four_step_rename(
         &current_video_path.to_string_lossy(),
         &target_video_dir.to_string_lossy(),
     )
-    .await)
-        .is_ok()
+    .await?;
     {
-        moved_count = 1;
-
         // 移动成功后，检查并清理原来的父目录（如果启用了清理且为空）
         if clean_empty_folders {
             if let Some(parent_dir) = current_video_path.parent() {
@@ -8418,7 +8514,7 @@ async fn move_video_files_to_new_path(
         }
     }
 
-    Ok((moved_count, cleaned_count))
+    Ok((1, cleaned_count, Some(actual_target_path)))
 }
 
 fn remap_page_path_with_video_prefix(
@@ -8433,7 +8529,7 @@ fn remap_page_path_with_video_prefix(
     ];
 
     for (old_prefix, new_prefix) in candidate_prefixes {
-        if current_page_path == old_prefix {
+        if same_path_for_reset(current_page_path, &old_prefix) {
             return Some(new_prefix);
         }
 
@@ -8445,7 +8541,7 @@ fn remap_page_path_with_video_prefix(
             format!("{old_prefix}/")
         };
 
-        if let Some(relative_path) = current_page_path.strip_prefix(&old_prefix_with_sep) {
+        if let Some(relative_path) = strip_reset_path_prefix(current_page_path, &old_prefix_with_sep) {
             let new_page_path = if new_prefix.ends_with('\\') || new_prefix.ends_with('/') {
                 format!("{new_prefix}{relative_path}")
             } else if new_prefix.contains('\\') {
@@ -8458,6 +8554,96 @@ fn remap_page_path_with_video_prefix(
     }
 
     None
+}
+
+fn strip_reset_path_prefix<'a>(current_path: &'a str, old_prefix_with_sep: &str) -> Option<&'a str> {
+    if let Some(relative_path) = current_path.strip_prefix(old_prefix_with_sep) {
+        return Some(relative_path);
+    }
+
+    #[cfg(windows)]
+    {
+        if current_path.len() >= old_prefix_with_sep.len() {
+            let (candidate_prefix, relative_path) = current_path.split_at(old_prefix_with_sep.len());
+            if candidate_prefix.eq_ignore_ascii_case(old_prefix_with_sep) {
+                return Some(relative_path);
+            }
+        }
+    }
+
+    None
+}
+
+fn normalized_path_for_reset_compare(path: &str) -> String {
+    let normalized = normalize_file_path(path).trim_end_matches('/').to_string();
+    #[cfg(windows)]
+    {
+        normalized.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+}
+
+fn same_path_for_reset(left: &str, right: &str) -> bool {
+    normalized_path_for_reset_compare(left) == normalized_path_for_reset_compare(right)
+}
+
+fn remap_existing_video_dir_to_new_base(
+    current_video_path: &std::path::Path,
+    old_base_path: &str,
+    new_base_path: &str,
+) -> Option<std::path::PathBuf> {
+    let current_video_path = current_video_path.to_string_lossy().to_string();
+    if same_path_for_reset(&current_video_path, old_base_path) {
+        return None;
+    }
+
+    let remapped_path = remap_page_path_with_video_prefix(&current_video_path, old_base_path, new_base_path)?;
+    if same_path_for_reset(&remapped_path, new_base_path) {
+        return None;
+    }
+
+    Some(std::path::PathBuf::from(remapped_path))
+}
+
+async fn update_video_and_page_paths_to_actual_path(
+    txn: &sea_orm::DatabaseTransaction,
+    video_id: i32,
+    old_video_path: &str,
+    actual_video_path: &str,
+) -> Result<(), ApiError> {
+    video::Entity::update_many()
+        .filter(video::Column::Id.eq(video_id))
+        .col_expr(video::Column::Path, Expr::value(actual_video_path.to_string()))
+        .exec(txn)
+        .await?;
+
+    let pages = page::Entity::find()
+        .filter(page::Column::VideoId.eq(video_id))
+        .all(txn)
+        .await?;
+
+    for page_model in pages {
+        let Some(current_page_path) = page_model.path.as_deref().filter(|path| !path.is_empty()) else {
+            continue;
+        };
+
+        let Some(new_page_path) =
+            remap_page_path_with_video_prefix(current_page_path, old_video_path, actual_video_path)
+        else {
+            continue;
+        };
+
+        page::Entity::update_many()
+            .filter(page::Column::Id.eq(page_model.id))
+            .col_expr(page::Column::Path, Expr::value(new_page_path))
+            .exec(txn)
+            .await?;
+    }
+
+    Ok(())
 }
 
 /// 正确重新生成视频和分页路径（基于新的基础路径重新计算完整路径）
@@ -11046,13 +11232,10 @@ async fn rename_existing_files(
                 }
 
                 let expected_new_path = if needs_deduplication {
+                    let dedup_pubtime = video.pubtime.format("%Y%m%d%H%M%S").to_string();
                     // 使用智能去重生成唯一文件夹名
-                    let unique_folder_name = generate_unique_folder_name(
-                        base_parent_dir,
-                        &final_folder_name,
-                        &video.bvid,
-                        &formatted_pubtime,
-                    );
+                    let unique_folder_name =
+                        generate_unique_folder_name(base_parent_dir, &final_folder_name, &video.bvid, &dedup_pubtime);
                     base_parent_dir.join(&unique_folder_name)
                 } else {
                     // 不使用去重，允许多个视频共享同一文件夹
@@ -11354,6 +11537,38 @@ async fn rename_existing_files(
                         let season_number = video.season_number.unwrap_or(1);
                         let episode_number = video.episode_number.unwrap_or(page.pid);
                         format!("S{:02}E{:02}-{:02}", season_number, episode_number, episode_number)
+                    }
+                }
+            } else if is_single_page && !is_collection {
+                if let Some(clean_name) = single_page_file_name_for_dedicated_folder(
+                    &final_video_path,
+                    &video.name,
+                    &page.name,
+                    &video.bvid,
+                    &video.pubtime.format("%Y%m%d%H%M%S").to_string(),
+                    config.video_name.as_ref(),
+                ) {
+                    debug!(
+                        "单P视频使用独立目录，重命名文件名改用标题: bvid={}, path={}, file_name={}",
+                        video.bvid,
+                        final_video_path.display(),
+                        clean_name
+                    );
+                    clean_name
+                } else {
+                    // 单P视频使用page_name模板
+                    match handlebars.render("page", &page_template_value) {
+                        Ok(rendered) => {
+                            debug!("单P视频模板渲染成功: '{}' -> '{}'", config.page_name, rendered);
+                            rendered
+                        }
+                        Err(e) => {
+                            warn!(
+                                "单P视频模板渲染失败: '{}', 错误: {}, 使用默认名称: '{}'",
+                                config.page_name, e, page.name
+                            );
+                            page.name.clone()
+                        }
                     }
                 }
             } else if is_single_page {
@@ -15365,7 +15580,6 @@ pub async fn proxy_video_stream(
 /// 生成唯一的文件夹名称，避免同名冲突
 fn generate_unique_folder_name(parent_dir: &std::path::Path, base_name: &str, bvid: &str, pubtime: &str) -> String {
     let mut unique_name = base_name.to_string();
-    let mut counter = 0;
 
     // 检查基础名称是否已存在
     let base_path = parent_dir.join(&unique_name);
@@ -15373,42 +15587,67 @@ fn generate_unique_folder_name(parent_dir: &std::path::Path, base_name: &str, bv
         return unique_name;
     }
 
-    // 如果存在，先尝试追加发布时间
-    unique_name = format!("{}-{}", base_name, pubtime);
-    let time_path = parent_dir.join(&unique_name);
-    if !time_path.exists() {
-        info!("检测到文件夹名冲突，追加发布时间: {} -> {}", base_name, unique_name);
+    // 真实冲突时固定使用完整发布时间+BVID，同一个视频永远落到同一个目录。
+    unique_name = if bvid.trim().is_empty() {
+        format!("{}-{}", base_name, pubtime)
+    } else {
+        format!("{}-{}-{}", base_name, pubtime, bvid)
+    };
+    let identity_path = parent_dir.join(&unique_name);
+    if !identity_path.exists() {
+        info!(
+            "检测到文件夹名冲突，追加完整发布时间+BVID: {} -> {}",
+            base_name, unique_name
+        );
         return unique_name;
     }
 
-    // 如果发布时间也冲突，追加BVID
-    unique_name = format!("{}-{}", base_name, bvid);
-    let bvid_path = parent_dir.join(&unique_name);
-    if !bvid_path.exists() {
-        info!("检测到文件夹名冲突，追加BVID: {} -> {}", base_name, unique_name);
-        return unique_name;
+    info!(
+        "检测到文件夹名冲突，固定使用完整发布时间+BVID后缀: {} -> {}",
+        base_name, unique_name
+    );
+    unique_name
+}
+
+fn video_template_uses_video_title(video_template: &str) -> bool {
+    video_template.contains("title") || (video_template.contains("name") && !video_template.contains("upper_name"))
+}
+
+fn folder_leaf_contains_video_identity(base_path: &std::path::Path, bvid: &str, pubtime: &str) -> bool {
+    let Some(folder_name) = base_path.file_name() else {
+        return false;
+    };
+    let folder_name = folder_name.to_string_lossy().to_lowercase();
+    let bvid = bvid.trim().to_lowercase();
+    let pubtime = pubtime.trim().to_lowercase();
+
+    (!bvid.is_empty() && folder_name.contains(&bvid)) || (!pubtime.is_empty() && folder_name.contains(&pubtime))
+}
+
+fn single_page_file_name_for_dedicated_folder(
+    final_video_path: &std::path::Path,
+    video_name: &str,
+    page_name: &str,
+    bvid: &str,
+    pubtime: &str,
+    video_template: &str,
+) -> Option<String> {
+    if !video_template_uses_video_title(video_template)
+        && !folder_leaf_contains_video_identity(final_video_path, bvid, pubtime)
+    {
+        return None;
     }
 
-    // 如果都冲突，使用数字后缀
-    loop {
-        counter += 1;
-        unique_name = format!("{}-{}", base_name, counter);
-        let numbered_path = parent_dir.join(&unique_name);
-        if !numbered_path.exists() {
-            warn!("检测到严重文件夹名冲突，使用数字后缀: {} -> {}", base_name, unique_name);
-            return unique_name;
-        }
+    let clean_video_name = crate::utils::filenamify::filenamify(video_name.trim());
+    if !clean_video_name.trim().is_empty() {
+        return Some(clean_video_name);
+    }
 
-        // 防止无限循环
-        if counter > 1000 {
-            warn!("文件夹名冲突解决失败，使用随机后缀");
-            unique_name = format!(
-                "{}-{}",
-                base_name,
-                uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("random")
-            );
-            return unique_name;
-        }
+    let clean_page_name = crate::utils::filenamify::filenamify(page_name.trim());
+    if clean_page_name.trim().is_empty() {
+        None
+    } else {
+        Some(clean_page_name)
     }
 }
 
@@ -15852,8 +16091,8 @@ async fn generate_unique_filename_with_video_info(
 
     // 尝试从数据库获取视频信息来生成更有意义的后缀
     let suffix = if let Ok(Some(video)) = video::Entity::find_by_id(video_id).one(db).await {
-        // 优先使用发布时间
-        format!("{}", video.pubtime.format("%Y-%m-%d"))
+        // 优先使用完整发布时间
+        format!("{}", video.pubtime.format("%Y%m%d%H%M%S"))
     } else {
         format!("vid{}", video_id)
     };
@@ -16041,14 +16280,10 @@ async fn move_bangumi_files_to_new_path(
             .all(txn)
             .await
             .map_err(|e| std::io::Error::other(format!("查询番剧分页路径失败: {e}")))?;
-        return move_flat_folder_video_files_to_new_path(
-            video,
-            &pages,
-            old_base_path,
-            new_base_path,
-            clean_empty_folders,
-        )
-        .await;
+        let (moved, cleaned, _) =
+            move_flat_folder_video_files_to_new_path(video, &pages, old_base_path, new_base_path, clean_empty_folders)
+                .await?;
+        return Ok((moved, cleaned));
     }
 
     let mut moved_count = 0;

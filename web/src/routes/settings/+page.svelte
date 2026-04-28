@@ -209,7 +209,7 @@
 
 	// 表单数据
 	let videoName = '{{upper_name}}';
-	let pageName = '{{pubtime}}-{{bvid}}-{{truncate title 20}}';
+	let pageName = '{{pubtime}}-{{bvid}}';
 	let multiPageName = 'P{{pid_pad}}.{{ptitle}}';
 	let bangumiName = '{{title}} S{{season_pad}}E{{pid_pad}} - {{ptitle}}';
 	let folderStructure = 'Season {{season_pad}}';
@@ -217,7 +217,7 @@
 	let collectionFolderMode = 'unified';
 	let collectionUnifiedName =
 		'S01E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}';
-	let timeFormat = '%Y-%m-%d';
+	let timeFormat = '%Y%m%d%H%M%S';
 	let interval = 1200;
 	let nfoTimeType = 'favtime';
 	let nfoIncludeGenre = true;
@@ -1612,7 +1612,7 @@
 					<Input
 						id="page-name"
 						bind:value={pageName}
-						placeholder={`{{pubtime}}-{{bvid}}-{{truncate title 20}}`}
+						placeholder={`{{pubtime}}-{{bvid}}`}
 						class={pageNameValid ? '' : 'border-red-500 focus:border-red-500'}
 					/>
 					{#if pageNameError}
@@ -1758,7 +1758,7 @@
 
 				<div class="space-y-2">
 					<Label for="time-format">时间格式</Label>
-					<Input id="time-format" bind:value={timeFormat} placeholder="%Y-%m-%d" />
+					<Input id="time-format" bind:value={timeFormat} placeholder="%Y%m%d%H%M%S" />
 					<p class="text-muted-foreground text-sm">控制时间变量的显示格式</p>
 				</div>
 

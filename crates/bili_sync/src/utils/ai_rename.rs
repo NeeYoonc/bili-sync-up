@@ -1079,7 +1079,7 @@ pub async fn batch_rename_history_files(
                 owner: video.upper_name.clone(),
                 tname: video.category.to_string(),
                 duration: 0,
-                pubdate: video.pubtime.format("%Y-%m-%d").to_string(),
+                pubdate: video.pubtime.format("%Y%m%d%H%M%S").to_string(),
                 dimension: String::new(),
                 part_name: page_model.name.clone(),
                 ugc_season: None,
