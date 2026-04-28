@@ -3367,7 +3367,7 @@ pub async fn download_video_pages(
             debug!("平铺目录模式：所有文件直接放在视频源根目录");
         }
 
-        let path = if flat_folder {
+        let computed_path = if flat_folder {
             // 平铺目录模式：直接使用视频源根目录，不创建子文件夹
             video_source_base_path.to_path_buf()
         } else if let VideoSourceEnum::Collection(collection_source) = video_source {
@@ -3536,6 +3536,16 @@ pub async fn download_video_pages(
                 debug!("最终计算路径: {:?}", final_path);
                 final_path
             }
+        };
+        let path = if flat_folder {
+            computed_path
+        } else {
+            preserve_existing_video_path_for_redownload(
+                video_source_base_path,
+                computed_path,
+                &final_video_model,
+                &pages,
+            )
         };
 
         // 检查是否为多P视频且启用了Season结构
@@ -12093,6 +12103,132 @@ fn folder_leaf_contains_video_identity(base_path: &std::path::Path, video_model:
     false
 }
 
+fn folder_leaf_contains_explicit_video_identity(base_path: &std::path::Path, video_model: &video::Model) -> bool {
+    let Some(folder_name) = base_path.file_name() else {
+        return false;
+    };
+    let folder_name = folder_name.to_string_lossy().to_lowercase();
+    let bvid = video_model.bvid.trim().to_lowercase();
+
+    if !bvid.is_empty() && folder_name.contains(&bvid) {
+        return true;
+    }
+    if let Some(cid_marker) = video_model.cid.filter(|cid| *cid > 0).map(|cid| format!("cid{}", cid)) {
+        if folder_name.contains(&cid_marker) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn find_existing_identity_sibling_path(computed_path: &std::path::Path, video_model: &video::Model) -> Option<PathBuf> {
+    let parent_dir = computed_path.parent()?;
+    let entries = std::fs::read_dir(parent_dir).ok()?;
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if entry_path == computed_path || !entry_path.is_dir() {
+            continue;
+        }
+        if folder_leaf_contains_explicit_video_identity(&entry_path, video_model) {
+            return Some(entry_path);
+        }
+    }
+
+    None
+}
+
+fn normalized_path_text(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let normalized = normalized.trim_end_matches('/').to_string();
+    #[cfg(windows)]
+    {
+        normalized.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+}
+
+fn path_text_is_same_or_child(path: &str, parent: &std::path::Path) -> bool {
+    let path = normalized_path_text(path);
+    let parent = normalized_path_text(&parent.to_string_lossy());
+
+    if path.is_empty() || parent.is_empty() {
+        return false;
+    }
+
+    path == parent || path.starts_with(&format!("{parent}/"))
+}
+
+fn path_is_same_or_child(path: &std::path::Path, parent: &std::path::Path) -> bool {
+    path_text_is_same_or_child(&path.to_string_lossy(), parent)
+}
+
+fn preserve_existing_video_path_for_redownload(
+    video_source_base_path: &std::path::Path,
+    computed_path: PathBuf,
+    video_model: &video::Model,
+    pages: &[page::Model],
+) -> PathBuf {
+    let existing_path_text = video_model.path.trim();
+    if existing_path_text.is_empty() {
+        return computed_path;
+    }
+
+    let existing_path = std::path::Path::new(existing_path_text);
+    if path_is_same_or_child(&computed_path, existing_path) && path_is_same_or_child(existing_path, &computed_path) {
+        if let Some(identity_path) = find_existing_identity_sibling_path(&computed_path, video_model) {
+            debug!(
+                "重置/重下通过BV/CID找回已有视频目录: bvid={}, computed='{}', identity='{}'",
+                video_model.bvid,
+                computed_path.display(),
+                identity_path.display()
+            );
+            return identity_path;
+        }
+        return computed_path;
+    }
+
+    if !path_text_is_same_or_child(existing_path_text, video_source_base_path) {
+        return computed_path;
+    }
+
+    if path_text_is_same_or_child(&video_source_base_path.to_string_lossy(), existing_path) {
+        return computed_path;
+    }
+
+    let has_page_under_existing_path = pages
+        .iter()
+        .filter_map(|page| page.path.as_deref())
+        .any(|page_path| path_text_is_same_or_child(page_path, existing_path));
+    let has_existing_directory = existing_path.is_dir();
+    let has_identity_in_leaf = folder_leaf_contains_video_identity(existing_path, video_model);
+
+    if has_page_under_existing_path || has_existing_directory || has_identity_in_leaf {
+        debug!(
+            "重置/重下保留已有视频目录: bvid={}, computed='{}', existing='{}'",
+            video_model.bvid,
+            computed_path.display(),
+            existing_path.display()
+        );
+        existing_path.to_path_buf()
+    } else {
+        if let Some(identity_path) = find_existing_identity_sibling_path(&computed_path, video_model) {
+            debug!(
+                "重置/重下通过BV/CID找回已有视频目录: bvid={}, computed='{}', identity='{}'",
+                video_model.bvid,
+                computed_path.display(),
+                identity_path.display()
+            );
+            return identity_path;
+        }
+        computed_path
+    }
+}
+
 fn single_page_file_name_for_dedicated_folder(
     base_path: &std::path::Path,
     video_model: &video::Model,
@@ -12662,6 +12798,89 @@ mod tests {
         let file_name = single_page_file_name_for_dedicated_folder(&base_path, &video, &page, false);
 
         assert_eq!(file_name, None);
+    }
+
+    #[test]
+    fn test_preserve_existing_video_path_for_redownload_keeps_identity_path() {
+        let source_root = PathBuf::from("F:/Downloads/测试5851");
+        let existing_path = source_root
+            .join("幼犬酱-单纯的男朋友")
+            .join("幼犬酱-单纯的男朋友-白丝-favorite-BV1RfosBMEoy");
+        let computed_path = source_root.join("幼犬酱-单纯的男朋友").join("白丝");
+        let video = video::Model {
+            name: "白丝".to_string(),
+            bvid: "BV1RfosBMEoy".to_string(),
+            path: existing_path.to_string_lossy().to_string(),
+            pubtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 22)
+                .unwrap()
+                .and_hms_opt(17, 57, 46)
+                .unwrap(),
+            ..Default::default()
+        };
+        let pages = vec![page::Model {
+            path: Some(
+                existing_path
+                    .join("幼犬酱-单纯的男朋友-白丝-favorite.mp4")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            ..Default::default()
+        }];
+
+        let resolved = preserve_existing_video_path_for_redownload(&source_root, computed_path.clone(), &video, &pages);
+
+        assert_eq!(resolved, existing_path);
+    }
+
+    #[test]
+    fn test_preserve_existing_video_path_for_redownload_recovers_identity_sibling() {
+        let source_root = unique_temp_dir("redownload-identity-sibling");
+        let up_dir = source_root.join("幼犬酱-单纯的男朋友");
+        let computed_path = up_dir.join("白丝");
+        let identity_path = up_dir.join("幼犬酱-单纯的男朋友-白丝-favorite-BV1RfosBMEoy");
+        fs::create_dir_all(&identity_path).expect("应能创建已有BV目录");
+
+        let video = video::Model {
+            name: "白丝".to_string(),
+            bvid: "BV1RfosBMEoy".to_string(),
+            cid: Some(37720424774),
+            path: computed_path.to_string_lossy().to_string(),
+            pubtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 22)
+                .unwrap()
+                .and_hms_opt(17, 57, 46)
+                .unwrap(),
+            ..Default::default()
+        };
+        let pages = vec![page::Model {
+            path: Some(computed_path.join("白丝.mp4").to_string_lossy().to_string()),
+            ..Default::default()
+        }];
+
+        let resolved = preserve_existing_video_path_for_redownload(&source_root, computed_path.clone(), &video, &pages);
+
+        assert_eq!(resolved, identity_path);
+        fs::remove_dir_all(source_root).expect("应能清理临时目录");
+    }
+
+    #[test]
+    fn test_preserve_existing_video_path_for_redownload_ignores_old_source_path() {
+        let source_root = PathBuf::from("F:/Downloads/新源");
+        let old_source_path = PathBuf::from("F:/Downloads/旧源").join("UP").join("标题-BV1OldSource");
+        let computed_path = source_root.join("UP").join("标题");
+        let video = video::Model {
+            name: "标题".to_string(),
+            bvid: "BV1OldSource".to_string(),
+            path: old_source_path.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let pages = vec![page::Model {
+            path: Some(old_source_path.join("标题.mp4").to_string_lossy().to_string()),
+            ..Default::default()
+        }];
+
+        let resolved = preserve_existing_video_path_for_redownload(&source_root, computed_path.clone(), &video, &pages);
+
+        assert_eq!(resolved, computed_path);
     }
 
     #[test]
