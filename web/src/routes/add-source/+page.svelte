@@ -92,6 +92,30 @@
 
 	let searchTotalResults = 0;
 
+	function clearSearchPanel(options: { clearKeyword?: boolean } = {}) {
+		showSearchResults = false;
+		searchResults = [];
+		searchTotalResults = 0;
+		hoveredItem = null;
+		if (options.clearKeyword) {
+			searchKeyword = '';
+		}
+	}
+
+	function clearFollowingsPanel() {
+		userFollowings = [];
+	}
+
+	function clearCollectionPanels() {
+		userCollections = [];
+		subscribedCollections = [];
+	}
+
+	function clearFavoritePanels() {
+		userFavorites = [];
+		clearSearchedUserFavoritesSelection();
+	}
+
 	// 收藏夹相关
 	let userFavorites: UserFavoriteFolder[] = [];
 	let loadingFavorites = false;
@@ -382,6 +406,15 @@
 			return;
 		}
 
+		clearFollowingsPanel();
+		if (sourceType === 'collection') {
+			clearCollectionPanels();
+		} else if (sourceType === 'favorite') {
+			clearFavoritePanels();
+		} else if (sourceType === 'submission') {
+			showSubmissionSelection = false;
+		}
+
 		// 根据参数或当前选择的视频源类型确定搜索类型
 		let searchType: 'video' | 'bili_user' | 'media_bangumi';
 		if (overrideSearchType) {
@@ -491,9 +524,12 @@
 
 	// 选择搜索结果
 	function selectSearchResult(result: SearchResultItem) {
+		clearFollowingsPanel();
+
 		switch (sourceType) {
 			case 'collection':
 				if (result.mid) {
+					clearCollectionPanels();
 					upId = result.mid.toString();
 					// 触发获取UP主合集列表
 					handleUpIdChange();
@@ -533,13 +569,7 @@
 		}
 
 		// 关闭搜索结果
-		showSearchResults = false;
-		searchResults = [];
-		searchKeyword = '';
-		searchTotalResults = 0;
-
-		// 清除悬停状态
-		hoveredItem = null;
+		clearSearchPanel({ clearKeyword: true });
 
 		if (sourceType !== 'collection') {
 			toast.success('已填充信息', { description: '请检查并完善其他必要信息' });
@@ -973,6 +1003,11 @@
 
 	// 获取收藏夹列表
 	async function fetchUserFavorites() {
+		clearSearchPanel();
+		clearFollowingsPanel();
+		clearCollectionPanels();
+		clearSearchedUserFavoritesSelection();
+
 		const result = await runRequest(() => api.getUserFavorites(), {
 			setLoading: (value) => (loadingFavorites = value),
 			context: '获取收藏夹失败'
@@ -1014,6 +1049,7 @@
 			title: favoriteName,
 			message: '收藏夹验证成功'
 		};
+		clearFavoritePanels();
 		toast.success('已选择收藏夹', { description: name });
 	}
 
@@ -1042,11 +1078,16 @@
 			title: favorite.title,
 			message: '收藏夹验证成功'
 		};
+		clearFavoritePanels();
 		toast.success('已选择收藏夹', { description: name });
 	}
 
 	// 选择UP主并获取其收藏夹
 	async function selectUserAndFetchFavorites(user: SearchResultItem) {
+		clearFollowingsPanel();
+		userFavorites = [];
+		clearCollectionPanels();
+
 		if (!user.mid) {
 			toast.error('获取收藏夹失败', { description: '未找到 UP 主 ID' });
 			return;
@@ -1057,10 +1098,7 @@
 		searchedUserFavorites = [];
 
 		// 关闭搜索结果
-		showSearchResults = false;
-		searchResults = [];
-		searchKeyword = '';
-		searchTotalResults = 0;
+		clearSearchPanel({ clearKeyword: true });
 
 		const result = await runRequest(() => api.getUserFavoritesByUid(selectedUserId), {
 			setLoading: (value) => (loadingSearchedUserFavorites = value),
@@ -1151,17 +1189,21 @@
 	function handleUpIdChange() {
 		if (upIdTimeout) clearTimeout(upIdTimeout);
 		if (upId.trim()) {
+			subscribedCollections = [];
 			upIdTimeout = setTimeout(() => {
 				fetchUserCollections();
 			}, 500);
 		} else {
-			userCollections = [];
+			clearCollectionPanels();
 		}
 	}
 
 	// 获取UP主合集列表
 	async function fetchUserCollections() {
 		if (!upId.trim()) return;
+		clearSearchPanel();
+		clearFollowingsPanel();
+		subscribedCollections = [];
 
 		const result = await runRequest(() => api.getUserCollections(upId), {
 			setLoading: (value) => (loadingCollections = value),
@@ -1225,6 +1267,9 @@
 		cover = collection.cover || '';
 		collectionType = collection.collection_type;
 		isManualInput = false; // 从列表选择，不是手动输入
+		clearSearchPanel();
+		clearFollowingsPanel();
+		clearCollectionPanels();
 		toast.success('已选择合集', {
 			description: `${collection.collection_type === 'season' ? '合集' : '系列'}：${collection.name}`
 		});
@@ -1603,6 +1648,8 @@
 
 	// 获取关注的UP主列表
 	async function fetchUserFollowings() {
+		clearSearchPanel();
+
 		const result = await runRequest(() => api.getUserFollowings(), {
 			setLoading: (value) => (loadingFollowings = value),
 			context: '获取关注UP主失败'
@@ -1621,6 +1668,8 @@
 
 	// 选择关注的UP主
 	function selectFollowing(following: UserFollowing) {
+		clearSearchPanel();
+
 		switch (sourceType) {
 			case 'collection':
 				upId = following.mid.toString();
@@ -1645,6 +1694,10 @@
 
 	// 获取关注的收藏夹列表
 	async function fetchSubscribedCollections() {
+		clearSearchPanel();
+		clearFollowingsPanel();
+		userCollections = [];
+
 		const result = await runRequest(() => api.getSubscribedCollections(), {
 			setLoading: (value) => (loadingSubscribedCollections = value),
 			context: '获取关注的合集失败'
@@ -1670,6 +1723,10 @@
 
 	// 选择订阅的合集或收藏夹
 	function selectSubscribedCollection(collection: UserCollectionInfo) {
+		clearSearchPanel();
+		clearFollowingsPanel();
+		userCollections = [];
+
 		// 根据 collection_type 决定添加为收藏夹还是合集
 		if (collection.collection_type === 'favorite') {
 			// 这是收藏夹，切换到收藏夹模式
@@ -1693,6 +1750,7 @@
 			collectionType = collection.collection_type;
 			toast.success('已选择合集', { description: collection.name });
 		}
+		subscribedCollections = [];
 	}
 
 	// 处理投稿选择确认
