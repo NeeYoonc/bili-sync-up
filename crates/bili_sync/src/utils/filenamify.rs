@@ -5,8 +5,75 @@ macro_rules! regex {
     }};
 }
 
+const MAX_FILENAME_BYTES: usize = 100;
+const UNIX_SEP_PLACEHOLDER: &str = "🔒UNIX_SEP_PROTECTED🔒";
+const WIN_SEP_PLACEHOLDER: &str = "🔒WIN_SEP_PROTECTED🔒";
+
 pub fn filenamify<S: AsRef<str>>(input: S) -> String {
     filenamify_with_options(input, false)
+}
+
+fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+
+    let mut end = 0;
+    for (idx, ch) in input.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+
+    input[..end].trim_matches(|c| c == ' ' || c == '_').to_string()
+}
+
+fn truncate_filename_segment(segment: &str) -> String {
+    let truncated = truncate_utf8_bytes(segment, MAX_FILENAME_BYTES);
+    if truncated.is_empty() {
+        "unnamed".to_string()
+    } else {
+        truncated
+    }
+}
+
+fn truncate_filename_segments(input: &str, preserve_template_separators: bool) -> String {
+    if !preserve_template_separators {
+        return truncate_filename_segment(input);
+    }
+
+    let mut result = String::new();
+    let mut remaining = input;
+    while !remaining.is_empty() {
+        let unix_idx = remaining.find(UNIX_SEP_PLACEHOLDER);
+        let win_idx = remaining.find(WIN_SEP_PLACEHOLDER);
+        let next_sep = match (unix_idx, win_idx) {
+            (Some(u), Some(w)) => Some((
+                u.min(w),
+                if u <= w {
+                    UNIX_SEP_PLACEHOLDER
+                } else {
+                    WIN_SEP_PLACEHOLDER
+                },
+            )),
+            (Some(u), None) => Some((u, UNIX_SEP_PLACEHOLDER)),
+            (None, Some(w)) => Some((w, WIN_SEP_PLACEHOLDER)),
+            (None, None) => None,
+        };
+
+        if let Some((idx, sep)) = next_sep {
+            result.push_str(&truncate_filename_segment(&remaining[..idx]));
+            result.push_str(sep);
+            remaining = &remaining[idx + sep.len()..];
+        } else {
+            result.push_str(&truncate_filename_segment(remaining));
+            break;
+        }
+    }
+
+    result
 }
 
 /// 带选项的文件名安全化函数
@@ -18,12 +85,9 @@ pub fn filenamify_with_options<S: AsRef<str>>(input: S, preserve_template_separa
     let mut input = input.as_ref().to_string();
 
     // 保护路径分隔符标记，避免被处理
-    let unix_sep_placeholder = "🔒UNIX_SEP_PROTECTED🔒";
-    let win_sep_placeholder = "🔒WIN_SEP_PROTECTED🔒";
-
     if preserve_template_separators {
-        input = input.replace("__UNIX_SEP__", unix_sep_placeholder);
-        input = input.replace("__WIN_SEP__", win_sep_placeholder);
+        input = input.replace("__UNIX_SEP__", UNIX_SEP_PLACEHOLDER);
+        input = input.replace("__WIN_SEP__", WIN_SEP_PLACEHOLDER);
     }
 
     // Windows不允许的字符：< > : " / \ | ? *
@@ -88,20 +152,13 @@ pub fn filenamify_with_options<S: AsRef<str>>(input: S, preserve_template_separa
         input = "unnamed".to_string();
     }
 
-    // 10. 限制文件名长度（Windows文件名最大255字符）
-    if input.len() > 200 {
-        input = input.chars().take(200).collect::<String>();
-        // 确保不在多字节字符中间截断
-        while !input.is_char_boundary(input.len()) {
-            input.pop();
-        }
-        input = input.trim_matches(|c| c == ' ' || c == '_').to_string();
-    }
+    // 10. 限制默认名称长度。按 UTF-8 字节截断，避免中文标题加 sidecar 后缀后超过文件系统限制。
+    input = truncate_filename_segments(&input, preserve_template_separators);
 
     // 11. 恢复路径分隔符占位符（仅在保护模式下）
     if preserve_template_separators {
-        input = input.replace(unix_sep_placeholder, "__UNIX_SEP__");
-        input = input.replace(win_sep_placeholder, "__WIN_SEP__");
+        input = input.replace(UNIX_SEP_PLACEHOLDER, "__UNIX_SEP__");
+        input = input.replace(WIN_SEP_PLACEHOLDER, "__WIN_SEP__");
     }
 
     input
@@ -203,5 +260,28 @@ mod tests {
             filenamify("【合集】『标题』〔测试〕〈特别篇〉"),
             "【合集】『标题』〔测试〕〈特别篇〉"
         );
+    }
+
+    #[test]
+    fn test_long_cjk_title_truncates_by_utf8_bytes() {
+        let title = "变天了，请注意盖被子，我帮你盖的时候要记得说“谢谢你，宝宝”而不是“我草，你是怎么进来的？！”这种不知感恩的话，不要问我为什么会在你家里，我会一直看着你的，永远";
+        let result = filenamify(title);
+
+        assert!(result.len() <= super::MAX_FILENAME_BYTES);
+        assert!(result.is_char_boundary(result.len()));
+        assert!(result.starts_with("变天了，请注意盖被子"));
+        assert!(result.len() < title.len());
+    }
+
+    #[test]
+    fn test_path_segments_truncate_independently() {
+        let long_title = "变天了，请注意盖被子，我帮你盖的时候要记得说“谢谢你，宝宝”而不是“我草，你是怎么进来的？！”这种不知感恩的话，不要问我为什么会在你家里，我会一直看着你的，永远";
+        let result = filenamify_with_options(&format!("UP主名__UNIX_SEP__{}", long_title), true);
+        let parts = result.split("__UNIX_SEP__").collect::<Vec<_>>();
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "UP主名");
+        assert!(parts[1].len() <= super::MAX_FILENAME_BYTES);
+        assert!(parts[1].is_char_boundary(parts[1].len()));
     }
 }
