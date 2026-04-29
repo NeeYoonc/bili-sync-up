@@ -847,33 +847,51 @@ pub async fn process_video_source(
         return Ok((new_video_count, new_videos));
     }
 
+    let has_unfilled_before_danmaku = !filter_unfilled_videos(video_source.filter_expr(), connection)
+        .await?
+        .is_empty();
+    let has_unhandled_before_danmaku = !filter_unhandled_video_pages(video_source.filter_expr(), connection)
+        .await?
+        .is_empty();
+    let has_failed_before_danmaku = !get_failed_videos_in_current_cycle(video_source.filter_expr(), connection)
+        .await?
+        .is_empty();
+    let source_has_pending_downloads =
+        new_video_count > 0 || has_unfilled_before_danmaku || has_unhandled_before_danmaku || has_failed_before_danmaku;
+    let mut scheduled_incremental_danmaku_count = 0;
+
     if video_source.download_danmaku() && !(video_source.audio_only() && video_source.audio_only_m4a_only()) {
-        if let Err(err) = crate::workflow_danmaku::schedule_incremental_danmaku_for_source(
-            connection,
-            video_source.filter_expr(),
-            &crate::config::reload_config(),
-        )
-        .await
-        {
-            warn!(
-                "{}「{}」准备弹幕增量状态失败，将继续执行常规下载流程: {:#}",
+        if source_has_pending_downloads {
+            info!(
+                "{}「{}」仍有待下载/修复任务，本轮跳过旧弹幕增量更新，待该源下载完毕后再按规则更新",
                 video_source.source_type_display(),
-                video_source.source_name_display(),
-                err
+                video_source.source_name_display()
             );
+        } else {
+            match crate::workflow_danmaku::schedule_incremental_danmaku_for_source(
+                connection,
+                video_source.filter_expr(),
+                &crate::config::reload_config(),
+            )
+            .await
+            {
+                Ok(count) => scheduled_incremental_danmaku_count = count,
+                Err(err) => {
+                    warn!(
+                        "{}「{}」准备弹幕增量状态失败，将继续执行常规下载流程: {:#}",
+                        video_source.source_type_display(),
+                        video_source.source_name_display(),
+                        err
+                    );
+                }
+            }
         }
     }
 
     if new_video_count == 0 {
-        let has_unfilled = !filter_unfilled_videos(video_source.filter_expr(), connection)
-            .await?
-            .is_empty();
-        let has_unhandled = !filter_unhandled_video_pages(video_source.filter_expr(), connection)
-            .await?
-            .is_empty();
-        let has_failed = !get_failed_videos_in_current_cycle(video_source.filter_expr(), connection)
-            .await?
-            .is_empty();
+        let has_unfilled = has_unfilled_before_danmaku;
+        let has_unhandled = has_unhandled_before_danmaku || scheduled_incremental_danmaku_count > 0;
+        let has_failed = has_failed_before_danmaku;
         if !(has_unfilled || has_unhandled || has_failed) {
             info!("本轮未发现新视频，且无待处理任务，跳过详情与下载阶段");
             return Ok((new_video_count, new_videos));
