@@ -1,9 +1,12 @@
 use core::str;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use futures::TryStreamExt;
-use reqwest::{header, Method, StatusCode};
+use reqwest::{header, Method, StatusCode, Url};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
@@ -12,6 +15,69 @@ use tracing::{debug, error, info, warn};
 use crate::bilibili::Client;
 pub struct Downloader {
     client: Client,
+}
+
+const BAD_CDN_HOST_TTL: Duration = Duration::from_secs(10 * 60);
+
+static BAD_CDN_HOSTS: LazyLock<Mutex<HashMap<String, Instant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn url_host(url: &str) -> Option<String> {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+}
+
+fn prune_expired_bad_cdn_hosts(cache: &mut HashMap<String, Instant>) {
+    let now = Instant::now();
+    cache.retain(|_, marked_at| now.duration_since(*marked_at) <= BAD_CDN_HOST_TTL);
+}
+
+pub(crate) fn is_url_blocked_by_bad_cdn_host(url: &str) -> bool {
+    let Some(host) = url_host(url) else {
+        return false;
+    };
+
+    let mut cache = BAD_CDN_HOSTS.lock().unwrap_or_else(|e| e.into_inner());
+    prune_expired_bad_cdn_hosts(&mut cache);
+    cache.contains_key(&host)
+}
+
+fn mark_bad_cdn_host(url: &str, err: &anyhow::Error) {
+    let Some(host) = url_host(url) else {
+        return;
+    };
+
+    let mut cache = BAD_CDN_HOSTS.lock().unwrap_or_else(|e| e.into_inner());
+    prune_expired_bad_cdn_hosts(&mut cache);
+    let is_new = cache.insert(host.clone(), Instant::now()).is_none();
+    if is_new {
+        warn!(
+            "检测到 CDN 证书域名不匹配，{} 分钟内跳过该 host: {}，错误: {:#}",
+            BAD_CDN_HOST_TTL.as_secs() / 60,
+            host,
+            err
+        );
+    } else {
+        debug!("刷新坏 CDN host 缓存: {}", host);
+    }
+}
+
+fn contains_certificate_name_mismatch(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    (message.contains("invalid peer certificate") && message.contains("certificate not valid for name"))
+        || message.contains("remotecertificatenamemismatch")
+        || message.contains("sec_e_wrong_principal")
+}
+
+pub(crate) fn is_certificate_name_mismatch_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| contains_certificate_name_mismatch(&cause.to_string()))
+        || contains_certificate_name_mismatch(&format!("{:#}", err))
+}
+
+pub(crate) fn should_refresh_playurl_after_download_error(err: &anyhow::Error) -> bool {
+    let message = format!("{:#}", err);
+    message.contains("所有URL尝试失败") || message.contains("failed to download from")
 }
 
 fn media_tool_executable_name(tool: &str) -> String {
@@ -96,6 +162,7 @@ impl Downloader {
         if parallel.enabled && parallel.threads > 1 {
             match self.fetch_parallel(url, path, parallel.threads).await {
                 Ok(()) => return Ok(()),
+                Err(e) if is_certificate_name_mismatch_error(&e) => return Err(e),
                 Err(e) => {
                     debug!("原生多线程下载不可用，回退到单线程下载: {:#}", e);
                 }
@@ -292,21 +359,32 @@ impl Downloader {
 
         let mut last_error = None;
         for url in urls.iter() {
+            if is_url_blocked_by_bad_cdn_host(url) {
+                debug!("跳过短期内已判定证书异常的 CDN URL: {}", url);
+                continue;
+            }
+
             match self.fetch(url, path).await {
                 Ok(_) => {
                     return Ok(());
                 }
                 Err(err) => {
+                    if is_certificate_name_mismatch_error(&err) {
+                        mark_bad_cdn_host(url, &err);
+                    }
                     warn!("下载失败: {:#}", err);
                     last_error = Some(err);
                 }
             }
         }
 
-        error!("所有URL尝试失败");
+        warn!("所有URL尝试失败");
         match last_error {
-            Some(err) => Err(err).with_context(|| format!("failed to download from {:?}", urls)),
-            None => bail!("no urls to try"),
+            Some(err) => Err(err)
+                .context("所有URL尝试失败")
+                .with_context(|| format!("failed to download from {:?}", urls)),
+            None => Err(anyhow!("所有URL尝试失败：候选URL已被短期坏CDN缓存跳过"))
+                .with_context(|| format!("failed to download from {:?}", urls)),
         }
     }
 
@@ -525,4 +603,41 @@ pub async fn remux_with_ffmpeg(input_path: &Path, output_path: &Path) -> Result<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_certificate_name_mismatch_error_text() {
+        let err = anyhow!(
+            "error sending request: client error (Connect): invalid peer certificate: certificate not valid for name \"upos-sz-mirror14b.bilivideo.com\""
+        );
+
+        assert!(is_certificate_name_mismatch_error(&err));
+    }
+
+    #[test]
+    fn marks_same_host_as_temporarily_blocked() {
+        BAD_CDN_HOSTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+
+        let err =
+            anyhow!("invalid peer certificate: certificate not valid for name \"upos-sz-mirror14b.bilivideo.com\"");
+        mark_bad_cdn_host("https://upos-sz-mirror14b.bilivideo.com/video.m4s", &err);
+
+        assert!(is_url_blocked_by_bad_cdn_host(
+            "https://upos-sz-mirror14b.bilivideo.com/audio.m4s"
+        ));
+        assert!(!is_url_blocked_by_bad_cdn_host(
+            "https://upos-sz-mirror08c.bilivideo.com/audio.m4s"
+        ));
+    }
+
+    #[test]
+    fn detects_download_error_that_should_refresh_playurl() {
+        let err = anyhow!("failed to download from [\"https://cdn.example/video.m4s\"]: 所有URL尝试失败");
+
+        assert!(should_refresh_playurl_after_download_error(&err));
+    }
 }

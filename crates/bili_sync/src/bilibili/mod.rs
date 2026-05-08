@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-pub use analyzer::{AudioQuality, BestStream, FilterOption, Stream, VideoCodecs, VideoQuality};
+pub use analyzer::{AudioQuality, BestStream, FilterOption, PageAnalyzer, Stream, VideoCodecs, VideoQuality};
 use anyhow::{bail, ensure, Result};
 use arc_swap::ArcSwapOption;
 pub use captcha_server::{get_captcha_info, serve_captcha_page, submit_captcha_result};

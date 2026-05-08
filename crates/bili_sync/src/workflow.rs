@@ -296,7 +296,8 @@ async fn persist_submission_membership_state_to_video(
 
 use crate::adapter::{video_source_from, Args, VideoSource, VideoSourceEnum};
 use crate::bilibili::{
-    BestStream, BiliClient, BiliError, Dimension, PageInfo, Stream as VideoStream, Video, VideoInfo,
+    BestStream, BiliClient, BiliError, Dimension, FilterOption, PageAnalyzer, PageInfo, Stream as VideoStream, Video,
+    VideoInfo,
 };
 use crate::config::ARGS;
 use crate::error::{DownloadAbortError, ExecutionStatus, ProcessPageError};
@@ -6931,6 +6932,9 @@ async fn download_stream(downloader: &UnifiedDownloader, video_id: i32, urls: &[
                     crate::error::ErrorType::UserCancelled => {
                         info!("下载因用户暂停而终止: {:#}", e);
                     }
+                    _ if crate::downloader::should_refresh_playurl_after_download_error(&e) => {
+                        debug!("下载失败，交由上层刷新播放地址后重试: {:#}", e);
+                    }
                     _ => {
                         error!("下载失败: {:#}", e);
                     }
@@ -7245,125 +7249,17 @@ fn to_db_file_size(size: u64) -> i64 {
     i64::try_from(size).unwrap_or(i64::MAX)
 }
 
-async fn fetch_page_video(
-    should_run: bool,
-    bili_client: &BiliClient,
-    video_model: &video::Model,
+async fn download_page_video_from_streams(
+    streams: &mut PageAnalyzer,
     connection: &DatabaseConnection,
     page_id: i32,
     downloader: &UnifiedDownloader,
-    page_info: &PageInfo,
+    video_model: &video::Model,
+    page_info_for_download: &PageInfo,
     page_path: &Path,
     audio_only: bool,
-    token: CancellationToken,
+    filter_option: &FilterOption,
 ) -> Result<PageVideoFetchResult> {
-    if !should_run {
-        return Ok(PageVideoFetchResult {
-            status: ExecutionStatus::Skipped,
-            file_size_bytes: None,
-            video_stream_size_bytes: None,
-            audio_stream_size_bytes: None,
-        });
-    }
-
-    if is_charge_video_locked(video_model) {
-        create_charge_video_placeholder(page_path, video_model, page_info).await?;
-        let placeholder_size = tokio::fs::metadata(page_path)
-            .await
-            .map(|metadata| to_db_file_size(metadata.len()))
-            .ok();
-        return Ok(PageVideoFetchResult {
-            status: ExecutionStatus::Succeeded,
-            file_size_bytes: placeholder_size,
-            video_stream_size_bytes: None,
-            audio_stream_size_bytes: placeholder_size,
-        });
-    }
-
-    let bili_video = Video::new(bili_client, video_model.bvid.clone());
-    let mut page_info_for_download = page_info.clone();
-    let mut retried_after_refresh = false;
-
-    // 获取用户配置的筛选选项（用于按画质范围请求播放地址，避免拿到高画质单流后被过滤导致无视频流）
-    let config = crate::config::reload_config();
-    let filter_option = &config.filter_option;
-    let max_qn = filter_option.video_max_quality as u32;
-    let min_qn = filter_option.video_min_quality as u32;
-
-    // 获取视频流信息 - 使用带API降级机制的调用
-    let mut streams = loop {
-        let result = tokio::select! {
-            biased;
-            _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
-            res = async {
-                // 检查是否为番剧视频
-                if video_model.source_type == Some(1) && video_model.ep_id.is_some() {
-                    // 番剧视频使用番剧专用API的回退机制
-                    let ep_id = video_model.ep_id.as_ref().unwrap();
-                    debug!("使用带质量回退的番剧API获取播放地址: ep_id={}", ep_id);
-                    bili_video
-                        .get_bangumi_page_analyzer_with_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)
-                        .await
-                } else {
-                    // 普通视频使用API降级机制（普通视频API -> 番剧API）
-                    debug!("使用API降级机制获取播放地址（普通视频API -> 番剧API）");
-                    // 传递ep_id以便在需要时降级到番剧API，如果没有ep_id则会自动从视频详情API获取
-                    let ep_id = video_model.ep_id.as_deref();
-                    if ep_id.is_some() {
-                        debug!("视频已有ep_id: {:?}，可直接用于API降级", ep_id);
-                    } else {
-                        debug!("视频缺少ep_id，如遇-404错误将尝试从视频详情API获取epid");
-                    }
-                    bili_video
-                        .get_page_analyzer_with_api_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)
-                        .await
-                }
-            } => res
-        };
-
-        match result {
-            Ok(streams) => break streams,
-            Err(e) if !retried_after_refresh && is_page_stream_not_found_error(&e) => {
-                if let Some(refreshed_page_info) = refresh_page_info_from_view(
-                    bili_client,
-                    video_model,
-                    page_id,
-                    &page_info_for_download,
-                    connection,
-                    token.clone(),
-                )
-                .await?
-                {
-                    retried_after_refresh = true;
-                    page_info_for_download = refreshed_page_info;
-                    continue;
-                }
-                return Err(e);
-            }
-            Err(e) => {
-                if is_charge_permission_error(&e) {
-                    info!(
-                        "检测到充电专享视频播放权限限制，改为创建占位文件: 视频「{}」第{}页 {}",
-                        &video_model.name, page_info_for_download.page, &page_info_for_download.name
-                    );
-                    persist_charge_video_state(connection, video_model.id, true, false).await;
-                    create_charge_video_placeholder(page_path, video_model, &page_info_for_download).await?;
-                    let placeholder_size = tokio::fs::metadata(page_path)
-                        .await
-                        .map(|metadata| to_db_file_size(metadata.len()))
-                        .ok();
-                    return Ok(PageVideoFetchResult {
-                        status: ExecutionStatus::Succeeded,
-                        file_size_bytes: placeholder_size,
-                        video_stream_size_bytes: None,
-                        audio_stream_size_bytes: placeholder_size,
-                    });
-                }
-                return Err(e);
-            }
-        }
-    };
-
     // 按需创建保存目录（只在实际下载时创建）
     ensure_parent_dir_for_file(page_path).await?;
 
@@ -7401,6 +7297,7 @@ async fn fetch_page_video(
     debug!("编码偏好: {:?}", filter_option.codecs);
 
     // 会员状态检查
+    let config = crate::config::reload_config();
     let credential = config.credential.load();
     match credential.as_deref() {
         Some(cred) => {
@@ -7569,6 +7466,9 @@ async fn fetch_page_video(
                             crate::error::ErrorType::UserCancelled => {
                                 info!("视频流下载因用户暂停而终止");
                             }
+                            _ if crate::downloader::should_refresh_playurl_after_download_error(&e) => {
+                                debug!("视频流下载失败，交由上层刷新播放地址后重试: {:#}", e);
+                            }
                             _ => {
                                 error!("视频流下载失败: {:#}", e);
                             }
@@ -7585,6 +7485,9 @@ async fn fetch_page_video(
                         match classified_error.error_type {
                             crate::error::ErrorType::UserCancelled => {
                                 info!("音频流下载因用户暂停而终止");
+                            }
+                            _ if crate::downloader::should_refresh_playurl_after_download_error(&e) => {
+                                debug!("音频流下载失败，交由上层刷新播放地址后重试: {:#}", e);
                             }
                             _ => {
                                 error!("音频流下载失败: {:#}", e);
@@ -7680,6 +7583,159 @@ async fn fetch_page_video(
         video_stream_size_bytes,
         audio_stream_size_bytes,
     })
+}
+
+async fn fetch_page_video(
+    should_run: bool,
+    bili_client: &BiliClient,
+    video_model: &video::Model,
+    connection: &DatabaseConnection,
+    page_id: i32,
+    downloader: &UnifiedDownloader,
+    page_info: &PageInfo,
+    page_path: &Path,
+    audio_only: bool,
+    token: CancellationToken,
+) -> Result<PageVideoFetchResult> {
+    if !should_run {
+        return Ok(PageVideoFetchResult {
+            status: ExecutionStatus::Skipped,
+            file_size_bytes: None,
+            video_stream_size_bytes: None,
+            audio_stream_size_bytes: None,
+        });
+    }
+
+    if is_charge_video_locked(video_model) {
+        create_charge_video_placeholder(page_path, video_model, page_info).await?;
+        let placeholder_size = tokio::fs::metadata(page_path)
+            .await
+            .map(|metadata| to_db_file_size(metadata.len()))
+            .ok();
+        return Ok(PageVideoFetchResult {
+            status: ExecutionStatus::Succeeded,
+            file_size_bytes: placeholder_size,
+            video_stream_size_bytes: None,
+            audio_stream_size_bytes: placeholder_size,
+        });
+    }
+
+    let bili_video = Video::new(bili_client, video_model.bvid.clone());
+    let mut page_info_for_download = page_info.clone();
+    let mut retried_after_refresh = false;
+
+    // 获取用户配置的筛选选项（用于按画质范围请求播放地址，避免拿到高画质单流后被过滤导致无视频流）
+    let config = crate::config::reload_config();
+    let filter_option = &config.filter_option;
+    let max_qn = filter_option.video_max_quality as u32;
+    let min_qn = filter_option.video_min_quality as u32;
+
+    let mut retried_after_playurl_refresh = false;
+
+    loop {
+        // 获取视频流信息 - 使用带API降级机制的调用
+        let mut streams = loop {
+            let result = tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
+                res = async {
+                    // 检查是否为番剧视频
+                    if video_model.source_type == Some(1) && video_model.ep_id.is_some() {
+                        // 番剧视频使用番剧专用API的回退机制
+                        let ep_id = video_model.ep_id.as_ref().unwrap();
+                        debug!("使用带质量回退的番剧API获取播放地址: ep_id={}", ep_id);
+                        bili_video
+                            .get_bangumi_page_analyzer_with_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)
+                            .await
+                    } else {
+                        // 普通视频使用API降级机制（普通视频API -> 番剧API）
+                        debug!("使用API降级机制获取播放地址（普通视频API -> 番剧API）");
+                        // 传递ep_id以便在需要时降级到番剧API，如果没有ep_id则会自动从视频详情API获取
+                        let ep_id = video_model.ep_id.as_deref();
+                        if ep_id.is_some() {
+                            debug!("视频已有ep_id: {:?}，可直接用于API降级", ep_id);
+                        } else {
+                            debug!("视频缺少ep_id，如遇-404错误将尝试从视频详情API获取epid");
+                        }
+                        bili_video
+                            .get_page_analyzer_with_api_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)
+                            .await
+                    }
+                } => res
+            };
+
+            match result {
+                Ok(streams) => break streams,
+                Err(e) if !retried_after_refresh && is_page_stream_not_found_error(&e) => {
+                    if let Some(refreshed_page_info) = refresh_page_info_from_view(
+                        bili_client,
+                        video_model,
+                        page_id,
+                        &page_info_for_download,
+                        connection,
+                        token.clone(),
+                    )
+                    .await?
+                    {
+                        retried_after_refresh = true;
+                        page_info_for_download = refreshed_page_info;
+                        continue;
+                    }
+                    return Err(e);
+                }
+                Err(e) => {
+                    if is_charge_permission_error(&e) {
+                        info!(
+                            "检测到充电专享视频播放权限限制，改为创建占位文件: 视频「{}」第{}页 {}",
+                            &video_model.name, page_info_for_download.page, &page_info_for_download.name
+                        );
+                        persist_charge_video_state(connection, video_model.id, true, false).await;
+                        create_charge_video_placeholder(page_path, video_model, &page_info_for_download).await?;
+                        let placeholder_size = tokio::fs::metadata(page_path)
+                            .await
+                            .map(|metadata| to_db_file_size(metadata.len()))
+                            .ok();
+                        return Ok(PageVideoFetchResult {
+                            status: ExecutionStatus::Succeeded,
+                            file_size_bytes: placeholder_size,
+                            video_stream_size_bytes: None,
+                            audio_stream_size_bytes: placeholder_size,
+                        });
+                    }
+                    return Err(e);
+                }
+            }
+        };
+
+        let download_result = download_page_video_from_streams(
+            &mut streams,
+            connection,
+            page_id,
+            downloader,
+            video_model,
+            &page_info_for_download,
+            page_path,
+            audio_only,
+            filter_option,
+        )
+        .await;
+
+        match download_result {
+            Ok(result) => return Ok(result),
+            Err(e)
+                if !retried_after_playurl_refresh
+                    && crate::downloader::should_refresh_playurl_after_download_error(&e) =>
+            {
+                warn!(
+                    "播放地址全部下载失败，重新获取一次播放地址后重试: 视频「{}」第{}页 {}，错误: {:#}",
+                    &video_model.name, page_info_for_download.page, &page_info_for_download.name, e
+                );
+                retried_after_playurl_refresh = true;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub struct PageDanmakuFetchResult {
