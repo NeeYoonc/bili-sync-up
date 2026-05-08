@@ -54,6 +54,47 @@ fn format_wbi_fetch_failure_message(err: &anyhow::Error) -> String {
     }
 }
 
+fn is_wbi_login_expired_error(err: &anyhow::Error) -> bool {
+    let error_msg = format!("{:#}", err);
+    error_msg.contains("status code: -101") || error_msg.contains("账号未登录")
+}
+
+fn is_wbi_fetch_retryable_error(err: &anyhow::Error) -> bool {
+    if is_wbi_login_expired_error(err) {
+        return false;
+    }
+
+    matches!(
+        crate::error::ErrorClassifier::classify_error(err).error_type,
+        crate::error::ErrorType::Network | crate::error::ErrorType::Timeout | crate::error::ErrorType::ServerError
+    )
+}
+
+async fn fetch_wbi_mixin_key_with_retry(bili_client: &BiliClient) -> Result<Option<String>> {
+    const MAX_ATTEMPTS: usize = 3;
+    const RETRY_DELAYS_SECONDS: [u64; MAX_ATTEMPTS - 1] = [2, 5];
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match bili_client.wbi_img().await.map(|wbi_img| wbi_img.into()) {
+            Ok(mixin_key) => return Ok(mixin_key),
+            Err(err) if attempt < MAX_ATTEMPTS && is_wbi_fetch_retryable_error(&err) => {
+                let delay_secs = RETRY_DELAYS_SECONDS[attempt - 1];
+                warn!(
+                    "获取B站签名信息失败，{} 秒后进行第 {}/{} 次重试: {:#}",
+                    delay_secs,
+                    attempt + 1,
+                    MAX_ATTEMPTS,
+                    err
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    unreachable!("WBI retry loop should return from success or final error")
+}
+
 fn calc_submission_next_delay_secs(base_interval_secs: u64, streak: i32, max_hours: u64) -> u64 {
     let multipliers: [u64; 5] = [1, 3, 9, 36, 72];
     let idx = (streak.max(0) as usize).min(multipliers.len() - 1);
@@ -674,7 +715,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             // 标记任务状态为运行中
             crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_running();
 
-            match bili_client.wbi_img().await.map(|wbi_img| wbi_img.into()) {
+            match fetch_wbi_mixin_key_with_retry(&bili_client).await {
                 Ok(Some(mixin_key)) => bilibili::set_global_mixin_key(mixin_key),
                 Ok(_) => {
                     error!("获取B站签名信息失败：未能解析签名参数，等待下一轮执行");
@@ -684,13 +725,10 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                     break 'inner;
                 }
                 Err(e) => {
-                    let error_msg = format!("{:#}", e);
-                    let is_login_expired = error_msg.contains("status code: -101") || error_msg.contains("账号未登录");
-
-                    if is_login_expired {
+                    if is_wbi_login_expired_error(&e) {
                         warn!("检测到登录状态过期或未登录，尝试自动续登并重试...");
                         match bili_client.check_refresh().await {
-                            Ok(()) => match bili_client.wbi_img().await.map(|wbi_img| wbi_img.into()) {
+                            Ok(()) => match fetch_wbi_mixin_key_with_retry(&bili_client).await {
                                 Ok(Some(mixin_key)) => {
                                     info!("自动续登成功，已恢复登录状态");
                                     bilibili::set_global_mixin_key(mixin_key);
