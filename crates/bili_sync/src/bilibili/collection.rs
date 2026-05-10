@@ -7,10 +7,13 @@ use futures::Stream;
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::bilibili::credential::encoded_query;
 use crate::bilibili::{BiliClient, Validate, VideoInfo, MIXIN_KEY};
+
+const COLLECTION_PAGE_MAX_ATTEMPTS: usize = 3;
+const COLLECTION_PAGE_RETRY_DELAYS_SECONDS: [u64; COLLECTION_PAGE_MAX_ATTEMPTS - 1] = [2, 5];
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum CollectionType {
@@ -146,6 +149,7 @@ impl<'a> Collection<'a> {
     }
 
     async fn get_videos(&self, page: i32) -> Result<Value> {
+        let page_number = page;
         let page = page.to_string();
         let (url, query) = match self.collection.collection_type {
             CollectionType::Series => (
@@ -175,16 +179,44 @@ impl<'a> Collection<'a> {
                 ),
             ),
         };
+        self.get_videos_with_retry(page_number, url, owned_query(query)).await
+    }
+
+    async fn request_videos_once(&self, url: &str, query: &[(String, String)]) -> Result<Value> {
         self.client
             .request(Method::GET, url)
             .await
-            .query(&query)
+            .query(query)
             .send()
             .await?
             .error_for_status()?
             .json::<Value>()
             .await?
             .validate()
+    }
+
+    async fn get_videos_with_retry(&self, page: i32, url: &str, query: Vec<(String, String)>) -> Result<Value> {
+        for attempt in 1..=COLLECTION_PAGE_MAX_ATTEMPTS {
+            match self.request_videos_once(url, &query).await {
+                Ok(videos) => return Ok(videos),
+                Err(err) if attempt < COLLECTION_PAGE_MAX_ATTEMPTS && is_collection_page_retryable_error(&err) => {
+                    let delay_secs = COLLECTION_PAGE_RETRY_DELAYS_SECONDS[attempt - 1];
+                    warn!(
+                        "获取合集 {:?} 第 {} 页失败，{} 秒后进行第 {}/{} 次重试: {:#}",
+                        self.collection,
+                        page,
+                        delay_secs,
+                        attempt + 1,
+                        COLLECTION_PAGE_MAX_ATTEMPTS,
+                        err
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        unreachable!("collection page retry loop should return from success or final error")
     }
 
     pub fn into_video_stream(self) -> impl Stream<Item = Result<VideoInfo>> + 'a {
@@ -326,17 +358,7 @@ impl<'a> Collection<'a> {
                 ),
             };
 
-            let videos = self
-                .client
-                .request(Method::GET, url)
-                .await
-                .query(&query)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Value>()
-                .await?
-                .validate()?;
+            let videos = self.get_videos_with_retry(page, url, owned_query(query)).await?;
 
             let archives = &videos["data"]["archives"];
             if let Some(arr) = archives.as_array() {
@@ -379,6 +401,17 @@ fn should_reverse_season_order(entries: &[(String, i64)]) -> bool {
         (Some((_, first_pubdate)), Some((_, last_pubdate))) => first_pubdate > last_pubdate,
         _ => false,
     }
+}
+
+fn owned_query(query: Vec<(&str, std::borrow::Cow<'_, str>)>) -> Vec<(String, String)> {
+    query
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.into_owned()))
+        .collect()
+}
+
+fn is_collection_page_retryable_error(err: &anyhow::Error) -> bool {
+    crate::error::ErrorClassifier::classify_error(err).should_retry
 }
 
 #[cfg(test)]
@@ -496,5 +529,22 @@ mod tests {
             CollectionEpisodeOrderStrategy::from(99),
             CollectionEpisodeOrderStrategy::Legacy
         );
+    }
+
+    #[test]
+    fn test_collection_page_timeout_error_is_retryable() {
+        let err = anyhow!(crate::bilibili::BiliError::RequestFailed(
+            -504,
+            "服务调用超时".to_string()
+        ));
+
+        assert!(is_collection_page_retryable_error(&err));
+    }
+
+    #[test]
+    fn test_collection_page_not_found_error_is_not_retryable() {
+        let err = anyhow!(crate::bilibili::BiliError::RequestFailed(-404, "啥都木有".to_string()));
+
+        assert!(!is_collection_page_retryable_error(&err));
     }
 }

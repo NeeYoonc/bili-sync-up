@@ -314,7 +314,7 @@ impl ErrorClassifier {
                     -401 | -403 => ErrorType::Authentication,
                     -404 => ErrorType::NotFound,
                     -429 => ErrorType::RateLimit,
-                    -500..=-400 => ErrorType::ServerError,
+                    -599..=-500 => ErrorType::ServerError,
                     // 充电专享视频错误现在通过upower字段在获取详情时处理，不需要特殊分类
                     _ => ErrorType::ClientError,
                 };
@@ -322,7 +322,7 @@ impl ErrorClassifier {
                 let should_retry = match *code {
                     -352 | -412 => false,     // 风控不重试
                     -404 => false,            // 404错误不重试
-                    -500..=-400 | -1 => true, // 服务器错误或网络错误可重试
+                    -599..=-500 | -1 => true, // 服务器错误或网络错误可重试
                     _ => false,               // 其他错误不重试
                 };
 
