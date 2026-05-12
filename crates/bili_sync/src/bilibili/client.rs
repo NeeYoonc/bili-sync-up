@@ -306,33 +306,22 @@ impl BiliClient {
         let new_credential = credential.refresh(&self.client).await?;
         config.credential.store(Some(Arc::new(new_credential.clone())));
 
-        // 将刷新后的credential通过任务队列保存到数据库
-        if let Err(e) = self.enqueue_credential_save_task(new_credential).await {
-            warn!("将credential刷新任务加入队列失败: {}", e);
-        } else {
-            info!("credential已刷新，保存任务已加入队列");
-        }
+        self.persist_refreshed_credential(&config).await?;
+        info!("credential已刷新并保存到数据库");
 
         Ok(())
     }
 
-    /// 将credential刷新任务加入配置任务队列
-    async fn enqueue_credential_save_task(&self, new_credential: crate::bilibili::Credential) -> Result<()> {
-        use uuid::Uuid;
-
-        // 更新内存中的配置
-        let updated_config = crate::config::reload_config();
-        updated_config.credential.store(Some(Arc::new(new_credential)));
-
-        // 创建重载配置任务，让任务队列处理数据库保存
-        let reload_task = crate::task::ReloadConfigTask {
-            task_id: Uuid::new_v4().to_string(),
-        };
-
-        // 将任务加入队列
-        let db = Arc::new(crate::database::setup_database().await);
-        crate::task::enqueue_reload_task(reload_task, &db).await?;
-
+    async fn persist_refreshed_credential(&self, config: &crate::config::Config) -> Result<()> {
+        let manager = crate::config::get_config_manager().context("配置管理器未初始化，无法保存刷新后的 credential")?;
+        let credential_json = serde_json::to_value(&config.credential).context("序列化刷新后的 credential 失败")?;
+        manager
+            .update_config_item("credential", credential_json)
+            .await
+            .context("保存刷新后的 credential 到数据库失败")?;
+        crate::config::reload_config_bundle()
+            .await
+            .context("刷新 credential 后重新加载配置失败")?;
         Ok(())
     }
 

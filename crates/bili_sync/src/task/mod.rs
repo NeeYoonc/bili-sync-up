@@ -2,7 +2,7 @@ mod http_server;
 pub mod video_downloader;
 
 pub use http_server::http_server;
-pub use video_downloader::video_downloader;
+pub use video_downloader::{credential_refresh_scheduler, video_downloader};
 
 use crate::utils::live_updates::{notify_queue_status_changed, notify_videos_changed};
 use crate::utils::time_format::now_standard_string;

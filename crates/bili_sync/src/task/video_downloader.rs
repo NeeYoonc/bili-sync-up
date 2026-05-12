@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use anyhow::Result;
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Duration, Local, NaiveDate, NaiveDateTime, NaiveTime};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
 use tracing::{debug, error, info, warn};
 
@@ -22,6 +23,12 @@ use crate::utils::scan_id_tracker::{
 use crate::utils::time_format::{now_naive, now_standard_string, parse_time_string, STANDARD_TIME_FORMAT};
 use crate::workflow::process_video_source;
 use bili_sync_entity::entities;
+
+const VIDEO_DOWNLOADER_LOG_TARGET: &str = "bili_sync::task::video_downloader";
+const DAILY_CREDENTIAL_REFRESH_HOUR: u32 = 1;
+const LOGIN_EXPIRED_NOTIFICATION_TITLE: &str = "B站登录状态异常";
+const LOGIN_EXPIRED_NOTIFICATION_MESSAGE: &str =
+    "检测到B站登录状态过期或未登录，自动刷新 Cookie 失败；请重新扫码登录或更新整套认证信息（SESSDATA、bili_jct、DedeUserID、ac_time_value）";
 
 fn is_submission_lookup_retryable_error(err: &anyhow::Error) -> bool {
     matches!(
@@ -56,7 +63,9 @@ fn format_wbi_fetch_failure_message(err: &anyhow::Error) -> String {
 
 fn is_wbi_login_expired_error(err: &anyhow::Error) -> bool {
     let error_msg = format!("{:#}", err);
-    error_msg.contains("status code: -101") || error_msg.contains("账号未登录")
+    error_msg.contains("status code: -101")
+        || error_msg.contains("账号未登录")
+        || error_msg.contains("no credential found")
 }
 
 fn is_wbi_fetch_retryable_error(err: &anyhow::Error) -> bool {
@@ -192,6 +201,59 @@ fn is_watch_later_empty_error(err: &anyhow::Error) -> bool {
 async fn send_source_status_notification(title: &str, message: &str, context: Option<&str>) {
     if let Err(notify_err) = crate::utils::notification::send_error_notification(title, message, context).await {
         warn!("发送通知失败: {}", notify_err);
+    }
+}
+
+fn add_video_downloader_log_entry(level: crate::api::handler::LogLevel, message: &str) {
+    crate::api::handler::add_log_entry(
+        level,
+        message.to_string(),
+        Some(VIDEO_DOWNLOADER_LOG_TARGET.to_string()),
+    );
+}
+
+async fn record_login_expired_warning(message: &str, context: Option<&str>) {
+    add_video_downloader_log_entry(crate::api::handler::LogLevel::Warn, message);
+    send_source_status_notification(LOGIN_EXPIRED_NOTIFICATION_TITLE, message, context).await;
+}
+
+fn next_daily_credential_refresh_after(now: NaiveDateTime) -> NaiveDateTime {
+    let refresh_time = NaiveTime::from_hms_opt(DAILY_CREDENTIAL_REFRESH_HOUR, 0, 0).unwrap();
+    let today_refresh = NaiveDateTime::new(now.date(), refresh_time);
+    if now < today_refresh {
+        today_refresh
+    } else {
+        today_refresh + Duration::days(1)
+    }
+}
+
+fn next_daily_credential_refresh_wait() -> (NaiveDateTime, StdDuration) {
+    let now = Local::now().naive_local();
+    let next_run = next_daily_credential_refresh_after(now);
+    let wait = (next_run - now).to_std().unwrap_or_else(|_| StdDuration::from_secs(0));
+    (next_run, wait)
+}
+
+pub async fn credential_refresh_scheduler() {
+    let bili_client = BiliClient::new(String::new());
+
+    loop {
+        let (next_run, wait) = next_daily_credential_refresh_wait();
+        info!(
+            "B站凭据自动刷新任务已启动，下次检查时间: {}",
+            next_run.format(STANDARD_TIME_FORMAT)
+        );
+        tokio::time::sleep(wait).await;
+
+        info!("开始执行每日B站凭据检查与自动刷新任务");
+        match bili_client.check_refresh().await {
+            Ok(()) => info!("每日B站凭据检查与自动刷新任务执行完毕"),
+            Err(err) => {
+                warn!("每日B站凭据检查与自动刷新任务失败: {:#}", err);
+                let context = format!("每日自动刷新失败: {:#}", err);
+                record_login_expired_warning(LOGIN_EXPIRED_NOTIFICATION_MESSAGE, Some(context.as_str())).await;
+            }
+        }
     }
 }
 
@@ -726,44 +788,48 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                 }
                 Err(e) => {
                     if is_wbi_login_expired_error(&e) {
-                        warn!("检测到登录状态过期或未登录，尝试自动续登并重试...");
+                        warn!("检测到登录状态过期或未登录，尝试自动刷新 Cookie 并重试...");
                         match bili_client.check_refresh().await {
                             Ok(()) => match fetch_wbi_mixin_key_with_retry(&bili_client).await {
                                 Ok(Some(mixin_key)) => {
-                                    info!("自动续登成功，已恢复登录状态");
+                                    info!("自动刷新 Cookie 成功，已恢复登录状态");
                                     bilibili::set_global_mixin_key(mixin_key);
                                 }
                                 Ok(_) => {
-                                    error!("自动续登后仍无法获取B站签名信息，等待下一轮执行");
-                                    crate::api::handler::add_log_entry(
-                                        crate::api::handler::LogLevel::Warn,
-                                        "自动续登后仍无法恢复登录状态，请检查认证信息".to_string(),
-                                        Some("bili_sync::task::video_downloader".to_string()),
-                                    );
+                                    error!("自动刷新 Cookie 后仍无法获取B站签名信息，等待下一轮执行");
+                                    record_login_expired_warning(
+                                        "自动刷新 Cookie 后仍无法恢复登录状态，请检查认证信息",
+                                        Some(
+                                            "自动刷新 Cookie 后仍无法获取B站签名信息，扫描已停止。请重新扫码登录或更新整套认证信息。",
+                                        ),
+                                    )
+                                    .await;
                                     TASK_CONTROLLER.set_scanning(false);
                                     crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
                                     break 'inner;
                                 }
                                 Err(retry_err) => {
-                                    warn!("自动续登失败或重试仍未登录: {:#}", retry_err);
-                                    crate::api::handler::add_log_entry(
-                                        crate::api::handler::LogLevel::Warn,
-                                        "检测到登录状态过期或未登录，自动续登失败，请更新配置文件中的SESSDATA等认证信息".to_string(),
-                                        Some("bili_sync::task::video_downloader".to_string()),
-                                    );
+                                    warn!("自动刷新 Cookie 失败或重试仍未登录: {:#}", retry_err);
+                                    let notification_context =
+                                        format!("自动刷新 Cookie 后重试仍未登录: {:#}", retry_err);
+                                    record_login_expired_warning(
+                                        LOGIN_EXPIRED_NOTIFICATION_MESSAGE,
+                                        Some(notification_context.as_str()),
+                                    )
+                                    .await;
                                     TASK_CONTROLLER.set_scanning(false);
                                     crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
                                     break 'inner;
                                 }
                             },
                             Err(refresh_err) => {
-                                warn!("检测到登录状态过期或未登录，自动续登失败: {:#}", refresh_err);
-                                crate::api::handler::add_log_entry(
-                                    crate::api::handler::LogLevel::Warn,
-                                    "检测到登录状态过期或未登录，自动续登失败，请更新配置文件中的SESSDATA等认证信息"
-                                        .to_string(),
-                                    Some("bili_sync::task::video_downloader".to_string()),
-                                );
+                                warn!("检测到登录状态过期或未登录，自动刷新 Cookie 失败: {:#}", refresh_err);
+                                let notification_context = format!("自动刷新 Cookie 失败: {:#}", refresh_err);
+                                record_login_expired_warning(
+                                    LOGIN_EXPIRED_NOTIFICATION_MESSAGE,
+                                    Some(notification_context.as_str()),
+                                )
+                                .await;
                                 TASK_CONTROLLER.set_scanning(false);
                                 crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
                                 break 'inner;
@@ -776,7 +842,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                         crate::api::handler::add_log_entry(
                             crate::api::handler::LogLevel::Error,
                             friendly_message,
-                            Some("bili_sync::task::video_downloader".to_string()),
+                            Some(VIDEO_DOWNLOADER_LOG_TARGET.to_string()),
                         );
 
                         TASK_CONTROLLER.set_scanning(false);
@@ -1343,6 +1409,46 @@ mod tests {
             .await
             .expect("应能完成测试数据库迁移");
         db
+    }
+
+    #[test]
+    fn wbi_login_expired_error_detects_bilibili_login_errors() {
+        assert!(is_wbi_login_expired_error(&anyhow::anyhow!(
+            "Bilibili api error, status code: -101"
+        )));
+        assert!(is_wbi_login_expired_error(&anyhow::anyhow!("账号未登录")));
+    }
+
+    #[test]
+    fn wbi_login_expired_error_detects_missing_credential() {
+        assert!(is_wbi_login_expired_error(&anyhow::anyhow!("no credential found")));
+    }
+
+    #[test]
+    fn daily_credential_refresh_runs_at_next_one_am() {
+        let before_one = NaiveDate::from_ymd_opt(2026, 5, 12)
+            .unwrap()
+            .and_hms_opt(0, 30, 0)
+            .unwrap();
+        let after_one = NaiveDate::from_ymd_opt(2026, 5, 12)
+            .unwrap()
+            .and_hms_opt(1, 30, 0)
+            .unwrap();
+
+        assert_eq!(
+            next_daily_credential_refresh_after(before_one),
+            NaiveDate::from_ymd_opt(2026, 5, 12)
+                .unwrap()
+                .and_hms_opt(1, 0, 0)
+                .unwrap()
+        );
+        assert_eq!(
+            next_daily_credential_refresh_after(after_one),
+            NaiveDate::from_ymd_opt(2026, 5, 13)
+                .unwrap()
+                .and_hms_opt(1, 0, 0)
+                .unwrap()
+        );
     }
 
     async fn insert_test_watch_later(db: &DatabaseConnection, id: i32, enabled: bool) {

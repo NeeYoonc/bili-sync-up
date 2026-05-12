@@ -25,7 +25,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 // 移除未使用的Lazy导入
-use task::{http_server, video_downloader};
+use task::{credential_refresh_scheduler, http_server, video_downloader};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -160,6 +160,12 @@ async fn async_main() -> Result<()> {
     }
 
     // SQLite配置已经在database::setup_database中设置了mmap，不再需要额外的初始化
+    spawn_task(
+        "B站凭据自动刷新",
+        credential_refresh_scheduler(),
+        &tracker,
+        token.clone(),
+    );
     spawn_task("定时下载", video_downloader(connection), &tracker, token.clone());
 
     tracker.close();

@@ -98,11 +98,35 @@ impl Credential {
     }
 
     pub async fn refresh(&self, client: &Client) -> Result<Self> {
+        self.ensure_can_refresh()?;
         let correspond_path = Self::get_correspond_path();
-        let csrf = self.get_refresh_csrf(client, correspond_path).await?;
-        let new_credential = self.get_new_credential(client, &csrf).await?;
-        self.confirm_refresh(client, &new_credential).await?;
+        let csrf = self.get_refresh_csrf(client, correspond_path).await.context(
+            "获取B站 Cookie 刷新 csrf 失败，可能是旧 Cookie 已失效、被手动退出登录，或和 ac_time_value 不匹配",
+        )?;
+        let new_credential = self
+            .get_new_credential(client, &csrf)
+            .await
+            .context("刷新B站 Cookie 失败，可能是 ac_time_value 已失效或和当前 Cookie 不匹配")?;
+        self.confirm_refresh(client, &new_credential)
+            .await
+            .context("确认B站 Cookie 刷新失败")?;
         Ok(new_credential)
+    }
+
+    fn ensure_can_refresh(&self) -> Result<()> {
+        ensure!(
+            !self.sessdata.trim().is_empty(),
+            "刷新B站 Cookie 失败：缺少 SESSDATA，请重新登录并更新整套认证信息"
+        );
+        ensure!(
+            !self.bili_jct.trim().is_empty(),
+            "刷新B站 Cookie 失败：缺少 bili_jct，请重新登录并更新整套认证信息"
+        );
+        ensure!(
+            !self.ac_time_value.trim().is_empty(),
+            "刷新B站 Cookie 失败：缺少 ac_time_value，请重新登录并更新整套认证信息"
+        );
+        Ok(())
     }
 
     fn get_correspond_path() -> String {
@@ -116,7 +140,8 @@ JNrRuoEUXpabUzGB8QIDAQAB
 -----END PUBLIC KEY-----",
         )
         .expect("fail to decode public key");
-        let ts = chrono::Local::now().timestamp_millis();
+        // B站会校验 correspondPath 内的时间戳；本机时间略快时可能拿不到 refresh_csrf。
+        let ts = chrono::Local::now().timestamp_millis() - 20000;
         let data = format!("refresh_{}", ts).into_bytes();
         let mut rng = rand::rngs::OsRng;
         let encrypted = key
@@ -132,11 +157,14 @@ JNrRuoEUXpabUzGB8QIDAQAB
                 format!("https://www.bilibili.com/correspond/1/{}", correspond_path).as_str(),
                 Some(self),
             )
-            .header(header::COOKIE, "Domain=.bilibili.com")
             .send()
-            .await?
-            .error_for_status()?;
-        regex_find(r#"<div id="1-name">(.+?)</div>"#, res.text().await?.as_str())
+            .await
+            .context("请求B站 Cookie 刷新 csrf 页面失败")?
+            .error_for_status()
+            .context("B站 Cookie 刷新 csrf 页面返回非成功 HTTP 状态")?;
+        let text = res.text().await.context("读取B站 Cookie 刷新 csrf 页面失败")?;
+        regex_find(r#"<div id="1-name">(.+?)</div>"#, text.as_str())
+            .context("B站 Cookie 刷新 csrf 页面未返回 refresh_csrf")
     }
 
     async fn get_new_credential(&self, client: &Client, csrf: &str) -> Result<Credential> {
@@ -146,7 +174,6 @@ JNrRuoEUXpabUzGB8QIDAQAB
                 "https://passport.bilibili.com/x/passport-login/web/cookie/refresh",
                 Some(self),
             )
-            .header(header::COOKIE, "Domain=.bilibili.com")
             .form(&[
                 // 这里不是 json，而是 form data
                 ("csrf", self.bili_jct.as_str()),
@@ -155,11 +182,18 @@ JNrRuoEUXpabUzGB8QIDAQAB
                 ("source", "main_web"),
             ])
             .send()
-            .await?
-            .error_for_status()?;
+            .await
+            .context("请求B站 Cookie 刷新接口失败")?
+            .error_for_status()
+            .context("B站 Cookie 刷新接口返回非成功 HTTP 状态")?;
         // 必须在 .json 前取出 headers，否则 res 会被消耗
         let headers = std::mem::take(res.headers_mut());
-        let res = res.json::<serde_json::Value>().await?.validate()?;
+        let res = res
+            .json::<serde_json::Value>()
+            .await
+            .context("解析B站 Cookie 刷新响应失败")?
+            .validate()
+            .context("B站 Cookie 刷新接口返回失败")?;
         let set_cookies = headers.get_all(header::SET_COOKIE);
         let mut credential = Self {
             buvid3: self.buvid3.clone(),
@@ -176,7 +210,7 @@ JNrRuoEUXpabUzGB8QIDAQAB
             .collect();
         ensure!(
             cookies.len() == required_cookies.len(),
-            "not all required cookies found"
+            "B站 Cookie 刷新响应缺少必要 Set-Cookie 字段: SESSDATA/bili_jct/DedeUserID"
         );
         for cookie in cookies {
             match cookie.name() {
@@ -188,7 +222,7 @@ JNrRuoEUXpabUzGB8QIDAQAB
         }
         match res["data"]["refresh_token"].as_str() {
             Some(token) => credential.ac_time_value = token.to_string(),
-            None => bail!("refresh_token not found"),
+            None => bail!("B站 Cookie 刷新响应缺少 refresh_token"),
         }
         Ok(credential)
     }
@@ -206,11 +240,15 @@ JNrRuoEUXpabUzGB8QIDAQAB
                 ("refresh_token", self.ac_time_value.as_str()),
             ])
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .context("请求B站 Cookie 刷新确认接口失败")?
+            .error_for_status()
+            .context("B站 Cookie 刷新确认接口返回非成功 HTTP 状态")?
             .json::<serde_json::Value>()
-            .await?
-            .validate()?;
+            .await
+            .context("解析B站 Cookie 刷新确认响应失败")?
+            .validate()
+            .context("B站 Cookie 刷新确认接口返回失败")?;
         Ok(())
     }
 }
@@ -302,6 +340,23 @@ mod tests {
             serde_urlencoded::to_string(query).unwrap().replace('+', "%20"),
             "bar=%E4%BA%94%E4%B8%80%E5%9B%9B&baz=1919810&foo=one%20one%20four"
         );
+    }
+
+    #[test]
+    fn refresh_requires_complete_refresh_material() {
+        let mut credential = Credential {
+            sessdata: "sessdata".to_string(),
+            bili_jct: "csrf".to_string(),
+            ac_time_value: "refresh-token".to_string(),
+            ..Default::default()
+        };
+        assert!(credential.ensure_can_refresh().is_ok());
+
+        credential.ac_time_value.clear();
+        let err = credential
+            .ensure_can_refresh()
+            .expect_err("缺少 ac_time_value 时不能刷新");
+        assert!(format!("{:#}", err).contains("缺少 ac_time_value"));
     }
 
     #[test]
