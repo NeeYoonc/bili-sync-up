@@ -290,6 +290,7 @@
 	let dedeUserIdCkMd5 = '';
 	let credentialSaving = false;
 	let credentialRefreshTesting = false;
+	let credentialRefreshForceTesting = false;
 	let credentialRefreshTestResult: CredentialRefreshTestResponse | null = null;
 	let currentUser: UserInfo | null = null;
 
@@ -1137,18 +1138,24 @@
 		}
 	}
 
-	async function testCredentialRefresh() {
-		const response = await runRequest(() => api.testCredentialRefresh(), {
-			setLoading: (value) => (credentialRefreshTesting = value),
-			context: '测试B站凭据刷新失败'
+	async function testCredentialRefresh(force = false) {
+		const response = await runRequest(() => api.testCredentialRefresh(force), {
+			setLoading: (value) =>
+				force ? (credentialRefreshForceTesting = value) : (credentialRefreshTesting = value),
+			context: force ? '强制刷新B站凭据失败' : '测试B站凭据刷新失败'
 		});
 		if (!response) return;
 
 		credentialRefreshTestResult = response.data;
 		if (response.data.success) {
-			toast.success('凭据刷新测试通过', { description: response.data.message });
+			toast.success(force ? '凭据强制刷新完成' : '凭据刷新测试通过', {
+				description: response.data.message
+			});
+			if (force) await loadConfig();
 		} else {
-			toast.error('凭据刷新测试失败', { description: response.data.diagnosis });
+			toast.error(force ? '凭据强制刷新失败' : '凭据刷新测试失败', {
+				description: response.data.diagnosis
+			});
 		}
 	}
 
@@ -2717,17 +2724,30 @@
 										字段长度、错误阶段、错误类型。
 									</div>
 								</div>
-								<Button
-									type="button"
-									variant="outline"
-									size="sm"
-									onclick={testCredentialRefresh}
-									disabled={credentialRefreshTesting}
-									class="w-full sm:w-auto"
-								>
-									<RefreshCwIcon class={credentialRefreshTesting ? 'animate-spin' : ''} />
-									{credentialRefreshTesting ? '测试中...' : '测试刷新'}
-								</Button>
+								<div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										onclick={() => testCredentialRefresh(false)}
+										disabled={credentialRefreshTesting || credentialRefreshForceTesting}
+										class="w-full sm:w-auto"
+									>
+										<RefreshCwIcon class={credentialRefreshTesting ? 'animate-spin' : ''} />
+										{credentialRefreshTesting ? '测试中...' : '测试刷新'}
+									</Button>
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										onclick={() => testCredentialRefresh(true)}
+										disabled={credentialRefreshTesting || credentialRefreshForceTesting}
+										class="w-full border-amber-300 text-amber-700 hover:bg-amber-50 sm:w-auto dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-950/30"
+									>
+										<RefreshCwIcon class={credentialRefreshForceTesting ? 'animate-spin' : ''} />
+										{credentialRefreshForceTesting ? '强刷中...' : '强制刷新'}
+									</Button>
+								</div>
 							</div>
 
 							{#if credentialRefreshTestResult}

@@ -881,6 +881,10 @@ export interface CredentialFieldStatus {
 	has_dedeuserid_ckmd5: boolean;
 }
 
+export interface CredentialRefreshTestRequest {
+	force?: boolean;
+}
+
 export interface CredentialRefreshTestResponse {
 	success: boolean;
 	message: string;

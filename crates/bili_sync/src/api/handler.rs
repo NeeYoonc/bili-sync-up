@@ -29,10 +29,10 @@ use utoipa::OpenApi;
 use crate::api::auth::OpenAPIAuth;
 use crate::api::error::InnerApiError;
 use crate::api::request::{
-    AddVideoSourceRequest, BatchUpdateConfigRequest, ConfigHistoryRequest, ConfigMigrationRequest, QRGenerateRequest,
-    QRPollRequest, ResetSpecificTasksRequest, ResetVideoSourcePathRequest, SetupAuthTokenRequest,
-    SubmissionVideosRequest, UpdateConfigItemRequest, UpdateConfigRequest, UpdateCredentialRequest,
-    UpdateVideoStatusRequest, VideosRequest,
+    AddVideoSourceRequest, BatchUpdateConfigRequest, ConfigHistoryRequest, ConfigMigrationRequest,
+    CredentialRefreshTestRequest, QRGenerateRequest, QRPollRequest, ResetSpecificTasksRequest,
+    ResetVideoSourcePathRequest, SetupAuthTokenRequest, SubmissionVideosRequest, UpdateConfigItemRequest,
+    UpdateConfigRequest, UpdateCredentialRequest, UpdateVideoStatusRequest, VideosRequest,
 };
 use crate::api::response::{
     AddVideoSourceResponse, BangumiSeasonInfo, BangumiSourceListResponse, BangumiSourceOption,
@@ -14074,12 +14074,16 @@ fn redact_credential_refresh_details(mut details: String, credential: Option<&cr
 #[utoipa::path(
     post,
     path = "/api/credential/test-refresh",
+    request_body = CredentialRefreshTestRequest,
     responses(
         (status = 200, description = "凭据刷新诊断完成", body = CredentialRefreshTestResponse),
         (status = 500, description = "服务器内部错误", body = String)
     )
 )]
-pub async fn test_credential_refresh() -> Result<ApiResponse<CredentialRefreshTestResponse>, ApiError> {
+pub async fn test_credential_refresh(
+    payload: Option<Json<CredentialRefreshTestRequest>>,
+) -> Result<ApiResponse<CredentialRefreshTestResponse>, ApiError> {
+    let force = payload.map(|Json(params)| params.force).unwrap_or(false);
     let config = crate::config::reload_config();
     let credential = config.credential.load();
     let credential_fields = credential_field_status(credential.as_deref());
@@ -14128,17 +14132,40 @@ pub async fn test_credential_refresh() -> Result<ApiResponse<CredentialRefreshTe
     }
 
     let bili_client = crate::bilibili::BiliClient::new(String::new());
-    match bili_client.check_refresh().await {
-        Ok(()) => Ok(ApiResponse::ok(CredentialRefreshTestResponse {
-            success: true,
-            message: "B 站凭据检查与自动刷新测试完成".to_string(),
-            stage: "completed".to_string(),
-            error_type: None,
-            should_retry: false,
-            diagnosis: "未复现刷新失败；如果当前 Cookie 不需要刷新，本次只完成刷新状态检查。".to_string(),
-            details: None,
-            credential_fields,
-        })),
+    match bili_client.refresh_credential(force).await {
+        Ok(refreshed) => {
+            let updated_config = crate::config::reload_config();
+            let updated_credential = updated_config.credential.load();
+            let credential_fields = credential_field_status(updated_credential.as_deref());
+            let (message, stage, diagnosis) = if refreshed {
+                (
+                    if force {
+                        "B 站凭据强制刷新完成"
+                    } else {
+                        "B 站凭据自动刷新完成"
+                    },
+                    if force { "force_completed" } else { "completed" },
+                    "已完成完整刷新链路：cookie/info、correspond、cookie/refresh、confirm/refresh。",
+                )
+            } else {
+                (
+                    "B 站返回当前凭据不需要刷新",
+                    "precheck_not_needed",
+                    "本次只完成刷新状态检查，没有执行 cookie/refresh；需要验证完整刷新链路请点强制刷新。",
+                )
+            };
+
+            Ok(ApiResponse::ok(CredentialRefreshTestResponse {
+                success: true,
+                message: message.to_string(),
+                stage: stage.to_string(),
+                error_type: None,
+                should_retry: false,
+                diagnosis: diagnosis.to_string(),
+                details: None,
+                credential_fields,
+            }))
+        }
         Err(err) => {
             let details = format!("{:#}", err);
             let classified = crate::error::ErrorClassifier::classify_error(&err);
@@ -14147,7 +14174,11 @@ pub async fn test_credential_refresh() -> Result<ApiResponse<CredentialRefreshTe
             let details = redact_credential_refresh_details(details, credential.as_deref());
             Ok(ApiResponse::ok(CredentialRefreshTestResponse {
                 success: false,
-                message: "B 站凭据检查或自动刷新测试失败".to_string(),
+                message: if force {
+                    "B 站凭据强制刷新测试失败".to_string()
+                } else {
+                    "B 站凭据检查或自动刷新测试失败".to_string()
+                },
                 stage,
                 error_type: Some(format!("{:?}", classified.error_type)),
                 should_retry: classified.should_retry,

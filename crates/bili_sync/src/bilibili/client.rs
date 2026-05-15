@@ -316,37 +316,44 @@ impl BiliClient {
     }
 
     pub async fn check_refresh(&self) -> Result<()> {
+        self.refresh_credential(false).await.map(|_| ())
+    }
+
+    pub async fn refresh_credential(&self, force: bool) -> Result<bool> {
         let config = crate::config::reload_config();
         let credential = config.credential.load();
         let Some(credential) = credential.as_deref() else {
-            return Ok(());
+            return Ok(false);
         };
 
-        let should_refresh = match credential.need_refresh(&self.client).await {
-            Ok(need_refresh) => need_refresh,
+        let refresh_info = match credential.refresh_info(&self.client).await {
+            Ok(refresh_info) => refresh_info,
             Err(err) => {
                 let error_text = format!("{:#}", err);
                 let is_login_expired = error_text.contains("status code: -101") || error_text.contains("账号未登录");
                 if is_login_expired && !credential.ac_time_value.trim().is_empty() {
                     warn!("检测到凭证已过期，跳过预检查并直接尝试刷新凭证");
-                    true
+                    crate::bilibili::credential::CookieRefreshInfo {
+                        need_refresh: true,
+                        timestamp: None,
+                    }
                 } else {
                     return Err(err);
                 }
             }
         };
 
-        if !should_refresh {
-            return Ok(());
+        if !force && !refresh_info.need_refresh {
+            return Ok(false);
         }
 
-        let new_credential = credential.refresh(&self.client).await?;
+        let new_credential = credential.refresh(&self.client, refresh_info.timestamp).await?;
         config.credential.store(Some(Arc::new(new_credential.clone())));
 
         self.persist_refreshed_credential(&config).await?;
         info!("credential已刷新并保存到数据库");
 
-        Ok(())
+        Ok(true)
     }
 
     async fn persist_refreshed_credential(&self, config: &crate::config::Config) -> Result<()> {

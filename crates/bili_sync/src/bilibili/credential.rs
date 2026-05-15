@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::bilibili::{Client, Validate};
 
+pub struct CookieRefreshInfo {
+    pub need_refresh: bool,
+    pub timestamp: Option<i64>,
+}
+
 const MIXIN_KEY_ENC_TAB: [usize; 64] = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38,
     41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36,
@@ -81,7 +86,7 @@ impl Credential {
     }
 
     /// 检查凭据是否有效
-    pub async fn need_refresh(&self, client: &Client) -> Result<bool> {
+    pub async fn refresh_info(&self, client: &Client) -> Result<CookieRefreshInfo> {
         let res = client
             .request(
                 Method::GET,
@@ -94,12 +99,15 @@ impl Credential {
             .json::<serde_json::Value>()
             .await?
             .validate()?;
-        res["data"]["refresh"].as_bool().context("check refresh failed")
+        Ok(CookieRefreshInfo {
+            need_refresh: res["data"]["refresh"].as_bool().context("check refresh failed")?,
+            timestamp: res["data"]["timestamp"].as_i64(),
+        })
     }
 
-    pub async fn refresh(&self, client: &Client) -> Result<Self> {
+    pub async fn refresh(&self, client: &Client, timestamp: Option<i64>) -> Result<Self> {
         self.ensure_can_refresh()?;
-        let correspond_path = Self::get_correspond_path();
+        let correspond_path = Self::get_correspond_path(timestamp);
         let csrf = self.get_refresh_csrf(client, correspond_path).await.context(
             "获取B站 Cookie 刷新 csrf 失败，可能是旧 Cookie 已失效、被手动退出登录，或和 ac_time_value 不匹配",
         )?;
@@ -129,7 +137,7 @@ impl Credential {
         Ok(())
     }
 
-    fn get_correspond_path() -> String {
+    fn get_correspond_path(timestamp: Option<i64>) -> String {
         // 调用频率很低，让 key 在函数内部构造影响不大
         let key = RsaPublicKey::from_public_key_pem(
             "-----BEGIN PUBLIC KEY-----
@@ -140,8 +148,8 @@ JNrRuoEUXpabUzGB8QIDAQAB
 -----END PUBLIC KEY-----",
         )
         .expect("fail to decode public key");
-        // B站会校验 correspondPath 内的时间戳；本机时间略快时可能拿不到 refresh_csrf。
-        let ts = chrono::Local::now().timestamp_millis() - 20000;
+        // B站会校验 correspondPath 内的时间戳；优先使用 cookie/info 返回的服务端时间。
+        let ts = timestamp.unwrap_or_else(|| chrono::Local::now().timestamp_millis() - 20000);
         let data = format!("refresh_{}", ts).into_bytes();
         let mut rng = rand::rngs::OsRng;
         let encrypted = key
