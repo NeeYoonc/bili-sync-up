@@ -181,6 +181,17 @@ fn response_body_preview(text: &str) -> String {
         .replace('\n', " ")
 }
 
+fn search_http_status_message(operation: &str, status: StatusCode) -> String {
+    if status == StatusCode::PRECONDITION_FAILED {
+        format!(
+            "{}触发 B 站风控(412)：请求被安全策略拒绝；搜索请求需要带稳定 Cookie/buvid 指纹，请先配置 B 站凭据，并确认 Referer 来自搜索页，避免无痕/新环境或出口 IP 风控",
+            operation
+        )
+    } else {
+        format!("{}请求失败: {}", operation, status)
+    }
+}
+
 async fn decode_json_response<T>(response: reqwest::Response, operation: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
@@ -437,7 +448,7 @@ impl BiliClient {
                 warn!("旧搜索接口触发412，回退到all/v2搜索接口");
                 return self.search_via_all_v2(keyword, search_type, page, page_size).await;
             }
-            return Err(anyhow!("搜索请求失败: {}", response.status()));
+            return Err(anyhow!(search_http_status_message("旧搜索接口", response.status())));
         }
 
         let search_response: SearchResponse = match decode_json_response(response, "搜索").await {
@@ -501,7 +512,7 @@ impl BiliClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(anyhow!("WBI 搜索请求失败: {}", response.status()));
+            return Err(anyhow!(search_http_status_message("WBI 搜索接口", response.status())));
         }
 
         let search_response: SearchResponse = decode_json_response(response, "WBI 搜索").await?;
@@ -567,7 +578,10 @@ impl BiliClient {
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(anyhow!("all/v2 搜索请求失败: {}", response.status()));
+            return Err(anyhow!(search_http_status_message(
+                "all/v2 搜索接口",
+                response.status()
+            )));
         }
 
         let payload: serde_json::Value = decode_json_response(response, "all/v2 搜索").await?;
