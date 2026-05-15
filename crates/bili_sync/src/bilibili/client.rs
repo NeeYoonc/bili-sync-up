@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -373,8 +374,20 @@ impl BiliClient {
     pub async fn wbi_img(&self) -> Result<WbiImg> {
         let config = crate::config::reload_config();
         let credential = config.credential.load();
-        let credential = credential.as_deref().context("no credential found")?;
-        credential.wbi_img(&self.client).await
+        let mut res = self
+            .client
+            .request(
+                Method::GET,
+                "https://api.bilibili.com/x/web-interface/nav",
+                credential.as_deref(),
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?
+            .validate()?;
+        Ok(serde_json::from_value(res["data"]["wbi_img"].take())?)
     }
 
     /// 搜索bilibili内容
@@ -391,6 +404,13 @@ impl BiliClient {
         page: u32,
         page_size: u32,
     ) -> Result<SearchResponseWrapper> {
+        match self.search_via_wbi_type(keyword, search_type, page, page_size).await {
+            Ok(wrapper) => return Ok(wrapper),
+            Err(err) => {
+                warn!("WBI 搜索接口失败，回退旧搜索接口: {:#}", err);
+            }
+        }
+
         let url = "https://api.bilibili.com/x/web-interface/search/type";
 
         let params = [
@@ -425,6 +445,68 @@ impl BiliClient {
             }
         };
 
+        self.parse_typed_search_response(search_response, search_type, page_size)
+    }
+
+    /// 使用 B 站 Web 端实际调用的 WBI 搜索接口。
+    async fn search_via_wbi_type(
+        &self,
+        keyword: &str,
+        search_type: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<SearchResponseWrapper> {
+        let url = "https://api.bilibili.com/x/web-interface/wbi/search/type";
+        let wbi_img = self.wbi_img().await.context("获取 WBI 签名参数失败")?;
+        let params = HashMap::from([
+            ("category_id".to_string(), String::new()),
+            ("search_type".to_string(), search_type.to_string()),
+            ("ad_resource".to_string(), "5646".to_string()),
+            ("__refresh__".to_string(), "true".to_string()),
+            ("_extra".to_string(), String::new()),
+            ("context".to_string(), String::new()),
+            ("page".to_string(), page.to_string()),
+            ("page_size".to_string(), page_size.to_string()),
+            ("order".to_string(), String::new()),
+            ("pubtime_begin_s".to_string(), "0".to_string()),
+            ("pubtime_end_s".to_string(), "0".to_string()),
+            ("duration".to_string(), String::new()),
+            ("from_source".to_string(), String::new()),
+            ("from_spmid".to_string(), "333.337".to_string()),
+            ("platform".to_string(), "pc".to_string()),
+            ("highlight".to_string(), "1".to_string()),
+            ("single_column".to_string(), "0".to_string()),
+            ("keyword".to_string(), keyword.to_string()),
+            ("source_tag".to_string(), "3".to_string()),
+            ("gaia_vtoken".to_string(), String::new()),
+            ("order_sort".to_string(), "0".to_string()),
+            ("user_type".to_string(), "0".to_string()),
+            ("dynamic_offset".to_string(), "0".to_string()),
+            ("web_location".to_string(), "1430654".to_string()),
+        ]);
+        let signed_params = wbi_img.sign_params(params).await.context("生成搜索 WBI 签名失败")?;
+
+        let response = self
+            .request(Method::GET, url)
+            .await
+            .query(&signed_params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("WBI 搜索请求失败: {}", response.status()));
+        }
+
+        let search_response: SearchResponse = decode_json_response(response, "WBI 搜索").await?;
+        self.parse_typed_search_response(search_response, search_type, page_size)
+    }
+
+    fn parse_typed_search_response(
+        &self,
+        search_response: SearchResponse,
+        search_type: &str,
+        page_size: u32,
+    ) -> Result<SearchResponseWrapper> {
         if search_response.code != 0 {
             return Err(anyhow!("搜索API返回错误: {}", search_response.message));
         }
@@ -434,22 +516,12 @@ impl BiliClient {
             num_pages: None,
             num_results: None,
         });
-
         let results = data.result.unwrap_or_default();
-
-        // 获取总数和页数
         let total = data.num_results.unwrap_or(0) as u32;
-        let num_pages = data.num_pages.unwrap_or(0) as u32;
-        let num_pages = if num_pages == 0 {
-            if total > 0 {
-                total.div_ceil(page_size) // 向上取整
-            } else {
-                1
-            }
-        } else {
-            num_pages
-        };
-
+        let mut num_pages = data.num_pages.unwrap_or(0) as u32;
+        if num_pages == 0 {
+            num_pages = if total > 0 { total.div_ceil(page_size) } else { 1 };
+        }
         let mut parsed_results = Vec::new();
 
         for item in results {

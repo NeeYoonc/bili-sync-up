@@ -73,18 +73,6 @@ impl WbiImg {
 }
 
 impl Credential {
-    pub async fn wbi_img(&self, client: &Client) -> Result<WbiImg> {
-        let mut res = client
-            .request(Method::GET, "https://api.bilibili.com/x/web-interface/nav", Some(self))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<serde_json::Value>()
-            .await?
-            .validate()?;
-        Ok(serde_json::from_value(res["data"]["wbi_img"].take())?)
-    }
-
     /// 检查凭据是否有效
     pub async fn refresh_info(&self, client: &Client) -> Result<CookieRefreshInfo> {
         let res = client

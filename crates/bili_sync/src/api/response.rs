@@ -668,6 +668,7 @@ pub struct SearchResponse {
     pub success: bool,
     pub results: Vec<SearchResult>,
     pub total: u32,
+    pub num_pages: u32,
     pub page: u32,
     pub page_size: u32,
 }

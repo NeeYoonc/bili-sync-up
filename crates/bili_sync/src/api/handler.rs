@@ -11904,6 +11904,7 @@ pub async fn search_bilibili(
     // 特殊处理：当搜索类型为media_bangumi时，同时搜索番剧和影视
     let mut all_results = Vec::new();
     let mut total_results = 0u32;
+    let mut num_pages = 1u32;
 
     if params.search_type == "media_bangumi" {
         // 搜索番剧
@@ -11917,6 +11918,7 @@ pub async fn search_bilibili(
             .await
         {
             Ok(bangumi_wrapper) => {
+                num_pages = num_pages.max(bangumi_wrapper.num_pages);
                 all_results.extend(bangumi_wrapper.results);
                 total_results += bangumi_wrapper.total;
             }
@@ -11936,6 +11938,7 @@ pub async fn search_bilibili(
             .await
         {
             Ok(ft_wrapper) => {
+                num_pages = num_pages.max(ft_wrapper.num_pages);
                 all_results.extend(ft_wrapper.results);
                 total_results += ft_wrapper.total;
             }
@@ -11955,6 +11958,7 @@ pub async fn search_bilibili(
             .await
         {
             Ok(search_wrapper) => {
+                num_pages = search_wrapper.num_pages;
                 all_results = search_wrapper.results;
                 total_results = search_wrapper.total;
             }
@@ -11991,6 +11995,7 @@ pub async fn search_bilibili(
         success: true,
         results: api_results,
         total: total_results,
+        num_pages,
         page: params.page,
         page_size: params.page_size,
     }))

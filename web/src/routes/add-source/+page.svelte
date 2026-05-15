@@ -461,7 +461,7 @@
 
 				// 如果总数超过pageSize，继续获取剩余页面
 				if (totalResults > pageSize) {
-					const totalPages = Math.ceil(totalResults / pageSize);
+					const totalPages = firstResult.data.num_pages || Math.ceil(totalResults / pageSize);
 					const remainingPages = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
 
 					// 串行获取剩余页面，避免并发请求过多导致失败

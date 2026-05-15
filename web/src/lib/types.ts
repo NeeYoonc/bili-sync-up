@@ -574,6 +574,7 @@ export interface SearchResponse {
 	success: boolean;
 	results: SearchResultItem[];
 	total: number;
+	num_pages: number;
 	page: number;
 	page_size: number;
 }
