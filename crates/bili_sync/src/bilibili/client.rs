@@ -181,12 +181,45 @@ fn response_body_preview(text: &str) -> String {
         .replace('\n', " ")
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SearchCredentialState {
+    Missing,
+    Incomplete,
+    Complete,
+}
+
+fn current_search_credential_state() -> SearchCredentialState {
+    let config = crate::config::reload_config();
+    let credential = config.credential.load();
+    match credential.as_deref() {
+        Some(credential)
+            if !credential.sessdata.trim().is_empty()
+                && !credential.buvid3.trim().is_empty()
+                && !credential.dedeuserid.trim().is_empty() =>
+        {
+            SearchCredentialState::Complete
+        }
+        Some(_) => SearchCredentialState::Incomplete,
+        None => SearchCredentialState::Missing,
+    }
+}
+
 fn search_http_status_message(operation: &str, status: StatusCode) -> String {
     if status == StatusCode::PRECONDITION_FAILED {
-        format!(
-            "{}触发 B 站风控(412)：请求被安全策略拒绝；搜索请求需要带稳定 Cookie/buvid 指纹，请先配置 B 站凭据，并确认 Referer 来自搜索页，避免无痕/新环境或出口 IP 风控",
-            operation
-        )
+        match current_search_credential_state() {
+            SearchCredentialState::Complete => format!(
+                "{}触发 B 站风控(412)：程序已携带当前配置的 Cookie/buvid 指纹并使用搜索页 Referer，但仍被 B 站安全策略拒绝；请稍后重试，或检查这套凭据/出口 IP 是否已被风控",
+                operation
+            ),
+            SearchCredentialState::Incomplete => format!(
+                "{}触发 B 站风控(412)：当前 B 站凭据缺少 SESSDATA、buvid3 或 DedeUserID，搜索请求无法形成稳定 Cookie/buvid 指纹；请重新扫码或补齐整套凭据",
+                operation
+            ),
+            SearchCredentialState::Missing => format!(
+                "{}触发 B 站风控(412)：当前未配置 B 站凭据，搜索请求无法携带 Cookie/buvid 指纹；请先扫码配置 B 站凭据后再试",
+                operation
+            ),
+        }
     } else {
         format!("{}请求失败: {}", operation, status)
     }
