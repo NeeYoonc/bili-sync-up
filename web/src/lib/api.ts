@@ -35,6 +35,7 @@ import type {
 	ValidateRegexResponse,
 	UpdateCredentialRequest,
 	UpdateCredentialResponse,
+	CredentialRefreshTestResponse,
 	InitialSetupCheckResponse,
 	TaskControlStatusResponse,
 	TaskControlResponse,
@@ -738,6 +739,10 @@ class ApiClient {
 		return this.put<UpdateCredentialResponse>('/credential', params);
 	}
 
+	async testCredentialRefresh(): Promise<ApiResponse<CredentialRefreshTestResponse>> {
+		return this.post<CredentialRefreshTestResponse>('/credential/test-refresh');
+	}
+
 	/**
 	 * 设置API Token（初始设置时使用）
 	 * @param token API Token
@@ -1270,6 +1275,8 @@ export const api = {
 	 * 更新B站登录凭证
 	 */
 	updateCredential: (params: UpdateCredentialRequest) => apiClient.updateCredential(params),
+
+	testCredentialRefresh: () => apiClient.testCredentialRefresh(),
 
 	/**
 	 * 设置API Token（初始设置时使用）

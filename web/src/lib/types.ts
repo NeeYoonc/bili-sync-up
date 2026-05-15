@@ -870,6 +870,28 @@ export interface UpdateCredentialResponse {
 	message: string;
 }
 
+export interface CredentialFieldStatus {
+	has_credential: boolean;
+	sessdata_len: number;
+	bili_jct_len: number;
+	buvid3_len: number;
+	dedeuserid_len: number;
+	ac_time_value_len: number;
+	has_buvid4: boolean;
+	has_dedeuserid_ckmd5: boolean;
+}
+
+export interface CredentialRefreshTestResponse {
+	success: boolean;
+	message: string;
+	stage: string;
+	error_type?: string | null;
+	should_retry: boolean;
+	diagnosis: string;
+	details?: string | null;
+	credential_fields: CredentialFieldStatus;
+}
+
 // 初始设置检查响应类型
 export interface InitialSetupCheckResponse {
 	needs_setup: boolean;

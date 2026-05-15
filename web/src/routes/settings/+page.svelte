@@ -12,7 +12,12 @@
 	import ResponsiveSheet from '$lib/components/responsive-sheet.svelte';
 	import SectionHeader from '$lib/components/section-header.svelte';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
-	import type { ConfigResponse, UserInfo, UpdateConfigRequest } from '$lib/types';
+	import type {
+		ConfigResponse,
+		CredentialRefreshTestResponse,
+		UserInfo,
+		UpdateConfigRequest
+	} from '$lib/types';
 	import {
 		DownloadIcon,
 		FileTextIcon,
@@ -24,7 +29,8 @@
 		VideoIcon,
 		PaletteIcon,
 		BellIcon,
-		SparklesIcon
+		SparklesIcon,
+		RefreshCwIcon
 	} from 'lucide-svelte';
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -283,6 +289,8 @@
 	let buvid4 = '';
 	let dedeUserIdCkMd5 = '';
 	let credentialSaving = false;
+	let credentialRefreshTesting = false;
+	let credentialRefreshTestResult: CredentialRefreshTestResponse | null = null;
 	let currentUser: UserInfo | null = null;
 
 	// UP主投稿风控配置
@@ -1126,6 +1134,21 @@
 			openSheet = null; // 关闭抽屉
 		} else {
 			toast.error('保存失败', { description: response.data.message });
+		}
+	}
+
+	async function testCredentialRefresh() {
+		const response = await runRequest(() => api.testCredentialRefresh(), {
+			setLoading: (value) => (credentialRefreshTesting = value),
+			context: '测试B站凭据刷新失败'
+		});
+		if (!response) return;
+
+		credentialRefreshTestResult = response.data;
+		if (response.data.success) {
+			toast.success('凭据刷新测试通过', { description: response.data.message });
+		} else {
+			toast.error('凭据刷新测试失败', { description: response.data.diagnosis });
 		}
 	}
 
@@ -2680,6 +2703,106 @@
 									{/if}
 								</div>
 							</div>
+						</div>
+
+						<div
+							class="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950/30"
+						>
+							<div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+								<div>
+									<div class="text-sm font-medium text-slate-900 dark:text-slate-100">
+										自动刷新诊断
+									</div>
+									<div class="text-xs text-slate-600 dark:text-slate-400">
+										字段长度、错误阶段、错误类型。
+									</div>
+								</div>
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onclick={testCredentialRefresh}
+									disabled={credentialRefreshTesting}
+									class="w-full sm:w-auto"
+								>
+									<RefreshCwIcon class={credentialRefreshTesting ? 'animate-spin' : ''} />
+									{credentialRefreshTesting ? '测试中...' : '测试刷新'}
+								</Button>
+							</div>
+
+							{#if credentialRefreshTestResult}
+								<div
+									class={`rounded-md border p-3 ${
+										credentialRefreshTestResult.success
+											? 'border-green-200 bg-green-50 dark:border-green-800 dark:bg-green-950/20'
+											: 'border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/20'
+									}`}
+								>
+									<div class="mb-2 flex flex-wrap items-center gap-2">
+										<Badge
+											variant={credentialRefreshTestResult.success ? 'default' : 'secondary'}
+											class={credentialRefreshTestResult.success
+												? 'bg-green-600 text-white'
+												: 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-100'}
+										>
+											{credentialRefreshTestResult.success ? '通过' : '失败'}
+										</Badge>
+										<span class="text-sm font-medium text-slate-900 dark:text-slate-100">
+											{credentialRefreshTestResult.message}
+										</span>
+									</div>
+
+									<div
+										class="grid grid-cols-1 gap-2 text-xs text-slate-700 sm:grid-cols-2 dark:text-slate-300"
+									>
+										<div>阶段：{credentialRefreshTestResult.stage}</div>
+										<div>类型：{credentialRefreshTestResult.error_type ?? '无'}</div>
+										<div>建议重试：{credentialRefreshTestResult.should_retry ? '是' : '否'}</div>
+										<div>
+											凭据：{credentialRefreshTestResult.credential_fields.has_credential
+												? '已加载'
+												: '未加载'}
+										</div>
+									</div>
+
+									<div class="mt-2 text-xs text-slate-700 dark:text-slate-300">
+										{credentialRefreshTestResult.diagnosis}
+									</div>
+
+									<div class="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+										<div class="rounded border bg-background px-2 py-1">
+											SESSDATA：{credentialRefreshTestResult.credential_fields.sessdata_len}
+										</div>
+										<div class="rounded border bg-background px-2 py-1">
+											bili_jct：{credentialRefreshTestResult.credential_fields.bili_jct_len}
+										</div>
+										<div class="rounded border bg-background px-2 py-1">
+											buvid3：{credentialRefreshTestResult.credential_fields.buvid3_len}
+										</div>
+										<div class="rounded border bg-background px-2 py-1">
+											DedeUserID：{credentialRefreshTestResult.credential_fields.dedeuserid_len}
+										</div>
+										<div class="rounded border bg-background px-2 py-1">
+											ac_time_value：{credentialRefreshTestResult.credential_fields.ac_time_value_len}
+										</div>
+										<div class="rounded border bg-background px-2 py-1">
+											buvid4：{credentialRefreshTestResult.credential_fields.has_buvid4 ? '有' : '无'}
+										</div>
+										<div class="rounded border bg-background px-2 py-1 sm:col-span-2">
+											DedeUserID__ckMd5：{credentialRefreshTestResult.credential_fields
+												.has_dedeuserid_ckmd5
+												? '有'
+												: '无'}
+										</div>
+									</div>
+
+									{#if credentialRefreshTestResult.details}
+										<pre
+											class="mt-3 max-h-36 overflow-auto whitespace-pre-wrap rounded border bg-background p-2 text-xs text-slate-700 dark:text-slate-300"
+										>{credentialRefreshTestResult.details}</pre>
+									{/if}
+								</div>
+							{/if}
 						</div>
 					</div>
 					<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t pt-4'}>

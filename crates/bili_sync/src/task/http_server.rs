@@ -80,6 +80,7 @@ use crate::api::handler::{
     stream_queue_status,
     stream_video_sources,
     stream_videos,
+    test_credential_refresh,
     test_notification_handler,
     test_risk_control_handler,
     update_config,
@@ -250,6 +251,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/setup/check", get(check_initial_setup))
         .route("/api/setup/auth-token", post(setup_auth_token))
         .route("/api/credential", put(update_credential))
+        .route("/api/credential/test-refresh", post(test_credential_refresh))
         // 扫码登录API路由
         .route("/api/auth/qr/generate", post(generate_qr_code))
         .route("/api/auth/qr/poll", get(poll_qr_status))
