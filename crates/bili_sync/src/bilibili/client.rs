@@ -448,13 +448,35 @@ impl BiliClient {
         page: u32,
         page_size: u32,
     ) -> Result<SearchResponseWrapper> {
-        match self.search_via_wbi_type(keyword, search_type, page, page_size).await {
+        match self.search_via_legacy_type(keyword, search_type, page, page_size).await {
             Ok(wrapper) => return Ok(wrapper),
             Err(err) => {
-                warn!("WBI 搜索接口失败，回退旧搜索接口: {:#}", err);
+                warn!("旧搜索接口失败，回退 WBI 搜索接口: {:#}", err);
+                let legacy_error = err;
+                match self.search_via_wbi_type(keyword, search_type, page, page_size).await {
+                    Ok(wrapper) => return Ok(wrapper),
+                    Err(err) => {
+                        warn!("WBI 搜索接口失败，最后回退 all/v2 搜索接口: {:#}", err);
+                        return self
+                            .search_via_all_v2(keyword, search_type, page, page_size)
+                            .await
+                            .with_context(|| {
+                                format!("旧搜索接口失败: {:#}; WBI 搜索接口失败: {:#}", legacy_error, err)
+                            });
+                    }
+                }
             }
         }
+    }
 
+    /// 使用原有搜索接口，失败时由调用方回退到 WBI 搜索。
+    async fn search_via_legacy_type(
+        &self,
+        keyword: &str,
+        search_type: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<SearchResponseWrapper> {
         let url = "https://api.bilibili.com/x/web-interface/search/type";
 
         let params = [
@@ -476,29 +498,14 @@ impl BiliClient {
             .await?;
 
         if !response.status().is_success() {
-            // 旧搜索接口在部分环境会返回 412，回退到 all/v2 接口以保证可用性
-            if response.status() == StatusCode::PRECONDITION_FAILED {
-                warn!("旧搜索接口触发412，回退到all/v2搜索接口");
-                return self.search_via_all_v2(keyword, search_type, page, page_size).await;
-            }
             return Err(anyhow!(search_http_status_message("旧搜索接口", response.status())));
         }
 
-        let search_response: SearchResponse = match decode_json_response(response, "搜索").await {
-            Ok(search_response) => search_response,
-            Err(err) => {
-                warn!("旧搜索接口响应解析失败，回退到 all/v2 搜索接口: {:#}", err);
-                return self
-                    .search_via_all_v2(keyword, search_type, page, page_size)
-                    .await
-                    .with_context(|| format!("旧搜索接口响应解析失败且 all/v2 回退失败: {:#}", err));
-            }
-        };
-
+        let search_response: SearchResponse = decode_json_response(response, "旧搜索").await?;
         self.parse_typed_search_response(search_response, search_type, page_size)
     }
 
-    /// 使用 B 站 Web 端实际调用的 WBI 搜索接口。
+    /// 原有搜索接口失败时，回退到 B 站 Web 端实际调用的 WBI 搜索接口。
     async fn search_via_wbi_type(
         &self,
         keyword: &str,
@@ -588,7 +595,7 @@ impl BiliClient {
         })
     }
 
-    /// 使用 all/v2 搜索接口（旧接口触发 412 时回退）
+    /// WBI 搜索也失败时，最后回退 all/v2 搜索接口。
     async fn search_via_all_v2(
         &self,
         keyword: &str,
