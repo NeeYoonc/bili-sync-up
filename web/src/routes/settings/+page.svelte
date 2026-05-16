@@ -2601,8 +2601,8 @@
 			</div>
 		{/if}
 	</div>
-	<div class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}">
-		<Tabs.Root value="manual" class="flex-1">
+	<div class="flex min-h-0 flex-1 flex-col">
+		<Tabs.Root value="manual" class="flex min-h-0 flex-1 flex-col">
 			<Tabs.List
 				class="grid w-full grid-cols-2 {isMobile ? 'mx-4' : 'mx-6'} mt-4"
 				style="width: calc(100% - {isMobile ? '2rem' : '3rem'});"
@@ -2611,7 +2611,7 @@
 				<Tabs.Trigger value="qr">扫码登录</Tabs.Trigger>
 			</Tabs.List>
 
-			<Tabs.Content value="manual" class="flex-1">
+			<Tabs.Content value="manual" class="min-h-0 flex-1">
 				<form
 					onsubmit={(e) => {
 						e.preventDefault();
@@ -2833,8 +2833,8 @@
 				</form>
 			</Tabs.Content>
 
-			<Tabs.Content value="qr" class="flex-1">
-				<div class="flex h-full flex-col {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+			<Tabs.Content value="qr" class="min-h-0 flex-1">
+				<div class="flex h-full min-h-0 flex-col overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
 					<div class="mx-auto w-full max-w-md">
 						<QrLogin
 							onLoginSuccess={handleQrLoginSuccess}
