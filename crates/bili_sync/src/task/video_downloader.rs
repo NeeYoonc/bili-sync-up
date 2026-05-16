@@ -31,7 +31,7 @@ const LOGIN_EXPIRED_NOTIFICATION_MESSAGE: &str =
     "检测到B站登录状态过期或未登录，自动刷新 Cookie 失败；请重新扫码登录或更新整套认证信息（SESSDATA、bili_jct、DedeUserID、ac_time_value）";
 const CREDENTIAL_REFRESH_NETWORK_NOTIFICATION_TITLE: &str = "B站凭据自动刷新暂时失败";
 const CREDENTIAL_REFRESH_NETWORK_NOTIFICATION_MESSAGE: &str =
-    "每日B站凭据检查时网络请求失败，暂时无法确认登录状态；本次不要求重新扫码，下一次会继续自动检查";
+    "每日B站凭据刷新时网络请求失败，暂时无法确认登录状态；本次不要求重新扫码，下一次会继续自动刷新";
 
 fn is_submission_lookup_retryable_error(err: &anyhow::Error) -> bool {
     matches!(
@@ -281,21 +281,21 @@ pub async fn credential_refresh_scheduler() {
     loop {
         let (next_run, wait) = next_daily_credential_refresh_wait();
         info!(
-            "B站凭据自动刷新任务已启动，下次检查时间: {}",
+            "B站凭据自动刷新任务已启动，下次强制刷新时间: {}",
             next_run.format(STANDARD_TIME_FORMAT)
         );
         tokio::time::sleep(wait).await;
 
-        info!("开始执行每日B站凭据检查与自动刷新任务");
-        match bili_client.check_refresh().await {
-            Ok(()) => info!("每日B站凭据检查与自动刷新任务执行完毕"),
+        info!("开始执行每日B站凭据强制刷新任务");
+        match bili_client.refresh_credential(true).await {
+            Ok(_) => info!("每日B站凭据强制刷新任务执行完毕"),
             Err(err) => {
                 let context = format!("每日自动刷新失败: {:#}", err);
                 if is_credential_refresh_transient_error(&err) {
-                    warn!("每日B站凭据检查与自动刷新任务暂时失败: {:#}", err);
+                    warn!("每日B站凭据强制刷新任务暂时失败: {:#}", err);
                     record_credential_refresh_network_warning(Some(context.as_str())).await;
                 } else {
-                    warn!("每日B站凭据检查与自动刷新任务失败: {:#}", err);
+                    warn!("每日B站凭据强制刷新任务失败: {:#}", err);
                     record_login_expired_warning(LOGIN_EXPIRED_NOTIFICATION_MESSAGE, Some(context.as_str())).await;
                 }
             }
