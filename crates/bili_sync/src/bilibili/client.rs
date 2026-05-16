@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -172,6 +173,87 @@ impl Default for Client {
     }
 }
 
+fn response_body_preview(text: &str) -> String {
+    text.chars()
+        .take(200)
+        .collect::<String>()
+        .replace('\r', " ")
+        .replace('\n', " ")
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SearchCredentialState {
+    Missing,
+    Incomplete,
+    Complete,
+}
+
+fn current_search_credential_state() -> SearchCredentialState {
+    let config = crate::config::reload_config();
+    let credential = config.credential.load();
+    match credential.as_deref() {
+        Some(credential)
+            if !credential.sessdata.trim().is_empty()
+                && !credential.buvid3.trim().is_empty()
+                && !credential.dedeuserid.trim().is_empty() =>
+        {
+            SearchCredentialState::Complete
+        }
+        Some(_) => SearchCredentialState::Incomplete,
+        None => SearchCredentialState::Missing,
+    }
+}
+
+fn search_http_status_message(operation: &str, status: StatusCode) -> String {
+    if status == StatusCode::PRECONDITION_FAILED {
+        match current_search_credential_state() {
+            SearchCredentialState::Complete => format!(
+                "{}触发 B 站风控(412)：程序已携带当前配置的 Cookie/buvid 指纹并使用搜索页 Referer，但仍被 B 站安全策略拒绝；请稍后重试，或检查这套凭据/出口 IP 是否已被风控",
+                operation
+            ),
+            SearchCredentialState::Incomplete => format!(
+                "{}触发 B 站风控(412)：当前 B 站凭据缺少 SESSDATA、buvid3 或 DedeUserID，搜索请求无法形成稳定 Cookie/buvid 指纹；请重新扫码或补齐整套凭据",
+                operation
+            ),
+            SearchCredentialState::Missing => format!(
+                "{}触发 B 站风控(412)：当前未配置 B 站凭据，搜索请求无法携带 Cookie/buvid 指纹；请先扫码配置 B 站凭据后再试",
+                operation
+            ),
+        }
+    } else {
+        format!("{}请求失败: {}", operation, status)
+    }
+}
+
+async fn decode_json_response<T>(response: reqwest::Response, operation: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    let body = response.text().await.with_context(|| {
+        format!(
+            "读取{}响应体失败: status={}, content-type={}",
+            operation, status, content_type
+        )
+    })?;
+
+    serde_json::from_str(&body).with_context(|| {
+        format!(
+            "{}响应不是有效 JSON: status={}, content-type={}, body_prefix={}",
+            operation,
+            status,
+            content_type,
+            response_body_preview(&body)
+        )
+    })
+}
+
 #[derive(Clone)]
 pub struct BiliClient {
     pub client: Client,
@@ -279,37 +361,44 @@ impl BiliClient {
     }
 
     pub async fn check_refresh(&self) -> Result<()> {
+        self.refresh_credential(false).await.map(|_| ())
+    }
+
+    pub async fn refresh_credential(&self, force: bool) -> Result<bool> {
         let config = crate::config::reload_config();
         let credential = config.credential.load();
         let Some(credential) = credential.as_deref() else {
-            return Ok(());
+            return Ok(false);
         };
 
-        let should_refresh = match credential.need_refresh(&self.client).await {
-            Ok(need_refresh) => need_refresh,
+        let refresh_info = match credential.refresh_info(&self.client).await {
+            Ok(refresh_info) => refresh_info,
             Err(err) => {
                 let error_text = format!("{:#}", err);
                 let is_login_expired = error_text.contains("status code: -101") || error_text.contains("账号未登录");
                 if is_login_expired && !credential.ac_time_value.trim().is_empty() {
                     warn!("检测到凭证已过期，跳过预检查并直接尝试刷新凭证");
-                    true
+                    crate::bilibili::credential::CookieRefreshInfo {
+                        need_refresh: true,
+                        timestamp: None,
+                    }
                 } else {
                     return Err(err);
                 }
             }
         };
 
-        if !should_refresh {
-            return Ok(());
+        if !force && !refresh_info.need_refresh {
+            return Ok(false);
         }
 
-        let new_credential = credential.refresh(&self.client).await?;
+        let new_credential = credential.refresh(&self.client, refresh_info.timestamp).await?;
         config.credential.store(Some(Arc::new(new_credential.clone())));
 
         self.persist_refreshed_credential(&config).await?;
         info!("credential已刷新并保存到数据库");
 
-        Ok(())
+        Ok(true)
     }
 
     async fn persist_refreshed_credential(&self, config: &crate::config::Config) -> Result<()> {
@@ -329,8 +418,20 @@ impl BiliClient {
     pub async fn wbi_img(&self) -> Result<WbiImg> {
         let config = crate::config::reload_config();
         let credential = config.credential.load();
-        let credential = credential.as_deref().context("no credential found")?;
-        credential.wbi_img(&self.client).await
+        let mut res = self
+            .client
+            .request(
+                Method::GET,
+                "https://api.bilibili.com/x/web-interface/nav",
+                credential.as_deref(),
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?
+            .validate()?;
+        Ok(serde_json::from_value(res["data"]["wbi_img"].take())?)
     }
 
     /// 搜索bilibili内容
@@ -347,6 +448,13 @@ impl BiliClient {
         page: u32,
         page_size: u32,
     ) -> Result<SearchResponseWrapper> {
+        match self.search_via_wbi_type(keyword, search_type, page, page_size).await {
+            Ok(wrapper) => return Ok(wrapper),
+            Err(err) => {
+                warn!("WBI 搜索接口失败，回退旧搜索接口: {:#}", err);
+            }
+        }
+
         let url = "https://api.bilibili.com/x/web-interface/search/type";
 
         let params = [
@@ -359,7 +467,13 @@ impl BiliClient {
             ("tids", "0"),          // 不限分区
         ];
 
-        let response = self.request(Method::GET, url).await.query(&params).send().await?;
+        let response = self
+            .request(Method::GET, url)
+            .await
+            .header(header::REFERER, "https://search.bilibili.com/")
+            .query(&params)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             // 旧搜索接口在部分环境会返回 412，回退到 all/v2 接口以保证可用性
@@ -367,11 +481,83 @@ impl BiliClient {
                 warn!("旧搜索接口触发412，回退到all/v2搜索接口");
                 return self.search_via_all_v2(keyword, search_type, page, page_size).await;
             }
-            return Err(anyhow!("搜索请求失败: {}", response.status()));
+            return Err(anyhow!(search_http_status_message("旧搜索接口", response.status())));
         }
 
-        let search_response: SearchResponse = response.json().await?;
+        let search_response: SearchResponse = match decode_json_response(response, "搜索").await {
+            Ok(search_response) => search_response,
+            Err(err) => {
+                warn!("旧搜索接口响应解析失败，回退到 all/v2 搜索接口: {:#}", err);
+                return self
+                    .search_via_all_v2(keyword, search_type, page, page_size)
+                    .await
+                    .with_context(|| format!("旧搜索接口响应解析失败且 all/v2 回退失败: {:#}", err));
+            }
+        };
 
+        self.parse_typed_search_response(search_response, search_type, page_size)
+    }
+
+    /// 使用 B 站 Web 端实际调用的 WBI 搜索接口。
+    async fn search_via_wbi_type(
+        &self,
+        keyword: &str,
+        search_type: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<SearchResponseWrapper> {
+        let url = "https://api.bilibili.com/x/web-interface/wbi/search/type";
+        let wbi_img = self.wbi_img().await.context("获取 WBI 签名参数失败")?;
+        let params = HashMap::from([
+            ("category_id".to_string(), String::new()),
+            ("search_type".to_string(), search_type.to_string()),
+            ("ad_resource".to_string(), "5646".to_string()),
+            ("__refresh__".to_string(), "true".to_string()),
+            ("_extra".to_string(), String::new()),
+            ("context".to_string(), String::new()),
+            ("page".to_string(), page.to_string()),
+            ("page_size".to_string(), page_size.to_string()),
+            ("order".to_string(), String::new()),
+            ("pubtime_begin_s".to_string(), "0".to_string()),
+            ("pubtime_end_s".to_string(), "0".to_string()),
+            ("duration".to_string(), String::new()),
+            ("from_source".to_string(), String::new()),
+            ("from_spmid".to_string(), "333.337".to_string()),
+            ("platform".to_string(), "pc".to_string()),
+            ("highlight".to_string(), "1".to_string()),
+            ("single_column".to_string(), "0".to_string()),
+            ("keyword".to_string(), keyword.to_string()),
+            ("source_tag".to_string(), "3".to_string()),
+            ("gaia_vtoken".to_string(), String::new()),
+            ("order_sort".to_string(), "0".to_string()),
+            ("user_type".to_string(), "0".to_string()),
+            ("dynamic_offset".to_string(), "0".to_string()),
+            ("web_location".to_string(), "1430654".to_string()),
+        ]);
+        let signed_params = wbi_img.sign_params(params).await.context("生成搜索 WBI 签名失败")?;
+
+        let response = self
+            .request(Method::GET, url)
+            .await
+            .header(header::REFERER, "https://search.bilibili.com/")
+            .query(&signed_params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(search_http_status_message("WBI 搜索接口", response.status())));
+        }
+
+        let search_response: SearchResponse = decode_json_response(response, "WBI 搜索").await?;
+        self.parse_typed_search_response(search_response, search_type, page_size)
+    }
+
+    fn parse_typed_search_response(
+        &self,
+        search_response: SearchResponse,
+        search_type: &str,
+        page_size: u32,
+    ) -> Result<SearchResponseWrapper> {
         if search_response.code != 0 {
             return Err(anyhow!("搜索API返回错误: {}", search_response.message));
         }
@@ -381,22 +567,12 @@ impl BiliClient {
             num_pages: None,
             num_results: None,
         });
-
         let results = data.result.unwrap_or_default();
-
-        // 获取总数和页数
         let total = data.num_results.unwrap_or(0) as u32;
-        let num_pages = data.num_pages.unwrap_or(0) as u32;
-        let num_pages = if num_pages == 0 {
-            if total > 0 {
-                total.div_ceil(page_size) // 向上取整
-            } else {
-                1
-            }
-        } else {
-            num_pages
-        };
-
+        let mut num_pages = data.num_pages.unwrap_or(0) as u32;
+        if num_pages == 0 {
+            num_pages = if total > 0 { total.div_ceil(page_size) } else { 1 };
+        }
         let mut parsed_results = Vec::new();
 
         for item in results {
@@ -427,12 +603,21 @@ impl BiliClient {
             ("page_size", &page_size.to_string()),
         ];
 
-        let response = self.request(Method::GET, url).await.query(&params).send().await?;
+        let response = self
+            .request(Method::GET, url)
+            .await
+            .header(header::REFERER, "https://search.bilibili.com/")
+            .query(&params)
+            .send()
+            .await?;
         if !response.status().is_success() {
-            return Err(anyhow!("all/v2 搜索请求失败: {}", response.status()));
+            return Err(anyhow!(search_http_status_message(
+                "all/v2 搜索接口",
+                response.status()
+            )));
         }
 
-        let payload = response.json::<serde_json::Value>().await?;
+        let payload: serde_json::Value = decode_json_response(response, "all/v2 搜索").await?;
         let code = payload["code"].as_i64().unwrap_or(-1);
         if code != 0 {
             let msg = payload["message"].as_str().unwrap_or("unknown");

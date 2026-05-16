@@ -29,6 +29,9 @@ const DAILY_CREDENTIAL_REFRESH_HOUR: u32 = 1;
 const LOGIN_EXPIRED_NOTIFICATION_TITLE: &str = "B站登录状态异常";
 const LOGIN_EXPIRED_NOTIFICATION_MESSAGE: &str =
     "检测到B站登录状态过期或未登录，自动刷新 Cookie 失败；请重新扫码登录或更新整套认证信息（SESSDATA、bili_jct、DedeUserID、ac_time_value）";
+const CREDENTIAL_REFRESH_NETWORK_NOTIFICATION_TITLE: &str = "B站凭据自动刷新暂时失败";
+const CREDENTIAL_REFRESH_NETWORK_NOTIFICATION_MESSAGE: &str =
+    "每日B站凭据检查时网络请求失败，暂时无法确认登录状态；本次不要求重新扫码，下一次会继续自动检查";
 
 fn is_submission_lookup_retryable_error(err: &anyhow::Error) -> bool {
     matches!(
@@ -77,6 +80,31 @@ fn is_wbi_fetch_retryable_error(err: &anyhow::Error) -> bool {
         crate::error::ErrorClassifier::classify_error(err).error_type,
         crate::error::ErrorType::Network | crate::error::ErrorType::Timeout | crate::error::ErrorType::ServerError
     )
+}
+
+fn is_credential_refresh_transient_error(err: &anyhow::Error) -> bool {
+    if is_wbi_login_expired_error(err) {
+        return false;
+    }
+
+    if matches!(
+        crate::error::ErrorClassifier::classify_error(err).error_type,
+        crate::error::ErrorType::Network
+            | crate::error::ErrorType::Timeout
+            | crate::error::ErrorType::RateLimit
+            | crate::error::ErrorType::ServerError
+    ) {
+        return true;
+    }
+
+    let error_text = format!("{:#}", err).to_lowercase();
+    error_text.contains("error sending request")
+        || error_text.contains("tcp connect error")
+        || error_text.contains("address not available")
+        || error_text.contains("connection refused")
+        || error_text.contains("network")
+        || error_text.contains("timed out")
+        || error_text.contains("timeout")
 }
 
 async fn fetch_wbi_mixin_key_with_retry(bili_client: &BiliClient) -> Result<Option<String>> {
@@ -217,6 +245,19 @@ async fn record_login_expired_warning(message: &str, context: Option<&str>) {
     send_source_status_notification(LOGIN_EXPIRED_NOTIFICATION_TITLE, message, context).await;
 }
 
+async fn record_credential_refresh_network_warning(context: Option<&str>) {
+    add_video_downloader_log_entry(
+        crate::api::handler::LogLevel::Warn,
+        CREDENTIAL_REFRESH_NETWORK_NOTIFICATION_MESSAGE,
+    );
+    send_source_status_notification(
+        CREDENTIAL_REFRESH_NETWORK_NOTIFICATION_TITLE,
+        CREDENTIAL_REFRESH_NETWORK_NOTIFICATION_MESSAGE,
+        context,
+    )
+    .await;
+}
+
 fn next_daily_credential_refresh_after(now: NaiveDateTime) -> NaiveDateTime {
     let refresh_time = NaiveTime::from_hms_opt(DAILY_CREDENTIAL_REFRESH_HOUR, 0, 0).unwrap();
     let today_refresh = NaiveDateTime::new(now.date(), refresh_time);
@@ -249,9 +290,14 @@ pub async fn credential_refresh_scheduler() {
         match bili_client.check_refresh().await {
             Ok(()) => info!("每日B站凭据检查与自动刷新任务执行完毕"),
             Err(err) => {
-                warn!("每日B站凭据检查与自动刷新任务失败: {:#}", err);
                 let context = format!("每日自动刷新失败: {:#}", err);
-                record_login_expired_warning(LOGIN_EXPIRED_NOTIFICATION_MESSAGE, Some(context.as_str())).await;
+                if is_credential_refresh_transient_error(&err) {
+                    warn!("每日B站凭据检查与自动刷新任务暂时失败: {:#}", err);
+                    record_credential_refresh_network_warning(Some(context.as_str())).await;
+                } else {
+                    warn!("每日B站凭据检查与自动刷新任务失败: {:#}", err);
+                    record_login_expired_warning(LOGIN_EXPIRED_NOTIFICATION_MESSAGE, Some(context.as_str())).await;
+                }
             }
         }
     }
@@ -1422,6 +1468,16 @@ mod tests {
     #[test]
     fn wbi_login_expired_error_detects_missing_credential() {
         assert!(is_wbi_login_expired_error(&anyhow::anyhow!("no credential found")));
+    }
+
+    #[test]
+    fn credential_refresh_transient_error_detects_network_failures() {
+        assert!(is_credential_refresh_transient_error(&anyhow::anyhow!(
+            "请求B站 Cookie 刷新 csrf 页面失败: error sending request: client error (Connect): tcp connect error: Address not available (os error 99)"
+        )));
+        assert!(!is_credential_refresh_transient_error(&anyhow::anyhow!(
+            "Bilibili api error, status code: -101"
+        )));
     }
 
     #[test]

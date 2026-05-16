@@ -668,6 +668,7 @@ pub struct SearchResponse {
     pub success: bool,
     pub results: Vec<SearchResult>,
     pub total: u32,
+    pub num_pages: u32,
     pub page: u32,
     pub page_size: u32,
 }
@@ -782,6 +783,30 @@ pub struct SetupAuthTokenResponse {
 pub struct UpdateCredentialResponse {
     pub success: bool,
     pub message: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct CredentialFieldStatus {
+    pub has_credential: bool,
+    pub sessdata_len: usize,
+    pub bili_jct_len: usize,
+    pub buvid3_len: usize,
+    pub dedeuserid_len: usize,
+    pub ac_time_value_len: usize,
+    pub has_buvid4: bool,
+    pub has_dedeuserid_ckmd5: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct CredentialRefreshTestResponse {
+    pub success: bool,
+    pub message: String,
+    pub stage: String,
+    pub error_type: Option<String>,
+    pub should_retry: bool,
+    pub diagnosis: String,
+    pub details: Option<String>,
+    pub credential_fields: CredentialFieldStatus,
 }
 
 // 扫码登录相关响应

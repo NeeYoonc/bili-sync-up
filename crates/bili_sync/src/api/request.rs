@@ -454,6 +454,12 @@ pub struct UpdateCredentialRequest {
     pub dedeuserid_ckmd5: Option<String>,
 }
 
+#[derive(Deserialize, ToSchema, Default)]
+pub struct CredentialRefreshTestRequest {
+    #[serde(default)]
+    pub force: bool,
+}
+
 // 扫码登录相关请求
 
 // 生成二维码请求

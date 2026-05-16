@@ -29,21 +29,21 @@ use utoipa::OpenApi;
 use crate::api::auth::OpenAPIAuth;
 use crate::api::error::InnerApiError;
 use crate::api::request::{
-    AddVideoSourceRequest, BatchUpdateConfigRequest, ConfigHistoryRequest, ConfigMigrationRequest, QRGenerateRequest,
-    QRPollRequest, ResetSpecificTasksRequest, ResetVideoSourcePathRequest, SetupAuthTokenRequest,
-    SubmissionVideosRequest, UpdateConfigItemRequest, UpdateConfigRequest, UpdateCredentialRequest,
-    UpdateVideoStatusRequest, VideosRequest,
+    AddVideoSourceRequest, BatchUpdateConfigRequest, ConfigHistoryRequest, ConfigMigrationRequest,
+    CredentialRefreshTestRequest, QRGenerateRequest, QRPollRequest, ResetSpecificTasksRequest,
+    ResetVideoSourcePathRequest, SetupAuthTokenRequest, SubmissionVideosRequest, UpdateConfigItemRequest,
+    UpdateConfigRequest, UpdateCredentialRequest, UpdateVideoStatusRequest, VideosRequest,
 };
 use crate::api::response::{
     AddVideoSourceResponse, BangumiSeasonInfo, BangumiSourceListResponse, BangumiSourceOption,
     BetaImageUpdateStatusResponse, ConfigChangeInfo, ConfigHistoryResponse, ConfigItemResponse,
     ConfigMigrationReportResponse, ConfigMigrationStatusResponse, ConfigReloadResponse, ConfigResponse,
-    ConfigValidationResponse, DashBoardResponse, DeleteVideoResponse, DeleteVideoSourceResponse,
-    HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse,
-    QRUserInfo, RefreshDanmakuResponse, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse,
-    SetupAuthTokenResponse, SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse,
-    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourceTag, VideoSourcesResponse,
-    VideosResponse,
+    ConfigValidationResponse, CredentialFieldStatus, CredentialRefreshTestResponse, DashBoardResponse,
+    DeleteVideoResponse, DeleteVideoSourceResponse, HotReloadStatusResponse, InitialSetupCheckResponse,
+    MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse, QRUserInfo, RefreshDanmakuResponse,
+    ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse, SetupAuthTokenResponse,
+    SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse, UpdateVideoStatusResponse, VideoInfo,
+    VideoResponse, VideoSource, VideoSourceTag, VideoSourcesResponse, VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::utils::live_updates::{
@@ -1511,7 +1511,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -11904,6 +11904,7 @@ pub async fn search_bilibili(
     // 特殊处理：当搜索类型为media_bangumi时，同时搜索番剧和影视
     let mut all_results = Vec::new();
     let mut total_results = 0u32;
+    let mut num_pages = 1u32;
 
     if params.search_type == "media_bangumi" {
         // 搜索番剧
@@ -11917,6 +11918,7 @@ pub async fn search_bilibili(
             .await
         {
             Ok(bangumi_wrapper) => {
+                num_pages = num_pages.max(bangumi_wrapper.num_pages);
                 all_results.extend(bangumi_wrapper.results);
                 total_results += bangumi_wrapper.total;
             }
@@ -11936,6 +11938,7 @@ pub async fn search_bilibili(
             .await
         {
             Ok(ft_wrapper) => {
+                num_pages = num_pages.max(ft_wrapper.num_pages);
                 all_results.extend(ft_wrapper.results);
                 total_results += ft_wrapper.total;
             }
@@ -11955,6 +11958,7 @@ pub async fn search_bilibili(
             .await
         {
             Ok(search_wrapper) => {
+                num_pages = search_wrapper.num_pages;
                 all_results = search_wrapper.results;
                 total_results = search_wrapper.total;
             }
@@ -11991,6 +11995,7 @@ pub async fn search_bilibili(
         success: true,
         results: api_results,
         total: total_results,
+        num_pages,
         page: params.page,
         page_size: params.page_size,
     }))
@@ -13976,6 +13981,218 @@ pub async fn update_credential(
     };
 
     Ok(ApiResponse::ok(response))
+}
+
+fn credential_field_status(credential: Option<&crate::bilibili::Credential>) -> CredentialFieldStatus {
+    match credential {
+        Some(credential) => CredentialFieldStatus {
+            has_credential: true,
+            sessdata_len: credential.sessdata.len(),
+            bili_jct_len: credential.bili_jct.len(),
+            buvid3_len: credential.buvid3.len(),
+            dedeuserid_len: credential.dedeuserid.len(),
+            ac_time_value_len: credential.ac_time_value.len(),
+            has_buvid4: credential.buvid4.as_ref().is_some_and(|value| !value.trim().is_empty()),
+            has_dedeuserid_ckmd5: credential
+                .dedeuserid_ckmd5
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty()),
+        },
+        None => CredentialFieldStatus {
+            has_credential: false,
+            sessdata_len: 0,
+            bili_jct_len: 0,
+            buvid3_len: 0,
+            dedeuserid_len: 0,
+            ac_time_value_len: 0,
+            has_buvid4: false,
+            has_dedeuserid_ckmd5: false,
+        },
+    }
+}
+
+fn credential_refresh_failure_stage(details: &str) -> String {
+    let lower = details.to_lowercase();
+    if lower.contains("cookie/info") {
+        "refresh_precheck".to_string()
+    } else if details.contains("刷新 csrf") || lower.contains("correspond") {
+        "refresh_csrf".to_string()
+    } else if details.contains("刷新B站 Cookie") || lower.contains("cookie/refresh") {
+        "refresh_cookie".to_string()
+    } else if details.contains("确认B站 Cookie") || lower.contains("confirm") {
+        "confirm_refresh".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn credential_refresh_diagnosis(error_type: &crate::error::ErrorType, details: &str) -> String {
+    match error_type {
+        crate::error::ErrorType::Network | crate::error::ErrorType::Timeout => {
+            "运行环境连接 B 站失败，优先检查容器/NAS 网络、DNS、代理或 IPv6 出口；当前凭据不一定失效。".to_string()
+        }
+        crate::error::ErrorType::ServerError | crate::error::ErrorType::RateLimit => {
+            "B 站接口临时不可用或请求受限，通常可以稍后重试；当前凭据不一定失效。".to_string()
+        }
+        crate::error::ErrorType::Authentication | crate::error::ErrorType::Authorization => {
+            "B 站明确返回认证或权限问题，优先重新扫码登录并更新整套凭据。".to_string()
+        }
+        crate::error::ErrorType::Parse => {
+            "B 站返回内容不是预期格式，可能是验证码页、风控页、HTML 错误页或网关异常。".to_string()
+        }
+        _ if details.contains("ac_time_value") => {
+            "自动刷新需要 ac_time_value，并且必须和当前 Cookie 同一批次；请重新扫码或更新整套凭据。".to_string()
+        }
+        _ => "未能归类到明确原因，请查看错误链 details。".to_string(),
+    }
+}
+
+fn redact_credential_refresh_details(mut details: String, credential: Option<&crate::bilibili::Credential>) -> String {
+    let Some(credential) = credential else {
+        return details;
+    };
+
+    let mut secrets = vec![
+        credential.sessdata.as_str(),
+        credential.bili_jct.as_str(),
+        credential.buvid3.as_str(),
+        credential.dedeuserid.as_str(),
+        credential.ac_time_value.as_str(),
+    ];
+    if let Some(value) = credential.buvid4.as_deref() {
+        secrets.push(value);
+    }
+    if let Some(value) = credential.dedeuserid_ckmd5.as_deref() {
+        secrets.push(value);
+    }
+
+    for secret in secrets {
+        let secret = secret.trim();
+        if secret.len() >= 4 {
+            details = details.replace(secret, "***");
+        }
+    }
+
+    details
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/credential/test-refresh",
+    request_body = CredentialRefreshTestRequest,
+    responses(
+        (status = 200, description = "凭据刷新诊断完成", body = CredentialRefreshTestResponse),
+        (status = 500, description = "服务器内部错误", body = String)
+    )
+)]
+pub async fn test_credential_refresh(
+    payload: Option<Json<CredentialRefreshTestRequest>>,
+) -> Result<ApiResponse<CredentialRefreshTestResponse>, ApiError> {
+    let force = payload.map(|Json(params)| params.force).unwrap_or(false);
+    let config = crate::config::reload_config();
+    let credential = config.credential.load();
+    let credential_fields = credential_field_status(credential.as_deref());
+
+    if !credential_fields.has_credential {
+        return Ok(ApiResponse::ok(CredentialRefreshTestResponse {
+            success: false,
+            message: "未找到 B 站登录凭据".to_string(),
+            stage: "field_check".to_string(),
+            error_type: Some("Configuration".to_string()),
+            should_retry: false,
+            diagnosis: "请先扫码登录或手动填写凭据。".to_string(),
+            details: None,
+            credential_fields,
+        }));
+    }
+
+    if credential_fields.sessdata_len == 0
+        || credential_fields.bili_jct_len == 0
+        || credential_fields.buvid3_len == 0
+        || credential_fields.dedeuserid_len == 0
+    {
+        return Ok(ApiResponse::ok(CredentialRefreshTestResponse {
+            success: false,
+            message: "B 站登录凭据必填字段不完整".to_string(),
+            stage: "field_check".to_string(),
+            error_type: Some("Configuration".to_string()),
+            should_retry: false,
+            diagnosis: "请补齐 SESSDATA、bili_jct、buvid3 和 DedeUserID。".to_string(),
+            details: None,
+            credential_fields,
+        }));
+    }
+
+    if credential_fields.ac_time_value_len == 0 {
+        return Ok(ApiResponse::ok(CredentialRefreshTestResponse {
+            success: false,
+            message: "缺少 ac_time_value，无法测试自动刷新".to_string(),
+            stage: "field_check".to_string(),
+            error_type: Some("Configuration".to_string()),
+            should_retry: false,
+            diagnosis: "自动刷新 Cookie 需要 ac_time_value；请重新扫码登录或更新整套凭据。".to_string(),
+            details: None,
+            credential_fields,
+        }));
+    }
+
+    let bili_client = crate::bilibili::BiliClient::new(String::new());
+    match bili_client.refresh_credential(force).await {
+        Ok(refreshed) => {
+            let updated_config = crate::config::reload_config();
+            let updated_credential = updated_config.credential.load();
+            let credential_fields = credential_field_status(updated_credential.as_deref());
+            let (message, stage, diagnosis) = if refreshed {
+                (
+                    if force {
+                        "B 站凭据强制刷新完成"
+                    } else {
+                        "B 站凭据自动刷新完成"
+                    },
+                    if force { "force_completed" } else { "completed" },
+                    "已完成完整刷新链路：cookie/info、correspond、cookie/refresh、confirm/refresh。",
+                )
+            } else {
+                (
+                    "B 站返回当前凭据不需要刷新",
+                    "precheck_not_needed",
+                    "本次只完成刷新状态检查，没有执行 cookie/refresh；需要验证完整刷新链路请点强制刷新。",
+                )
+            };
+
+            Ok(ApiResponse::ok(CredentialRefreshTestResponse {
+                success: true,
+                message: message.to_string(),
+                stage: stage.to_string(),
+                error_type: None,
+                should_retry: false,
+                diagnosis: diagnosis.to_string(),
+                details: None,
+                credential_fields,
+            }))
+        }
+        Err(err) => {
+            let details = format!("{:#}", err);
+            let classified = crate::error::ErrorClassifier::classify_error(&err);
+            let stage = credential_refresh_failure_stage(&details);
+            let diagnosis = credential_refresh_diagnosis(&classified.error_type, &details);
+            let details = redact_credential_refresh_details(details, credential.as_deref());
+            Ok(ApiResponse::ok(CredentialRefreshTestResponse {
+                success: false,
+                message: if force {
+                    "B 站凭据强制刷新测试失败".to_string()
+                } else {
+                    "B 站凭据检查或自动刷新测试失败".to_string()
+                },
+                stage,
+                error_type: Some(format!("{:?}", classified.error_type)),
+                should_retry: classified.should_retry,
+                diagnosis,
+                details: Some(details),
+                credential_fields,
+            }))
+        }
+    }
 }
 
 /// 生成扫码登录二维码
