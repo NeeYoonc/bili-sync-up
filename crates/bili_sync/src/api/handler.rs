@@ -692,6 +692,14 @@ fn process_path_with_filenamify(input: &str) -> String {
 #[cfg(test)]
 mod rename_tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-rename-{}-{}", prefix, uuid::Uuid::new_v4()));
+        dir
+    }
 
     #[test]
     fn test_process_path_with_filenamify_slash_handling() {
@@ -725,6 +733,42 @@ mod rename_tests {
         // 应该将所有斜杠转换为下划线
         assert_eq!(result, "普通视频标题_带斜杠");
         assert!(!result.contains('/'));
+    }
+
+    #[test]
+    fn test_generate_unique_folder_name_keeps_current_target_folder() {
+        let root = unique_temp_dir("current-target");
+        let base_name = "N_eko喵-3632302200458215/2026-05-22-BV1RTLe68Ebs-知道你们爱看点有劲的";
+        let current_path = root.join(base_name);
+        fs::create_dir_all(&current_path).expect("应能创建当前视频目录");
+
+        let unique_name =
+            generate_unique_folder_name(&root, base_name, "BV1RTLe68Ebs", "20260522100748", Some(&current_path));
+
+        assert_eq!(unique_name, base_name);
+        fs::remove_dir_all(root).expect("应能清理临时目录");
+    }
+
+    #[test]
+    fn test_generate_unique_folder_name_reuses_existing_identity_folder_when_db_path_is_stale() {
+        let root = unique_temp_dir("identity-target");
+        let base_name = "N_eko喵-3632302200458215/2026-05-22-BV1RTLe68Ebs-知道你们爱看点有劲的";
+        let expected_path = root.join(base_name);
+        let stale_path = root
+            .join("N_eko喵-3632302200458215/2026-05-22-BV1RTLe68Ebs-知道你们爱看点有劲的-20260522100748-BV1RTLe68Ebs");
+        fs::create_dir_all(&expected_path).expect("应能创建模板目标目录");
+        fs::create_dir_all(&stale_path).expect("应能创建旧数据库目录");
+        fs::write(
+            expected_path.join("2026-05-22-BV1RTLe68Ebs-知道你们爱看点有劲的.mp4"),
+            b"",
+        )
+        .expect("应能创建当前视频文件");
+
+        let unique_name =
+            generate_unique_folder_name(&root, base_name, "BV1RTLe68Ebs", "20260522100748", Some(&stale_path));
+
+        assert_eq!(unique_name, base_name);
+        fs::remove_dir_all(root).expect("应能清理临时目录");
     }
 }
 
@@ -8482,6 +8526,7 @@ async fn move_video_files_to_new_path(
                 &new_video_path,
                 &video.bvid,
                 &video.pubtime.format("%Y%m%d%H%M%S").to_string(),
+                Some(current_video_path),
             );
             new_video_dir.join(unique_video_path)
         } else {
@@ -11234,8 +11279,13 @@ async fn rename_existing_files(
                 let expected_new_path = if needs_deduplication {
                     let dedup_pubtime = video.pubtime.format("%Y%m%d%H%M%S").to_string();
                     // 使用智能去重生成唯一文件夹名
-                    let unique_folder_name =
-                        generate_unique_folder_name(base_parent_dir, &final_folder_name, &video.bvid, &dedup_pubtime);
+                    let unique_folder_name = generate_unique_folder_name(
+                        base_parent_dir,
+                        &final_folder_name,
+                        &video.bvid,
+                        &dedup_pubtime,
+                        Some(video_path),
+                    );
                     base_parent_dir.join(&unique_folder_name)
                 } else {
                     // 不使用去重，允许多个视频共享同一文件夹
@@ -15763,12 +15813,65 @@ pub async fn proxy_video_stream(
 
 /// 四步法安全重命名目录，避免父子目录冲突
 /// 生成唯一的文件夹名称，避免同名冲突
-fn generate_unique_folder_name(parent_dir: &std::path::Path, base_name: &str, bvid: &str, pubtime: &str) -> String {
+fn folder_name_contains_video_identity(folder_path: &std::path::Path, bvid: &str, pubtime: &str) -> bool {
+    let bvid = bvid.trim().to_lowercase();
+    let pubtime = pubtime.trim().to_lowercase();
+
+    folder_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .is_some_and(|folder_name| {
+            (!bvid.is_empty() && folder_name.contains(&bvid)) || (!pubtime.is_empty() && folder_name.contains(&pubtime))
+        })
+}
+
+fn folder_files_contain_video_identity(folder_path: &std::path::Path, bvid: &str, pubtime: &str) -> bool {
+    let bvid = bvid.trim().to_lowercase();
+    let pubtime = pubtime.trim().to_lowercase();
+    if bvid.is_empty() && pubtime.is_empty() {
+        return false;
+    }
+
+    std::fs::read_dir(folder_path).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            let file_name = entry.file_name().to_string_lossy().to_lowercase();
+            (!bvid.is_empty() && file_name.contains(&bvid)) || (!pubtime.is_empty() && file_name.contains(&pubtime))
+        })
+    })
+}
+
+fn folder_belongs_to_current_video(
+    folder_path: &std::path::Path,
+    bvid: &str,
+    pubtime: &str,
+    current_path: Option<&std::path::Path>,
+) -> bool {
+    if current_path.is_some_and(|path| {
+        same_path_for_reset(folder_path.to_string_lossy().as_ref(), path.to_string_lossy().as_ref())
+    }) {
+        return true;
+    }
+
+    folder_name_contains_video_identity(folder_path, bvid, pubtime)
+        || folder_files_contain_video_identity(folder_path, bvid, pubtime)
+}
+
+fn generate_unique_folder_name(
+    parent_dir: &std::path::Path,
+    base_name: &str,
+    bvid: &str,
+    pubtime: &str,
+    current_path: Option<&std::path::Path>,
+) -> String {
     let mut unique_name = base_name.to_string();
 
     // 检查基础名称是否已存在
     let base_path = parent_dir.join(&unique_name);
     if !base_path.exists() {
+        return unique_name;
+    }
+    if folder_belongs_to_current_video(&base_path, bvid, pubtime, current_path) {
+        debug!("文件夹 {:?} 已是当前视频的文件夹，无需追加去重后缀", base_path);
         return unique_name;
     }
 
