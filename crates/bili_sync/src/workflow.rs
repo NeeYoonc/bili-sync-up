@@ -6297,23 +6297,9 @@ async fn download_page(
                 format!("S{:02}E{:02}-{:02}", season_number, episode_number, episode_number)
             }
         }
-    } else if let Some(clean_name) = single_page_file_name_for_dedicated_folder(
-        base_path,
-        video_model,
-        &page_model,
-        crate::config::with_config(|bundle| video_template_uses_video_title(bundle.config.video_name.as_ref())),
-    ) {
-        debug!(
-            "单P视频使用独立目录，文件名改用标题: bvid={}, base_path={}, file_name={}",
-            video_model.bvid,
-            base_path.display(),
-            clean_name
-        );
-        clean_name
     } else {
         // 单P视频使用最新配置的page_name模板
-        crate::config::with_config(|bundle| bundle.render_page_template(&page_format_args(video_model, &page_model)))
-            .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?
+        render_single_page_base_name_from_config(video_model, &page_model)?
     };
 
     // 根据audio_only设置选择文件扩展名
@@ -12141,6 +12127,20 @@ fn resolve_sidecar_base_name(base_path: &std::path::Path, rendered_name: Option<
         .unwrap_or_else(|| fallback_title.to_string())
 }
 
+fn render_single_page_base_name(
+    bundle: &crate::config::ConfigBundle,
+    video_model: &video::Model,
+    page_model: &page::Model,
+) -> Result<String> {
+    bundle
+        .render_page_template(&page_format_args(video_model, page_model))
+        .map_err(|e| anyhow!("模板渲染失败: {}", e))
+}
+
+fn render_single_page_base_name_from_config(video_model: &video::Model, page_model: &page::Model) -> Result<String> {
+    crate::config::with_config(|bundle| render_single_page_base_name(bundle, video_model, page_model))
+}
+
 fn video_identity_suffix(video_model: &video::Model, pubtime: &str) -> String {
     let bvid = video_model.bvid.trim();
     if bvid.is_empty() {
@@ -12303,29 +12303,6 @@ fn preserve_existing_video_path_for_redownload(
     }
 }
 
-fn single_page_file_name_for_dedicated_folder(
-    base_path: &std::path::Path,
-    video_model: &video::Model,
-    page_model: &page::Model,
-    video_folder_is_dedicated: bool,
-) -> Option<String> {
-    if !video_folder_is_dedicated && !folder_leaf_contains_video_identity(base_path, video_model) {
-        return None;
-    }
-
-    let clean_video_name = crate::utils::filenamify::filenamify(video_model.name.trim());
-    if !clean_video_name.trim().is_empty() {
-        return Some(clean_video_name);
-    }
-
-    let clean_page_name = crate::utils::filenamify::filenamify(page_model.name.trim());
-    if clean_page_name.trim().is_empty() {
-        None
-    } else {
-        Some(clean_page_name)
-    }
-}
-
 /// 生成唯一的文件夹名称，避免同名冲突（增强版）
 pub fn generate_unique_folder_name(
     parent_dir: &std::path::Path,
@@ -12378,6 +12355,7 @@ mod tests {
     use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
     use sea_orm::{ActiveModelTrait, DatabaseConnection, Set, SqlxSqliteConnector};
     use serde_json::json;
+    use std::borrow::Cow;
     use std::fs;
     use std::path::PathBuf;
 
@@ -12817,61 +12795,43 @@ mod tests {
     }
 
     #[test]
-    fn test_single_page_file_name_for_identity_folder_uses_title() {
+    fn test_single_page_base_name_honors_page_template_when_video_template_has_folder() {
+        let config = crate::config::Config {
+            video_name: Cow::Borrowed("{{upper_name}}-{{upper_mid}}/{{pubtime}}-{{bvid}}-{{truncate title 20}}"),
+            page_name: Cow::Borrowed("{{pubtime}}-{{bvid}}-{{truncate title 20}}"),
+            ..Default::default()
+        };
+        let bundle = crate::config::ConfigBundle::from_config(config).expect("配置包应能创建");
+        let pubtime = chrono::NaiveDate::from_ymd_opt(2026, 5, 13)
+            .unwrap()
+            .and_hms_opt(12, 34, 56)
+            .unwrap();
         let video = video::Model {
-            name: "ψ(｀∇´)ψ".to_string(),
-            bvid: "BV1TestSplit001".to_string(),
-            pubtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 28)
-                .unwrap()
-                .and_hms_opt(17, 8, 30)
-                .unwrap(),
+            name: "abcdefghijklmnopqrstuv".to_string(),
+            upper_name: "creator".to_string(),
+            upper_id: 89428420,
+            bvid: "BV1Um5k63ERL".to_string(),
+            pubtime,
+            favtime: pubtime,
+            single_page: Some(true),
             ..Default::default()
         };
         let page = page::Model {
-            name: "ψ(｀∇´)ψ".to_string(),
+            name: video.name.clone(),
+            pid: 1,
             ..Default::default()
         };
-        let base_path = PathBuf::from("测试UP").join("ψ(｀∇´)ψ-20260428170830-BV1TestSplit001");
 
-        let file_name = single_page_file_name_for_dedicated_folder(&base_path, &video, &page, false);
+        let rendered_video_folder = bundle
+            .render_video_template(&video_format_args(&video))
+            .expect("视频目录模板应能渲染");
+        let rendered_page_name = render_single_page_base_name(&bundle, &video, &page).expect("单P文件名模板应能渲染");
 
-        assert_eq!(file_name.as_deref(), Some("ψ(｀∇´)ψ"));
-    }
-
-    #[test]
-    fn test_single_page_file_name_for_plain_dedicated_folder_uses_title() {
-        let video = video::Model {
-            name: "ψ(｀∇´)ψ".to_string(),
-            bvid: "BV1TestSplit002".to_string(),
-            ..Default::default()
-        };
-        let page = page::Model {
-            name: "ψ(｀∇´)ψ".to_string(),
-            ..Default::default()
-        };
-        let base_path = PathBuf::from("测试UP").join("ψ(｀∇´)ψ");
-
-        let file_name = single_page_file_name_for_dedicated_folder(&base_path, &video, &page, true);
-
-        assert_eq!(file_name.as_deref(), Some("ψ(｀∇´)ψ"));
-    }
-
-    #[test]
-    fn test_single_page_file_name_for_shared_folder_keeps_template() {
-        let video = video::Model {
-            name: "ψ(｀∇´)ψ".to_string(),
-            bvid: "BV1TestSplit003".to_string(),
-            ..Default::default()
-        };
-        let page = page::Model {
-            name: "ψ(｀∇´)ψ".to_string(),
-            ..Default::default()
-        };
-        let base_path = PathBuf::from("测试UP").join("ψ(｀∇´)ψ");
-
-        let file_name = single_page_file_name_for_dedicated_folder(&base_path, &video, &page, false);
-
-        assert_eq!(file_name, None);
+        assert_eq!(
+            rendered_video_folder,
+            "creator-89428420/20260513123456-BV1Um5k63ERL-abcdefghijklmnopqrst"
+        );
+        assert_eq!(rendered_page_name, "20260513123456-BV1Um5k63ERL-abcdefghijklmnopqrst");
     }
 
     #[test]

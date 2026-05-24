@@ -11539,38 +11539,6 @@ async fn rename_existing_files(
                         format!("S{:02}E{:02}-{:02}", season_number, episode_number, episode_number)
                     }
                 }
-            } else if is_single_page && !is_collection {
-                if let Some(clean_name) = single_page_file_name_for_dedicated_folder(
-                    &final_video_path,
-                    &video.name,
-                    &page.name,
-                    &video.bvid,
-                    &video.pubtime.format("%Y%m%d%H%M%S").to_string(),
-                    config.video_name.as_ref(),
-                ) {
-                    debug!(
-                        "单P视频使用独立目录，重命名文件名改用标题: bvid={}, path={}, file_name={}",
-                        video.bvid,
-                        final_video_path.display(),
-                        clean_name
-                    );
-                    clean_name
-                } else {
-                    // 单P视频使用page_name模板
-                    match handlebars.render("page", &page_template_value) {
-                        Ok(rendered) => {
-                            debug!("单P视频模板渲染成功: '{}' -> '{}'", config.page_name, rendered);
-                            rendered
-                        }
-                        Err(e) => {
-                            warn!(
-                                "单P视频模板渲染失败: '{}', 错误: {}, 使用默认名称: '{}'",
-                                config.page_name, e, page.name
-                            );
-                            page.name.clone()
-                        }
-                    }
-                }
             } else if is_single_page {
                 // 单P视频使用page_name模板
                 match handlebars.render("page", &page_template_value) {
@@ -15828,44 +15796,6 @@ fn generate_unique_folder_name(parent_dir: &std::path::Path, base_name: &str, bv
 
 fn video_template_uses_video_title(video_template: &str) -> bool {
     video_template.contains("title") || (video_template.contains("name") && !video_template.contains("upper_name"))
-}
-
-fn folder_leaf_contains_video_identity(base_path: &std::path::Path, bvid: &str, pubtime: &str) -> bool {
-    let Some(folder_name) = base_path.file_name() else {
-        return false;
-    };
-    let folder_name = folder_name.to_string_lossy().to_lowercase();
-    let bvid = bvid.trim().to_lowercase();
-    let pubtime = pubtime.trim().to_lowercase();
-
-    (!bvid.is_empty() && folder_name.contains(&bvid)) || (!pubtime.is_empty() && folder_name.contains(&pubtime))
-}
-
-fn single_page_file_name_for_dedicated_folder(
-    final_video_path: &std::path::Path,
-    video_name: &str,
-    page_name: &str,
-    bvid: &str,
-    pubtime: &str,
-    video_template: &str,
-) -> Option<String> {
-    if !video_template_uses_video_title(video_template)
-        && !folder_leaf_contains_video_identity(final_video_path, bvid, pubtime)
-    {
-        return None;
-    }
-
-    let clean_video_name = crate::utils::filenamify::filenamify(video_name.trim());
-    if !clean_video_name.trim().is_empty() {
-        return Some(clean_video_name);
-    }
-
-    let clean_page_name = crate::utils::filenamify::filenamify(page_name.trim());
-    if clean_page_name.trim().is_empty() {
-        None
-    } else {
-        Some(clean_page_name)
-    }
 }
 
 /// 智能重组视频文件夹
