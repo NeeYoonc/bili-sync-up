@@ -14,6 +14,12 @@ use sea_orm::{DatabaseConnection, Unchanged};
 use crate::adapter::{VideoSource, VideoSourceEnum, _ActiveModel};
 use crate::bilibili::{BiliClient, FavoriteList, VideoInfo};
 
+pub(super) fn favorite_sync_on_conflict() -> OnConflict {
+    OnConflict::column(favorite::Column::FId)
+        .update_columns([favorite::Column::Path])
+        .to_owned()
+}
+
 impl VideoSource for favorite::Model {
     fn filter_expr(&self) -> SimpleExpr {
         video::Column::FavoriteId.eq(self.id)
@@ -208,11 +214,7 @@ pub(super) async fn favorite_from<'a>(
         scan_deleted_videos_once: Set(false),
         ..Default::default()
     })
-    .on_conflict(
-        OnConflict::column(favorite::Column::FId)
-            .update_columns([favorite::Column::Name, favorite::Column::Path])
-            .to_owned(),
-    )
+    .on_conflict(favorite_sync_on_conflict())
     .exec(connection)
     .await?;
     Ok((

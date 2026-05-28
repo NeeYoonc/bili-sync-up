@@ -15,6 +15,16 @@ use crate::bilibili::{
     BiliClient, Collection, CollectionEpisodeOrderStrategy, CollectionItem, CollectionType, VideoInfo,
 };
 
+pub(super) fn collection_sync_on_conflict() -> OnConflict {
+    OnConflict::columns([
+        collection::Column::SId,
+        collection::Column::MId,
+        collection::Column::Type,
+    ])
+    .update_columns([collection::Column::Path])
+    .to_owned()
+}
+
 impl VideoSource for collection::Model {
     fn filter_expr(&self) -> SimpleExpr {
         video::Column::CollectionId.eq(self.id)
@@ -209,15 +219,7 @@ pub(super) async fn collection_from<'a>(
         episode_order_strategy: Set(CollectionEpisodeOrderStrategy::SeasonHeadTailOldestFirst.into()),
         ..Default::default()
     })
-    .on_conflict(
-        OnConflict::columns([
-            collection::Column::SId,
-            collection::Column::MId,
-            collection::Column::Type,
-        ])
-        .update_columns([collection::Column::Name, collection::Column::Path])
-        .to_owned(),
-    )
+    .on_conflict(collection_sync_on_conflict())
     .exec(connection)
     .await?;
     Ok((

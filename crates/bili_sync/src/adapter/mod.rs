@@ -301,6 +301,144 @@ impl _ActiveModel {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bili_sync_entity::{
+        collection as collection_entity, favorite as favorite_entity, submission as submission_entity,
+    };
+    use bili_sync_migration::{Migrator, MigratorTrait};
+    use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+    use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set, SqlxSqliteConnector};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-adapter-{}-{}", prefix, uuid::Uuid::new_v4()));
+        dir
+    }
+
+    async fn create_test_db(prefix: &str) -> DatabaseConnection {
+        let dir = unique_temp_dir(prefix);
+        fs::create_dir_all(&dir).expect("应能创建临时数据库目录");
+        let db_path = dir.join("data.sqlite");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("应能连接测试数据库");
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+
+        Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        db
+    }
+
+    fn fixed_time() -> String {
+        "2026-05-28 00:00:00".to_string()
+    }
+
+    async fn sync_collection(db: &DatabaseConnection, name: &str, path: &str) {
+        collection_entity::Entity::insert(collection_entity::ActiveModel {
+            s_id: Set(3362533),
+            m_id: Set(521722088),
+            r#type: Set(2),
+            name: Set(name.to_string()),
+            path: Set(path.to_string()),
+            created_at: Set(fixed_time()),
+            latest_row_at: Set("1970-01-01 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
+            ..Default::default()
+        })
+        .on_conflict(collection::collection_sync_on_conflict())
+        .exec(db)
+        .await
+        .expect("合集同步应成功");
+    }
+
+    async fn sync_favorite(db: &DatabaseConnection, name: &str, path: &str) {
+        favorite_entity::Entity::insert(favorite_entity::ActiveModel {
+            f_id: Set(42),
+            name: Set(name.to_string()),
+            path: Set(path.to_string()),
+            created_at: Set(fixed_time()),
+            latest_row_at: Set("1970-01-01 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
+            ..Default::default()
+        })
+        .on_conflict(favorite::favorite_sync_on_conflict())
+        .exec(db)
+        .await
+        .expect("收藏夹同步应成功");
+    }
+
+    async fn sync_submission(db: &DatabaseConnection, upper_name: &str, path: &str) {
+        submission_entity::Entity::insert(submission_entity::ActiveModel {
+            upper_id: Set(10086),
+            upper_name: Set(upper_name.to_string()),
+            path: Set(path.to_string()),
+            created_at: Set(fixed_time()),
+            latest_row_at: Set("1970-01-01 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
+            ..Default::default()
+        })
+        .on_conflict(submission::submission_sync_on_conflict())
+        .exec(db)
+        .await
+        .expect("投稿源同步应成功");
+    }
+
+    #[tokio::test]
+    async fn config_sync_preserves_existing_custom_source_names() {
+        let db = create_test_db("preserve-custom-source-names").await;
+
+        sync_collection(&db, "自定义合集名", "/old/collection").await;
+        sync_collection(&db, "合集·【接口返回名】", "/new/collection").await;
+        let collection = collection_entity::Entity::find()
+            .filter(collection_entity::Column::SId.eq(3362533))
+            .one(&db)
+            .await
+            .expect("查询合集应成功")
+            .expect("合集应存在");
+        assert_eq!(collection.name, "自定义合集名");
+        assert_eq!(collection.path, "/new/collection");
+
+        sync_favorite(&db, "自定义收藏夹名", "/old/favorite").await;
+        sync_favorite(&db, "接口收藏夹名", "/new/favorite").await;
+        let favorite = favorite_entity::Entity::find()
+            .filter(favorite_entity::Column::FId.eq(42))
+            .one(&db)
+            .await
+            .expect("查询收藏夹应成功")
+            .expect("收藏夹应存在");
+        assert_eq!(favorite.name, "自定义收藏夹名");
+        assert_eq!(favorite.path, "/new/favorite");
+
+        sync_submission(&db, "自定义UP名", "/old/submission").await;
+        sync_submission(&db, "接口UP名", "/new/submission").await;
+        let submission = submission_entity::Entity::find()
+            .filter(submission_entity::Column::UpperId.eq(10086))
+            .one(&db)
+            .await
+            .expect("查询投稿源应成功")
+            .expect("投稿源应存在");
+        assert_eq!(submission.upper_name, "自定义UP名");
+        assert_eq!(submission.path, "/new/submission");
+    }
+}
+
 pub async fn bangumi_from<'a>(
     season_id: &Option<String>,
     media_id: &Option<String>,

@@ -16,6 +16,12 @@ use crate::adapter::{VideoSource, VideoSourceEnum, _ActiveModel};
 use crate::bilibili::{BiliClient, Dynamic, Submission, VideoInfo};
 use crate::error::{ErrorClassifier, ErrorType};
 
+pub(super) fn submission_sync_on_conflict() -> OnConflict {
+    OnConflict::column(submission::Column::UpperId)
+        .update_columns([submission::Column::Path])
+        .to_owned()
+}
+
 fn should_use_cached_submission_info(err: &anyhow::Error) -> bool {
     matches!(
         ErrorClassifier::classify_error(err).error_type,
@@ -340,11 +346,7 @@ pub(super) async fn submission_from<'a>(
                 dynamic_api_full_synced: Set(false),
                 ..Default::default()
             })
-            .on_conflict(
-                OnConflict::column(submission::Column::UpperId)
-                    .update_columns([submission::Column::UpperName, submission::Column::Path])
-                    .to_owned(),
-            )
+            .on_conflict(submission_sync_on_conflict())
             .exec(connection)
             .await?;
 
