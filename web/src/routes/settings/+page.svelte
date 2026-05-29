@@ -15,6 +15,7 @@
 	import type {
 		ConfigResponse,
 		CredentialRefreshTestResponse,
+		FilenamePreviewResponse,
 		UserInfo,
 		UpdateConfigRequest
 	} from '$lib/types';
@@ -30,7 +31,8 @@
 		PaletteIcon,
 		BellIcon,
 		SparklesIcon,
-		RefreshCwIcon
+		RefreshCwIcon,
+		EyeIcon
 	} from 'lucide-svelte';
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -411,6 +413,12 @@
 	let collectionUnifiedNameValid = true;
 	let bindAddressError = '';
 	let bindAddressValid = true;
+	let filenamePreview: FilenamePreviewResponse | null = null;
+	let filenamePreviewLoading = false;
+	let filenamePreviewError = '';
+	let filenamePreviewTimer: ReturnType<typeof setTimeout> | null = null;
+	let filenamePreviewRequestId = 0;
+	let filenamePreviewSignature = '';
 
 	// 互斥逻辑：视频文件名模板 vs 多P视频文件名模板
 	let videoNameHasPath = false;
@@ -509,7 +517,9 @@
 	const isTabletQuery = new IsTablet();
 	let isMobile: boolean = false;
 	let isTablet: boolean = false;
+	// eslint-disable-next-line svelte/no-immutable-reactive-statements
 	$: isMobile = isMobileQuery.current;
+	// eslint-disable-next-line svelte/no-immutable-reactive-statements
 	$: isTablet = isTabletQuery.current;
 
 	// 拖拽排序相关
@@ -709,6 +719,81 @@
 		aiRenameVideoPromptHint = config.ai_rename?.video_prompt_hint || '';
 		aiRenameAudioPromptHint = config.ai_rename?.audio_prompt_hint || '';
 		aiRenameRenameParentDir = config.ai_rename?.rename_parent_dir ?? false;
+	}
+
+	function scheduleFilenamePreview() {
+		if (filenamePreviewTimer) {
+			clearTimeout(filenamePreviewTimer);
+		}
+		filenamePreviewTimer = setTimeout(() => {
+			void loadFilenamePreview();
+		}, 300);
+	}
+
+	function getRequestErrorMessage(error: unknown) {
+		if (error instanceof Error) return error.message;
+		if (error && typeof error === 'object' && 'message' in error) {
+			const message = (error as { message?: unknown }).message;
+			if (typeof message === 'string') return message;
+		}
+		return '命名模板预览失败';
+	}
+
+	async function loadFilenamePreview() {
+		if (!config || openSheet !== 'naming') return;
+
+		const requestId = ++filenamePreviewRequestId;
+		filenamePreviewLoading = true;
+		filenamePreviewError = '';
+
+		try {
+			const response = await api.previewFilenameTemplates({
+				video_name: videoName,
+				page_name: pageName,
+				multi_page_name: multiPageName,
+				bangumi_name: bangumiName,
+				folder_structure: folderStructure,
+				bangumi_folder_name: bangumiFolderName,
+				collection_folder_mode: collectionFolderMode,
+				collection_unified_name: collectionUnifiedName,
+				time_format: timeFormat,
+				multi_page_use_season_structure: multiPageUseSeasonStructure,
+				collection_use_season_structure: collectionUseSeasonStructure,
+				bangumi_use_season_structure: bangumiUseSeasonStructure
+			});
+			if (requestId !== filenamePreviewRequestId) return;
+			filenamePreview = response.data;
+		} catch (error) {
+			if (requestId !== filenamePreviewRequestId) return;
+			filenamePreview = null;
+			filenamePreviewError = getRequestErrorMessage(error);
+		} finally {
+			if (requestId === filenamePreviewRequestId) {
+				filenamePreviewLoading = false;
+			}
+		}
+	}
+
+	$: {
+		const nextSignature = JSON.stringify({
+			openSheet,
+			videoName,
+			pageName,
+			multiPageName,
+			bangumiName,
+			folderStructure,
+			bangumiFolderName,
+			collectionFolderMode,
+			collectionUnifiedName,
+			timeFormat,
+			multiPageUseSeasonStructure,
+			collectionUseSeasonStructure,
+			bangumiUseSeasonStructure
+		});
+		if (config && openSheet === 'naming' && nextSignature !== filenamePreviewSignature) {
+			filenamePreviewSignature = nextSignature;
+			scheduleFilenamePreview();
+		}
 	}
 
 	// 检查模板是否包含路径
@@ -1761,6 +1846,65 @@
 				</div>
 			</div>
 
+			<div class="bg-muted/20 rounded-lg border p-4">
+				<div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+					<div class="flex items-center gap-2">
+						<EyeIcon class="text-muted-foreground h-4 w-4" />
+						<h4 class="text-sm font-medium">命名预览</h4>
+					</div>
+					{#if filenamePreviewLoading}
+						<span class="text-muted-foreground text-xs">更新中...</span>
+					{/if}
+				</div>
+
+				{#if filenamePreviewError}
+					<div
+						class="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/20 dark:text-red-300"
+					>
+						{filenamePreviewError}
+					</div>
+				{:else if filenamePreview}
+					{#if filenamePreview.warnings.length > 0}
+						<div
+							class="mb-3 space-y-1 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-300"
+						>
+							{#each filenamePreview.warnings as warning (warning)}
+								<p>{warning}</p>
+							{/each}
+						</div>
+					{/if}
+
+					<div class="space-y-2">
+						{#each filenamePreview.items as item (item.key)}
+							{#each item.files as file (`${item.key}-${file.path}`)}
+								<div
+									class="bg-background grid grid-cols-1 gap-2 rounded-md border px-3 py-2 {item.active
+										? ''
+										: 'opacity-70'} {isMobile
+										? ''
+										: 'md:grid-cols-[7rem_minmax(0,1fr)] md:items-center'}"
+								>
+									<div class="flex min-w-0 items-center gap-2">
+										<span class="text-sm font-medium">{item.title}</span>
+										{#if !item.active}
+											<Badge variant="outline">未生效</Badge>
+										{/if}
+									</div>
+									<code
+										class="bg-muted block overflow-x-auto rounded border px-2 py-1 text-xs whitespace-nowrap"
+										>{file.path}</code
+									>
+								</div>
+							{/each}
+						{/each}
+					</div>
+				{:else}
+					<div class="text-muted-foreground rounded-md border border-dashed p-3 text-sm">
+						打开文件命名设置后会自动生成预览。
+					</div>
+				{/if}
+			</div>
+
 			<div class="space-y-2">
 				<Label for="folder-structure">文件夹结构模板</Label>
 				<Input id="folder-structure" bind:value={folderStructure} placeholder="Season 1" />
@@ -2790,25 +2934,28 @@
 									</div>
 
 									<div class="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-										<div class="rounded border bg-background px-2 py-1">
+										<div class="bg-background rounded border px-2 py-1">
 											SESSDATA：{credentialRefreshTestResult.credential_fields.sessdata_len}
 										</div>
-										<div class="rounded border bg-background px-2 py-1">
+										<div class="bg-background rounded border px-2 py-1">
 											bili_jct：{credentialRefreshTestResult.credential_fields.bili_jct_len}
 										</div>
-										<div class="rounded border bg-background px-2 py-1">
+										<div class="bg-background rounded border px-2 py-1">
 											buvid3：{credentialRefreshTestResult.credential_fields.buvid3_len}
 										</div>
-										<div class="rounded border bg-background px-2 py-1">
+										<div class="bg-background rounded border px-2 py-1">
 											DedeUserID：{credentialRefreshTestResult.credential_fields.dedeuserid_len}
 										</div>
-										<div class="rounded border bg-background px-2 py-1">
-											ac_time_value：{credentialRefreshTestResult.credential_fields.ac_time_value_len}
+										<div class="bg-background rounded border px-2 py-1">
+											ac_time_value：{credentialRefreshTestResult.credential_fields
+												.ac_time_value_len}
 										</div>
-										<div class="rounded border bg-background px-2 py-1">
-											buvid4：{credentialRefreshTestResult.credential_fields.has_buvid4 ? '有' : '无'}
+										<div class="bg-background rounded border px-2 py-1">
+											buvid4：{credentialRefreshTestResult.credential_fields.has_buvid4
+												? '有'
+												: '无'}
 										</div>
-										<div class="rounded border bg-background px-2 py-1 sm:col-span-2">
+										<div class="bg-background rounded border px-2 py-1 sm:col-span-2">
 											DedeUserID__ckMd5：{credentialRefreshTestResult.credential_fields
 												.has_dedeuserid_ckmd5
 												? '有'
@@ -2818,8 +2965,7 @@
 
 									{#if credentialRefreshTestResult.details}
 										<pre
-											class="mt-3 max-h-36 overflow-auto whitespace-pre-wrap rounded border bg-background p-2 text-xs text-slate-700 dark:text-slate-300"
-										>{credentialRefreshTestResult.details}</pre>
+											class="bg-background mt-3 max-h-36 overflow-auto rounded border p-2 text-xs whitespace-pre-wrap text-slate-700 dark:text-slate-300">{credentialRefreshTestResult.details}</pre>
 									{/if}
 								</div>
 							{/if}
@@ -2834,7 +2980,11 @@
 			</Tabs.Content>
 
 			<Tabs.Content value="qr" class="min-h-0 flex-1">
-				<div class="flex h-full min-h-0 flex-col overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+				<div
+					class="flex h-full min-h-0 flex-col overflow-y-auto {isMobile
+						? 'px-4 py-4'
+						: 'px-6 py-6'}"
+				>
 					<div class="mx-auto w-full max-w-md">
 						<QrLogin
 							onLoginSuccess={handleQrLoginSuccess}
@@ -4395,7 +4545,8 @@
 							placeholder="deepseek-v4-flash"
 						/>
 						<p class="text-muted-foreground text-xs">
-							DeepSeek推荐: deepseek-v4-flash；高质量可用 deepseek-v4-pro。旧的 deepseek-chat / deepseek-reasoner 将于 2026-07-24 停用。
+							DeepSeek推荐: deepseek-v4-flash；高质量可用 deepseek-v4-pro。旧的 deepseek-chat /
+							deepseek-reasoner 将于 2026-07-24 停用。
 						</p>
 					</div>
 				{/if}

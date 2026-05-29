@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +31,7 @@ use crate::api::auth::OpenAPIAuth;
 use crate::api::error::InnerApiError;
 use crate::api::request::{
     AddVideoSourceRequest, BatchUpdateConfigRequest, ConfigHistoryRequest, ConfigMigrationRequest,
-    CredentialRefreshTestRequest, QRGenerateRequest, QRPollRequest, ResetSpecificTasksRequest,
+    CredentialRefreshTestRequest, FilenamePreviewRequest, QRGenerateRequest, QRPollRequest, ResetSpecificTasksRequest,
     ResetVideoSourcePathRequest, SetupAuthTokenRequest, SubmissionVideosRequest, UpdateConfigItemRequest,
     UpdateConfigRequest, UpdateCredentialRequest, UpdateVideoStatusRequest, VideosRequest,
 };
@@ -39,11 +40,12 @@ use crate::api::response::{
     BetaImageUpdateStatusResponse, ConfigChangeInfo, ConfigHistoryResponse, ConfigItemResponse,
     ConfigMigrationReportResponse, ConfigMigrationStatusResponse, ConfigReloadResponse, ConfigResponse,
     ConfigValidationResponse, CredentialFieldStatus, CredentialRefreshTestResponse, DashBoardResponse,
-    DeleteVideoResponse, DeleteVideoSourceResponse, HotReloadStatusResponse, InitialSetupCheckResponse,
-    MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse, QRUserInfo, RefreshDanmakuResponse,
-    ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse, SetupAuthTokenResponse,
-    SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse, UpdateVideoStatusResponse, VideoInfo,
-    VideoResponse, VideoSource, VideoSourceTag, VideoSourcesResponse, VideosResponse,
+    DeleteVideoResponse, DeleteVideoSourceResponse, FilenamePreviewFile, FilenamePreviewItem, FilenamePreviewResponse,
+    HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse,
+    QRUserInfo, RefreshDanmakuResponse, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse,
+    SetupAuthTokenResponse, SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse,
+    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourceTag, VideoSourcesResponse,
+    VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::utils::live_updates::{
@@ -1555,7 +1557,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -8981,6 +8983,408 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         // 服务器绑定地址
         bind_address: config.bind_address.clone(),
     }))
+}
+
+fn apply_preview_template(value: Option<String>, target: &mut Cow<'static, str>) {
+    if let Some(value) = value {
+        *target = Cow::Owned(value);
+    }
+}
+
+fn config_for_filename_preview(params: FilenamePreviewRequest) -> crate::config::Config {
+    let mut config = crate::config::with_config(|bundle| bundle.config.clone());
+
+    apply_preview_template(params.video_name, &mut config.video_name);
+    apply_preview_template(params.page_name, &mut config.page_name);
+    apply_preview_template(params.multi_page_name, &mut config.multi_page_name);
+    apply_preview_template(params.bangumi_name, &mut config.bangumi_name);
+    apply_preview_template(params.folder_structure, &mut config.folder_structure);
+    apply_preview_template(params.bangumi_folder_name, &mut config.bangumi_folder_name);
+    apply_preview_template(params.collection_folder_mode, &mut config.collection_folder_mode);
+    apply_preview_template(params.collection_unified_name, &mut config.collection_unified_name);
+
+    if let Some(time_format) = params.time_format {
+        config.time_format = time_format;
+    }
+    if let Some(enabled) = params.multi_page_use_season_structure {
+        config.multi_page_use_season_structure = enabled;
+    }
+    if let Some(enabled) = params.collection_use_season_structure {
+        config.collection_use_season_structure = enabled;
+    }
+    if let Some(enabled) = params.bangumi_use_season_structure {
+        config.bangumi_use_season_structure = enabled;
+    }
+
+    config
+}
+
+fn preview_time(config: &crate::config::Config) -> String {
+    chrono::NaiveDate::from_ymd_opt(2026, 5, 13)
+        .and_then(|date| date.and_hms_opt(12, 34, 56))
+        .unwrap()
+        .and_utc()
+        .format(&config.time_format)
+        .to_string()
+}
+
+fn preview_path(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .flat_map(|part| {
+            part.replace('\\', "/")
+                .split('/')
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn preview_files(directory: &str, base_name: &str) -> Vec<FilenamePreviewFile> {
+    vec![FilenamePreviewFile {
+        label: "视频文件".to_string(),
+        path: preview_path(&[directory, &format!("{base_name}.mp4")]),
+    }]
+}
+
+fn video_preview_args(config: &crate::config::Config, title: &str, upper_name: &str, bvid: &str) -> serde_json::Value {
+    let time = preview_time(config);
+    serde_json::json!({
+        "bvid": bvid,
+        "title": title,
+        "upper_name": upper_name,
+        "upper_mid": 10086,
+        "pubtime": time,
+        "fav_time": time,
+        "show_title": title,
+    })
+}
+
+fn page_preview_args(
+    config: &crate::config::Config,
+    title: &str,
+    page_title: &str,
+    bvid: &str,
+    pid: i32,
+    is_multi_page: bool,
+) -> serde_json::Value {
+    let time = preview_time(config);
+    serde_json::json!({
+        "bvid": bvid,
+        "title": title,
+        "upper_name": "示例UP主",
+        "upper_mid": 10086,
+        "ptitle": page_title,
+        "pid": pid,
+        "pid_pad": format!("{pid:02}"),
+        "episode": pid,
+        "episode_pad": format!("{pid:02}"),
+        "is_multi_page": is_multi_page,
+        "season": 1,
+        "season_pad": "01",
+        "year": 2026,
+        "studio": "示例UP主",
+        "actors": "示例演员A, 示例演员B",
+        "share_copy": "示例分享文案",
+        "category": 1,
+        "resolution": "1920x1080",
+        "duration": 600,
+        "width": 1920,
+        "height": 1080,
+        "pubtime": time,
+        "fav_time": time,
+        "long_title": page_title,
+        "show_title": page_title,
+    })
+}
+
+fn bangumi_preview_args(config: &crate::config::Config) -> serde_json::Value {
+    let time = preview_time(config);
+    serde_json::json!({
+        "bvid": "BV1bg411c7mD",
+        "title": "示例番剧 第二季 第01集",
+        "upper_name": "哔哩哔哩番剧",
+        "upper_mid": 928123,
+        "ptitle": "第01集 开播",
+        "pid": 1,
+        "pid_pad": "01",
+        "episode": 1,
+        "episode_pad": "01",
+        "season": 2,
+        "season_pad": "02",
+        "year": 2026,
+        "studio": "示例制作公司",
+        "actors": "角色A, 角色B",
+        "share_copy": "示例番剧分享文案",
+        "category": 1,
+        "resolution": "1920x1080",
+        "content_type": "番剧",
+        "status": "连载中",
+        "ep_id": "ep123456",
+        "season_id": "ss654321",
+        "pubtime": time,
+        "fav_time": time,
+        "long_title": "第01集 开播",
+        "show_title": "示例番剧 第二季 第01集",
+        "series_title": "示例番剧",
+        "version": "",
+    })
+}
+
+fn template_has_path_separator_outside_handlebars(template: &str) -> bool {
+    let mut i = 0usize;
+    let mut in_tag = false;
+    let mut tag_end_len = 0usize;
+
+    while i < template.len() {
+        let bytes = template.as_bytes();
+
+        if !in_tag {
+            if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                let mut start_len = 2usize;
+                while i + start_len < bytes.len() && bytes[i + start_len] == b'{' && start_len < 4 {
+                    start_len += 1;
+                }
+                i += start_len;
+                in_tag = true;
+                tag_end_len = start_len;
+                continue;
+            }
+
+            let ch = template[i..].chars().next().unwrap();
+            if ch == '/' || ch == '\\' {
+                return true;
+            }
+            i += ch.len_utf8();
+            continue;
+        }
+
+        if bytes[i] == b'}' && tag_end_len > 0 {
+            let mut ok = true;
+            for k in 0..tag_end_len {
+                if i + k >= bytes.len() || bytes[i + k] != b'}' {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                i += tag_end_len;
+                in_tag = false;
+                tag_end_len = 0;
+                continue;
+            }
+        }
+
+        let ch = template[i..].chars().next().unwrap();
+        i += ch.len_utf8();
+    }
+
+    false
+}
+
+fn render_preview_name(
+    rendered: anyhow::Result<String>,
+    label: &str,
+    fallback: &str,
+    warnings: &mut Vec<String>,
+) -> String {
+    match rendered {
+        Ok(value) => value,
+        Err(err) => {
+            warnings.push(format!("{label}渲染失败：{err}"));
+            fallback.to_string()
+        }
+    }
+}
+
+/// 预览文件命名模板
+#[utoipa::path(
+    post,
+    path = "/api/config/name-preview",
+    request_body = FilenamePreviewRequest,
+    responses(
+        (status = 200, description = "文件命名预览成功", body = FilenamePreviewResponse),
+        (status = 400, description = "命名模板解析失败", body = String),
+        (status = 500, description = "服务器内部错误", body = String)
+    )
+)]
+pub async fn preview_filename_templates(
+    axum::Json(params): axum::Json<FilenamePreviewRequest>,
+) -> Result<ApiResponse<FilenamePreviewResponse>, ApiError> {
+    let preview_config = config_for_filename_preview(params);
+    let bundle = crate::config::ConfigBundle::from_config(preview_config.clone())
+        .map_err(|err| ApiError::from(InnerApiError::BadRequest(format!("命名模板解析失败: {}", err))))?;
+
+    let mut warnings = Vec::new();
+    if preview_config.video_name.contains('/') || preview_config.video_name.contains('\\') {
+        if preview_config.multi_page_name.contains('/') || preview_config.multi_page_name.contains('\\') {
+            warnings
+                .push("视频文件名模板和多P视频文件名模板都包含路径分隔符，保存时会按路径冲突规则处理。".to_string());
+        }
+    }
+    if template_has_path_separator_outside_handlebars(&preview_config.page_name) {
+        warnings.push("单P视频文件名模板包含路径分隔符，当前保存规则不允许这样配置。".to_string());
+    }
+    if template_has_path_separator_outside_handlebars(&preview_config.multi_page_name) {
+        warnings.push("多P视频文件名模板包含路径分隔符，当前保存规则不允许这样配置。".to_string());
+    }
+    if template_has_path_separator_outside_handlebars(&preview_config.collection_unified_name) {
+        warnings.push("合集统一命名模板包含路径分隔符，当前保存规则不允许这样配置。".to_string());
+    }
+
+    let single_video_args = video_preview_args(&preview_config, "示例单P视频标题", "示例UP主", "BV1sp411c7mD");
+    let single_page_args = page_preview_args(
+        &preview_config,
+        "示例单P视频标题",
+        "示例单P视频标题",
+        "BV1sp411c7mD",
+        1,
+        false,
+    );
+    let single_dir_name = render_preview_name(
+        bundle.render_video_template(&single_video_args),
+        "单P视频目录",
+        "示例UP主/示例单P视频标题",
+        &mut warnings,
+    );
+    let single_base_name = render_preview_name(
+        bundle.render_page_template(&single_page_args),
+        "单P文件名",
+        "20260513123456-BV1sp411c7mD",
+        &mut warnings,
+    );
+    let single_dir = preview_path(&["视频源路径", &single_dir_name]);
+
+    let multi_video_args = video_preview_args(&preview_config, "示例多P视频标题", "示例UP主", "BV1mp411c7mD");
+    let multi_page_args = page_preview_args(&preview_config, "示例多P视频标题", "P1 开场", "BV1mp411c7mD", 1, true);
+    let multi_dir_name = render_preview_name(
+        bundle.render_video_template(&multi_video_args),
+        "多P视频目录",
+        "示例UP主/示例多P视频标题",
+        &mut warnings,
+    );
+    let multi_base_name = render_preview_name(
+        bundle.render_multi_page_template(&multi_page_args),
+        "多P文件名",
+        "P01.P1 开场",
+        &mut warnings,
+    );
+    let multi_dir = if preview_config.multi_page_use_season_structure {
+        preview_path(&["视频源路径", &multi_dir_name, "Season 01"])
+    } else {
+        preview_path(&["视频源路径", &multi_dir_name])
+    };
+
+    let collection_args = {
+        let mut args = page_preview_args(
+            &preview_config,
+            "合集示例视频标题",
+            "合集分P标题",
+            "BV1cl411c7mD",
+            1,
+            true,
+        );
+        if let Some(obj) = args.as_object_mut() {
+            obj.insert("episode".to_string(), serde_json::json!(3));
+            obj.insert("episode_pad".to_string(), serde_json::json!("03"));
+            obj.insert("season".to_string(), serde_json::json!(1));
+            obj.insert("season_pad".to_string(), serde_json::json!("01"));
+            obj.insert("is_multi_page".to_string(), serde_json::json!(true));
+        }
+        args
+    };
+    let collection_base_name = render_preview_name(
+        bundle.render_collection_unified_template(&collection_args),
+        "合集统一文件名",
+        "S01E03P01 - 合集示例视频标题",
+        &mut warnings,
+    );
+    let collection_mode = preview_config.collection_folder_mode.as_ref();
+    let collection_active = matches!(collection_mode, "unified" | "up_seasonal");
+    let collection_root = if collection_mode == "up_seasonal" {
+        preview_path(&["投稿源路径", "示例UP主", "示例UP主合集"])
+    } else {
+        preview_path(&["合集源路径", "示例合集"])
+    };
+    let collection_dir = if preview_config.collection_use_season_structure || collection_mode == "up_seasonal" {
+        preview_path(&[&collection_root, "Season 01"])
+    } else {
+        collection_root
+    };
+
+    let bangumi_args = bangumi_preview_args(&preview_config);
+    let bangumi_base_name = render_preview_name(
+        bundle.render_bangumi_template(&bangumi_args),
+        "番剧文件名",
+        "S02E01",
+        &mut warnings,
+    );
+    let bangumi_dir = if preview_config.bangumi_use_season_structure {
+        preview_path(&["番剧源路径", "示例番剧", "Season 02"])
+    } else {
+        let folder_name = render_preview_name(
+            bundle.render_bangumi_folder_template(&bangumi_args),
+            "番剧文件夹名",
+            "示例番剧",
+            &mut warnings,
+        );
+        let season_folder = render_preview_name(
+            bundle.render_folder_structure_template(&bangumi_args),
+            "番剧季度文件夹",
+            "Season 02",
+            &mut warnings,
+        );
+        preview_path(&["番剧源路径", &folder_name, &season_folder])
+    };
+
+    let items = vec![
+        FilenamePreviewItem {
+            key: "single_page".to_string(),
+            title: "单P视频".to_string(),
+            description: "video_name 生成目录，page_name 生成视频和配套文件名。".to_string(),
+            active: true,
+            files: preview_files(&single_dir, &single_base_name),
+        },
+        FilenamePreviewItem {
+            key: "multi_page".to_string(),
+            title: "多P视频".to_string(),
+            description: if preview_config.multi_page_use_season_structure {
+                "已启用 Season 结构，multi_page_name 生成 Season 目录内的分P文件名。".to_string()
+            } else {
+                "multi_page_name 生成视频目录内的分P文件名。".to_string()
+            },
+            active: true,
+            files: preview_files(&multi_dir, &multi_base_name),
+        },
+        FilenamePreviewItem {
+            key: "collection_unified".to_string(),
+            title: "合集统一模式".to_string(),
+            description: if collection_active {
+                "collection_unified_name 用于合集/投稿统一目录下的剧集文件名。".to_string()
+            } else {
+                "当前目录模式不是统一模式，此模板不会影响普通合集下载。".to_string()
+            },
+            active: collection_active,
+            files: preview_files(&collection_dir, &collection_base_name),
+        },
+        FilenamePreviewItem {
+            key: "bangumi".to_string(),
+            title: "番剧".to_string(),
+            description: if preview_config.bangumi_use_season_structure {
+                "已启用统一 Season 结构，系列根目录和 Season 目录按番剧规则生成。".to_string()
+            } else {
+                "bangumi_folder_name 生成番剧目录，folder_structure 生成季度目录，bangumi_name 生成剧集文件名。"
+                    .to_string()
+            },
+            active: true,
+            files: preview_files(&bangumi_dir, &bangumi_base_name),
+        },
+    ];
+
+    Ok(ApiResponse::ok(FilenamePreviewResponse { items, warnings }))
 }
 
 /// 更新配置

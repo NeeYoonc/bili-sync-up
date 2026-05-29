@@ -14,6 +14,8 @@ import type {
 	DeleteVideoSourceResponse,
 	DeleteVideoResponse,
 	ConfigResponse,
+	FilenamePreviewRequest,
+	FilenamePreviewResponse,
 	RefreshDanmakuResponse,
 	UpdateConfigRequest,
 	UpdateConfigResponse,
@@ -49,7 +51,6 @@ import type {
 	TaskStatus,
 	BangumiSeasonsResponse,
 	VideoBvidResponse,
-	KeywordFilterMode,
 	LatestIngestResponse,
 	BetaImageUpdateStatusResponse
 } from './types';
@@ -105,7 +106,7 @@ class ApiClient {
 				// 尝试读取响应体获取详细错误信息
 				let errorMessage = `HTTP error! status: ${response.status}`;
 				try {
-					const errorData = await response.json() as {
+					const errorData = (await response.json()) as {
 						data?: string | { message?: string };
 						message?: string;
 						error?: string;
@@ -619,6 +620,16 @@ class ApiClient {
 	}
 
 	/**
+	 * 预览文件命名模板
+	 * @param params 当前命名模板配置
+	 */
+	async previewFilenameTemplates(
+		params: FilenamePreviewRequest
+	): Promise<ApiResponse<FilenamePreviewResponse>> {
+		return this.post<FilenamePreviewResponse>('/config/name-preview', params);
+	}
+
+	/**
 	 * 搜索B站内容
 	 * @param params 搜索参数
 	 */
@@ -1079,6 +1090,12 @@ export const api = {
 	updateConfig: (params: UpdateConfigRequest) => apiClient.updateConfig(params),
 
 	/**
+	 * 预览文件命名模板
+	 */
+	previewFilenameTemplates: (params: FilenamePreviewRequest) =>
+		apiClient.previewFilenameTemplates(params),
+
+	/**
 	 * 搜索B站内容
 	 */
 	searchBilibili: (params: SearchRequest) => apiClient.searchBilibili(params),
@@ -1155,11 +1172,8 @@ export const api = {
 	/**
 	 * 更新视频源本轮扫描已删除视频设置
 	 */
-	updateVideoSourceScanDeletedOnce: (
-		sourceType: string,
-		id: number,
-		scanDeletedOnce: boolean
-	) => apiClient.updateVideoSourceScanDeletedOnce(sourceType, id, scanDeletedOnce),
+	updateVideoSourceScanDeletedOnce: (sourceType: string, id: number, scanDeletedOnce: boolean) =>
+		apiClient.updateVideoSourceScanDeletedOnce(sourceType, id, scanDeletedOnce),
 
 	/**
 	 * 更新视频源下载选项

@@ -62,6 +62,7 @@ use crate::api::handler::{
     migrate_config_schema,
     pause_scanning_endpoint,
     poll_qr_status,
+    preview_filename_templates,
     proxy_image,
     proxy_video_stream,
     refresh_page_danmaku,
@@ -215,6 +216,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/reload-config", post(reload_config))
         .route("/api/config", get(get_config))
         .route("/api/config", put(update_config))
+        .route("/api/config/name-preview", post(preview_filename_templates))
         // 新的配置管理API路由
         .route("/api/config/item/{key}", get(get_config_item))
         .route(

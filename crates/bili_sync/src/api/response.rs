@@ -555,6 +555,28 @@ pub struct ConfigResponse {
     pub bind_address: String,
 }
 
+// 文件命名预览响应结构体
+#[derive(Serialize, ToSchema)]
+pub struct FilenamePreviewResponse {
+    pub items: Vec<FilenamePreviewItem>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct FilenamePreviewItem {
+    pub key: String,
+    pub title: String,
+    pub description: String,
+    pub active: bool,
+    pub files: Vec<FilenamePreviewFile>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct FilenamePreviewFile {
+    pub label: String,
+    pub path: String,
+}
+
 // B站凭证信息结构体
 #[derive(Serialize, ToSchema)]
 pub struct CredentialInfo {

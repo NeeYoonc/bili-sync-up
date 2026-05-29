@@ -311,6 +311,35 @@ pub struct UpdateConfigRequest {
     pub bind_address: Option<String>,
 }
 
+// 文件命名预览请求结构体
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct FilenamePreviewRequest {
+    // 视频命名模板
+    pub video_name: Option<String>,
+    // 单P分页命名模板
+    pub page_name: Option<String>,
+    // 多P分页命名模板
+    pub multi_page_name: Option<String>,
+    // 番剧分页命名模板
+    pub bangumi_name: Option<String>,
+    // 文件夹结构模板
+    pub folder_structure: Option<String>,
+    // 番剧文件夹命名模板
+    pub bangumi_folder_name: Option<String>,
+    // 合集目录模式
+    pub collection_folder_mode: Option<String>,
+    // 合集统一命名模板
+    pub collection_unified_name: Option<String>,
+    // 时间格式
+    pub time_format: Option<String>,
+    // 多P视频是否使用 Season 目录结构
+    pub multi_page_use_season_structure: Option<bool>,
+    // 合集是否使用 Season 目录结构
+    pub collection_use_season_structure: Option<bool>,
+    // 番剧是否使用统一 Season 目录结构
+    pub bangumi_use_season_structure: Option<bool>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SearchRequest {
     pub keyword: String,     // 搜索关键词

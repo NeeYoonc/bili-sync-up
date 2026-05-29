@@ -392,6 +392,39 @@ export interface ConfigResponse {
 	bind_address: string;
 }
 
+export interface FilenamePreviewRequest {
+	video_name?: string;
+	page_name?: string;
+	multi_page_name?: string;
+	bangumi_name?: string;
+	folder_structure?: string;
+	bangumi_folder_name?: string;
+	collection_folder_mode?: string;
+	collection_unified_name?: string;
+	time_format?: string;
+	multi_page_use_season_structure?: boolean;
+	collection_use_season_structure?: boolean;
+	bangumi_use_season_structure?: boolean;
+}
+
+export interface FilenamePreviewFile {
+	label: string;
+	path: string;
+}
+
+export interface FilenamePreviewItem {
+	key: string;
+	title: string;
+	description: string;
+	active: boolean;
+	files: FilenamePreviewFile[];
+}
+
+export interface FilenamePreviewResponse {
+	items: FilenamePreviewItem[];
+	warnings: string[];
+}
+
 // AI重命名配置类型
 export interface AiRenameConfig {
 	enabled: boolean;
