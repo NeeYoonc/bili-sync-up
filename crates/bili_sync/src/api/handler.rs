@@ -694,6 +694,12 @@ fn process_path_with_filenamify(input: &str) -> String {
 #[cfg(test)]
 mod rename_tests {
     use super::*;
+    use bili_sync_migration::{Migrator, MigratorTrait};
+    use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+    use sea_orm::{
+        ActiveModelTrait, ConnectionTrait, DatabaseBackend, EntityTrait, Set, SqlxSqliteConnector, Statement,
+    };
+    use std::borrow::Cow;
     use std::fs;
     use std::path::PathBuf;
 
@@ -701,6 +707,33 @@ mod rename_tests {
         let mut dir = std::env::temp_dir();
         dir.push(format!("bili-sync-rename-{}-{}", prefix, uuid::Uuid::new_v4()));
         dir
+    }
+
+    async fn create_test_db(prefix: &str) -> Arc<DatabaseConnection> {
+        let dir = unique_temp_dir(prefix);
+        fs::create_dir_all(&dir).expect("应能创建临时数据库目录");
+        let db_path = dir.join("data.sqlite");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("应能连接测试数据库");
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+
+        Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        db.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "ALTER TABLE page ADD COLUMN ai_renamed INTEGER DEFAULT 0",
+        ))
+        .await
+        .ok();
+        Arc::new(db)
     }
 
     #[test]
@@ -771,6 +804,127 @@ mod rename_tests {
 
         assert_eq!(unique_name, base_name);
         fs::remove_dir_all(root).expect("应能清理临时目录");
+    }
+
+    #[tokio::test]
+    async fn test_rename_title_folder_to_bvid_keeps_page_path_on_media_file() {
+        let db = create_test_db("title-to-bvid").await;
+        let root = unique_temp_dir("title-to-bvid-root");
+        let title = "标题/带特殊符号";
+        let old_stem = process_path_with_filenamify(title);
+        let old_dir = root.join(&old_stem);
+        fs::create_dir_all(&old_dir).expect("应能创建旧视频目录");
+        let old_mp4 = old_dir.join(format!("{old_stem}.mp4"));
+        let old_nfo = old_dir.join(format!("{old_stem}.nfo"));
+        fs::write(&old_mp4, b"video").expect("应能创建旧视频文件");
+        fs::write(&old_nfo, b"nfo").expect("应能创建旧nfo文件");
+
+        let test_time = chrono::NaiveDate::from_ymd_opt(2026, 5, 30)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let bvid = "BV1RenameBug";
+
+        video::ActiveModel {
+            id: Set(1),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(None),
+            source_id: Set(None),
+            source_type: Set(None),
+            upper_id: Set(1000),
+            upper_name: Set("测试UP".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set(title.to_string()),
+            path: Set(old_dir.to_string_lossy().to_string()),
+            category: Set(1),
+            bvid: Set(bvid.to_string()),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(test_time),
+            pubtime: Set(test_time),
+            favtime: Set(test_time),
+            download_status: Set(31),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-05-30 12:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(false),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+        }
+        .insert(db.as_ref())
+        .await
+        .expect("应能插入测试视频");
+
+        page::ActiveModel {
+            id: Set(1),
+            video_id: Set(1),
+            cid: Set(10),
+            pid: Set(1),
+            name: Set(title.to_string()),
+            width: Set(None),
+            height: Set(None),
+            duration: Set(60),
+            path: Set(Some(old_mp4.to_string_lossy().to_string())),
+            file_size_bytes: Set(None),
+            video_stream_size_bytes: Set(None),
+            audio_stream_size_bytes: Set(None),
+            image: Set(None),
+            download_status: Set(31),
+            created_at: Set("2026-05-30 12:00:00".to_string()),
+            play_video_streams: Set(None),
+            play_audio_streams: Set(None),
+            play_subtitle_streams: Set(None),
+            play_streams_updated_at: Set(None),
+            danmaku_last_synced_at: Set(None),
+            danmaku_sync_generation: Set(0),
+            danmaku_cid_snapshot: Set(None),
+            danmaku_last_write_count: Set(0),
+            ai_renamed: sea_orm::ActiveValue::NotSet,
+        }
+        .insert(db.as_ref())
+        .await
+        .expect("应能插入测试分页");
+
+        let config = crate::config::Config {
+            video_name: Cow::Borrowed("{{bvid}}"),
+            page_name: Cow::Borrowed("{{title}}"),
+            ..Default::default()
+        };
+
+        rename_existing_files(db.clone(), &config, true, false, false, false)
+            .await
+            .expect("重命名应成功");
+
+        let updated_page = page::Entity::find_by_id(1)
+            .one(db.as_ref())
+            .await
+            .expect("查询应成功")
+            .expect("分页应存在");
+        let updated_path = updated_page.path.expect("分页路径应存在");
+
+        assert!(
+            updated_path.ends_with(".mp4"),
+            "分页路径应指向媒体文件，实际为 {updated_path}"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }
 
@@ -11344,6 +11498,11 @@ fn find_page_file_in_dir(dir_path: &std::path::Path, page: &bili_sync_entity::pa
     None
 }
 
+fn is_page_media_file_name(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    lower.ends_with(".mp4") || lower.ends_with(".m4a")
+}
+
 /// 重命名已下载的文件以匹配新的命名规则
 #[allow(unused_variables)] // rename_folder_structure 参数表示是否更新了 folder_structure 配置，虽然当前未使用但保留以备将来扩展
 async fn rename_existing_files(
@@ -12157,8 +12316,8 @@ async fn rename_existing_files(
                                             }
                                             updated_count += 1;
 
-                                            // 如果这是主文件（MP4），更新数据库中的路径记录
-                                            if file_name.ends_with(".mp4") {
+                                            // 只有分页主媒体文件能写回 page.path，NFO/封面/弹幕等配套文件不能覆盖分页路径。
+                                            if is_page_media_file_name(&file_name) {
                                                 let new_path_str = final_new_file_path.to_string_lossy().to_string();
                                                 let mut page_update: bili_sync_entity::page::ActiveModel =
                                                     page.clone().into();
@@ -16515,11 +16674,11 @@ async fn extract_video_files_by_database(
                                         moved_files += 1;
                                         info!("       ✅ 文件移动成功 (总计: {}/{})", moved_files, total_files);
 
-                                        // **关键修复：如果移动的是页面主文件，记录需要更新数据库路径**
-                                        // 检查是否为主文件：mp4或nfo文件，且文件名匹配原始基础名称
+                                        // **关键修复：如果移动的是页面主媒体文件，记录需要更新数据库路径**
+                                        // 检查是否为主文件：mp4/m4a 文件，且文件名匹配原始基础名称
                                         let is_main_file = if let Some(extension) = file_path.extension() {
                                             let ext_str = extension.to_string_lossy().to_lowercase();
-                                            (ext_str == "mp4" || ext_str == "nfo")
+                                            (ext_str == "mp4" || ext_str == "m4a")
                                                 && file_name_str.starts_with(original_base_name)
                                                 && !file_name_str.contains("-fanart")
                                                 && !file_name_str.contains("-poster")
