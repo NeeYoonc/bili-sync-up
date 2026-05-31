@@ -95,15 +95,16 @@ impl Credential {
 
     pub async fn refresh(&self, client: &Client, timestamp: Option<i64>) -> Result<Self> {
         self.ensure_can_refresh()?;
+        let old_refresh_token = self.ac_time_value.clone();
         let correspond_path = Self::get_correspond_path(timestamp);
         let csrf = self.get_refresh_csrf(client, correspond_path).await.context(
             "获取B站 Cookie 刷新 csrf 失败，可能是旧 Cookie 已失效、被手动退出登录，或和 ac_time_value 不匹配",
         )?;
         let new_credential = self
-            .get_new_credential(client, &csrf)
+            .get_new_credential(client, &csrf, &old_refresh_token)
             .await
             .context("刷新B站 Cookie 失败，可能是 ac_time_value 已失效或和当前 Cookie 不匹配")?;
-        self.confirm_refresh(client, &new_credential)
+        Self::confirm_refresh(client, &new_credential, &old_refresh_token)
             .await
             .context("确认B站 Cookie 刷新失败")?;
         Ok(new_credential)
@@ -163,20 +164,29 @@ JNrRuoEUXpabUzGB8QIDAQAB
             .context("B站 Cookie 刷新 csrf 页面未返回 refresh_csrf")
     }
 
-    async fn get_new_credential(&self, client: &Client, csrf: &str) -> Result<Credential> {
+    fn refresh_cookie_form<'a>(
+        csrf: &'a str,
+        refresh_csrf: &'a str,
+        old_refresh_token: &'a str,
+    ) -> [(&'static str, &'a str); 4] {
+        [
+            ("csrf", csrf),
+            ("refresh_csrf", refresh_csrf),
+            ("refresh_token", old_refresh_token),
+            ("source", "main_web"),
+        ]
+    }
+
+    async fn get_new_credential(&self, client: &Client, csrf: &str, old_refresh_token: &str) -> Result<Credential> {
+        let refresh_form = Self::refresh_cookie_form(self.bili_jct.as_str(), csrf, old_refresh_token);
         let mut res = client
             .request(
                 Method::POST,
                 "https://passport.bilibili.com/x/passport-login/web/cookie/refresh",
                 Some(self),
             )
-            .form(&[
-                // 这里不是 json，而是 form data
-                ("csrf", self.bili_jct.as_str()),
-                ("refresh_csrf", csrf),
-                ("refresh_token", self.ac_time_value.as_str()),
-                ("source", "main_web"),
-            ])
+            // 这里不是 json，而是 form data。
+            .form(&refresh_form)
             .send()
             .await
             .context("请求B站 Cookie 刷新接口失败")?
@@ -223,18 +233,20 @@ JNrRuoEUXpabUzGB8QIDAQAB
         Ok(credential)
     }
 
-    async fn confirm_refresh(&self, client: &Client, new_credential: &Credential) -> Result<()> {
+    fn confirm_refresh_form<'a>(new_csrf: &'a str, old_refresh_token: &'a str) -> [(&'static str, &'a str); 2] {
+        [("csrf", new_csrf), ("refresh_token", old_refresh_token)]
+    }
+
+    async fn confirm_refresh(client: &Client, new_credential: &Credential, old_refresh_token: &str) -> Result<()> {
+        let confirm_form = Self::confirm_refresh_form(new_credential.bili_jct.as_str(), old_refresh_token);
         client
             .request(
                 Method::POST,
                 "https://passport.bilibili.com/x/passport-login/web/confirm/refresh",
-                // 此处用的是新的凭证
+                // 确认接口要携带新 Cookie，但 refresh_token 必须是刷新前的 ac_time_value。
                 Some(new_credential),
             )
-            .form(&[
-                ("csrf", new_credential.bili_jct.as_str()),
-                ("refresh_token", self.ac_time_value.as_str()),
-            ])
+            .form(&confirm_form)
             .send()
             .await
             .context("请求B站 Cookie 刷新确认接口失败")?
@@ -353,6 +365,26 @@ mod tests {
             .ensure_can_refresh()
             .expect_err("缺少 ac_time_value 时不能刷新");
         assert!(format!("{:#}", err).contains("缺少 ac_time_value"));
+    }
+
+    #[test]
+    fn refresh_forms_keep_old_refresh_token_contract() {
+        let refresh_form = Credential::refresh_cookie_form("old-csrf", "refresh-csrf", "old-refresh-token");
+        assert_eq!(
+            refresh_form,
+            [
+                ("csrf", "old-csrf"),
+                ("refresh_csrf", "refresh-csrf"),
+                ("refresh_token", "old-refresh-token"),
+                ("source", "main_web"),
+            ]
+        );
+
+        let confirm_form = Credential::confirm_refresh_form("new-csrf", "old-refresh-token");
+        assert_eq!(
+            confirm_form,
+            [("csrf", "new-csrf"), ("refresh_token", "old-refresh-token"),]
+        );
     }
 
     #[test]
