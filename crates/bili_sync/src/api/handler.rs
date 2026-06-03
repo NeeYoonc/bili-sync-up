@@ -8975,10 +8975,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
     // 使用配置包系统获取最新配置
     let config = crate::config::with_config(|bundle| bundle.config.clone());
 
-    let nfo_time_type = match config.nfo_time_type {
-        crate::config::NFOTimeType::FavTime => "favtime",
-        crate::config::NFOTimeType::PubTime => "pubtime",
-    };
+    let nfo_time_type = nfo_time_type_response_value(&config.nfo_config.time_type);
 
     Ok(ApiResponse::ok(crate::api::response::ConfigResponse {
         video_name: config.video_name.to_string(),
@@ -9796,9 +9793,31 @@ fn should_reset_nfo_tasks(updated_fields: &[&str]) -> bool {
     updated_fields.contains(&"nfo_time_type")
 }
 
+fn nfo_time_type_response_value(time_type: &crate::config::NFOTimeType) -> &'static str {
+    match time_type {
+        crate::config::NFOTimeType::FavTime => "favtime",
+        crate::config::NFOTimeType::PubTime => "pubtime",
+    }
+}
+
+fn sync_nfo_time_type(
+    config: &mut crate::config::Config,
+    new_nfo_time_type: crate::config::NFOTimeType,
+    updated_fields: &mut Vec<&'static str>,
+) {
+    if config.nfo_time_type != new_nfo_time_type
+        || config.nfo_config.time_type != new_nfo_time_type
+    {
+        config.nfo_time_type = new_nfo_time_type.clone();
+        config.nfo_config.time_type = new_nfo_time_type;
+        updated_fields.push("nfo_time_type");
+    }
+}
+
 #[cfg(test)]
 mod config_update_tests {
-    use super::should_reset_nfo_tasks;
+    use super::{nfo_time_type_response_value, should_reset_nfo_tasks, sync_nfo_time_type};
+    use crate::config::{Config, NFOTimeType};
 
     #[test]
     fn changing_nfo_genre_toggle_does_not_reset_nfo_tasks() {
@@ -9809,6 +9828,38 @@ mod config_update_tests {
     fn changing_nfo_time_type_still_resets_nfo_tasks() {
         assert!(should_reset_nfo_tasks(&["nfo_time_type"]));
         assert!(should_reset_nfo_tasks(&["nfo_include_genre", "nfo_time_type"]));
+    }
+
+    #[test]
+    fn nfo_time_type_response_uses_effective_nfo_config_value() {
+        assert_eq!(nfo_time_type_response_value(&NFOTimeType::FavTime), "favtime");
+        assert_eq!(nfo_time_type_response_value(&NFOTimeType::PubTime), "pubtime");
+    }
+
+    #[test]
+    fn sync_nfo_time_type_updates_legacy_and_effective_config() {
+        let mut config = Config::default();
+        config.nfo_time_type = NFOTimeType::PubTime;
+        config.nfo_config.time_type = NFOTimeType::FavTime;
+        let mut updated_fields = Vec::new();
+
+        sync_nfo_time_type(&mut config, NFOTimeType::PubTime, &mut updated_fields);
+
+        assert_eq!(config.nfo_time_type, NFOTimeType::PubTime);
+        assert_eq!(config.nfo_config.time_type, NFOTimeType::PubTime);
+        assert_eq!(updated_fields, vec!["nfo_time_type"]);
+    }
+
+    #[test]
+    fn sync_nfo_time_type_skips_when_both_values_match() {
+        let mut config = Config::default();
+        config.nfo_time_type = NFOTimeType::PubTime;
+        config.nfo_config.time_type = NFOTimeType::PubTime;
+        let mut updated_fields = Vec::new();
+
+        sync_nfo_time_type(&mut config, NFOTimeType::PubTime, &mut updated_fields);
+
+        assert!(updated_fields.is_empty());
     }
 }
 
@@ -9879,8 +9930,6 @@ pub async fn update_config_internal(
     let default_ai_rename = crate::utils::ai_rename::AiRenameConfig::default();
     let mut updated_fields = Vec::new();
 
-    // 记录原始的NFO时间类型，用于比较是否真正发生了变化
-    let original_nfo_time_type = config.nfo_time_type.clone();
     let original_nfo_include_genre = config.nfo_config.include_genre;
 
     // 记录原始的命名相关配置，用于比较是否真正发生了变化
@@ -10046,11 +10095,7 @@ pub async fn update_config_internal(
             _ => return Err(anyhow!("无效的NFO时间类型，只支持 'favtime' 或 'pubtime'").into()),
         };
 
-        // 只有当NFO时间类型真正发生变化时才标记为需要更新
-        if original_nfo_time_type != new_nfo_time_type {
-            config.nfo_time_type = new_nfo_time_type;
-            updated_fields.push("nfo_time_type");
-        }
+        sync_nfo_time_type(&mut config, new_nfo_time_type, &mut updated_fields);
     }
 
     if let Some(nfo_include_genre) = params.nfo_include_genre {
@@ -11026,6 +11071,9 @@ pub async fn update_config_internal(
                 "nfo_time_type" => {
                     manager
                         .update_config_item("nfo_time_type", serde_json::to_value(&config.nfo_time_type)?)
+                        .await?;
+                    manager
+                        .update_config_item("nfo_config", serde_json::to_value(&config.nfo_config)?)
                         .await
                 }
                 "nfo_include_genre" => {
