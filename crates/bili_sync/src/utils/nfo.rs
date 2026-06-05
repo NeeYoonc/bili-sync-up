@@ -394,6 +394,10 @@ impl NFO<'_> {
                     .create_element("aired")
                     .write_text_content_async(BytesText::new(&movie.aired.format("%Y-%m-%d").to_string()))
                     .await?;
+                writer
+                    .create_element("dateadded")
+                    .write_text_content_async(BytesText::new(&movie.aired.format("%Y-%m-%d %H:%M:%S").to_string()))
+                    .await?;
 
                 // 制作信息
                 if let Some(studio) = movie.studio {
@@ -795,6 +799,10 @@ impl NFO<'_> {
                     .create_element("aired")
                     .write_text_content_async(BytesText::new(&tvshow.aired.format("%Y-%m-%d").to_string()))
                     .await?;
+                writer
+                    .create_element("dateadded")
+                    .write_text_content_async(BytesText::new(&tvshow.aired.format("%Y-%m-%d %H:%M:%S").to_string()))
+                    .await?;
 
                 // 制作信息
                 if let Some(studio) = tvshow.studio {
@@ -1134,6 +1142,10 @@ impl NFO<'_> {
                     writer
                         .create_element("aired")
                         .write_text_content_async(BytesText::new(&aired.format("%Y-%m-%d").to_string()))
+                        .await?;
+                    writer
+                        .create_element("dateadded")
+                        .write_text_content_async(BytesText::new(&aired.format("%Y-%m-%d %H:%M:%S").to_string()))
                         .await?;
                 }
 
@@ -1505,6 +1517,10 @@ impl NFO<'_> {
                 writer
                     .create_element("aired")
                     .write_text_content_async(BytesText::new(&season.aired.format("%Y-%m-%d").to_string()))
+                    .await?;
+                writer
+                    .create_element("dateadded")
+                    .write_text_content_async(BytesText::new(&season.aired.format("%Y-%m-%d %H:%M:%S").to_string()))
                     .await?;
 
                 // 制作信息
@@ -2380,6 +2396,10 @@ impl<'a> Episode<'a> {
                 Cow::Borrowed(video.name.as_str()),
             )
         };
+        let aired_time = match config.nfo_config.time_type {
+            NFOTimeType::FavTime => video.favtime,
+            NFOTimeType::PubTime => video.pubtime,
+        };
 
         Self {
             name: episode_title,
@@ -2388,7 +2408,7 @@ impl<'a> Episode<'a> {
             plot: Some(&video.intro),                                 // 使用视频简介
             season: season_number,                                    // 根据配置使用统一season或原始season_number
             episode_number: video.episode_number.unwrap_or(page.pid), // 使用video的episode_number
-            aired: Some(video.pubtime),                               // 使用视频发布时间
+            aired: Some(aired_time),
             duration: Some(page.duration as i32 / 60),                // 分页时长转换为分钟
             user_rating: None,                                        // 分页没有单独评分
             director: None,                                           // 分页没有单独导演信息
@@ -2694,8 +2714,8 @@ mod tests {
         assert!(generated_movie.contains(r#"<uniqueid type="bilibili" default="true">BV1nWcSeeEkV</uniqueid>"#));
         assert!(generated_movie.contains("<country>中国</country>"));
         assert!(generated_movie.contains("<studio>哔哩哔哩</studio>"));
-        assert!(generated_movie.contains("<name>1</name>")); // upper_id=1
-        assert!(generated_movie.contains("<role>upper_name</role>"));
+        assert!(generated_movie.contains("<name>upper_name</name>"));
+        assert!(generated_movie.contains("<role>UP主</role>"));
         assert!(generated_movie.contains("<thumb>https://example.com/cover.jpg</thumb>"));
         assert!(!generated_movie.contains("原始视频："));
         assert!(!generated_movie.contains("https://www.bilibili.com/video/"));
@@ -2709,8 +2729,8 @@ mod tests {
         assert!(generated_tvshow.contains("<totalseasons>1</totalseasons>"));
         assert!(generated_tvshow.contains("<country>中国</country>"));
         assert!(generated_tvshow.contains("<studio>哔哩哔哩</studio>"));
-        assert!(generated_tvshow.contains("<name>1</name>")); // upper_id=1
-        assert!(generated_tvshow.contains("<role>upper_name</role>"));
+        assert!(generated_tvshow.contains("<name>upper_name</name>"));
+        assert!(generated_tvshow.contains("<role>UP主</role>"));
         assert!(generated_tvshow.contains("<thumb>https://example.com/cover.jpg</thumb>"));
         assert!(!generated_tvshow.contains("原始视频："));
         assert!(!generated_tvshow.contains("https://www.bilibili.com/video/"));
@@ -2742,6 +2762,170 @@ mod tests {
         assert!(generated_episode.contains("<season>1</season>"));
         assert!(generated_episode.contains("<episode>3</episode>"));
         assert!(generated_episode.contains(r#"<uniqueid type="bilibili" default="true">3</uniqueid>"#));
+    }
+
+    #[tokio::test]
+    async fn test_nfo_keeps_aired_date_and_adds_full_dateadded_time() {
+        let full_time = chrono::NaiveDateTime::new(
+            chrono::NaiveDate::from_ymd_opt(2022, 4, 7).unwrap(),
+            chrono::NaiveTime::from_hms_opt(12, 34, 56).unwrap(),
+        );
+
+        let movie_nfo = NFO::Movie(Movie {
+            name: "movie",
+            original_title: "movie",
+            intro: "",
+            bvid: "BV1DateMovie",
+            upper_id: 1,
+            upper_name: "upper",
+            aired: full_time,
+            premiered: full_time,
+            tags: None,
+            user_rating: None,
+            mpaa: None,
+            country: None,
+            studio: None,
+            director: None,
+            credits: None,
+            duration: None,
+            view_count: None,
+            like_count: None,
+            category: 0,
+            tagline: None,
+            set: None,
+            sorttitle: None,
+            actors_info: None,
+            staff_info: None,
+            cover_url: "",
+            fanart_url: None,
+            upper_face_url: None,
+        })
+        .generate_nfo()
+        .await
+        .unwrap();
+        assert!(movie_nfo.contains("<premiered>2022-04-07</premiered>"));
+        assert!(movie_nfo.contains("<aired>2022-04-07</aired>"));
+        assert!(movie_nfo.contains("<dateadded>2022-04-07 12:34:56</dateadded>"));
+        assert!(!movie_nfo.contains("<aired>2022-04-07 12:34:56</aired>"));
+
+        let tvshow_nfo = NFO::TVShow(TVShow {
+            name: "tvshow",
+            original_title: "tvshow",
+            intro: "",
+            bvid: "BV1DateTVShow",
+            upper_id: 1,
+            upper_name: "upper",
+            aired: full_time,
+            premiered: full_time,
+            tags: None,
+            user_rating: None,
+            mpaa: None,
+            country: None,
+            studio: None,
+            status: None,
+            total_seasons: None,
+            total_episodes: None,
+            duration: None,
+            view_count: None,
+            like_count: None,
+            category: 0,
+            tagline: None,
+            set: None,
+            sorttitle: None,
+            actors_info: None,
+            staff_info: None,
+            cover_url: "",
+            fanart_url: None,
+            upper_face_url: None,
+            season_id: None,
+            media_id: None,
+            plot_link_override: None,
+            uniqueid_override: None,
+        })
+        .generate_nfo()
+        .await
+        .unwrap();
+        assert!(tvshow_nfo.contains("<premiered>2022-04-07</premiered>"));
+        assert!(tvshow_nfo.contains("<aired>2022-04-07</aired>"));
+        assert!(tvshow_nfo.contains("<dateadded>2022-04-07 12:34:56</dateadded>"));
+        assert!(!tvshow_nfo.contains("<aired>2022-04-07 12:34:56</aired>"));
+
+        let episode_nfo = NFO::Episode(Episode {
+            name: Cow::Borrowed("episode"),
+            original_title: Cow::Borrowed("episode"),
+            pid: "1".to_string(),
+            plot: None,
+            season: 1,
+            episode_number: 1,
+            aired: Some(full_time),
+            duration: None,
+            user_rating: None,
+            director: None,
+            credits: None,
+            bvid: "BV1DateEpisode",
+            category: 0,
+            mpaa: None,
+            country: None,
+            studio: None,
+            genres: None,
+            upper_id: 1,
+            upper_name: "upper",
+            actors_info: None,
+            staff_info: None,
+            thumb_url: None,
+            fanart_url: None,
+            upper_face_url: None,
+        })
+        .generate_nfo()
+        .await
+        .unwrap();
+        assert!(episode_nfo.contains("<aired>2022-04-07</aired>"));
+        assert!(episode_nfo.contains("<dateadded>2022-04-07 12:34:56</dateadded>"));
+        assert!(!episode_nfo.contains("<aired>2022-04-07 12:34:56</aired>"));
+
+        let season_nfo = NFO::Season(Season {
+            name: "season",
+            original_title: "season",
+            intro: "",
+            season_number: 1,
+            bvid: "BV1DateSeason",
+            upper_id: 1,
+            upper_name: "upper",
+            aired: full_time,
+            premiered: full_time,
+            tags: None,
+            user_rating: None,
+            mpaa: None,
+            country: None,
+            studio: None,
+            status: None,
+            total_episodes: None,
+            duration: None,
+            view_count: None,
+            like_count: None,
+            category: 0,
+            source_type: None,
+            tagline: None,
+            set: None,
+            sorttitle: None,
+            actors_info: None,
+            staff_info: None,
+            cover_url: "",
+            fanart_url: None,
+            upper_face_url: None,
+            season_id: None,
+            media_id: None,
+            plot_link_override: None,
+            uniqueid_override: None,
+            suppress_season_label_in_title: false,
+        })
+        .generate_nfo()
+        .await
+        .unwrap();
+        assert!(season_nfo.contains("<premiered>2022-04-07</premiered>"));
+        assert!(season_nfo.contains("<aired>2022-04-07</aired>"));
+        assert!(season_nfo.contains("<dateadded>2022-04-07 12:34:56</dateadded>"));
+        assert!(!season_nfo.contains("<aired>2022-04-07 12:34:56</aired>"));
     }
 
     #[tokio::test]
@@ -3681,8 +3865,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_nfo_actor_info_with_uid_and_role() {
-        // 测试NFO生成中使用UID作为name，UP主名称作为role
+    async fn test_nfo_actor_info_with_upper_name_and_role() {
+        // 测试NFO生成中使用UP主昵称作为name，固定使用UP主作为role
         let video = video::Model {
             intro: "测试视频介绍".to_string(),
             name: "测试视频".to_string(),
@@ -3704,13 +3888,13 @@ mod tests {
 
         let movie_nfo = NFO::Movie((&video).into()).generate_nfo().await.unwrap();
 
-        // 验证使用UID作为name，UP主名称作为role
+        // 验证使用UP主昵称作为name，固定使用UP主作为role
         assert!(movie_nfo.contains("<actor>"));
-        assert!(movie_nfo.contains("<name>123456789</name>")); // UID作为name
-        assert!(movie_nfo.contains("<role>知名UP主</role>")); // UP主名称作为role
+        assert!(movie_nfo.contains("<name>知名UP主</name>"));
+        assert!(movie_nfo.contains("<role>UP主</role>"));
         assert!(movie_nfo.contains("<order>1</order>"));
 
-        // 测试UID无效的情况
+        // 测试UID无效但UP主名称有效的情况
         let video_no_uid = video::Model {
             upper_id: 0, // 无效UID
             upper_name: "另一个UP主".to_string(),
@@ -3719,10 +3903,9 @@ mod tests {
 
         let movie_nfo_no_uid = NFO::Movie((&video_no_uid).into()).generate_nfo().await.unwrap();
 
-        // 验证无效UID时，UP主名称同时作为name和role
         assert!(movie_nfo_no_uid.contains("<name>另一个UP主</name>"));
-        assert!(movie_nfo_no_uid.contains("<role>另一个UP主</role>"));
+        assert!(movie_nfo_no_uid.contains("<role>UP主</role>"));
 
-        println!("NFO演员信息（UID和角色）测试通过");
+        println!("NFO演员信息（UP主昵称和角色）测试通过");
     }
 }
