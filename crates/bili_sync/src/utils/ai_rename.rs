@@ -922,17 +922,16 @@ async fn ai_generate_filenames_batch_openai(
     if let Err(e) = add_conversation_message(db.as_ref(), source_key, "user", &simplified_user_msg).await {
         warn!("保存用户消息失败: {}", e);
     }
-    // 保存生成的文件名列表（JSON格式转为简单列表格式）
-    let simplified_response = if let Ok(names) = serde_json::from_str::<Vec<String>>(&raw) {
-        names.join("\n")
-    } else {
-        raw.clone()
-    };
+    let parsed_names = parse_batch_response(&raw, expected_count);
+    let simplified_response = parsed_names
+        .as_ref()
+        .map(|names| names.join("\n"))
+        .unwrap_or_else(|_| raw.clone());
     if let Err(e) = add_conversation_message(db.as_ref(), source_key, "assistant", &simplified_response).await {
         warn!("保存助手回复失败: {}", e);
     }
 
-    parse_batch_response(&raw, expected_count)
+    parsed_names
 }
 
 fn deepseek_thinking_override(cfg: &AiRenameConfig) -> Option<ThinkingConfig> {
@@ -975,6 +974,62 @@ fn extract_chat_content(resp: &ChatResponse) -> Result<String> {
     ))
 }
 
+fn normalize_ai_filename_punctuation(input: &str) -> String {
+    let mut output = input.replace("……", "...");
+    output = output.replace('…', "...");
+
+    let mut normalized = String::with_capacity(output.len());
+    for ch in output.chars() {
+        match ch {
+            '【' | '〖' | '〔' | '「' | '『' | '《' | '〈' => normalized.push('['),
+            '】' | '〗' | '〕' | '」' | '』' | '》' | '〉' => normalized.push(']'),
+            '（' => normalized.push('('),
+            '）' => normalized.push(')'),
+            '，' | '、' => normalized.push(','),
+            '。' => normalized.push('.'),
+            '；' => normalized.push(';'),
+            '！' => normalized.push('!'),
+            '：' | ':' | '？' | '?' => normalized.push('-'),
+            '“' | '”' | '‘' | '’' | '"' => {}
+            '\u{3000}' => normalized.push(' '),
+            _ => normalized.push(ch),
+        }
+    }
+
+    remove_spaces_after_closing_bracket(&normalized)
+}
+
+fn remove_spaces_after_closing_bracket(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        output.push(ch);
+        if ch == ']' {
+            while matches!(chars.peek(), Some(' ' | '\t' | '\u{3000}')) {
+                chars.next();
+            }
+        }
+    }
+
+    output
+}
+
+fn cleanup_ai_filename_separators(input: &str) -> String {
+    let mut output = input.trim().to_string();
+    while output.contains("--") {
+        output = output.replace("--", "-");
+    }
+    while output.contains(",,") {
+        output = output.replace(",,", ",");
+    }
+
+    output
+        .trim_matches(|ch| matches!(ch, '-' | ',' | ';' | ' ' | '\t' | '\u{3000}'))
+        .trim_end_matches('.')
+        .to_string()
+}
+
 /// 解析批量响应的 JSON 数组
 fn parse_batch_response(response: &str, expected_count: usize) -> Result<Vec<String>> {
     let response = response.trim();
@@ -1002,8 +1057,11 @@ fn parse_batch_response(response: &str, expected_count: usize) -> Result<Vec<Str
         .into_iter()
         .map(|name| {
             let mut n = name.replace(['"', '\n', '\r'], "");
+            n = normalize_ai_filename_punctuation(&n);
             n = n.replace(' ', "-");
+            n = cleanup_ai_filename_separators(&n);
             n = crate::utils::filenamify::filenamify(&n);
+            n = cleanup_ai_filename_separators(&n);
             if n.chars().count() > 180 {
                 n = n.chars().take(180).collect();
             }
@@ -1027,6 +1085,30 @@ mod tests {
             .expect("valid json array should parse");
 
         assert_eq!(names, vec!["ZHY20202024-06-09", "三国bigbig2024-06-09"]);
+    }
+
+    #[test]
+    fn parse_batch_response_normalizes_ai_punctuation() {
+        let names = parse_batch_response(
+            r#"[
+                "【枪神纪】 大楼屋顶-榴弹点位荧块",
+                "[崩坏:星穹铁道]罗浮仙舟-镜流剧情?",
+                "[音乐]歌名（现场版）-",
+                "[电影解说]“开局即巅峰”-这部片太重磅了..."
+            ]"#,
+            4,
+        )
+        .expect("valid json array should parse");
+
+        assert_eq!(
+            names,
+            vec![
+                "[枪神纪]大楼屋顶-榴弹点位荧块",
+                "[崩坏-星穹铁道]罗浮仙舟-镜流剧情",
+                "[音乐]歌名(现场版)",
+                "[电影解说]开局即巅峰-这部片太重磅了"
+            ]
+        );
     }
 
     #[test]
