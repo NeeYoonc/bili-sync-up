@@ -53,7 +53,9 @@ use crate::utils::live_updates::{
     subscribe_video_sources_changed, subscribe_videos_changed,
 };
 use crate::utils::model::{is_video_file_size_backfill_pending, queue_video_file_size_backfill};
-use crate::utils::status::{PageStatus, VideoStatus};
+use crate::utils::status::{
+    PageStatus, VideoStatus, PAGE_STATUS_NFO_INDEX, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_PAGE_DOWNLOAD_INDEX,
+};
 
 // 全局静态的扫码登录服务实例
 use once_cell::sync::Lazy;
@@ -9805,9 +9807,7 @@ fn sync_nfo_time_type(
     new_nfo_time_type: crate::config::NFOTimeType,
     updated_fields: &mut Vec<&'static str>,
 ) {
-    if config.nfo_time_type != new_nfo_time_type
-        || config.nfo_config.time_type != new_nfo_time_type
-    {
+    if config.nfo_time_type != new_nfo_time_type || config.nfo_config.time_type != new_nfo_time_type {
         config.nfo_time_type = new_nfo_time_type.clone();
         config.nfo_config.time_type = new_nfo_time_type;
         updated_fields.push("nfo_time_type");
@@ -17565,16 +17565,16 @@ async fn reset_nfo_tasks_for_config_change(db: Arc<DatabaseConnection>) -> Resul
         .all(db.as_ref())
         .await?;
 
-    // 重置页面的NFO任务状态（索引2：视频信息NFO）
+    // 重置页面的NFO任务状态
     let resetted_pages_info = all_pages
         .into_iter()
         .filter_map(|(id, pid, name, download_status, video_id)| {
             let mut page_status = PageStatus::from(download_status);
-            let current_nfo_status = page_status.get(2); // 索引2是视频信息NFO
+            let current_nfo_status = page_status.get(PAGE_STATUS_NFO_INDEX);
 
             if current_nfo_status != 0 {
                 // 只重置已经开始的NFO任务
-                page_status.set(2, 0); // 重置为未开始
+                page_status.set(PAGE_STATUS_NFO_INDEX, 0); // 重置为未开始
                 let page_info = PageInfo::from((id, pid, name, page_status.into()));
                 Some((page_info, video_id))
             } else {
@@ -17593,23 +17593,23 @@ async fn reset_nfo_tasks_for_config_change(db: Arc<DatabaseConnection>) -> Resul
 
     let all_videos_info: Vec<VideoInfo> = all_videos.into_iter().map(VideoInfo::from).collect();
 
-    // 重置视频的NFO任务状态（索引1：视频信息NFO）
+    // 重置视频的NFO任务状态
     let resetted_videos_info = all_videos_info
         .into_iter()
         .filter_map(|mut video_info| {
             let mut video_status = VideoStatus::from(video_info.download_status);
             let mut video_resetted = false;
 
-            // 重置视频信息NFO任务（索引1）
-            let current_nfo_status = video_status.get(1);
+            // 重置视频信息NFO任务
+            let current_nfo_status = video_status.get(VIDEO_STATUS_NFO_INDEX);
             if current_nfo_status != 0 {
-                video_status.set(1, 0); // 重置为未开始
+                video_status.set(VIDEO_STATUS_NFO_INDEX, 0); // 重置为未开始
                 video_resetted = true;
             }
 
-            // 如果有页面被重置，同时重置分P下载状态（索引4）
+            // 如果有页面被重置，同时重置分P下载状态
             if video_ids_with_resetted_pages.contains(&video_info.id) {
-                video_status.set(4, 0); // 将"分P下载"重置为 0
+                video_status.set(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX, 0); // 将"分P下载"重置为 0
                 video_resetted = true;
             }
 

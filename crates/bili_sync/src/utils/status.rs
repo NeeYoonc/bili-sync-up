@@ -185,6 +185,12 @@ impl<const N: usize> From<[u32; N]> for Status<N> {
     }
 }
 
+pub const VIDEO_STATUS_NFO_INDEX: usize = 1;
+pub const VIDEO_STATUS_UPPER_FACE_INDEX: usize = 2;
+pub const VIDEO_STATUS_PAGE_DOWNLOAD_INDEX: usize = 4;
+
+pub const PAGE_STATUS_NFO_INDEX: usize = 2;
+
 /// 包含五个子任务，从前到后依次是：视频封面、视频信息、Up 主头像、Up 主信息、分 P 下载
 pub type VideoStatus = Status<5>;
 

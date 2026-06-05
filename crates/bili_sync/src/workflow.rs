@@ -310,7 +310,7 @@ use crate::utils::model::{
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
 use crate::utils::scan_collector::create_new_video_info;
-use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK};
+use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX};
 
 const DB_LOCK_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
 
@@ -2983,6 +2983,14 @@ pub struct DownloadPageArgs<'a> {
     pub inline_total_file_size_bytes: Arc<TokioMutex<Option<i64>>>,
 }
 
+fn video_status_should_run_nfo(separate_status: &[bool; 5]) -> bool {
+    separate_status[VIDEO_STATUS_NFO_INDEX]
+}
+
+fn video_status_should_run_upper_face(separate_status: &[bool; 5]) -> bool {
+    separate_status[VIDEO_STATUS_UPPER_FACE_INDEX]
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn download_video_pages(
     bili_client: &BiliClient,
@@ -3002,6 +3010,8 @@ pub async fn download_video_pages(
     };
     let mut status = VideoStatus::from(video_model.download_status);
     let separate_status = status.should_run();
+    let should_run_video_nfo = video_status_should_run_nfo(&separate_status);
+    let should_run_upper_face = video_status_should_run_upper_face(&separate_status);
     // “重置后恢复”判断：如果数据库里已存在 page.path，通常代表曾经下载过；此时遇到 B站-404 应恢复为未重置
     let has_existing_page_paths = pages.iter().any(|p| p.path.as_ref().is_some());
 
@@ -4008,7 +4018,7 @@ pub async fn download_video_pages(
         // 番剧且有API数据：使用API驱动的NFO生成
         // 注意：启用Season结构时，bangumi_folder_path已经指向系列根目录
         generate_bangumi_video_nfo(
-            separate_status[2] && bangumi_folder_path.is_some() && should_download_bangumi_nfo,
+            should_run_video_nfo && bangumi_folder_path.is_some() && should_download_bangumi_nfo,
             &video_model,
             season_info.as_ref().unwrap(),
             bangumi_folder_path.as_ref().unwrap().join("tvshow.nfo"),
@@ -4019,10 +4029,10 @@ pub async fn download_video_pages(
         // 对于合集，只在第一个视频时生成tvshow.nfo，避免重复生成
         let should_generate_nfo = if is_bangumi {
             // 番剧：只有在文件不存在时才生成，放在番剧文件夹根目录
-            separate_status[2] && bangumi_folder_path.is_some() && should_download_bangumi_nfo
+            should_run_video_nfo && bangumi_folder_path.is_some() && should_download_bangumi_nfo
         } else if is_collection || submission_up_seasonal_nfo_route {
             // 合集：只有第一个视频时生成tvshow.nfo
-            if !disable_tvshow_assets && separate_status[2] && collection_use_season_structure {
+            if !disable_tvshow_assets && should_run_video_nfo && collection_use_season_structure {
                 // 检查是否为第一个视频
                 match video_source {
                     VideoSourceEnum::Collection(collection_source) => {
@@ -4054,13 +4064,13 @@ pub async fn download_video_pages(
             }
         } else {
             // 普通视频：为多P视频生成nfo
-            separate_status[2] && !is_single_page && !disable_tvshow_assets
+            should_run_video_nfo && !is_single_page && !disable_tvshow_assets
         };
 
         let should_generate_collection_tvshow_nfo = should_generate_nfo && collection_like_nfo_route;
         let should_generate_collection_season_nfo = collection_like_nfo_route
             && !disable_tvshow_assets
-            && separate_status[2]
+            && should_run_video_nfo
             && ((is_collection && collection_use_season_structure)
                 || submission_up_seasonal_nfo_route
                 || multi_page_use_season_nfo_route)
@@ -4535,8 +4545,8 @@ pub async fn download_video_pages(
         let series_title = season_info.as_ref().unwrap().title.as_str();
         info!("番剧「{}」使用季度编号: {}", series_title, season_number);
 
-        // season.nfo生成依赖separate_status[2]状态（重置状态后会强制重新生成）
-        let should_generate_season_nfo = separate_status[2];
+        // season.nfo 属于视频级 NFO，跟随 VideoStatus[1] 重置。
+        let should_generate_season_nfo = should_run_video_nfo;
 
         generate_bangumi_season_nfo(
             should_generate_season_nfo,
@@ -4951,7 +4961,7 @@ pub async fn download_video_pages(
     let res_3_fut = Box::pin(
         // 下载 Up 主头像（番剧跳过，因为番剧没有UP主信息）
         fetch_upper_face(
-            separate_status[2] && should_download_upper && !is_bangumi,
+            should_run_upper_face && should_download_upper && !is_bangumi,
             &final_video_model,
             downloader,
             base_upper_path.join("folder.jpg"),
@@ -5183,7 +5193,7 @@ pub async fn download_video_pages(
 
     // 下载联合投稿中其他UP主的头像（在主UP主头像下载之后）
     let staff_faces_result = if !is_bangumi && should_download_upper {
-        fetch_staff_faces(separate_status[2], &final_video_model, downloader, token.clone()).await
+        fetch_staff_faces(should_run_upper_face, &final_video_model, downloader, token.clone()).await
     } else {
         Ok(ExecutionStatus::Skipped)
     };
@@ -12366,6 +12376,15 @@ mod tests {
         let mut dir = std::env::temp_dir();
         dir.push(format!("bili-sync-workflow-{}-{}", prefix, uuid::Uuid::new_v4()));
         dir
+    }
+
+    #[test]
+    fn test_video_nfo_gate_uses_nfo_status_not_upper_face_status() {
+        let status = VideoStatus::from([STATUS_OK, 0, STATUS_OK, STATUS_OK, STATUS_OK]);
+        let separate_status = status.should_run();
+
+        assert!(video_status_should_run_nfo(&separate_status));
+        assert!(!video_status_should_run_upper_face(&separate_status));
     }
 
     async fn create_test_db(prefix: &str) -> DatabaseConnection {
