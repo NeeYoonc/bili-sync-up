@@ -176,6 +176,12 @@ pub trait VideoSource {
         false
     }
 
+    /// 是否在下载后按播放器章节切分为独立视频
+    /// 默认 false
+    fn split_chapters_after_download(&self) -> bool {
+        false
+    }
+
     /// 获取是否下载弹幕（默认为 true）
     fn download_danmaku(&self) -> bool {
         true // 默认实现：下载弹幕
@@ -504,6 +510,7 @@ pub async fn bangumi_from<'a>(
             audio_only: model.audio_only,
             audio_only_m4a_only: model.audio_only_m4a_only,
             flat_folder: model.flat_folder,
+            split_chapters_after_download: model.split_chapters_after_download,
             download_danmaku: model.download_danmaku,
             download_subtitle: model.download_subtitle,
             ai_rename: model.ai_rename,
@@ -549,6 +556,7 @@ pub async fn bangumi_from<'a>(
             audio_only: false,
             audio_only_m4a_only: false,
             flat_folder: false,
+            split_chapters_after_download: false,
             download_danmaku: true,
             download_subtitle: true,
             ai_rename: false,

@@ -75,6 +75,7 @@ export interface VideoSource {
 	audio_only: boolean; // 仅下载音频（输出m4a格式）
 	audio_only_m4a_only: boolean; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
 	flat_folder: boolean; // 平铺目录模式（不为每个视频创建子文件夹）
+	split_chapters_after_download: boolean; // 下载后按播放器章节切分为独立视频
 	download_danmaku: boolean; // 是否下载弹幕
 	download_subtitle: boolean; // 是否下载字幕
 	ai_rename: boolean; // 是否启用AI重命名
@@ -136,6 +137,10 @@ export interface VideoSourceTag {
 	source_type: string;
 	source_type_label: string;
 	source_name: string;
+	split_chapters_after_download: boolean;
+	audio_only: boolean;
+	audio_only_m4a_only: boolean;
+	flat_folder: boolean;
 }
 
 // 单个视频响应类型
@@ -234,6 +239,7 @@ export interface AddVideoSourceRequest {
 	audio_only?: boolean; // 仅下载音频（输出m4a格式）
 	audio_only_m4a_only?: boolean; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
 	flat_folder?: boolean; // 平铺目录模式（不为每个视频创建子文件夹）
+	split_chapters_after_download?: boolean; // 下载后按播放器章节切分为独立视频
 	download_danmaku?: boolean; // 是否下载弹幕（默认true）
 	download_subtitle?: boolean; // 是否下载字幕（默认true）
 	use_dynamic_api?: boolean; // 投稿源：是否使用动态API
@@ -284,6 +290,7 @@ export interface ConfigResponse {
 	parallel_download_enabled: boolean;
 	parallel_download_threads: number;
 	parallel_download_use_aria2: boolean;
+	split_chapters_after_download?: boolean;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;
@@ -456,6 +463,7 @@ export interface UpdateConfigRequest {
 	parallel_download_enabled?: boolean;
 	parallel_download_threads?: number;
 	parallel_download_use_aria2?: boolean;
+	split_chapters_after_download?: boolean;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;

@@ -42,6 +42,7 @@ pub struct Movie<'a> {
     pub tagline: Option<String>,                   // 标语/副标题（从share_copy提取）
     pub set: Option<String>,                       // 系列名称
     pub sorttitle: Option<String>,                 // 排序标题
+    pub uniqueid_override: Option<String>,         // 覆盖uniqueid内容（用于章节独立条目）
     pub actors_info: Option<String>,               // 演员信息字符串（从API获取，番剧用）
     pub staff_info: Option<&'a serde_json::Value>, // 联合投稿成员信息（JSON格式）
     pub cover_url: &'a str,                        // 封面图片URL
@@ -335,11 +336,12 @@ impl NFO<'_> {
                 }
 
                 // 唯一标识符
+                let uniqueid = movie.uniqueid_override.as_deref().unwrap_or(movie.bvid);
                 writer
                     .create_element("uniqueid")
                     .with_attribute(("type", "bilibili"))
                     .with_attribute(("default", "true"))
-                    .write_text_content_async(BytesText::new(movie.bvid))
+                    .write_text_content_async(BytesText::new(uniqueid))
                     .await?;
 
                 // 类型标签
@@ -2019,6 +2021,7 @@ impl<'a> From<&'a video::Model> for Movie<'a> {
             tagline,
             set: set_name,
             sorttitle,
+            uniqueid_override: None,
             actors_info: video.actors.clone(),
             staff_info: video.staff_info.as_ref(),
             cover_url: &video.cover,
@@ -2409,25 +2412,25 @@ impl<'a> Episode<'a> {
             season: season_number,                                    // 根据配置使用统一season或原始season_number
             episode_number: video.episode_number.unwrap_or(page.pid), // 使用video的episode_number
             aired: Some(aired_time),
-            duration: Some(page.duration as i32 / 60),                // 分页时长转换为分钟
-            user_rating: None,                                        // 分页没有单独评分
-            director: None,                                           // 分页没有单独导演信息
-            credits: None,                                            // 分页没有单独创作人员信息
-            bvid: &video.bvid,                                        // B站视频ID
-            category: video.category,                                 // 视频分类
-            mpaa: None,                                               // 使用默认分级（PG）
-            country: None,                                            // 使用默认国家
-            studio: None,                                             // 使用默认制作工作室
+            duration: Some(page.duration as i32 / 60), // 分页时长转换为分钟
+            user_rating: None,                         // 分页没有单独评分
+            director: None,                            // 分页没有单独导演信息
+            credits: None,                             // 分页没有单独创作人员信息
+            bvid: &video.bvid,                         // B站视频ID
+            category: video.category,                  // 视频分类
+            mpaa: None,                                // 使用默认分级（PG）
+            country: None,                             // 使用默认国家
+            studio: None,                              // 使用默认制作工作室
             genres: video
                 .tags
                 .as_ref()
                 .and_then(|tags| serde_json::from_value(tags.clone()).ok()), // 从视频标签提取类型
-            upper_id: video.upper_id,                                 // UP主UID
-            upper_name: &video.upper_name,                            // UP主名称
-            actors_info: video.actors.clone(),                        // 演员信息
-            staff_info: video.staff_info.as_ref(),                    // 联合投稿成员信息
-            thumb_url: None,                                          // 暂不设置本地路径
-            fanart_url: None,                                         // 暂不设置本地路径
+            upper_id: video.upper_id,                  // UP主UID
+            upper_name: &video.upper_name,             // UP主名称
+            actors_info: video.actors.clone(),         // 演员信息
+            staff_info: video.staff_info.as_ref(),     // 联合投稿成员信息
+            thumb_url: None,                           // 暂不设置本地路径
+            fanart_url: None,                          // 暂不设置本地路径
             upper_face_url: if !video.upper_face.is_empty() {
                 Some(&video.upper_face)
             } else {
@@ -2794,6 +2797,7 @@ mod tests {
             tagline: None,
             set: None,
             sorttitle: None,
+            uniqueid_override: None,
             actors_info: None,
             staff_info: None,
             cover_url: "",

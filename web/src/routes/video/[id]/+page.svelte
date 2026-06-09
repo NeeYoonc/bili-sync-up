@@ -185,6 +185,34 @@
 				value: `${source.source_type_label} · ${source.source_name}`,
 				title: `该视频来自 ${source.source_type_label}：${source.source_name}`
 			});
+			if (source.audio_only) {
+				badges.push({
+					label: '下载',
+					value: '仅下载音频',
+					title: '该视频源启用了仅下载音频'
+				});
+				if (source.audio_only_m4a_only) {
+					badges.push({
+						label: '下载',
+						value: '仅保留M4A',
+						title: '该视频源启用了仅保留M4A'
+					});
+				}
+			}
+			if (source.flat_folder) {
+				badges.push({
+					label: '下载',
+					value: '平铺目录',
+					title: '该视频源启用了平铺目录'
+				});
+			}
+			if (source.split_chapters_after_download) {
+				badges.push({
+					label: '下载',
+					value: '分章下载',
+					title: '该视频源启用了分章下载'
+				});
+			}
 		}
 		return badges;
 	}

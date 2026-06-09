@@ -86,6 +86,8 @@ pub struct AddVideoSourceRequest {
     pub audio_only_m4a_only: Option<bool>,
     // 是否启用平铺目录模式（不为每个视频创建子文件夹）
     pub flat_folder: Option<bool>,
+    // 是否在下载后按播放器章节切分为独立视频
+    pub split_chapters_after_download: Option<bool>,
     // 是否使用动态API获取UP主投稿（仅submission有效）
     pub use_dynamic_api: Option<bool>,
 }
@@ -118,6 +120,8 @@ pub struct UpdateVideoSourceDownloadOptionsRequest {
     pub audio_only_m4a_only: Option<bool>,
     /// 是否启用平铺目录模式（不为每个视频创建子文件夹）
     pub flat_folder: Option<bool>,
+    /// 是否在下载后按播放器章节切分为独立视频
+    pub split_chapters_after_download: Option<bool>,
     /// 是否下载弹幕文件（ASS）
     pub download_danmaku: Option<bool>,
     /// 是否下载字幕文件（SRT）
@@ -284,6 +288,7 @@ pub struct UpdateConfigRequest {
     pub bangumi_quick_subscribe_path: Option<String>,
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: Option<String>,
+    pub split_chapters_after_download: Option<bool>,
     // 风控验证配置
     pub risk_control_enabled: Option<bool>,
     pub risk_control_mode: Option<String>,

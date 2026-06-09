@@ -121,6 +121,10 @@ fn default_ffmpeg_path() -> String {
     String::new()
 }
 
+fn default_split_chapters_after_download() -> bool {
+    false
+}
+
 // 移除不再需要的默认函数
 // fn default_download_all_seasons() -> bool {
 //     false
@@ -199,6 +203,8 @@ pub struct Config {
     /// 可选的 ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     #[serde(default = "default_ffmpeg_path")]
     pub ffmpeg_path: String,
+    #[serde(default = "default_split_chapters_after_download")]
+    pub split_chapters_after_download: bool,
     #[serde(default)]
     pub nfo_time_type: NFOTimeType,
     #[serde(default)]
@@ -682,6 +688,7 @@ impl Clone for Config {
             submission_quick_subscribe_path: self.submission_quick_subscribe_path.clone(),
             bangumi_quick_subscribe_path: self.bangumi_quick_subscribe_path.clone(),
             ffmpeg_path: self.ffmpeg_path.clone(),
+            split_chapters_after_download: self.split_chapters_after_download,
             nfo_time_type: self.nfo_time_type.clone(),
             nfo_config: self.nfo_config.clone(),
             concurrent_limit: self.concurrent_limit.clone(),
@@ -731,6 +738,7 @@ impl Default for Config {
             submission_quick_subscribe_path: default_quick_subscribe_path_template(),
             bangumi_quick_subscribe_path: default_quick_subscribe_path_template(),
             ffmpeg_path: default_ffmpeg_path(),
+            split_chapters_after_download: default_split_chapters_after_download(),
             nfo_time_type: NFOTimeType::FavTime,
             nfo_config: NFOConfig::default(),
             concurrent_limit: ConcurrentLimit::default(),

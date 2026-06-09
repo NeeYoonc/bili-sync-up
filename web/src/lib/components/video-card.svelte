@@ -426,7 +426,7 @@
 		{/if}
 		{#if customMetaBadges.length > 0}
 			<div class="flex flex-wrap gap-2">
-				{#each customMetaBadges as badge (badge.label)}
+				{#each customMetaBadges as badge (`${badge.label}-${badge.value}`)}
 					<div
 						class="bg-muted/70 flex min-w-0 max-w-full items-center gap-1 rounded-md border px-2 py-1 text-xs"
 						title={badge.title ?? `${badge.label}：${badge.value}`}

@@ -39,6 +39,7 @@
 	import MusicIcon from '@lucide/svelte/icons/music';
 	import FileAudioIcon from '@lucide/svelte/icons/file-audio';
 	import FolderSyncIcon from '@lucide/svelte/icons/folder-sync';
+	import ListTreeIcon from '@lucide/svelte/icons/list-tree';
 	import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
 	import SubtitlesIcon from '@lucide/svelte/icons/subtitles';
 	import ActivityIcon from '@lucide/svelte/icons/activity';
@@ -668,6 +669,33 @@
 					updateSourceInStore(sourceType, sourceId, (source) => ({
 						...source,
 						flat_folder: data.flat_folder
+					}));
+				}
+			}
+		);
+	}
+
+	// 切换分章下载设置
+	async function handleToggleSplitChaptersAfterDownload(
+		sourceType: string,
+		sourceId: number,
+		currentSplitChaptersAfterDownload: boolean
+	) {
+		const newSplitChaptersAfterDownload = !currentSplitChaptersAfterDownload;
+		await updateAndApply(
+			() =>
+				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
+					split_chapters_after_download: newSplitChaptersAfterDownload
+				}),
+			{
+				successToast: () => ({
+					title: '设置更新成功',
+					description: newSplitChaptersAfterDownload ? '已启用分章下载' : '已禁用分章下载'
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						split_chapters_after_download: data.split_chapters_after_download
 					}));
 				}
 			}
@@ -1329,6 +1357,9 @@
 													{#if source.flat_folder}
 														<span class="text-purple-600">平铺目录</span>
 													{/if}
+													{#if source.split_chapters_after_download}
+														<span class="text-emerald-600">分章下载</span>
+													{/if}
 													{#if source.use_dynamic_api}
 														<span class="text-blue-600">动态API已启用</span>
 													{/if}
@@ -1527,6 +1558,26 @@
 													<FolderSyncIcon
 														class="h-4 w-4 {source.flat_folder
 															? 'text-purple-600'
+															: 'text-gray-400'}"
+													/>
+												</Button>
+
+												<!-- 分章下载 -->
+												<Button
+													size="sm"
+													variant="ghost"
+													onclick={() =>
+														handleToggleSplitChaptersAfterDownload(
+															sourceConfig.type,
+															source.id,
+															source.split_chapters_after_download ?? false
+														)}
+													title={source.split_chapters_after_download ? '禁用分章下载' : '启用分章下载'}
+													class="h-8 w-8 p-0"
+												>
+													<ListTreeIcon
+														class="h-4 w-4 {source.split_chapters_after_download
+															? 'text-emerald-600'
 															: 'text-gray-400'}"
 													/>
 												</Button>

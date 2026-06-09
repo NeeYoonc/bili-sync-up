@@ -131,6 +131,10 @@ impl VideoSource for watch_later::Model {
         self.flat_folder
     }
 
+    fn split_chapters_after_download(&self) -> bool {
+        self.split_chapters_after_download
+    }
+
     fn download_danmaku(&self) -> bool {
         self.download_danmaku
     }

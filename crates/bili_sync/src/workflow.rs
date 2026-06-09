@@ -297,7 +297,7 @@ async fn persist_submission_membership_state_to_video(
 use crate::adapter::{video_source_from, Args, VideoSource, VideoSourceEnum};
 use crate::bilibili::{
     BestStream, BiliClient, BiliError, Dimension, FilterOption, PageAnalyzer, PageInfo, Stream as VideoStream, Video,
-    VideoInfo,
+    VideoChapter, VideoInfo,
 };
 use crate::config::ARGS;
 use crate::error::{DownloadAbortError, ExecutionStatus, ProcessPageError};
@@ -2981,6 +2981,7 @@ pub struct DownloadPageArgs<'a> {
     pub downloader: &'a UnifiedDownloader,
     pub base_path: &'a Path,
     pub inline_total_file_size_bytes: Arc<TokioMutex<Option<i64>>>,
+    pub inline_chapters_split: Arc<TokioMutex<bool>>,
 }
 
 fn video_status_should_run_nfo(separate_status: &[bool; 5]) -> bool {
@@ -4977,6 +4978,7 @@ pub async fn download_video_pages(
         ),
     );
     let inline_total_file_size_bytes = Arc::new(TokioMutex::new(None));
+    let inline_chapters_split = Arc::new(TokioMutex::new(false));
     let res_5_fut = Box::pin(
         // 分发并执行分 P 下载的任务
         dispatch_download_page(
@@ -4990,6 +4992,7 @@ pub async fn download_video_pages(
                 downloader,
                 base_path: &base_path,
                 inline_total_file_size_bytes: inline_total_file_size_bytes.clone(),
+                inline_chapters_split: inline_chapters_split.clone(),
             },
             token.clone(),
         ),
@@ -4998,6 +5001,7 @@ pub async fn download_video_pages(
     let (res_1, res_2, res_folder, res_3, res_4, res_5) =
         tokio::join!(res_1_fut, res_2_fut, res_folder_fut, res_3_fut, res_4_fut, res_5_fut);
     let inline_total_file_size_bytes = inline_total_file_size_bytes.lock().await.take();
+    let inline_chapters_split = *inline_chapters_split.lock().await;
 
     // 兼容命名：根目录补充“根目录名-thumb/fanart”，例如：
     // - 投稿源同UP合集分季：浅影阿_合集-thumb.jpg / 浅影阿_合集-fanart.jpg（使用 UP 头像）
@@ -5530,6 +5534,9 @@ pub async fn download_video_pages(
     }
 
     video_active_model.path = Set(final_path);
+    if inline_chapters_split {
+        video_active_model.single_page = Set(Some(false));
+    }
     video_active_model.total_file_size_bytes = Set(inline_total_file_size_bytes.or_else(|| {
         latest_video_snapshot
             .as_ref()
@@ -5548,6 +5555,8 @@ struct PagePersistenceDecision {
 struct PageDownloadOutcome {
     model: page::ActiveModel,
     persistence: PagePersistenceDecision,
+    video_total_file_size_bytes_override: Option<i64>,
+    split_chapters: bool,
 }
 
 fn active_value_matches<T>(value: &sea_orm::ActiveValue<T>, original: &T) -> bool
@@ -5667,6 +5676,8 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
     let mut failed_pages: Vec<String> = Vec::new(); // 收集失败的分页信息
     let mut changed_pages: Vec<page::ActiveModel> = Vec::new();
     let mut should_recompute_video_total_size = false;
+    let mut video_total_file_size_bytes_override: Option<i64> = None;
+    let mut split_chapters = false;
     let mut stream = tasks;
     while let Some((res, page_pid, page_name)) = stream.next().await {
         match res {
@@ -5690,6 +5701,14 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
                 if outcome.persistence.should_recompute_video_total_size {
                     should_recompute_video_total_size = true;
                 }
+                if let Some(total_file_size_bytes) = outcome.video_total_file_size_bytes_override {
+                    video_total_file_size_bytes_override = Some(
+                        video_total_file_size_bytes_override
+                            .unwrap_or(0)
+                            .saturating_add(total_file_size_bytes),
+                    );
+                }
+                split_chapters |= outcome.split_chapters;
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -5774,10 +5793,14 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
         }
     }
 
-    let inline_total_file_size_bytes =
-        should_recompute_video_total_size.then(|| merge_video_total_file_size_bytes(&original_pages, &changed_pages));
+    let inline_total_file_size_bytes = video_total_file_size_bytes_override.or_else(|| {
+        should_recompute_video_total_size.then(|| merge_video_total_file_size_bytes(&original_pages, &changed_pages))
+    });
     if let Some(total_file_size_bytes) = inline_total_file_size_bytes {
         *args.inline_total_file_size_bytes.lock().await = Some(total_file_size_bytes);
+    }
+    if split_chapters {
+        *args.inline_chapters_split.lock().await = true;
     }
 
     if !changed_pages.is_empty() {
@@ -6414,6 +6437,11 @@ async fn download_page(
         dimension,
         ..Default::default()
     };
+    let poster_path_for_chapters = poster_path.clone();
+    let fanart_path_for_chapters = fanart_path.clone();
+    let nfo_path_for_chapters = nfo_path.clone();
+    let danmaku_path_for_chapters = danmaku_path.clone();
+    let subtitle_path_for_chapters = subtitle_path.clone();
     let res_1_fut = Box::pin(fetch_page_poster(
         separate_status[0],
         video_model,
@@ -6474,15 +6502,18 @@ async fn download_page(
 
     let (res_1, res_2, res_3, res_4, res_5) = tokio::join!(res_1_fut, res_2_fut, res_3_fut, res_4_fut, res_5_fut);
 
-    let (res_2, page_file_size_bytes, page_video_stream_size_bytes, page_audio_stream_size_bytes) = match res_2 {
-        Ok(video_result) => (
-            Ok(video_result.status),
-            video_result.file_size_bytes,
-            video_result.video_stream_size_bytes,
-            video_result.audio_stream_size_bytes,
-        ),
-        Err(err) => (Err(err), None, None, None),
-    };
+    let (res_2, mut page_file_size_bytes, mut page_video_stream_size_bytes, mut page_audio_stream_size_bytes) =
+        match res_2 {
+            Ok(video_result) => (
+                Ok(video_result.status),
+                video_result.file_size_bytes,
+                video_result.video_stream_size_bytes,
+                video_result.audio_stream_size_bytes,
+            ),
+            Err(err) => (Err(err), None, None, None),
+        };
+    let mut chapter_total_file_size_bytes: Option<i64> = None;
+    let mut split_chapters = false;
 
     let (res_4, danmaku_sync_update) = match res_4 {
         Ok(danmaku_result) => (Ok(danmaku_result.status), danmaku_result.sync_update),
@@ -6803,9 +6834,86 @@ async fn download_page(
         video_path.clone()
     };
 
+    let mut chapter_primary_path: Option<PathBuf> = None;
+    if video_source.split_chapters_after_download()
+        && is_single_page
+        && !is_charge_video_locked(video_model)
+        && inaccessible_reason.is_none()
+        && matches!(results.get(1), Some(ExecutionStatus::Succeeded))
+        && video_path.exists()
+    {
+        let bili_video = Video::new(bili_client, video_model.bvid.clone());
+        match split_page_chapters_after_download(&bili_video, &page_info, &video_path, token.clone()).await {
+            Ok(Some(outcome)) if !outcome.files.is_empty() => {
+                match write_chapter_sidecars(
+                    video_model,
+                    &outcome.files,
+                    &poster_path_for_chapters,
+                    fanart_path_for_chapters.as_deref(),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        match sync_chapter_pages_after_split(connection, video_model, &page_model, &outcome).await {
+                            Ok(_) => {
+                                if let Err(err) = remove_original_page_artifacts(
+                                    &video_path,
+                                    &nfo_path_for_chapters,
+                                    &poster_path_for_chapters,
+                                    fanart_path_for_chapters.as_deref(),
+                                    &danmaku_path_for_chapters,
+                                    &subtitle_path_for_chapters,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        "章节切分完成，但清理原始文件失败: 视频「{}」第{}页: {:#}",
+                                        &video_model.name, page_model.pid, err
+                                    );
+                                }
+
+                                chapter_primary_path = outcome.files.first().map(|file| file.path.clone());
+                                page_file_size_bytes = outcome.files.first().map(|file| file.size_bytes);
+                                page_video_stream_size_bytes = None;
+                                page_audio_stream_size_bytes = None;
+                                chapter_total_file_size_bytes = Some(outcome.total_size_bytes);
+                                split_chapters = true;
+                                info!(
+                                    "章节切分完成: 视频「{}」第{}页，共生成 {} 个独立章节视频",
+                                    &video_model.name,
+                                    page_model.pid,
+                                    outcome.files.len()
+                                );
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "章节数据库同步失败，保留原始视频: 视频「{}」第{}页: {:#}",
+                                    &video_model.name, page_model.pid, err
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            "章节 sidecar 生成失败，保留原始视频: 视频「{}」第{}页: {:#}",
+                            &video_model.name, page_model.pid, err
+                        );
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(
+                    "章节切分失败，主视频下载结果保持成功并保留原始视频: 视频「{}」第{}页: {:#}",
+                    &video_model.name, page_model.pid, err
+                );
+            }
+        }
+    }
+
     // AI 重命名已移至视频源下载完成后批量执行（batch_ai_rename_for_source）
     // 此处仅保存原始文件路径，批量重命名时会更新
-    let final_video_path = video_path.clone();
+    let final_video_path = chapter_primary_path.unwrap_or_else(|| video_path.clone());
 
     let final_video_path_str = final_video_path.to_string_lossy().to_string();
     let final_page_path = if inaccessible_reason.is_some() {
@@ -6842,6 +6950,8 @@ async fn download_page(
     Ok(PageDownloadOutcome {
         model: page_active_model,
         persistence,
+        video_total_file_size_bytes_override: chapter_total_file_size_bytes,
+        split_chapters,
     })
 }
 
@@ -7732,6 +7842,385 @@ async fn fetch_page_video(
             Err(e) => return Err(e),
         }
     }
+}
+
+#[derive(Debug)]
+struct ChapterFileOutput {
+    index: usize,
+    chapter: VideoChapter,
+    path: PathBuf,
+    duration_seconds: u32,
+    size_bytes: i64,
+}
+
+#[derive(Debug)]
+struct ChapterSplitOutcome {
+    files: Vec<ChapterFileOutput>,
+    total_size_bytes: i64,
+}
+
+fn chapter_title(chapter: &VideoChapter, index: usize) -> String {
+    let chapter_name = crate::utils::filenamify::filenamify(chapter.content.trim());
+    if chapter_name.is_empty() {
+        format!("Chapter {}", index + 1)
+    } else {
+        chapter_name
+    }
+}
+
+fn chapter_output_path(page_path: &Path, chapter: &VideoChapter, index: usize) -> Result<PathBuf> {
+    let parent = page_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = page_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("video");
+    let ext = page_path.extension().and_then(|value| value.to_str()).unwrap_or("mp4");
+    let chapter_name = chapter_title(chapter, index);
+
+    Ok(parent.join(format!("{stem} - {:02} - {}.{}", index + 1, chapter_name, ext)))
+}
+
+async fn split_page_chapters_after_download(
+    bili_video: &Video<'_>,
+    page_info: &PageInfo,
+    page_path: &Path,
+    token: CancellationToken,
+) -> Result<Option<ChapterSplitOutcome>> {
+    if !page_path.exists() {
+        bail!("downloaded media file does not exist: {}", page_path.display());
+    }
+
+    let chapters = tokio::select! {
+        biased;
+        _ = token.cancelled() => return Ok(None),
+        res = bili_video.get_chapters(page_info) => res?,
+    };
+
+    if chapters.is_empty() {
+        debug!(
+            "视频「{}」第 {} 页没有播放器章节，跳过章节切分",
+            bili_video.bvid, page_info.page
+        );
+        return Ok(None);
+    }
+
+    let mut valid_chapters = Vec::new();
+    for (index, chapter) in chapters.iter().enumerate() {
+        if token.is_cancelled() {
+            return Ok(None);
+        }
+
+        let duration = chapter.to.saturating_sub(chapter.from);
+        if duration == 0 {
+            debug!(
+                "跳过无效章节: bvid={}, page={}, index={}, from={}, to={}",
+                bili_video.bvid,
+                page_info.page,
+                index + 1,
+                chapter.from,
+                chapter.to
+            );
+            continue;
+        }
+
+        valid_chapters.push((index, chapter, duration));
+    }
+
+    if valid_chapters.is_empty() {
+        return Ok(None);
+    }
+
+    let mut split_points = Vec::new();
+    for pair in valid_chapters.windows(2) {
+        let current = pair[0].1;
+        let next = pair[1].1;
+        if next.from <= current.from {
+            bail!(
+                "chapter split points must be increasing: bvid={}, page={}, current={}, next={}",
+                bili_video.bvid,
+                page_info.page,
+                current.from,
+                next.from
+            );
+        }
+        split_points.push(next.from);
+    }
+
+    let output_paths = valid_chapters
+        .iter()
+        .map(|(index, chapter, _)| chapter_output_path(page_path, chapter, *index))
+        .collect::<Result<Vec<_>>>()?;
+
+    if token.is_cancelled() {
+        return Ok(None);
+    }
+
+    crate::downloader::split_media_segments_with_ffmpeg(page_path, &output_paths, &split_points).await?;
+
+    let mut files = Vec::with_capacity(output_paths.len());
+    let mut total_size_bytes = 0i64;
+    for ((index, chapter, duration_seconds), path) in valid_chapters.into_iter().zip(output_paths) {
+        let size = fs::metadata(&path)
+            .await
+            .map(|metadata| to_db_file_size(metadata.len()))
+            .unwrap_or(0);
+        total_size_bytes = total_size_bytes.saturating_add(size);
+        files.push(ChapterFileOutput {
+            index,
+            chapter: chapter.clone(),
+            path,
+            duration_seconds,
+            size_bytes: size,
+        });
+    }
+
+    Ok(Some(ChapterSplitOutcome {
+        files,
+        total_size_bytes,
+    }))
+}
+
+async fn sync_chapter_pages_after_split(
+    connection: &DatabaseConnection,
+    video_model: &video::Model,
+    source_page: &page::Model,
+    outcome: &ChapterSplitOutcome,
+) -> Result<()> {
+    if outcome.files.is_empty() {
+        return Ok(());
+    }
+
+    let ok_page_status: u32 = PageStatus::from([STATUS_OK; 5]).into();
+    let chapter_count: i32 = outcome
+        .files
+        .len()
+        .try_into()
+        .context("chapter count exceeds i32 range")?;
+    let txn = crate::database::begin_write_transaction(connection, "workflow.sync_chapter_pages_after_split").await?;
+
+    let existing_pages = page::Entity::find()
+        .filter(page::Column::VideoId.eq(video_model.id))
+        .all(&txn)
+        .await
+        .context("查询现有章节分页记录失败")?;
+    let mut existing_pages_by_pid = existing_pages
+        .into_iter()
+        .map(|existing_page| (existing_page.pid, existing_page))
+        .collect::<HashMap<_, _>>();
+    let now = now_standard_string();
+
+    for chapter_file in &outcome.files {
+        let pid: i32 = (chapter_file.index + 1)
+            .try_into()
+            .context("chapter index exceeds i32 range")?;
+        let existing_page = existing_pages_by_pid.remove(&pid);
+        let created_at = existing_page
+            .as_ref()
+            .map(|page| page.created_at.clone())
+            .unwrap_or_else(|| now.clone());
+        let title = chapter_display_title(&chapter_file.chapter, chapter_file.index);
+        let path = chapter_file.path.to_string_lossy().to_string();
+
+        let mut active = page::ActiveModel {
+            video_id: Set(video_model.id),
+            cid: Set(source_page.cid),
+            pid: Set(pid),
+            name: Set(title),
+            width: Set(source_page.width),
+            height: Set(source_page.height),
+            duration: Set(chapter_file.duration_seconds),
+            path: Set(Some(path)),
+            file_size_bytes: Set(Some(chapter_file.size_bytes)),
+            video_stream_size_bytes: Set(None),
+            audio_stream_size_bytes: Set(None),
+            image: Set(source_page.image.clone()),
+            download_status: Set(ok_page_status),
+            created_at: Set(created_at),
+            play_video_streams: Set(None),
+            play_audio_streams: Set(None),
+            play_subtitle_streams: Set(None),
+            play_streams_updated_at: Set(None),
+            danmaku_last_synced_at: Set(None),
+            danmaku_sync_generation: Set(0),
+            danmaku_cid_snapshot: Set(None),
+            danmaku_last_write_count: Set(0),
+            ai_renamed: Set(Some(0)),
+            ..Default::default()
+        };
+
+        if let Some(existing_page) = existing_page {
+            active.id = sea_orm::ActiveValue::Unchanged(existing_page.id);
+            page::Entity::update(active)
+                .exec(&txn)
+                .await
+                .with_context(|| format!("更新章节分页记录失败: page_id={}", existing_page.id))?;
+        } else {
+            page::Entity::insert(active)
+                .exec(&txn)
+                .await
+                .with_context(|| format!("插入章节分页记录失败: video_id={}, pid={}", video_model.id, pid))?;
+        }
+    }
+
+    for stale_page in existing_pages_by_pid
+        .into_values()
+        .filter(|page| page.pid > chapter_count && page.cid == source_page.cid)
+    {
+        page::Entity::delete_by_id(stale_page.id)
+            .exec(&txn)
+            .await
+            .with_context(|| format!("删除过期章节分页记录失败: page_id={}", stale_page.id))?;
+    }
+
+    video::Entity::update(video::ActiveModel {
+        id: sea_orm::ActiveValue::Unchanged(video_model.id),
+        single_page: Set(Some(false)),
+        total_file_size_bytes: Set(Some(outcome.total_size_bytes)),
+        ..Default::default()
+    })
+    .exec(&txn)
+    .await
+    .with_context(|| format!("更新章节视频元数据失败: video_id={}", video_model.id))?;
+
+    txn.commit().await?;
+    Ok(())
+}
+
+fn chapter_display_title(chapter: &VideoChapter, index: usize) -> String {
+    let title = chapter.content.trim();
+    if title.is_empty() {
+        format!("Chapter {}", index + 1)
+    } else {
+        title.to_string()
+    }
+}
+
+fn media_sidecar_image_path(media_path: &Path, suffix: &str) -> Result<PathBuf> {
+    let parent = media_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = media_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .context("media path stem is empty")?;
+    Ok(parent.join(format!("{stem}-{suffix}.jpg")))
+}
+
+async fn copy_file_if_exists(source: &Path, target: &Path) -> Result<bool> {
+    match fs::metadata(source).await {
+        Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {
+            ensure_parent_dir_for_file(target).await?;
+            fs::copy(source, target).await?;
+            Ok(true)
+        }
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn generate_chapter_movie_nfo(video_model: &video::Model, chapter_file: &ChapterFileOutput) -> Result<()> {
+    use crate::utils::nfo::Movie;
+
+    let title = chapter_display_title(&chapter_file.chapter, chapter_file.index);
+    let sorttitle = format!("{:02} - {}", chapter_file.index + 1, title);
+    let uniqueid = format!("{}-chapter-{:02}", video_model.bvid, chapter_file.index + 1);
+    let duration_minutes = i32::try_from((chapter_file.duration_seconds.saturating_add(59)) / 60)
+        .unwrap_or(i32::MAX)
+        .max(1);
+    let mut movie: Movie<'_> = video_model.into();
+    movie.name = title.as_str();
+    movie.original_title = video_model.name.as_str();
+    movie.duration = Some(duration_minutes);
+    movie.set = Some(video_model.name.clone());
+    movie.sorttitle = Some(sorttitle);
+    movie.uniqueid_override = Some(uniqueid);
+
+    generate_nfo(NFO::Movie(movie), chapter_file.path.with_extension("nfo")).await
+}
+
+async fn write_chapter_sidecars(
+    video_model: &video::Model,
+    chapter_files: &[ChapterFileOutput],
+    poster_path: &Path,
+    fanart_path: Option<&Path>,
+) -> Result<()> {
+    for chapter_file in chapter_files {
+        generate_chapter_movie_nfo(video_model, chapter_file).await?;
+
+        let chapter_thumb_path = media_sidecar_image_path(&chapter_file.path, "thumb")?;
+        let poster_copied = copy_file_if_exists(poster_path, &chapter_thumb_path).await?;
+
+        let chapter_fanart_path = media_sidecar_image_path(&chapter_file.path, "fanart")?;
+        let fanart_copied = match fanart_path {
+            Some(source) => copy_file_if_exists(source, &chapter_fanart_path).await?,
+            None => false,
+        };
+        if !fanart_copied && poster_copied {
+            let _ = copy_file_if_exists(&chapter_thumb_path, &chapter_fanart_path).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn remove_file_if_exists(path: &Path) -> Result<bool> {
+    match fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => {
+            fs::remove_file(path).await?;
+            Ok(true)
+        }
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn remove_original_page_artifacts(
+    page_path: &Path,
+    nfo_path: &Path,
+    poster_path: &Path,
+    fanart_path: Option<&Path>,
+    danmaku_path: &Path,
+    subtitle_path: &Path,
+) -> Result<()> {
+    let _ = remove_file_if_exists(page_path).await?;
+    let _ = remove_file_if_exists(nfo_path).await?;
+    let _ = remove_file_if_exists(poster_path).await?;
+    if let Some(fanart_path) = fanart_path {
+        let _ = remove_file_if_exists(fanart_path).await?;
+    }
+    let _ = remove_file_if_exists(danmaku_path).await?;
+    let _ = remove_file_if_exists(subtitle_path).await?;
+
+    if let (Some(parent), Some(stem)) = (
+        page_path.parent(),
+        page_path.file_stem().and_then(|value| value.to_str()),
+    ) {
+        let sidecar_prefix = format!("{stem}.");
+        let mut entries = fs::read_dir(parent).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !entry.file_type().await?.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with(&sidecar_prefix) {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(str::to_ascii_lowercase);
+            if matches!(ext.as_deref(), Some("srt") | Some("ass")) {
+                let _ = remove_file_if_exists(&path).await?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub struct PageDanmakuFetchResult {
