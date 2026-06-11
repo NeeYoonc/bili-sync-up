@@ -2,7 +2,7 @@ use core::str;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use futures::TryStreamExt;
@@ -602,6 +602,108 @@ pub async fn remux_with_ffmpeg(input_path: &Path, output_path: &Path) -> Result<
         bail!("ffmpeg error: {}", stderr.trim());
     }
 
+    Ok(())
+}
+
+pub async fn split_media_segments_with_ffmpeg(
+    input_path: &Path,
+    output_paths: &[PathBuf],
+    split_points_seconds: &[u32],
+) -> Result<()> {
+    ensure!(!output_paths.is_empty(), "segment output paths must not be empty");
+
+    for output_path in output_paths {
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+    }
+
+    if split_points_seconds.is_empty() {
+        if output_paths[0].exists() {
+            fs::remove_file(&output_paths[0]).await?;
+        }
+        fs::copy(input_path, &output_paths[0]).await?;
+        return Ok(());
+    }
+
+    let output_dir = output_paths[0]
+        .parent()
+        .context("segment output path must have a parent directory")?;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let temp_dir = output_dir.join(format!(".bili-sync-chapters-{}-{}", std::process::id(), ts));
+    fs::create_dir_all(&temp_dir).await?;
+
+    let input_path_str = input_path.to_string_lossy().to_string();
+    let ext = output_paths[0]
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("mp4");
+    let output_pattern = temp_dir.join(format!("segment-%03d.{ext}"));
+    let output_pattern_str = output_pattern.to_string_lossy().to_string();
+    let split_points_arg = split_points_seconds
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+        .args([
+            "-y",
+            "-i",
+            &input_path_str,
+            "-map",
+            "0",
+            "-c",
+            "copy",
+            "-f",
+            "segment",
+            "-segment_times",
+            &split_points_arg,
+            "-reset_timestamps",
+            "1",
+            "-break_non_keyframes",
+            "1",
+            &output_pattern_str,
+        ])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = str::from_utf8(&output.stderr).unwrap_or("unknown");
+        let _ = fs::remove_dir_all(&temp_dir).await;
+        bail!("ffmpeg chapter split error: {}", stderr.trim());
+    }
+
+    let mut segment_paths = Vec::new();
+    let mut entries = fs::read_dir(&temp_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if entry.file_type().await?.is_file() {
+            segment_paths.push(entry.path());
+        }
+    }
+    segment_paths.sort();
+
+    if segment_paths.len() != output_paths.len() {
+        let _ = fs::remove_dir_all(&temp_dir).await;
+        bail!(
+            "ffmpeg generated {} chapter segments, expected {}",
+            segment_paths.len(),
+            output_paths.len()
+        );
+    }
+
+    for (segment_path, output_path) in segment_paths.into_iter().zip(output_paths) {
+        if output_path.exists() {
+            fs::remove_file(output_path).await?;
+        }
+        fs::rename(segment_path, output_path).await?;
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir).await;
     Ok(())
 }
 

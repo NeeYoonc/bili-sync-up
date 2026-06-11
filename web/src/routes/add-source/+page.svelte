@@ -68,6 +68,7 @@
 	let audioOnly = false; // 仅下载音频
 	let audioOnlyM4aOnly = false; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
 	let flatFolder = false; // 平铺目录模式
+	let splitChaptersAfterDownload = false; // 下载后按播放器章节切分为独立视频
 	let downloadDanmaku = true; // 下载弹幕（默认开启）
 	let downloadSubtitle = true; // 下载字幕（默认开启）
 	let useDynamicApi = false; // 投稿源：使用动态API
@@ -822,6 +823,7 @@
 			audio_only: audioOnly,
 			audio_only_m4a_only: audioOnlyM4aOnly,
 			flat_folder: flatFolder,
+			split_chapters_after_download: splitChaptersAfterDownload,
 			download_danmaku: downloadDanmaku,
 			download_subtitle: downloadSubtitle,
 			use_dynamic_api: useDynamicApi,
@@ -979,6 +981,7 @@
 			audioOnly = false;
 			audioOnlyM4aOnly = false;
 			flatFolder = false;
+			splitChaptersAfterDownload = false;
 			downloadDanmaku = true;
 			downloadSubtitle = true;
 			useDynamicApi = false;
@@ -2294,7 +2297,27 @@
 						source_type: getSourceTypeFromBatchItem(item),
 						source_id: getSourceIdFromBatchItem(item),
 						name: item.name,
-						path: getBatchPathForItem(item)
+						path: getBatchPathForItem(item),
+						audio_only: audioOnly,
+						audio_only_m4a_only: audioOnlyM4aOnly,
+						flat_folder: flatFolder,
+						split_chapters_after_download: splitChaptersAfterDownload,
+						download_danmaku: downloadDanmaku,
+						download_subtitle: downloadSubtitle,
+						use_dynamic_api: useDynamicApi,
+						ai_rename: aiRename,
+						ai_rename_video_prompt: aiRenameVideoPrompt.trim() || undefined,
+						ai_rename_audio_prompt: aiRenameAudioPrompt.trim() || undefined,
+						ai_rename_enable_multi_page: showAiRenameAdvanced
+							? aiRenameEnableMultiPage
+							: undefined,
+						ai_rename_enable_collection: showAiRenameAdvanced
+							? aiRenameEnableCollection
+							: undefined,
+						ai_rename_enable_bangumi: showAiRenameAdvanced ? aiRenameEnableBangumi : undefined,
+						ai_rename_rename_parent_dir: showAiRenameAdvanced
+							? aiRenameRenameParentDir
+							: undefined
 					};
 
 					// 添加特定类型的额外参数
@@ -3090,6 +3113,45 @@
 										<input type="checkbox" bind:checked={flatFolder} class="peer sr-only" />
 										<div
 											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-purple-600 peer-focus:ring-2 peer-focus:ring-purple-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-purple-500"
+										></div>
+									</label>
+								</div>
+
+								<!-- 分章下载 -->
+								<div
+									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
+								>
+									<div class="flex items-center gap-2">
+										<svg
+											class="h-4 w-4 text-emerald-600 dark:text-emerald-400"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												stroke-width="2"
+												d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"
+											/>
+										</svg>
+										<div>
+											<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
+												>分章下载</span
+											>
+											<p class="text-[10px] text-gray-500 dark:text-gray-400">
+												下载完成后按播放器章节切分为独立视频
+											</p>
+										</div>
+									</div>
+									<label class="relative inline-flex cursor-pointer items-center">
+										<input
+											type="checkbox"
+											bind:checked={splitChaptersAfterDownload}
+											class="peer sr-only"
+										/>
+										<div
+											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-emerald-600 peer-focus:ring-2 peer-focus:ring-emerald-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-emerald-500"
 										></div>
 									</label>
 								</div>

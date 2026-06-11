@@ -38,6 +38,10 @@ pub struct VideoSourceTag {
     pub source_type: String,
     pub source_type_label: String,
     pub source_name: String,
+    pub split_chapters_after_download: bool,
+    pub audio_only: bool,
+    pub audio_only_m4a_only: bool,
+    pub flat_folder: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -148,6 +152,7 @@ pub struct UpdateVideoSourceDownloadOptionsResponse {
     pub audio_only: bool,
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
+    pub split_chapters_after_download: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
     pub ai_rename: bool,
@@ -246,18 +251,19 @@ pub struct VideoSource {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyword_filter_mode: Option<String>, // 【已废弃】关键词过滤模式
     // 音频和下载选项
-    pub audio_only: bool,                  // 是否仅下载音频（输出m4a）
-    pub audio_only_m4a_only: bool,         // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
-    pub flat_folder: bool,                 // 是否启用平铺目录模式
-    pub download_danmaku: bool,            // 是否下载弹幕文件
-    pub download_subtitle: bool,           // 是否下载字幕文件
-    pub ai_rename: bool,                   // 是否启用AI重命名
-    pub ai_rename_video_prompt: String,    // AI重命名视频提示词
-    pub ai_rename_audio_prompt: String,    // AI重命名音频提示词
-    pub ai_rename_enable_multi_page: bool, // 对多P视频启用AI重命名
-    pub ai_rename_enable_collection: bool, // 对合集视频启用AI重命名
-    pub ai_rename_enable_bangumi: bool,    // 对番剧启用AI重命名
-    pub ai_rename_rename_parent_dir: bool, // AI重命名时重命名上级目录
+    pub audio_only: bool,                    // 是否仅下载音频（输出m4a）
+    pub audio_only_m4a_only: bool,           // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
+    pub flat_folder: bool,                   // 是否启用平铺目录模式
+    pub split_chapters_after_download: bool, // 是否在下载后按播放器章节切分为独立视频
+    pub download_danmaku: bool,              // 是否下载弹幕文件
+    pub download_subtitle: bool,             // 是否下载字幕文件
+    pub ai_rename: bool,                     // 是否启用AI重命名
+    pub ai_rename_video_prompt: String,      // AI重命名视频提示词
+    pub ai_rename_audio_prompt: String,      // AI重命名音频提示词
+    pub ai_rename_enable_multi_page: bool,   // 对多P视频启用AI重命名
+    pub ai_rename_enable_collection: bool,   // 对合集视频启用AI重命名
+    pub ai_rename_enable_bangumi: bool,      // 对番剧启用AI重命名
+    pub ai_rename_rename_parent_dir: bool,   // AI重命名时重命名上级目录
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_dynamic_api: Option<bool>, // 投稿源：是否使用动态API
 }
@@ -543,6 +549,7 @@ pub struct ConfigResponse {
     pub bangumi_quick_subscribe_path: String,
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: String,
+    pub split_chapters_after_download: bool,
     // B站凭证信息
     pub credential: Option<CredentialInfo>,
     // 推送通知配置

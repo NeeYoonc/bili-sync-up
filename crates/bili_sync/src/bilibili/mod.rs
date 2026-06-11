@@ -20,7 +20,7 @@ pub use risk_control::{CaptchaInfo, CaptchaResult, GeetestInfo, RiskControl};
 use serde::{Deserialize, Deserializer};
 pub use submission::Submission;
 pub use verification_coordinator::{VerificationRequest, VERIFICATION_COORDINATOR};
-pub use video::{bvid_to_aid, Dimension, PageInfo, Video};
+pub use video::{bvid_to_aid, Dimension, PageInfo, Video, VideoChapter};
 pub use watch_later::WatchLater;
 pub mod bangumi;
 

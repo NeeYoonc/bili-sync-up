@@ -65,6 +65,7 @@ mod m20260314_000001_clear_image_proxy_image_data;
 mod m20260328_000001_add_scan_deleted_videos_once_field;
 mod m20260330_000001_add_video_file_size_fields;
 mod m20260414_000001_add_danmaku_sync_fields;
+mod m20260415_000001_add_split_chapters_to_sources;
 
 pub struct Migrator;
 
@@ -137,6 +138,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260328_000001_add_scan_deleted_videos_once_field::Migration),
             Box::new(m20260330_000001_add_video_file_size_fields::Migration),
             Box::new(m20260414_000001_add_danmaku_sync_fields::Migration),
+            Box::new(m20260415_000001_add_split_chapters_to_sources::Migration),
         ]
     }
 }

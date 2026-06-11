@@ -43,6 +43,7 @@ pub struct BangumiSource {
     pub audio_only: bool,
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
+    pub split_chapters_after_download: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
     pub ai_rename: bool,
@@ -552,6 +553,10 @@ impl VideoSource for BangumiSource {
 
     fn flat_folder(&self) -> bool {
         self.flat_folder
+    }
+
+    fn split_chapters_after_download(&self) -> bool {
+        self.split_chapters_after_download
     }
 
     fn download_danmaku(&self) -> bool {

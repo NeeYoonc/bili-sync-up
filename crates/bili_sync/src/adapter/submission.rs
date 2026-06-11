@@ -272,6 +272,10 @@ impl VideoSource for submission::Model {
         self.flat_folder
     }
 
+    fn split_chapters_after_download(&self) -> bool {
+        self.split_chapters_after_download
+    }
+
     fn download_danmaku(&self) -> bool {
         self.download_danmaku
     }

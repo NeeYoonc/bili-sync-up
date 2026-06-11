@@ -108,6 +108,16 @@ pub struct Dimension {
     pub rotate: u32,
 }
 
+#[derive(Debug, serde::Deserialize, Clone)]
+pub struct VideoChapter {
+    #[serde(default)]
+    pub from: u32,
+    #[serde(default)]
+    pub to: u32,
+    #[serde(default)]
+    pub content: String,
+}
+
 impl<'a> Video<'a> {
     pub fn new(client: &'a BiliClient, bvid: String) -> Self {
         let aid = bvid_to_aid(&bvid).to_string();
@@ -369,6 +379,32 @@ impl<'a> Video<'a> {
             .await?
             .validate()?;
         Ok(serde_json::from_value(res["data"].take())?)
+    }
+
+    pub async fn get_chapters(&self, page: &PageInfo) -> Result<Vec<VideoChapter>> {
+        let cid = page.cid.to_string();
+        let mut res = self
+            .client
+            .request(Method::GET, "https://api.bilibili.com/x/player/wbi/v2")
+            .await
+            .query(&[
+                ("aid", self.aid.as_str()),
+                ("bvid", self.bvid.as_str()),
+                ("cid", cid.as_str()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?
+            .validate()?;
+
+        let chapters = res["data"]["view_points"].take();
+        if chapters.is_null() {
+            return Ok(Vec::new());
+        }
+
+        Ok(serde_json::from_value(chapters)?)
     }
 
     pub async fn get_tags(&self) -> Result<Vec<Tag>> {

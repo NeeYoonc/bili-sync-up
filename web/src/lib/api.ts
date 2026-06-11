@@ -394,6 +394,7 @@ class ApiClient {
 			audio_only?: boolean;
 			audio_only_m4a_only?: boolean;
 			flat_folder?: boolean;
+			split_chapters_after_download?: boolean;
 			download_danmaku?: boolean;
 			download_subtitle?: boolean;
 			use_dynamic_api?: boolean;
@@ -414,6 +415,7 @@ class ApiClient {
 			audio_only: boolean;
 			audio_only_m4a_only: boolean;
 			flat_folder: boolean;
+			split_chapters_after_download: boolean;
 			download_danmaku: boolean;
 			download_subtitle: boolean;
 			ai_rename: boolean;
@@ -436,6 +438,7 @@ class ApiClient {
 			audio_only: boolean;
 			audio_only_m4a_only: boolean;
 			flat_folder: boolean;
+			split_chapters_after_download: boolean;
 			download_danmaku: boolean;
 			download_subtitle: boolean;
 			ai_rename: boolean;
@@ -1185,6 +1188,7 @@ export const api = {
 			audio_only?: boolean;
 			audio_only_m4a_only?: boolean;
 			flat_folder?: boolean;
+			split_chapters_after_download?: boolean;
 			download_danmaku?: boolean;
 			download_subtitle?: boolean;
 			use_dynamic_api?: boolean;

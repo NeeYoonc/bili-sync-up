@@ -1874,6 +1874,7 @@ pub async fn get_video_sources(
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
                 flat_folder: model.flat_folder,
+                split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -1935,6 +1936,7 @@ pub async fn get_video_sources(
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
                 flat_folder: model.flat_folder,
+                split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -1996,6 +1998,7 @@ pub async fn get_video_sources(
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
                 flat_folder: model.flat_folder,
+                split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -2057,6 +2060,7 @@ pub async fn get_video_sources(
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
                 flat_folder: model.flat_folder,
+                split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -2137,6 +2141,7 @@ pub async fn get_video_sources(
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
                 flat_folder: model.flat_folder,
+                split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -2765,84 +2770,169 @@ fn build_video_source_tag(
     source_type: &str,
     source_type_label: &str,
     source_name: String,
+    split_chapters_after_download: bool,
+    audio_only: bool,
+    audio_only_m4a_only: bool,
+    flat_folder: bool,
 ) -> VideoSourceTag {
     VideoSourceTag {
         source_id,
         source_type: source_type.to_string(),
         source_type_label: source_type_label.to_string(),
         source_name,
+        split_chapters_after_download,
+        audio_only,
+        audio_only_m4a_only,
+        flat_folder,
     }
 }
 
 async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model) -> Result<Option<VideoSourceTag>> {
     if video.source_type == Some(1) {
         if let Some(source_id) = video.source_id {
-            let source_name = video_source::Entity::find_by_id(source_id)
-                .one(db)
-                .await?
-                .map(|source| source.name)
-                .unwrap_or_else(|| format!("已删除番剧源 #{}", source_id));
-            return Ok(Some(build_video_source_tag(source_id, "bangumi", "番剧", source_name)));
+            let source = video_source::Entity::find_by_id(source_id).one(db).await?;
+            let (source_name, split_chapters_after_download, audio_only, audio_only_m4a_only, flat_folder) = source
+                .map(|source| {
+                    (
+                        source.name,
+                        source.split_chapters_after_download,
+                        source.audio_only,
+                        source.audio_only_m4a_only,
+                        source.flat_folder,
+                    )
+                })
+                .unwrap_or_else(|| (format!("已删除番剧源 #{}", source_id), false, false, false, false));
+            return Ok(Some(build_video_source_tag(
+                source_id,
+                "bangumi",
+                "番剧",
+                source_name,
+                split_chapters_after_download,
+                audio_only,
+                audio_only_m4a_only,
+                flat_folder,
+            )));
         }
     }
 
     if let Some(source_id) = video.collection_id {
-        let source_name = collection::Entity::find_by_id(source_id)
-            .one(db)
-            .await?
-            .map(|source| source.name)
-            .unwrap_or_else(|| format!("已删除合集源 #{}", source_id));
+        let source = collection::Entity::find_by_id(source_id).one(db).await?;
+        let (source_name, split_chapters_after_download, audio_only, audio_only_m4a_only, flat_folder) = source
+            .map(|source| {
+                (
+                    source.name,
+                    source.split_chapters_after_download,
+                    source.audio_only,
+                    source.audio_only_m4a_only,
+                    source.flat_folder,
+                )
+            })
+            .unwrap_or_else(|| (format!("已删除合集源 #{}", source_id), false, false, false, false));
         return Ok(Some(build_video_source_tag(
             source_id,
             "collection",
             "合集 / 列表",
             source_name,
+            split_chapters_after_download,
+            audio_only,
+            audio_only_m4a_only,
+            flat_folder,
         )));
     }
 
     if let Some(source_id) = video.favorite_id {
-        let source_name = favorite::Entity::find_by_id(source_id)
-            .one(db)
-            .await?
-            .map(|source| source.name)
-            .unwrap_or_else(|| format!("已删除收藏夹源 #{}", source_id));
+        let source = favorite::Entity::find_by_id(source_id).one(db).await?;
+        let (source_name, split_chapters_after_download, audio_only, audio_only_m4a_only, flat_folder) = source
+            .map(|source| {
+                (
+                    source.name,
+                    source.split_chapters_after_download,
+                    source.audio_only,
+                    source.audio_only_m4a_only,
+                    source.flat_folder,
+                )
+            })
+            .unwrap_or_else(|| (format!("已删除收藏夹源 #{}", source_id), false, false, false, false));
         return Ok(Some(build_video_source_tag(
             source_id,
             "favorite",
             "收藏夹",
             source_name,
+            split_chapters_after_download,
+            audio_only,
+            audio_only_m4a_only,
+            flat_folder,
         )));
     }
 
     if let Some(source_id) = video.submission_id {
-        let source_name = submission::Entity::find_by_id(source_id)
-            .one(db)
-            .await?
-            .map(|source| source.upper_name)
-            .unwrap_or_else(|| format!("已删除投稿源 #{}", source_id));
+        let source = submission::Entity::find_by_id(source_id).one(db).await?;
+        let (source_name, split_chapters_after_download, audio_only, audio_only_m4a_only, flat_folder) = source
+            .map(|source| {
+                (
+                    source.upper_name,
+                    source.split_chapters_after_download,
+                    source.audio_only,
+                    source.audio_only_m4a_only,
+                    source.flat_folder,
+                )
+            })
+            .unwrap_or_else(|| (format!("已删除投稿源 #{}", source_id), false, false, false, false));
         return Ok(Some(build_video_source_tag(
             source_id,
             "submission",
             "UP主投稿",
             source_name,
+            split_chapters_after_download,
+            audio_only,
+            audio_only_m4a_only,
+            flat_folder,
         )));
     }
 
     if let Some(source_id) = video.watch_later_id {
-        let source_name = watch_later::Entity::find_by_id(source_id)
-            .one(db)
-            .await?
-            .map(|_| "稍后再看".to_string())
-            .unwrap_or_else(|| format!("已删除稍后再看源 #{}", source_id));
+        let source = watch_later::Entity::find_by_id(source_id).one(db).await?;
+        let (source_name, split_chapters_after_download, audio_only, audio_only_m4a_only, flat_folder) = source
+            .map(|source| {
+                (
+                    "稍后再看".to_string(),
+                    source.split_chapters_after_download,
+                    source.audio_only,
+                    source.audio_only_m4a_only,
+                    source.flat_folder,
+                )
+            })
+            .unwrap_or_else(|| (format!("已删除稍后再看源 #{}", source_id), false, false, false, false));
         return Ok(Some(build_video_source_tag(
             source_id,
             "watch_later",
             "稍后再看",
             source_name,
+            split_chapters_after_download,
+            audio_only,
+            audio_only_m4a_only,
+            flat_folder,
         )));
     }
 
     Ok(None)
+}
+
+async fn video_has_generated_chapter_pages(db: &DatabaseConnection, video_id: i32) -> Result<bool> {
+    let cids = page::Entity::find()
+        .filter(page::Column::VideoId.eq(video_id))
+        .order_by_asc(page::Column::Pid)
+        .select_only()
+        .column(page::Column::Cid)
+        .into_tuple::<i64>()
+        .all(db)
+        .await?;
+
+    let Some(first_cid) = cids.first().copied() else {
+        return Ok(false);
+    };
+
+    Ok(cids.len() > 1 && first_cid > 0 && cids.iter().all(|cid| *cid == first_cid))
 }
 
 #[utoipa::path(
@@ -2889,7 +2979,12 @@ pub async fn get_video(
             }
         }
     }
-    let source = resolve_video_source_tag(db.as_ref(), &raw_video).await?;
+    let mut source = resolve_video_source_tag(db.as_ref(), &raw_video).await?;
+    if let Some(source_tag) = source.as_mut() {
+        if !source_tag.split_chapters_after_download && video_has_generated_chapter_pages(db.as_ref(), id).await? {
+            source_tag.split_chapters_after_download = true;
+        }
+    }
     let pages = page::Entity::find()
         .filter(page::Column::VideoId.eq(id))
         .order_by_asc(page::Column::Pid)
@@ -4261,6 +4356,7 @@ pub async fn add_video_source_internal(
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
                 flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
+                split_chapters_after_download: sea_orm::Set(params.split_chapters_after_download.unwrap_or(false)),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
                 ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
@@ -4360,6 +4456,7 @@ pub async fn add_video_source_internal(
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
                 flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
+                split_chapters_after_download: sea_orm::Set(params.split_chapters_after_download.unwrap_or(false)),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
                 ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
@@ -4452,6 +4549,7 @@ pub async fn add_video_source_internal(
                 ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
                 flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
+                split_chapters_after_download: sea_orm::Set(params.split_chapters_after_download.unwrap_or(false)),
                 use_dynamic_api: sea_orm::Set(params.use_dynamic_api.unwrap_or(false)),
                 dynamic_api_full_synced: sea_orm::Set(params.use_dynamic_api.unwrap_or(false)),
             };
@@ -4756,6 +4854,7 @@ pub async fn add_video_source_internal(
                     keyword_filters: sea_orm::Set(keyword_filters_json),
                     keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
                     audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
+                    split_chapters_after_download: sea_orm::Set(params.split_chapters_after_download.unwrap_or(false)),
                     download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                     download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
                     ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
@@ -4849,6 +4948,7 @@ pub async fn add_video_source_internal(
                 ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
                 flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
+                split_chapters_after_download: sea_orm::Set(params.split_chapters_after_download.unwrap_or(false)),
             };
 
             let insert_result = watch_later::Entity::insert(watch_later).exec(&txn).await?;
@@ -7037,6 +7137,9 @@ pub async fn update_video_source_download_options_internal(
             let audio_only = params.audio_only.unwrap_or(collection.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(collection.audio_only_m4a_only);
             let flat_folder = params.flat_folder.unwrap_or(collection.flat_folder);
+            let split_chapters_after_download = params
+                .split_chapters_after_download
+                .unwrap_or(collection.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(collection.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(collection.download_subtitle);
             let collection_aggregate_enabled = params
@@ -7084,6 +7187,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -7107,6 +7211,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
+                split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
                 ai_rename,
@@ -7129,6 +7234,9 @@ pub async fn update_video_source_download_options_internal(
             let audio_only = params.audio_only.unwrap_or(favorite.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(favorite.audio_only_m4a_only);
             let flat_folder = params.flat_folder.unwrap_or(favorite.flat_folder);
+            let split_chapters_after_download = params
+                .split_chapters_after_download
+                .unwrap_or(favorite.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(favorite.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(favorite.download_subtitle);
             let ai_rename = params.ai_rename.unwrap_or(favorite.ai_rename);
@@ -7158,6 +7266,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -7181,6 +7290,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
+                split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
                 ai_rename,
@@ -7203,6 +7313,9 @@ pub async fn update_video_source_download_options_internal(
             let audio_only = params.audio_only.unwrap_or(submission.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(submission.audio_only_m4a_only);
             let flat_folder = params.flat_folder.unwrap_or(submission.flat_folder);
+            let split_chapters_after_download = params
+                .split_chapters_after_download
+                .unwrap_or(submission.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(submission.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(submission.download_subtitle);
             let ai_rename = params.ai_rename.unwrap_or(submission.ai_rename);
@@ -7244,6 +7357,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -7273,6 +7387,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
+                split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
                 ai_rename,
@@ -7295,6 +7410,9 @@ pub async fn update_video_source_download_options_internal(
             let audio_only = params.audio_only.unwrap_or(watch_later.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(watch_later.audio_only_m4a_only);
             let flat_folder = params.flat_folder.unwrap_or(watch_later.flat_folder);
+            let split_chapters_after_download = params
+                .split_chapters_after_download
+                .unwrap_or(watch_later.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(watch_later.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(watch_later.download_subtitle);
             let ai_rename = params.ai_rename.unwrap_or(watch_later.ai_rename);
@@ -7324,6 +7442,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -7347,6 +7466,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
+                split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
                 ai_rename,
@@ -7369,6 +7489,9 @@ pub async fn update_video_source_download_options_internal(
             let audio_only = params.audio_only.unwrap_or(video_source.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(video_source.audio_only_m4a_only);
             let flat_folder = params.flat_folder.unwrap_or(video_source.flat_folder);
+            let split_chapters_after_download = params
+                .split_chapters_after_download
+                .unwrap_or(video_source.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(video_source.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(video_source.download_subtitle);
             let ai_rename = params.ai_rename.unwrap_or(video_source.ai_rename);
@@ -7398,6 +7521,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -7421,6 +7545,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
+                split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
                 ai_rename,
@@ -9073,6 +9198,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         bangumi_quick_subscribe_path: config.bangumi_quick_subscribe_path.to_string(),
         // ffmpeg 路径
         ffmpeg_path: config.ffmpeg_path.clone(),
+        split_chapters_after_download: config.split_chapters_after_download,
         // B站凭证信息
         credential: {
             let credential = config.credential.load();
@@ -9646,6 +9772,7 @@ pub async fn update_config(
             bangumi_quick_subscribe_path: params.bangumi_quick_subscribe_path.clone(),
             // ffmpeg 路径
             ffmpeg_path: params.ffmpeg_path.clone(),
+            split_chapters_after_download: params.split_chapters_after_download,
             ai_rename_rename_parent_dir: params.ai_rename_rename_parent_dir,
             task_id: task_id.clone(),
         };
@@ -9753,6 +9880,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "submission_quick_subscribe_path" => Some("UP主投稿快捷订阅路径模板"),
         "bangumi_quick_subscribe_path" => Some("番剧快捷订阅路径模板"),
         "ffmpeg_path" => Some("ffmpeg路径"),
+        "split_chapters_after_download" => Some("下载后按章节切分"),
         "bind_address" => Some("服务监听地址"),
         "risk_control.enabled" => Some("风控验证开关"),
         "risk_control.mode" => Some("风控验证模式"),
@@ -10679,6 +10807,13 @@ pub async fn update_config_internal(
         }
     }
 
+    if let Some(split_chapters) = params.split_chapters_after_download {
+        if split_chapters != config.split_chapters_after_download {
+            config.split_chapters_after_download = split_chapters;
+            updated_fields.push("split_chapters_after_download");
+        }
+    }
+
     // 服务器绑定地址配置
     if let Some(bind_address) = params.bind_address {
         let trimmed_bind_address = bind_address.trim();
@@ -11089,6 +11224,14 @@ pub async fn update_config_internal(
                 "ffmpeg_path" => {
                     manager
                         .update_config_item("ffmpeg_path", serde_json::to_value(&config.ffmpeg_path)?)
+                        .await
+                }
+                "split_chapters_after_download" => {
+                    manager
+                        .update_config_item(
+                            "split_chapters_after_download",
+                            serde_json::to_value(config.split_chapters_after_download)?,
+                        )
                         .await
                 }
                 "bind_address" => {
