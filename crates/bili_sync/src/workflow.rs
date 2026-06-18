@@ -13713,6 +13713,7 @@ mod tests {
             audio_only: Set(false),
             audio_only_m4a_only: Set(false),
             flat_folder: Set(false),
+            split_chapters_after_download: Set(false),
             download_danmaku: Set(true),
             download_subtitle: Set(true),
             ai_rename: Set(false),

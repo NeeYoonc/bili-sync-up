@@ -29,8 +29,78 @@ fn wasm_file_path() -> PathBuf {
 static WASM_LAST_CHECK: Lazy<parking_lot::Mutex<Option<std::time::Instant>>> =
     Lazy::new(|| parking_lot::Mutex::new(None));
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LatestWasm {
+    hash: String,
+    url: String,
+}
+
+fn resolve_url(base_url: &str, asset_ref: &str) -> Option<String> {
+    reqwest::Url::parse(base_url)
+        .ok()?
+        .join(asset_ref)
+        .ok()
+        .map(|url| url.to_string())
+}
+
+fn extract_main_js_urls(html: &str, page_url: &str) -> Vec<String> {
+    let Ok(script_re) = Regex::new(r#"<script[^>]+src=["']([^"']+\.js)["']"#) else {
+        return Vec::new();
+    };
+
+    let mut urls = Vec::new();
+    for caps in script_re.captures_iter(html) {
+        let Some(script_ref) = caps.get(1).map(|m| m.as_str()) else {
+            continue;
+        };
+        let Some(url) = resolve_url(page_url, script_ref) else {
+            continue;
+        };
+        if url.contains("/main.") || url.contains("main.") {
+            urls.insert(0, url);
+        } else {
+            urls.push(url);
+        }
+    }
+
+    urls.dedup();
+    urls
+}
+
+fn resolve_wasm_url(js_url: &str, wasm_ref: &str) -> Option<String> {
+    if wasm_ref.starts_with("http://") || wasm_ref.starts_with("https://") {
+        return reqwest::Url::parse(wasm_ref).ok().map(|url| url.to_string());
+    }
+
+    let asset_ref = if wasm_ref.starts_with('/') {
+        wasm_ref.to_string()
+    } else if wasm_ref.starts_with("chat/") {
+        format!("/{wasm_ref}")
+    } else if wasm_ref.starts_with("static/") {
+        format!("../{wasm_ref}")
+    } else {
+        wasm_ref.to_string()
+    };
+
+    resolve_url(js_url, &asset_ref)
+}
+
+fn extract_wasm_from_js(js: &str, js_url: &str) -> Option<LatestWasm> {
+    let wasm_re = Regex::new(
+        r#"(?P<path>(?:https?://[^"'\\\s()]+|/?(?:chat/)?static/)?sha3_wasm_bg\.(?P<hash>[a-f0-9]+)\.wasm)"#,
+    )
+    .ok()?;
+
+    let caps = wasm_re.captures(js)?;
+    let hash = caps.name("hash")?.as_str().to_string();
+    let wasm_ref = caps.name("path")?.as_str();
+    let url = resolve_wasm_url(js_url, wasm_ref)?;
+
+    Some(LatestWasm { hash, url })
+}
+
 /// 从 DeepSeek 网站获取最新 WASM 哈希
-async fn fetch_latest_wasm_hash() -> Option<String> {
+async fn fetch_latest_wasm() -> Option<LatestWasm> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -46,6 +116,51 @@ async fn fetch_latest_wasm_hash() -> Option<String> {
         .text()
         .await
         .ok()?;
+
+    let main_js_urls = extract_main_js_urls(&html, "https://chat.deepseek.com/");
+    let chunk_re = Regex::new(r"\d{4,5}\.[a-f0-9]+\.js").ok()?;
+    for main_js_url in main_js_urls {
+        debug!("Fetch DeepSeek main.js: {}", main_js_url);
+        let main_js = match client
+            .get(&main_js_url)
+            .header("User-Agent", "Mozilla/5.0")
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.text().await {
+                Ok(text) => text,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
+
+        if let Some(latest) = extract_wasm_from_js(&main_js, &main_js_url) {
+            debug!("Extracted DeepSeek WASM from main.js: {}", latest.hash);
+            return Some(latest);
+        }
+
+        let chunks: Vec<_> = chunk_re
+            .find_iter(&main_js)
+            .map(|m| m.as_str().to_string())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .take(10)
+            .collect();
+
+        for chunk in chunks {
+            let Some(chunk_url) = resolve_url(&main_js_url, &chunk) else {
+                continue;
+            };
+            if let Ok(resp) = client.get(&chunk_url).header("User-Agent", "Mozilla/5.0").send().await {
+                if let Ok(chunk_js) = resp.text().await {
+                    if let Some(latest) = extract_wasm_from_js(&chunk_js, &chunk_url) {
+                        debug!("Extracted DeepSeek WASM from chunk {}: {}", chunk, latest.hash);
+                        return Some(latest);
+                    }
+                }
+            }
+        }
+    }
 
     // 提取 main.js URL
     let main_js_re = Regex::new(r#"src="(https://static\.deepseek\.com/chat/static/main\.[^"]+\.js)""#).ok()?;
@@ -69,7 +184,8 @@ async fn fetch_latest_wasm_hash() -> Option<String> {
     if let Some(caps) = wasm_re.captures(&main_js) {
         let hash = caps.get(1)?.as_str().to_string();
         debug!("从 main.js 提取到 WASM 哈希: {}", hash);
-        return Some(hash);
+        let url = format!("https://static.deepseek.com/chat/static/sha3_wasm_bg.{hash}.wasm");
+        return Some(LatestWasm { hash, url });
     }
 
     // 3. 搜索 chunk 文件
@@ -89,7 +205,8 @@ async fn fetch_latest_wasm_hash() -> Option<String> {
                 if let Some(caps) = wasm_re.captures(&chunk_js) {
                     let hash = caps.get(1)?.as_str().to_string();
                     debug!("从 chunk {} 提取到 WASM 哈希: {}", chunk, hash);
-                    return Some(hash);
+                    let url = format!("https://static.deepseek.com/chat/static/sha3_wasm_bg.{hash}.wasm");
+                    return Some(LatestWasm { hash, url });
                 }
             }
         }
@@ -99,8 +216,8 @@ async fn fetch_latest_wasm_hash() -> Option<String> {
 }
 
 /// 下载 WASM 文件
-async fn download_wasm(hash: &str) -> anyhow::Result<Vec<u8>> {
-    let url = format!("https://static.deepseek.com/chat/static/sha3_wasm_bg.{}.wasm", hash);
+async fn download_wasm(latest: &LatestWasm) -> anyhow::Result<Vec<u8>> {
+    let url = latest.url.clone();
 
     debug!("下载 WASM: {}", url);
 
@@ -109,7 +226,7 @@ async fn download_wasm(hash: &str) -> anyhow::Result<Vec<u8>> {
         .build()?;
 
     let bytes = client
-        .get(&url)
+        .get(&latest.url)
         .header("User-Agent", "Mozilla/5.0")
         .send()
         .await?
@@ -184,7 +301,7 @@ pub async fn check_and_update_wasm() -> bool {
 /// 执行 WASM 更新检查
 async fn do_check_and_update_wasm() -> anyhow::Result<bool> {
     // 获取最新哈希
-    let latest_hash = match fetch_latest_wasm_hash().await {
+    let latest = match fetch_latest_wasm().await {
         Some(h) => h,
         None => {
             debug!("无法获取最新 WASM 信息，使用本地文件");
@@ -208,20 +325,20 @@ async fn do_check_and_update_wasm() -> anyhow::Result<bool> {
     };
 
     // 如果哈希相同且文件有效，无需更新
-    if local_hash == latest_hash && local_valid {
-        debug!("WASM 已是最新版本: {}", latest_hash);
+    if local_hash == latest.hash.as_str() && local_valid {
+        debug!("WASM 已是最新版本: {}", latest.hash);
         return Ok(false);
     }
 
     // 需要更新
     if !local_valid {
         info!("首次下载 WASM 或本地文件损坏，正在下载...");
-    } else if local_hash != latest_hash {
-        info!("发现新版本 WASM: {} -> {}", local_hash, latest_hash);
+    } else if local_hash != latest.hash.as_str() {
+        info!("发现新版本 WASM: {} -> {}", local_hash, latest.hash);
     }
 
     // 下载新版本
-    let wasm_bytes = download_wasm(&latest_hash).await?;
+    let wasm_bytes = download_wasm(&latest).await?;
 
     // 确保目录存在
     if let Some(parent) = wasm_file_path().parent() {
@@ -232,9 +349,9 @@ async fn do_check_and_update_wasm() -> anyhow::Result<bool> {
     std::fs::write(wasm_file_path(), &wasm_bytes)?;
 
     // 保存哈希
-    std::fs::write(wasm_hash_file(), &latest_hash)?;
+    std::fs::write(wasm_hash_file(), &latest.hash)?;
 
-    info!("WASM 已更新到: {}", latest_hash);
+    info!("WASM 已更新到: {}", latest.hash);
 
     // 重新初始化 WASM 运行时
     reinit_wasm_runtime();
@@ -542,6 +659,45 @@ pub fn encode_pow_header(response: &PowResponse) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extract_main_js_urls_supports_fe_static() {
+        let html = r#"
+            <html>
+              <script defer src="https://fe-static.deepseek.com/chat/static/default-vendors.bca4876a42.js"></script>
+              <script defer src="https://fe-static.deepseek.com/chat/static/main.ac0de859b8.js"></script>
+            </html>
+        "#;
+
+        let urls = extract_main_js_urls(html, "https://chat.deepseek.com/");
+
+        assert_eq!(urls[0], "https://fe-static.deepseek.com/chat/static/main.ac0de859b8.js");
+        assert!(urls.contains(&"https://fe-static.deepseek.com/chat/static/default-vendors.bca4876a42.js".to_string()));
+    }
+
+    #[test]
+    fn test_extract_wasm_from_js_resolves_static_ref() {
+        let js = r#"const wasm = "static/sha3_wasm_bg.7b9ca65ddd.wasm";"#;
+        let latest = extract_wasm_from_js(js, "https://fe-static.deepseek.com/chat/static/main.ac0de859b8.js").unwrap();
+
+        assert_eq!(latest.hash, "7b9ca65ddd");
+        assert_eq!(
+            latest.url,
+            "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm"
+        );
+    }
+
+    #[test]
+    fn test_extract_wasm_from_js_supports_full_old_url() {
+        let js = r#"const wasm = "https://static.deepseek.com/chat/static/sha3_wasm_bg.abcdef1234.wasm";"#;
+        let latest = extract_wasm_from_js(js, "https://static.deepseek.com/chat/static/main.123456.js").unwrap();
+
+        assert_eq!(latest.hash, "abcdef1234");
+        assert_eq!(
+            latest.url,
+            "https://static.deepseek.com/chat/static/sha3_wasm_bg.abcdef1234.wasm"
+        );
+    }
 
     #[test]
     fn test_solve_pow_keccak() {

@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 use super::deepseek_pow::{build_pow_response, encode_pow_header, solve_pow, PowChallenge};
 
 const BASE_URL: &str = "https://chat.deepseek.com";
-const APP_VERSION: &str = "20241129.1";
+const APP_VERSION: &str = "2.0.0";
 
 /// DeepSeek Web 会话信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +40,19 @@ struct ApiData<T> {
 /// 创建会话响应
 #[derive(Debug, Deserialize)]
 struct CreateSessionResponse {
+    id: Option<String>,
+    chat_session: Option<CreateSessionInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSessionInfo {
     id: String,
+}
+
+impl CreateSessionResponse {
+    fn session_id(self) -> Option<String> {
+        self.id.or_else(|| self.chat_session.map(|session| session.id))
+    }
 }
 
 /// POW 挑战响应
@@ -212,6 +224,7 @@ impl DeepSeekWebClient {
     fn get_headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::ACCEPT, "*/*".parse().unwrap());
+        headers.insert(reqwest::header::ACCEPT_ENCODING, "identity".parse().unwrap());
         headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
         headers.insert(reqwest::header::ORIGIN, BASE_URL.parse().unwrap());
         headers.insert(reqwest::header::REFERER, format!("{}/", BASE_URL).parse().unwrap());
@@ -224,7 +237,8 @@ impl DeepSeekWebClient {
         headers.insert("x-app-version", APP_VERSION.parse().unwrap());
         headers.insert("x-client-locale", "zh_CN".parse().unwrap());
         headers.insert("x-client-platform", "web".parse().unwrap());
-        headers.insert("x-client-version", "1.6.0".parse().unwrap());
+        headers.insert("x-client-version", "2.0.0".parse().unwrap());
+        headers.insert("x-client-timezone-offset", "28800".parse().unwrap());
         headers.insert(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", self.token).parse().unwrap(),
@@ -268,7 +282,10 @@ impl DeepSeekWebClient {
             ));
         }
 
-        let session_id = data.data.ok_or_else(|| anyhow!("创建会话响应无数据"))?.biz_data.id;
+        let session_id = data
+            .data
+            .and_then(|data| data.biz_data.session_id())
+            .ok_or_else(|| anyhow!("DeepSeek create_session response missing session id"))?;
 
         info!("DeepSeek 会话创建成功: {}", session_id);
         Ok(session_id)
@@ -623,7 +640,27 @@ impl DeepSeekWebClient {
 
 #[cfg(test)]
 mod tests {
-    use super::DeepSeekWebClient;
+    use super::{ApiResponse, CreateSessionResponse, DeepSeekWebClient};
+
+    #[test]
+    fn parse_create_session_response_supports_legacy_id() {
+        let body = r#"{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":{"id":"legacy-session-id"}}}"#;
+        let data: ApiResponse<CreateSessionResponse> = serde_json::from_str(body).expect("response should parse");
+
+        let session_id = data.data.and_then(|data| data.biz_data.session_id());
+
+        assert_eq!(session_id.as_deref(), Some("legacy-session-id"));
+    }
+
+    #[test]
+    fn parse_create_session_response_supports_nested_chat_session() {
+        let body = r#"{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":{"chat_session":{"id":"nested-session-id","seq_id":1}}}}"#;
+        let data: ApiResponse<CreateSessionResponse> = serde_json::from_str(body).expect("response should parse");
+
+        let session_id = data.data.and_then(|data| data.biz_data.session_id());
+
+        assert_eq!(session_id.as_deref(), Some("nested-session-id"));
+    }
 
     #[test]
     fn parse_sse_response_keeps_initial_response_fragment_snapshot() {

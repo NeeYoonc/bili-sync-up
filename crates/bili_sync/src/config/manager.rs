@@ -97,6 +97,92 @@ pub(crate) fn describe_config_key(key: &str) -> &'static str {
         _ => "未知/未定义",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_format_config_json_for_log_redacts_sensitive_values() {
+        let config_json = json!({
+            "ai_rename": {
+                "provider": "deepseek-web",
+                "api_key": "sk-test-secret",
+                "deepseek_web_token": "bearer-token-secret"
+            },
+            "credential": {
+                "sessdata": "sess-secret",
+                "bili_jct": "csrf-secret"
+            },
+            "notification": {
+                "webhook_url": "https://example.com/hook/secret"
+            },
+            "items": [
+                { "auth_token": "auth-secret" },
+                { "name": "keep-me" }
+            ],
+            "plain": "visible"
+        });
+
+        let logged = format_config_json_for_log(&config_json);
+
+        assert!(logged.contains("visible"));
+        assert!(logged.contains("keep-me"));
+        assert!(logged.contains("***REDACTED***"));
+        assert!(!logged.contains("sk-test-secret"));
+        assert!(!logged.contains("bearer-token-secret"));
+        assert!(!logged.contains("sess-secret"));
+        assert!(!logged.contains("csrf-secret"));
+        assert!(!logged.contains("auth-secret"));
+        assert!(!logged.contains("/hook/secret"));
+    }
+}
+
+fn is_sensitive_config_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace('-', "_");
+
+    matches!(
+        normalized.as_str(),
+        "api_key"
+            | "auth_token"
+            | "credential"
+            | "deepseek_web_token"
+            | "sessdata"
+            | "bili_jct"
+            | "dedeuserid"
+            | "ac_time_value"
+    ) || normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("api_key")
+        || normalized.contains("credential")
+        || normalized.contains("cookie")
+        || normalized.contains("webhook")
+}
+
+fn redact_sensitive_config_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    if is_sensitive_config_key(key) {
+                        (key.clone(), Value::String("***REDACTED***".to_string()))
+                    } else {
+                        (key.clone(), redact_sensitive_config_value(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_sensitive_config_value).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn format_config_json_for_log(config_json: &Value) -> String {
+    serde_json::to_string_pretty(&redact_sensitive_config_value(config_json))
+        .unwrap_or_else(|_| "无法格式化JSON".to_string())
+}
 impl ConfigManager {
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db }
@@ -375,17 +461,11 @@ impl ConfigManager {
         let config_json = Value::Object(nested_map);
 
         // 添加详细的反序列化错误信息
-        debug!(
-            "尝试反序列化配置JSON: {}",
-            serde_json::to_string_pretty(&config_json).unwrap_or_else(|_| "无法格式化JSON".to_string())
-        );
+        debug!("尝试反序列化配置JSON: {}", format_config_json_for_log(&config_json));
 
         let config: Config = serde_json::from_value(config_json.clone()).map_err(|e| {
             error!("配置反序列化详细错误: {}", e);
-            error!(
-                "配置JSON内容: {}",
-                serde_json::to_string_pretty(&config_json).unwrap_or_else(|_| "无法格式化JSON".to_string())
-            );
+            error!("配置JSON内容: {}", format_config_json_for_log(&config_json));
             anyhow!("从数据库数据构建配置对象失败: {}", e)
         })?;
 
