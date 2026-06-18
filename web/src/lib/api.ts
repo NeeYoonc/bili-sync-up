@@ -474,8 +474,8 @@ class ApiClient {
 	}
 
 	/**
-	 * 重试 UP 投稿源下已识别的充电视频
-	 * @param sourceType 视频源类型，仅支持 submission
+	 * 重试视频源下已识别的充电视频
+	 * @param sourceType 视频源类型，支持除 bangumi 外的视频源
 	 * @param id 视频源ID
 	 */
 	async retryChargeVideosForSource(

@@ -1,10 +1,10 @@
-# UP 投稿源充电视频重试 Implementation Plan
+# 非番剧视频源充电视频重试 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在 UP 投稿源卡片上增加“重试充电视频”按钮，把该投稿源下已识别的充电视频重新放回现有下载流程。
+**Goal:** 在除番剧外的视频源卡片上增加“重试充电视频”按钮，把该源下已识别的充电视频重新放回现有下载流程。
 
-**Architecture:** 后端新增一个只支持 `submission` 源的 API，重置视频级分页下载状态和分页级视频内容下载状态，但不触发立即扫描。前端只在 UP 投稿源操作区展示按钮，调用该 API 后提示重置数量。
+**Architecture:** 后端新增一个支持 `collection`、`favorite`、`submission`、`watch_later` 的 API，重置视频级分页下载状态和分页级视频内容下载状态，但不触发立即扫描。前端只在非番剧源操作区展示按钮，调用该 API 后提示重置数量。
 
 **Tech Stack:** Rust, Axum, SeaORM, Svelte, TypeScript, existing `runRequest`/toast utilities.
 
@@ -51,14 +51,14 @@ async fn retry_charge_videos_for_submission_resets_only_matching_charge_videos()
 }
 
 #[tokio::test]
-async fn retry_charge_videos_rejects_non_submission_sources() {
+async fn retry_charge_videos_rejects_bangumi_sources() {
     let db = setup_retry_charge_video_test_db().await;
 
-    let error = retry_charge_videos_for_source_internal(db, "favorite".to_string(), 1)
+    let error = retry_charge_videos_for_source_internal(db, "bangumi".to_string(), 1)
         .await
-        .expect_err("非投稿源不应支持重试充电视频");
+        .expect_err("番剧源不应支持重试充电视频");
 
-    assert!(error.to_string().contains("仅支持UP投稿源"));
+    assert!(error.to_string().contains("番剧"));
 }
 ```
 
@@ -67,7 +67,7 @@ async fn retry_charge_videos_rejects_non_submission_sources() {
 Run:
 
 ```powershell
-cargo test -p bili_sync retry_charge_videos --lib
+cargo test -p bili_sync retry_charge_videos
 ```
 
 Expected: compile failure because `retry_charge_videos_for_source_internal`, `setup_retry_charge_video_test_db`, and `PAGE_STATUS_VIDEO_INDEX` do not exist yet.
@@ -104,9 +104,9 @@ pub async fn retry_charge_videos_for_source(
 
 The internal helper should:
 
-- return an API error unless `source_type == "submission"`;
-- ensure the submission source exists;
-- query `video` rows with `submission_id = id`, `valid = true`, `deleted = 0`, `auto_download = true`, `is_charge_video = true`;
+- return an API error for `source_type == "bangumi"` and unknown source types;
+- ensure the selected source exists;
+- query `video` rows through the matching relation column (`collection_id` / `favorite_id` / `submission_id` / `watch_later_id`) with `valid = true`, `deleted = 0`, `auto_download = true`, `is_charge_video = true`;
 - reset only `VIDEO_STATUS_PAGE_DOWNLOAD_INDEX` on matching videos;
 - query all pages for matching video IDs and reset only `PAGE_STATUS_VIDEO_INDEX`;
 - commit the transaction and call `notify_videos_changed()` if anything changed;
@@ -125,12 +125,12 @@ Add `retry_charge_videos_for_source` to:
 Run:
 
 ```powershell
-cargo test -p bili_sync retry_charge_videos --lib
+cargo test -p bili_sync retry_charge_videos
 ```
 
 Expected: the new tests pass.
 
-### Task 2: 前端 API 和 UP 投稿源按钮
+### Task 2: 前端 API 和非番剧源按钮
 
 **Files:**
 - Modify: `web/src/lib/api.ts`
@@ -155,37 +155,35 @@ Also expose it from the exported `api` object.
 
 - [ ] **Step 2: Add source-local loading state and handler**
 
-In `web/src/routes/video-sources/+page.svelte`, add a `Set<string>` tracking sources currently retrying. Add:
+In `web/src/routes/video-sources/+page.svelte`, add a `SvelteSet<string>` tracking sources currently retrying. Add:
 
 ```ts
-async function handleRetryChargeVideos(sourceId: number) {
-  const key = `submission:${sourceId}`;
+async function handleRetryChargeVideos(sourceType: string, sourceId: number) {
+  const key = `${sourceType}:${sourceId}`;
   if (retryingChargeVideoSources.has(key)) return;
-  retryingChargeVideoSources = new Set(retryingChargeVideoSources).add(key);
+  retryingChargeVideoSources.add(key);
   try {
-    const response = await runRequest(() => api.retryChargeVideosForSource('submission', sourceId), {
+    const response = await runRequest(() => api.retryChargeVideosForSource(sourceType, sourceId), {
       context: '重试充电视频失败'
     });
     if (!response) return;
     const data = response.data;
     if (data.resetted) {
-      toast.success('已加入下一轮扫描', {
+      toast.success('已重置充电视频', {
         description: `已重置 ${data.resetted_videos_count} 个视频、${data.resetted_pages_count} 个分页`
       });
     } else {
-      toast.info('该 UP 投稿源没有可重试的充电视频');
+      toast.info('该视频源没有可重试的充电视频');
     }
   } finally {
-    const next = new Set(retryingChargeVideoSources);
-    next.delete(key);
-    retryingChargeVideoSources = next;
+    retryingChargeVideoSources.delete(key);
   }
 }
 ```
 
-- [ ] **Step 3: Render the button only for UP 投稿源**
+- [ ] **Step 3: Render the button only for non-bangumi sources**
 
-Inside the existing `{#if sourceConfig.type === 'submission'}` action block, add a ghost icon button with `RotateCcwIcon` or a suitable existing lucide icon. Disable it while that source key is in the loading set. Do not render it for collection, favorite, watch_later, or bangumi.
+Render a ghost icon button with `BatteryChargingIcon` or a suitable existing lucide icon for every source where `sourceConfig.type !== 'bangumi'`. Disable it while that source key is in the loading set. Keep submission-only controls such as history selection and dynamic API inside the existing submission block.
 
 - [ ] **Step 4: Run frontend verification**
 
@@ -213,7 +211,7 @@ Expected: command exits 0.
 Run:
 
 ```powershell
-cargo test -p bili_sync retry_charge_videos --lib
+cargo test -p bili_sync retry_charge_videos
 ```
 
 Expected: all targeted tests pass.

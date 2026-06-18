@@ -47,23 +47,23 @@
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { formatCompactTimestampOrFallback } from '$lib/utils/timezone';
 	import { buildAuthenticatedStreamUrl } from '$lib/utils/live-stream';
 	import { createManagedEventSource } from '$lib/utils/live-event-source';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 	let loading = false;
 	let bulkUpdating = false;
 	const videoSourcesStream = createManagedEventSource();
-	const queuedDeleteNoticeMap = new Map<
+	const queuedDeleteNoticeMap = new SvelteMap<
 		string,
 		{ sourceType: VideoSourceType; sourceId: number; sourceName: string }
 	>();
 
 	// 响应式相关
 	const isMobileQuery = new IsMobile();
-	let isMobile: boolean = false;
 	// let isTablet: boolean = false; // 未使用，已注释
-	$: isMobile = isMobileQuery.current;
 	// $: isTablet = innerWidth >= 768 && innerWidth < 1024; // md断点 - 未使用
 
 	// 折叠状态管理 - 默认所有分类都是折叠状态
@@ -71,8 +71,8 @@
 
 	// 批量操作状态（按分类）
 	let bulkModeSections: Record<string, boolean> = {};
-	let bulkSelectedIds: Record<string, Set<number>> = {};
-	let retryingChargeVideoSources = new Set<string>();
+	let bulkSelectedIds: Record<string, SvelteSet<number>> = {};
+	const retryingChargeVideoSources = new SvelteSet<string>();
 
 	// 删除对话框状态
 	let showDeleteDialog = false;
@@ -405,15 +405,16 @@
 	}
 
 	function getSelectedSet(sectionKey: string) {
-		return bulkSelectedIds[sectionKey] ?? new Set<number>();
+		return bulkSelectedIds[sectionKey] ?? new SvelteSet<number>();
 	}
 
-	function setSelectedSet(sectionKey: string, set: Set<number>) {
+	function setSelectedSet(sectionKey: string, set: SvelteSet<number>) {
 		bulkSelectedIds = { ...bulkSelectedIds, [sectionKey]: set };
 	}
 
 	function clearSelection(sectionKey: string) {
-		const { [sectionKey]: _removed, ...rest } = bulkSelectedIds;
+		const { [sectionKey]: removed, ...rest } = bulkSelectedIds;
+		void removed;
 		bulkSelectedIds = rest;
 	}
 
@@ -427,7 +428,7 @@
 
 	function toggleSelect(sectionKey: string, sourceId: number) {
 		const current = getSelectedSet(sectionKey);
-		const next = new Set(current);
+		const next = new SvelteSet(current);
 		if (next.has(sourceId)) {
 			next.delete(sourceId);
 		} else {
@@ -437,11 +438,11 @@
 	}
 
 	function selectAll(sectionKey: string, sources: { id: number }[]) {
-		setSelectedSet(sectionKey, new Set(sources.map((s) => s.id)));
+		setSelectedSet(sectionKey, new SvelteSet(sources.map((s) => s.id)));
 	}
 
 	function clearAll(sectionKey: string) {
-		setSelectedSet(sectionKey, new Set());
+		setSelectedSet(sectionKey, new SvelteSet());
 	}
 
 	async function bulkSetEnabled(sectionKey: string, sourceType: string, enabled: boolean) {
@@ -545,13 +546,13 @@
 		showResetPathDialog = true;
 	}
 
-	async function handleRetryChargeVideos(sourceId: number) {
-		const key = `submission:${sourceId}`;
+	async function handleRetryChargeVideos(sourceType: string, sourceId: number) {
+		const key = `${sourceType}:${sourceId}`;
 		if (retryingChargeVideoSources.has(key)) return;
 
-		retryingChargeVideoSources = new Set(retryingChargeVideoSources).add(key);
+		retryingChargeVideoSources.add(key);
 		try {
-			const result = await runRequest(() => api.retryChargeVideosForSource('submission', sourceId), {
+			const result = await runRequest(() => api.retryChargeVideosForSource(sourceType, sourceId), {
 				context: '重试充电视频失败'
 			});
 			if (!result) return;
@@ -567,12 +568,10 @@
 					description: `已重置 ${data.resetted_videos_count} 个视频、${data.resetted_pages_count} 个分页，后续由现有下载流程重试`
 				});
 			} else {
-				toast.info('该 UP 投稿源没有可重试的充电视频');
+				toast.info('该视频源没有可重试的充电视频');
 			}
 		} finally {
-			const next = new Set(retryingChargeVideoSources);
-			next.delete(key);
-			retryingChargeVideoSources = next;
+			retryingChargeVideoSources.delete(key);
 		}
 	}
 
@@ -1116,7 +1115,7 @@
 	}
 
 	function navigateToAddSource() {
-		goto('/add-source');
+		goto(resolve('/add-source'));
 	}
 
 	onMount(() => {
@@ -1142,13 +1141,13 @@
 		title="视频源管理"
 		description="管理和配置您的视频源，包括收藏夹、合集、投稿和稍后再看。"
 		titleTooltip="管理和配置收藏夹、合集、投稿、番剧与稍后再看视频源"
-		titleClass="font-bold {isMobile ? 'text-xl' : 'text-2xl'}"
-		descriptionClass="text-muted-foreground {isMobile ? 'text-sm' : 'text-base'} mt-1"
+		titleClass="font-bold {isMobileQuery.current ? 'text-xl' : 'text-2xl'}"
+		descriptionClass="text-muted-foreground {isMobileQuery.current ? 'text-sm' : 'text-base'} mt-1"
 	>
 		{#snippet actions()}
 			<Button
 				onclick={navigateToAddSource}
-				class="flex items-center gap-2 {isMobile ? 'w-full' : 'w-auto'}"
+				class="flex items-center gap-2 {isMobileQuery.current ? 'w-full' : 'w-auto'}"
 				title="添加新的视频源"
 			>
 				<PlusIcon class="h-4 w-4" />
@@ -1230,10 +1229,12 @@
 
 							{#if sources && sources.length > 0}
 								{@const bulkMode = bulkModeSections[sourceKey] === true}
-								{@const selectedSet = bulkSelectedIds[sourceKey] ?? new Set<number>()}
+								{@const selectedSet = bulkSelectedIds[sourceKey] ?? new SvelteSet<number>()}
 
 								<div
-									class="mb-3 flex flex-wrap items-center gap-2 {isMobile ? 'justify-between' : ''}"
+									class="mb-3 flex flex-wrap items-center gap-2 {isMobileQuery.current
+										? 'justify-between'
+										: ''}"
 								>
 									<Button
 										size="sm"
@@ -1285,12 +1286,14 @@
 								<div class="space-y-3">
 									{#each sources as source (source.id)}
 										<div
-											class="flex {isMobile
+											class="flex {isMobileQuery.current
 												? 'flex-col gap-3'
 												: 'flex-row items-center justify-between gap-3'} rounded-lg border p-3"
 										>
 											{#if bulkMode}
-												<label class="flex items-center {isMobile ? 'self-start' : ''}">
+												<label
+													class="flex items-center {isMobileQuery.current ? 'self-start' : ''}"
+												>
 													<input
 														type="checkbox"
 														checked={selectedSet.has(source.id)}
@@ -1302,7 +1305,7 @@
 											{/if}
 											<div class="min-w-0 flex-1">
 												<div
-													class="flex {isMobile
+													class="flex {isMobileQuery.current
 														? 'flex-col gap-2'
 														: 'flex-row items-center gap-2'} mb-1"
 												>
@@ -1462,17 +1465,23 @@
 																: 'text-gray-400'}"
 														/>
 													</Button>
+												{/if}
 
+												{#if sourceConfig.type !== 'bangumi'}
 													<Button
 														size="sm"
 														variant="ghost"
-														onclick={() => handleRetryChargeVideos(source.id)}
-														disabled={retryingChargeVideoSources.has(`submission:${source.id}`)}
+														onclick={() => handleRetryChargeVideos(sourceConfig.type, source.id)}
+														disabled={retryingChargeVideoSources.has(
+															`${sourceConfig.type}:${source.id}`
+														)}
 														title="重试充电视频"
 														class="h-8 w-8 p-0"
 													>
 														<BatteryChargingIcon
-															class="h-4 w-4 {retryingChargeVideoSources.has(`submission:${source.id}`)
+															class="h-4 w-4 {retryingChargeVideoSources.has(
+																`${sourceConfig.type}:${source.id}`
+															)
 																? 'text-gray-400'
 																: 'text-pink-600'}"
 														/>
@@ -1620,7 +1629,9 @@
 															source.id,
 															source.split_chapters_after_download ?? false
 														)}
-													title={source.split_chapters_after_download ? '禁用分章下载' : '启用分章下载'}
+													title={source.split_chapters_after_download
+														? '禁用分章下载'
+														: '启用分章下载'}
 													class="h-8 w-8 p-0"
 												>
 													<ListTreeIcon
