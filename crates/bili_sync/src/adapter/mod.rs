@@ -66,9 +66,10 @@ pub trait VideoSource {
     // 判断是否应该继续拉取视频
     fn should_take(&self, release_datetime: &chrono::DateTime<Utc>, latest_row_at_string: &str) -> bool {
         let beijing_tz = crate::utils::time_format::beijing_timezone();
-        let release_beijing = release_datetime.with_timezone(&beijing_tz);
-        let release_beijing_str = release_beijing.format("%Y-%m-%d %H:%M:%S").to_string();
-        release_beijing_str.as_str() > latest_row_at_string
+        let release_beijing = release_datetime.with_timezone(&beijing_tz).naive_local();
+        let latest_row_at = crate::utils::time_format::parse_time_string(latest_row_at_string)
+            .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc());
+        release_beijing > latest_row_at
     }
 
     /// 是否允许跳过第一条旧视频并继续扫描（用于动态API置顶旧视频场景）
@@ -104,7 +105,7 @@ pub trait VideoSource {
     }
 
     /// 获取创建时间，用于判断是否为新投稿
-    fn get_created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+    fn get_created_at(&self) -> Option<chrono::NaiveDateTime> {
         None // 默认实现：没有创建时间信息
     }
 

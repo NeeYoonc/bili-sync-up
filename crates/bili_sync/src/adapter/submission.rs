@@ -94,22 +94,27 @@ impl VideoSource for submission::Model {
         // 增量扫描逻辑：只获取比上次扫描时间更新的视频
         let current_config = crate::config::reload_config();
         if current_config.submission_risk_control.enable_incremental_fetch || self.selected_videos.is_some() {
-            // 将UTC时间转换为北京时间字符串，然后直接比较字符串
+            // 将 API 时间转换为北京时间 NaiveDateTime，再与数据库中的北京时间比较
             let beijing_tz = crate::utils::time_format::beijing_timezone();
-            let release_beijing = release_datetime.with_timezone(&beijing_tz);
-            let release_beijing_str = release_beijing.format("%Y-%m-%d %H:%M:%S").to_string();
+            let release_beijing = release_datetime.with_timezone(&beijing_tz).naive_local();
+            let latest_row_at = parse_time_string(latest_row_at_string)
+                .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc());
 
-            let should_take = release_beijing_str.as_str() > latest_row_at_string;
+            let should_take = release_beijing > latest_row_at;
 
             if should_take {
                 debug!(
                     "UP主「{}」增量获取：视频发布时间 {} > 上次扫描最新视频发布时间 {}",
-                    self.upper_name, release_beijing_str, latest_row_at_string
+                    self.upper_name,
+                    release_beijing.format("%Y-%m-%d %H:%M:%S"),
+                    latest_row_at.format("%Y-%m-%d %H:%M:%S")
                 );
             } else {
                 debug!(
                     "UP主「{}」增量跳过：视频发布时间 {} <= 上次扫描最新视频发布时间 {}",
-                    self.upper_name, release_beijing_str, latest_row_at_string
+                    self.upper_name,
+                    release_beijing.format("%Y-%m-%d %H:%M:%S"),
+                    latest_row_at.format("%Y-%m-%d %H:%M:%S")
                 );
             }
 
@@ -208,9 +213,9 @@ impl VideoSource for submission::Model {
         })
     }
 
-    fn get_created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+    fn get_created_at(&self) -> Option<chrono::NaiveDateTime> {
         // 使用统一的时间解析函数
-        parse_time_string(&self.created_at).map(|dt| dt.and_utc()).or_else(|| {
+        parse_time_string(&self.created_at).or_else(|| {
             warn!("解析 created_at 时间失败，原始值: {}", self.created_at);
             None
         })

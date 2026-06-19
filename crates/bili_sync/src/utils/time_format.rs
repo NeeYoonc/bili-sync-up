@@ -79,6 +79,15 @@ pub fn parse_time_string(time_str: &str) -> Option<NaiveDateTime> {
     None
 }
 
+/// 将数据库中存储的北京时间 NaiveDateTime 转为 UTC。
+pub fn stored_beijing_naive_to_utc(value: NaiveDateTime) -> DateTime<Utc> {
+    beijing_timezone()
+        .from_local_datetime(&value)
+        .single()
+        .expect("固定北京时间偏移应始终能映射本地时间")
+        .with_timezone(&Utc)
+}
+
 /// 将 Unix 时间戳转换为标准格式字符串（北京时间）
 pub fn timestamp_to_beijing_string(timestamp: i64) -> String {
     match DateTime::from_timestamp(timestamp, 0) {

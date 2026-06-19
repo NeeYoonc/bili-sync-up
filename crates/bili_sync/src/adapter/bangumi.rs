@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use futures::Stream;
 use sea_orm::prelude::*;
 use sea_orm::ActiveValue::Set;
@@ -176,7 +176,7 @@ impl BangumiSource {
     pub async fn video_stream_from_cache(
         &self,
         cached_data: &str,
-        latest_row_at: Option<DateTime<Utc>>,
+        latest_row_at: Option<NaiveDateTime>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>>> {
         use crate::bilibili::VideoInfo;
         use crate::utils::bangumi_cache::parse_cache;
@@ -202,9 +202,13 @@ impl BangumiSource {
             for episode in episodes {
                 let pub_time = episode["pub_time"].as_i64().unwrap_or(0);
                 let pub_datetime = DateTime::<Utc>::from_timestamp(pub_time, 0);
+                let pub_datetime_beijing = pub_datetime.map(|dt| {
+                    dt.with_timezone(&crate::utils::time_format::beijing_timezone())
+                        .naive_local()
+                });
 
                 // 如果设置了时间过滤，跳过旧剧集
-                if let (Some(latest), Some(pub_dt)) = (latest_row_at, pub_datetime) {
+                if let (Some(latest), Some(pub_dt)) = (latest_row_at, pub_datetime_beijing) {
                     if pub_dt <= latest {
                         continue;
                     }
@@ -280,8 +284,7 @@ impl BangumiSource {
             // 已有记录，使用增量模式
             Some(
                 crate::utils::time_format::parse_time_string(&self.latest_row_at)
-                    .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc())
-                    .and_utc(),
+                    .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc()),
             )
         };
 
@@ -297,12 +300,11 @@ impl BangumiSource {
             (&source_model.cached_episodes, source_model.cache_updated_at)
         {
             // 检查缓存是否过期（默认24小时）
-            let cache_updated_at_utc = crate::utils::time_format::parse_time_string(&cache_updated_at)
-                .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc())
-                .and_utc();
-            if !is_cache_expired(Some(cache_updated_at_utc), 24) {
+            let cache_updated_at_beijing = crate::utils::time_format::parse_time_string(&cache_updated_at)
+                .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc());
+            if !is_cache_expired(Some(cache_updated_at_beijing), 24) {
                 // 尝试轻量级更新检查
-                match bangumi.check_update(Some(cache_updated_at_utc)).await {
+                match bangumi.check_update(Some(cache_updated_at_beijing)).await {
                     Ok((has_update, _)) => {
                         if !has_update {
                             // 没有更新，可以使用缓存
