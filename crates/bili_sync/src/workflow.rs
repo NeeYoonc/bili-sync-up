@@ -13908,6 +13908,94 @@ mod tests {
         assert_eq!(updated_submission.latest_row_at, "2026-06-03 22:32:31");
     }
 
+    #[tokio::test]
+    async fn test_refresh_video_source_does_not_treat_same_run_page_checkpoint_as_resume() {
+        let db = create_test_db("submission-runtime-checkpoint").await;
+        insert_test_submission(&db, 1, false, false).await;
+
+        let mut update_model = submission::ActiveModel {
+            id: Set(1),
+            ..Default::default()
+        };
+        update_model.latest_row_at = Set("2026-06-20 18:00:00".to_string());
+        update_model.update(&db).await.expect("should update test submission");
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("submission should exist");
+        let upper_id = submission_source.upper_id.to_string();
+        let video_source = VideoSourceEnum::Submission(submission_source);
+
+        {
+            let mut tracker = crate::bilibili::submission::SUBMISSION_PAGE_TRACKER.write().unwrap();
+            tracker.remove(&upper_id);
+        }
+        {
+            let mut tracker = crate::bilibili::submission::SUBMISSION_RESUME_TRACKER.write().unwrap();
+            tracker.remove(&upper_id);
+        }
+
+        let upper_id_for_stream = upper_id.clone();
+        let video_stream = futures::stream::iter((0..31).map(move |idx| {
+            if idx == 30 {
+                let mut tracker = crate::bilibili::submission::SUBMISSION_PAGE_TRACKER.write().unwrap();
+                tracker.insert(upper_id_for_stream.clone(), (2, 0));
+            }
+
+            let timestamp = if idx < 30 {
+                format!("2026-06-20T10:{:02}:00Z", idx + 1)
+            } else {
+                "2026-06-20T09:00:00Z".to_string()
+            };
+            let ctime = chrono::DateTime::parse_from_rfc3339(&timestamp)
+                .expect("test timestamp should parse")
+                .with_timezone(&chrono::Utc);
+
+            Ok(crate::bilibili::VideoInfo::Submission {
+                title: format!("checkpoint regression {idx}"),
+                bvid: format!("BVCheckpointRegression{idx:02}"),
+                intro: String::new(),
+                cover: String::new(),
+                ctime,
+                duration: Some(60),
+                season_id: None,
+            })
+        }));
+        let bili_client = BiliClient::new(String::new());
+
+        let (count, _) = refresh_video_source(
+            &video_source,
+            Box::pin(video_stream),
+            &db,
+            CancellationToken::new(),
+            &bili_client,
+        )
+        .await
+        .expect("refresh should succeed");
+
+        assert_eq!(count, 30, "old video after a runtime checkpoint should stop the scan");
+        let old_video_count = video::Entity::find()
+            .filter(video::Column::Bvid.eq("BVCheckpointRegression30"))
+            .count(&db)
+            .await
+            .expect("count should succeed");
+        assert_eq!(
+            old_video_count, 0,
+            "old video after a runtime checkpoint should not be stored"
+        );
+
+        {
+            let mut tracker = crate::bilibili::submission::SUBMISSION_PAGE_TRACKER.write().unwrap();
+            tracker.remove(&upper_id);
+        }
+        {
+            let mut tracker = crate::bilibili::submission::SUBMISSION_RESUME_TRACKER.write().unwrap();
+            tracker.remove(&upper_id);
+        }
+    }
+
     #[test]
     fn test_is_bili_request_failed_inaccessible_matches_deleted_and_invisible_codes() {
         let deleted_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-404, "not found".to_string()));

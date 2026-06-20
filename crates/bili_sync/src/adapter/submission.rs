@@ -57,14 +57,15 @@ impl VideoSource for submission::Model {
     }
 
     fn should_take(&self, release_datetime: &chrono::DateTime<Utc>, latest_row_at_string: &str) -> bool {
-        // 检查是否存在断点恢复情况
+        // 只有本轮扫描开始前已经存在的断点才算断点恢复。
+        // 同一轮扫描中每页结束保存的运行时断点不能绕过增量截止。
         let upper_id_str = self.upper_id.to_string();
-        let has_checkpoint = {
-            let tracker = crate::bilibili::submission::SUBMISSION_PAGE_TRACKER.read().unwrap();
-            tracker.contains_key(&upper_id_str)
+        let is_resuming_from_checkpoint = {
+            let tracker = crate::bilibili::submission::SUBMISSION_RESUME_TRACKER.read().unwrap();
+            tracker.contains(&upper_id_str)
         };
 
-        if has_checkpoint {
+        if is_resuming_from_checkpoint {
             return true;
         }
 

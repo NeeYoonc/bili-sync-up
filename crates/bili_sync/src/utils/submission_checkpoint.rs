@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::bilibili::submission::SUBMISSION_PAGE_TRACKER;
+use crate::bilibili::submission::{SUBMISSION_PAGE_TRACKER, SUBMISSION_RESUME_TRACKER};
 
 const CHECKPOINT_KEY: &str = "submission_checkpoints";
 
@@ -44,6 +44,7 @@ pub async fn restore_checkpoints_from_db(db: &Arc<DatabaseConnection>) -> Result
             // 恢复到内存中的静态变量
             let mut tracker = SUBMISSION_PAGE_TRACKER.write().unwrap();
             *tracker = checkpoints.checkpoints;
+            SUBMISSION_RESUME_TRACKER.write().unwrap().clear();
 
             if !tracker.is_empty() {
                 info!("从数据库恢复 {} 个断点信息", tracker.len());
@@ -55,6 +56,7 @@ pub async fn restore_checkpoints_from_db(db: &Arc<DatabaseConnection>) -> Result
             }
         }
         None => {
+            SUBMISSION_RESUME_TRACKER.write().unwrap().clear();
             debug!("数据库中没有断点信息配置项");
         }
     }
@@ -121,6 +123,7 @@ pub async fn clear_submission_checkpoint(db: &Arc<DatabaseConnection>, upper_id:
         let mut tracker = SUBMISSION_PAGE_TRACKER.write().unwrap();
         tracker.remove(&upper_id_str).is_some()
     };
+    SUBMISSION_RESUME_TRACKER.write().unwrap().remove(&upper_id_str);
 
     if removed {
         info!("清除UP主 {} 的断点信息（删除视频源）", upper_id);

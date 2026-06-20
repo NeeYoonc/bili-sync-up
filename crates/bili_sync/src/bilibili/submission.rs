@@ -5,7 +5,7 @@ use futures::Stream;
 use once_cell::sync::Lazy;
 use reqwest::Method;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -21,6 +21,7 @@ use crate::utils::submission_checkpoint;
 /// 存储格式: (页码, 该页已处理的视频索引)
 pub static SUBMISSION_PAGE_TRACKER: Lazy<RwLock<HashMap<String, (usize, usize)>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+pub static SUBMISSION_RESUME_TRACKER: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| RwLock::new(HashSet::new()));
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct SubmissionAccountStatus {
@@ -152,7 +153,15 @@ impl<'a> Submission<'a> {
             };
 
             // 记录恢复信息
-            let _is_resuming_from_checkpoint = page > 1 || skip_videos_count > 0;
+            let is_resuming_from_checkpoint = page > 1 || skip_videos_count > 0;
+            {
+                let mut resume_tracker = SUBMISSION_RESUME_TRACKER.write().unwrap();
+                if is_resuming_from_checkpoint {
+                    resume_tracker.insert(self.upper_id.clone());
+                } else {
+                    resume_tracker.remove(&self.upper_id);
+                }
+            }
             let resume_page = page;  // 记录恢复的起始页码，用于判断是否需要跳过视频
             let mut current_skip_count = skip_videos_count;  // 当前页需要跳过的视频数
 
@@ -371,6 +380,10 @@ impl<'a> Submission<'a> {
             if tracker.remove(&self.upper_id).is_some() {
                 info!("清除UP主 {} 的断点（扫描完成）", self.upper_id);
             }
+        }
+        {
+            let mut resume_tracker = SUBMISSION_RESUME_TRACKER.write().unwrap();
+            resume_tracker.remove(&self.upper_id);
         }
 
         // 持久化到数据库（清除该UP主的断点）
