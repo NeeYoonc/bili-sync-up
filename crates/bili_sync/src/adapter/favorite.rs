@@ -59,8 +59,8 @@ impl VideoSource for favorite::Model {
 
         let beijing_tz = crate::utils::time_format::beijing_timezone();
         let release_beijing = release_datetime.with_timezone(&beijing_tz).naive_local();
-        let latest_row_at = parse_time_string(latest_row_at_string)
-            .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc());
+        let latest_row_at =
+            parse_time_string(latest_row_at_string).unwrap_or_else(crate::utils::time_format::beijing_epoch_naive);
         release_beijing > latest_row_at
     }
 

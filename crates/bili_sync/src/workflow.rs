@@ -1128,7 +1128,7 @@ pub async fn refresh_video_source<'a>(
     video_source.log_refresh_video_start();
     let latest_row_at_string = video_source.get_latest_row_at();
     let latest_row_at = crate::utils::time_format::parse_time_string(&latest_row_at_string)
-        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc());
+        .unwrap_or_else(crate::utils::time_format::beijing_epoch_naive);
     let mut max_datetime = latest_row_at;
     let beijing_tz = crate::utils::time_format::beijing_timezone();
 

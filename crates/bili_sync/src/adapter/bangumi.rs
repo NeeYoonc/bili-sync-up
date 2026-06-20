@@ -284,7 +284,7 @@ impl BangumiSource {
             // 已有记录，使用增量模式
             Some(
                 crate::utils::time_format::parse_time_string(&self.latest_row_at)
-                    .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc()),
+                    .unwrap_or_else(crate::utils::time_format::beijing_epoch_naive),
             )
         };
 
@@ -301,7 +301,7 @@ impl BangumiSource {
         {
             // 检查缓存是否过期（默认24小时）
             let cache_updated_at_beijing = crate::utils::time_format::parse_time_string(&cache_updated_at)
-                .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc());
+                .unwrap_or_else(crate::utils::time_format::beijing_epoch_naive);
             if !is_cache_expired(Some(cache_updated_at_beijing), 24) {
                 // 尝试轻量级更新检查
                 match bangumi.check_update(Some(cache_updated_at_beijing)).await {
