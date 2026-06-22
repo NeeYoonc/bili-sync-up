@@ -425,7 +425,8 @@ pub async fn create_videos(
                 // 获取创建时间来判断是否为新投稿
                 let is_new_submission = if let Some(created_at) = video_source.get_created_at() {
                     // 如果视频发布时间晚于订阅创建时间，则为新投稿，自动下载
-                    video_info.release_datetime() > &created_at
+                    let beijing_tz = crate::utils::time_format::beijing_timezone();
+                    video_info.release_datetime().with_timezone(&beijing_tz).naive_local() > created_at
                 } else {
                     // 如果无法获取创建时间，保守地认为不是新投稿
                     false
@@ -699,7 +700,8 @@ pub async fn create_videos(
                 // 获取创建时间来判断是否为新投稿
                 let is_new_submission = if let Some(created_at) = video_source.get_created_at() {
                     // 如果视频发布时间晚于订阅创建时间，则为新投稿，自动下载
-                    video_info.release_datetime() > &created_at
+                    let beijing_tz = crate::utils::time_format::beijing_timezone();
+                    video_info.release_datetime().with_timezone(&beijing_tz).naive_local() > created_at
                 } else {
                     // 如果无法获取创建时间，保守地认为不是新投稿
                     false
@@ -1587,6 +1589,83 @@ mod tests {
         let path = root.join(name);
         fs::write(&path, vec![b'x'; size]).expect("应能写入测试文件");
         path.to_string_lossy().to_string()
+    }
+
+    fn selective_submission_source(created_at: &str) -> VideoSourceEnum {
+        VideoSourceEnum::Submission(submission::Model {
+            id: 1,
+            upper_id: 1000,
+            upper_name: "测试UP".to_string(),
+            path: "/tmp/submission-selective".to_string(),
+            created_at: created_at.to_string(),
+            latest_row_at: "1970-01-01 00:00:00".to_string(),
+            enabled: true,
+            scan_deleted_videos: false,
+            scan_deleted_videos_once: false,
+            selected_videos: Some("[]".to_string()),
+            keyword_filters: None,
+            keyword_filter_mode: None,
+            blacklist_keywords: None,
+            whitelist_keywords: None,
+            keyword_case_sensitive: false,
+            min_duration_seconds: None,
+            max_duration_seconds: None,
+            published_after: None,
+            published_before: None,
+            audio_only: false,
+            audio_only_m4a_only: false,
+            flat_folder: false,
+            split_chapters_after_download: false,
+            download_danmaku: true,
+            download_subtitle: true,
+            ai_rename: false,
+            ai_rename_video_prompt: String::new(),
+            ai_rename_audio_prompt: String::new(),
+            ai_rename_enable_multi_page: false,
+            ai_rename_enable_collection: false,
+            ai_rename_enable_bangumi: false,
+            ai_rename_rename_parent_dir: false,
+            use_dynamic_api: false,
+            dynamic_api_full_synced: false,
+            last_scan_at: None,
+            next_scan_at: None,
+            no_update_streak: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn create_videos_treats_submission_created_at_as_beijing_time_for_selective_download() {
+        let db = create_test_db("selective-created-at-beijing").await;
+        let source = selective_submission_source("2026-06-03 20:52:11");
+        let video_time = chrono::DateTime::parse_from_rfc3339("2026-06-03T14:32:31Z")
+            .expect("测试时间应合法")
+            .with_timezone(&chrono::Utc);
+
+        create_videos(
+            vec![crate::bilibili::VideoInfo::Submission {
+                title: "订阅后新投稿".to_string(),
+                bvid: "BV1CreatedAtBeijing".to_string(),
+                intro: String::new(),
+                cover: String::new(),
+                ctime: video_time,
+                duration: Some(60),
+                season_id: None,
+            }],
+            &source,
+            &db,
+        )
+        .await
+        .expect("创建视频应成功");
+
+        let inserted_count = video::Entity::find()
+            .filter(video::Column::Bvid.eq("BV1CreatedAtBeijing"))
+            .count(&db)
+            .await
+            .expect("应能统计插入视频");
+        assert_eq!(
+            inserted_count, 1,
+            "北京时间 22:32:31 晚于订阅创建时间 20:52:11，应作为新投稿存储"
+        );
     }
 
     #[tokio::test]

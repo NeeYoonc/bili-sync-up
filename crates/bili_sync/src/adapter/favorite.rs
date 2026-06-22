@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::pin::Pin;
 
-use crate::utils::time_format::now_standard_string;
+use crate::utils::time_format::{now_standard_string, parse_time_string};
 use anyhow::{Context, Result};
 use bili_sync_entity::*;
 use chrono::Utc;
@@ -58,9 +58,10 @@ impl VideoSource for favorite::Model {
         }
 
         let beijing_tz = crate::utils::time_format::beijing_timezone();
-        let release_beijing = release_datetime.with_timezone(&beijing_tz);
-        let release_beijing_str = release_beijing.format("%Y-%m-%d %H:%M:%S").to_string();
-        release_beijing_str.as_str() > latest_row_at_string
+        let release_beijing = release_datetime.with_timezone(&beijing_tz).naive_local();
+        let latest_row_at =
+            parse_time_string(latest_row_at_string).unwrap_or_else(crate::utils::time_format::beijing_epoch_naive);
+        release_beijing > latest_row_at
     }
 
     fn log_refresh_video_start(&self) {

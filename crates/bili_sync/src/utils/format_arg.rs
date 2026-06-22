@@ -1,8 +1,16 @@
-use chrono::Datelike;
+use chrono::{Datelike, TimeZone};
 use html_escape::decode_html_entities;
 use serde_json::json;
 
 use crate::config;
+
+fn format_stored_beijing_time(value: chrono::NaiveDateTime, format: &str) -> String {
+    crate::utils::time_format::beijing_timezone()
+        .from_local_datetime(&value)
+        .single()
+        .map(|dt| dt.format(format).to_string())
+        .unwrap_or_else(|| value.format(format).to_string())
+}
 
 /// 完全基于API的番剧标题提取，无硬编码回退逻辑
 fn extract_series_title_with_context(
@@ -116,8 +124,8 @@ pub fn video_format_args(video_model: &bili_sync_entity::video::Model) -> serde_
         "title": &video_model.name,
         "upper_name": decoded_upper_name,
         "upper_mid": &video_model.upper_id,
-        "pubtime": &video_model.pubtime.and_utc().format(&current_config.time_format).to_string(),
-        "fav_time": &video_model.favtime.and_utc().format(&current_config.time_format).to_string(),
+        "pubtime": &format_stored_beijing_time(video_model.pubtime, &current_config.time_format),
+        "fav_time": &format_stored_beijing_time(video_model.favtime, &current_config.time_format),
         "show_title": &video_model.name,
     })
 }
@@ -231,8 +239,8 @@ pub fn bangumi_page_format_args(
         "status": status,
         "ep_id": video_model.ep_id.as_deref().unwrap_or(""),
         "season_id": video_model.season_id.as_deref().unwrap_or(""),
-        "pubtime": video_model.pubtime.and_utc().format(&current_config.time_format).to_string(),
-        "fav_time": video_model.favtime.and_utc().format(&current_config.time_format).to_string(),
+        "pubtime": format_stored_beijing_time(video_model.pubtime, &current_config.time_format),
+        "fav_time": format_stored_beijing_time(video_model.favtime, &current_config.time_format),
         // 添加更多文件夹命名可能用到的变量
         "show_title": &video_model.name, // 番剧标题（别名）
         "series_title": &series_title, // 系列标题，从单集标题中提取
@@ -289,8 +297,8 @@ pub fn page_format_args(
             "share_copy": video_model.share_copy.as_deref().unwrap_or(""),
             "category": video_model.category,
             "resolution": resolution,
-            "pubtime": video_model.pubtime.and_utc().format(&current_config.time_format).to_string(),
-            "fav_time": video_model.favtime.and_utc().format(&current_config.time_format).to_string(),
+            "pubtime": format_stored_beijing_time(video_model.pubtime, &current_config.time_format),
+            "fav_time": format_stored_beijing_time(video_model.favtime, &current_config.time_format),
             "long_title": &page_model.name,
             "show_title": &page_model.name,
         })
@@ -307,8 +315,8 @@ pub fn page_format_args(
             "ptitle": &page_model.name,
             "pid": page_model.pid,
             "pid_pad": format!("{:02}", page_model.pid),
-            "pubtime": video_model.pubtime.and_utc().format(&current_config.time_format).to_string(),
-            "fav_time": video_model.favtime.and_utc().format(&current_config.time_format).to_string(),
+            "pubtime": format_stored_beijing_time(video_model.pubtime, &current_config.time_format),
+            "fav_time": format_stored_beijing_time(video_model.favtime, &current_config.time_format),
             "long_title": &page_model.name,
             "show_title": &page_model.name,
         })

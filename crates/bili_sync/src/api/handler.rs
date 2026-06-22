@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use axum::extract::{Extension, Json, Path, Query};
 use axum::http::{header::IF_NONE_MATCH, HeaderMap};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use html_escape::decode_html_entities;
 
 use crate::http::headers::{create_api_headers, create_image_headers};
@@ -9835,12 +9835,14 @@ fn config_for_filename_preview(params: FilenamePreviewRequest) -> crate::config:
 }
 
 fn preview_time(config: &crate::config::Config) -> String {
-    chrono::NaiveDate::from_ymd_opt(2026, 5, 13)
+    let preview_naive = chrono::NaiveDate::from_ymd_opt(2026, 5, 13)
         .and_then(|date| date.and_hms_opt(12, 34, 56))
-        .unwrap()
-        .and_utc()
-        .format(&config.time_format)
-        .to_string()
+        .unwrap();
+    crate::utils::time_format::beijing_timezone()
+        .from_local_datetime(&preview_naive)
+        .single()
+        .map(|dt| dt.format(&config.time_format).to_string())
+        .unwrap_or_else(|| preview_naive.format(&config.time_format).to_string())
 }
 
 fn preview_path(parts: &[&str]) -> String {

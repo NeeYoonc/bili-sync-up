@@ -1034,7 +1034,7 @@ async fn update_bangumi_cache(
                 "long_title": video.name.clone(),
                 "cover": video.cover.clone(),
                 "duration": page.duration as i64 * 1000, // 秒转毫秒
-                "pub_time": video.pubtime.and_utc().timestamp(),
+                "pub_time": crate::utils::time_format::stored_beijing_naive_to_utc(video.pubtime).timestamp(),
                 "section_type": 0, // 正片
             });
 
@@ -1079,7 +1079,10 @@ async fn update_bangumi_cache(
     });
 
     // 获取最新的剧集时间
-    let last_episode_time = videos_with_pages.iter().map(|(v, _)| v.pubtime.and_utc()).max();
+    let last_episode_time = videos_with_pages
+        .iter()
+        .map(|(v, _)| crate::utils::time_format::stored_beijing_naive_to_utc(v.pubtime))
+        .max();
 
     // 创建缓存对象
     let cache = BangumiCache {
@@ -1125,9 +1128,9 @@ pub async fn refresh_video_source<'a>(
     video_source.log_refresh_video_start();
     let latest_row_at_string = video_source.get_latest_row_at();
     let latest_row_at = crate::utils::time_format::parse_time_string(&latest_row_at_string)
-        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc())
-        .and_utc();
+        .unwrap_or_else(crate::utils::time_format::beijing_epoch_naive);
     let mut max_datetime = latest_row_at;
+    let beijing_tz = crate::utils::time_format::beijing_timezone();
 
     async fn ingest_batch(
         video_source: &VideoSourceEnum,
@@ -1297,8 +1300,9 @@ pub async fn refresh_video_source<'a>(
         // 此时获取到的第二页视频比第一页的还要新，因此为了确保正确，理应对每一页的第一个视频进行时间比较
         // 但在 streams 的抽象下，无法判断具体是在哪里分页的，所以暂且对每个视频都进行比较，应该不会有太大性能损失
         let release_datetime = video_info.release_datetime();
-        if release_datetime > &max_datetime {
-            max_datetime = *release_datetime;
+        let release_datetime_beijing = release_datetime.with_timezone(&beijing_tz).naive_local();
+        if release_datetime_beijing > max_datetime {
+            max_datetime = release_datetime_beijing;
         }
 
         // 增量截断：遇到旧视频则结束扫描
@@ -1322,9 +1326,7 @@ pub async fn refresh_video_source<'a>(
         ingest_batch(video_source, connection, videos_info, &mut count, &mut new_videos).await?;
     }
     if max_datetime != latest_row_at {
-        // 转换为北京时间的标准字符串格式
-        let beijing_datetime = max_datetime.with_timezone(&crate::utils::time_format::beijing_timezone());
-        let beijing_datetime_string = beijing_datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+        let beijing_datetime_string = max_datetime.format("%Y-%m-%d %H:%M:%S").to_string();
         video_source
             .update_latest_row_at(beijing_datetime_string)
             .save(connection)
@@ -13849,6 +13851,149 @@ mod tests {
             .expect("投稿源应存在");
         assert!(updated_submission.scan_deleted_videos);
         assert!(!updated_submission.scan_deleted_videos_once);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_video_source_advances_submission_latest_row_at_with_beijing_time() {
+        let db = create_test_db("submission-latest-row-beijing").await;
+        insert_test_submission(&db, 1, false, false).await;
+
+        let mut update_model = submission::ActiveModel {
+            id: Set(1),
+            ..Default::default()
+        };
+        update_model.created_at = Set("2026-06-04 00:00:00".to_string());
+        update_model.latest_row_at = Set("2026-06-03 20:52:11".to_string());
+        update_model.selected_videos = Set(Some("[]".to_string()));
+        update_model.update(&db).await.expect("应能更新测试投稿源");
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("查询应成功")
+            .expect("投稿源应存在");
+        let video_source = VideoSourceEnum::Submission(submission_source);
+        let video_time = chrono::DateTime::parse_from_rfc3339("2026-06-03T14:32:31Z")
+            .expect("测试时间应合法")
+            .with_timezone(&chrono::Utc);
+        let video_stream = futures::stream::iter(vec![Ok(crate::bilibili::VideoInfo::Submission {
+            title: "选择性下载会跳过的视频".to_string(),
+            bvid: "BV1SkippedBySelection".to_string(),
+            intro: String::new(),
+            cover: String::new(),
+            ctime: video_time,
+            duration: Some(60),
+            season_id: None,
+        })]);
+        let bili_client = BiliClient::new(String::new());
+
+        let (count, new_videos) = refresh_video_source(
+            &video_source,
+            Box::pin(video_stream),
+            &db,
+            CancellationToken::new(),
+            &bili_client,
+        )
+        .await
+        .expect("刷新投稿源应成功");
+
+        assert_eq!(count, 0, "选择性下载过滤的视频不应被存储");
+        assert!(new_videos.is_empty(), "选择性下载过滤的视频不应生成新视频通知");
+
+        let updated_submission = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("查询应成功")
+            .expect("投稿源应存在");
+        assert_eq!(updated_submission.latest_row_at, "2026-06-03 22:32:31");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_video_source_does_not_treat_same_run_page_checkpoint_as_resume() {
+        let db = create_test_db("submission-runtime-checkpoint").await;
+        insert_test_submission(&db, 1, false, false).await;
+
+        let mut update_model = submission::ActiveModel {
+            id: Set(1),
+            ..Default::default()
+        };
+        update_model.latest_row_at = Set("2026-06-20 18:00:00".to_string());
+        update_model.update(&db).await.expect("should update test submission");
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("submission should exist");
+        let upper_id = submission_source.upper_id.to_string();
+        let video_source = VideoSourceEnum::Submission(submission_source);
+
+        {
+            let mut tracker = crate::bilibili::submission::SUBMISSION_PAGE_TRACKER.write().unwrap();
+            tracker.remove(&upper_id);
+        }
+        {
+            let mut tracker = crate::bilibili::submission::SUBMISSION_RESUME_TRACKER.write().unwrap();
+            tracker.remove(&upper_id);
+        }
+
+        let upper_id_for_stream = upper_id.clone();
+        let video_stream = futures::stream::iter((0..31).map(move |idx| {
+            if idx == 30 {
+                let mut tracker = crate::bilibili::submission::SUBMISSION_PAGE_TRACKER.write().unwrap();
+                tracker.insert(upper_id_for_stream.clone(), (2, 0));
+            }
+
+            let timestamp = if idx < 30 {
+                format!("2026-06-20T10:{:02}:00Z", idx + 1)
+            } else {
+                "2026-06-20T09:00:00Z".to_string()
+            };
+            let ctime = chrono::DateTime::parse_from_rfc3339(&timestamp)
+                .expect("test timestamp should parse")
+                .with_timezone(&chrono::Utc);
+
+            Ok(crate::bilibili::VideoInfo::Submission {
+                title: format!("checkpoint regression {idx}"),
+                bvid: format!("BVCheckpointRegression{idx:02}"),
+                intro: String::new(),
+                cover: String::new(),
+                ctime,
+                duration: Some(60),
+                season_id: None,
+            })
+        }));
+        let bili_client = BiliClient::new(String::new());
+
+        let (count, _) = refresh_video_source(
+            &video_source,
+            Box::pin(video_stream),
+            &db,
+            CancellationToken::new(),
+            &bili_client,
+        )
+        .await
+        .expect("refresh should succeed");
+
+        assert_eq!(count, 30, "old video after a runtime checkpoint should stop the scan");
+        let old_video_count = video::Entity::find()
+            .filter(video::Column::Bvid.eq("BVCheckpointRegression30"))
+            .count(&db)
+            .await
+            .expect("count should succeed");
+        assert_eq!(
+            old_video_count, 0,
+            "old video after a runtime checkpoint should not be stored"
+        );
+
+        {
+            let mut tracker = crate::bilibili::submission::SUBMISSION_PAGE_TRACKER.write().unwrap();
+            tracker.remove(&upper_id);
+        }
+        {
+            let mut tracker = crate::bilibili::submission::SUBMISSION_RESUME_TRACKER.write().unwrap();
+            tracker.remove(&upper_id);
+        }
     }
 
     #[test]

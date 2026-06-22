@@ -2,7 +2,7 @@ use std::pin::Pin;
 
 use anyhow::{bail, Result};
 use async_stream::try_stream;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use futures::Stream;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -14,6 +14,16 @@ use super::{BiliClient, Validate, VideoInfo};
 /// 根据用户确认，section_type: 1 是最可靠的预告片标识
 fn is_preview_episode(episode: &serde_json::Value) -> bool {
     episode["section_type"].as_i64().unwrap_or(0) == 1
+}
+
+fn utc_datetime_to_beijing_naive(value: DateTime<Utc>) -> NaiveDateTime {
+    value
+        .with_timezone(&crate::utils::time_format::beijing_timezone())
+        .naive_local()
+}
+
+fn api_timestamp_to_beijing_naive(timestamp: i64) -> Option<NaiveDateTime> {
+    DateTime::<Utc>::from_timestamp(timestamp, 0).map(utc_datetime_to_beijing_naive)
 }
 
 /// 智能集数分配算法，解决特殊剧集集数冲突问题
@@ -122,14 +132,14 @@ impl Bangumi {
 
     /// 轻量级检查番剧是否有更新
     /// 返回 (是否有更新, 最新剧集时间)
-    pub async fn check_update(&self, last_check_time: Option<DateTime<Utc>>) -> Result<(bool, Option<DateTime<Utc>>)> {
+    pub async fn check_update(&self, last_check_time: Option<NaiveDateTime>) -> Result<(bool, Option<NaiveDateTime>)> {
         // 获取最小信息来判断是否有更新
         let season_info = self.get_season_info().await?;
 
         // 获取最新更新时间
         let latest_episode_time = season_info["new_ep"]["pub_time"]
             .as_i64()
-            .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0));
+            .and_then(api_timestamp_to_beijing_naive);
 
         // 如果没有上次检查时间，视为有更新
         let has_update = match (last_check_time, latest_episode_time) {
@@ -181,7 +191,7 @@ impl Bangumi {
     /// 将单季番剧转换为视频流（支持增量获取）
     pub fn to_video_stream_incremental(
         &self,
-        latest_row_at: Option<chrono::DateTime<chrono::Utc>>,
+        latest_row_at: Option<NaiveDateTime>,
     ) -> Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>> {
         let client = self.client.clone();
         let season_id = self.season_id.clone();
@@ -283,12 +293,13 @@ impl Bangumi {
                 // 将发布时间戳转换为 DateTime<Utc>
                 let pub_time = DateTime::<Utc>::from_timestamp(pub_time_timestamp, 0)
                     .unwrap_or_else(Utc::now);
+                let pub_time_beijing = utc_datetime_to_beijing_naive(pub_time);
                 let duration = (_duration > 0).then_some((_duration / 1000) as i32);
 
                 // 增量获取：检查旧集数是否需要字段更新
                 if let Some(latest_time) = latest_row_at {
-                    if pub_time <= latest_time {
-                        tracing::trace!("检查旧集数字段更新需求：{} (发布时间: {}, 最新时间: {})", episode_title_raw, pub_time, latest_time);
+                    if pub_time_beijing <= latest_time {
+                        tracing::trace!("检查旧集数字段更新需求：{} (发布时间: {}, 最新时间: {})", episode_title_raw, pub_time_beijing, latest_time);
 
                         // 为旧集数构建 VideoInfo，用于后续的字段更新检查
                         let episode_title = if !show_title.is_empty() {
@@ -396,7 +407,7 @@ impl Bangumi {
     /// 将所有季度的番剧转换为视频流（支持增量获取）
     pub fn to_all_seasons_video_stream_incremental(
         &self,
-        latest_row_at: Option<chrono::DateTime<chrono::Utc>>,
+        latest_row_at: Option<NaiveDateTime>,
     ) -> Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>> {
         let client = self.client.clone();
         let season_id = self.season_id.clone();
@@ -485,12 +496,13 @@ impl Bangumi {
                     // 将发布时间戳转换为 DateTime<Utc>
                     let pub_time = DateTime::<Utc>::from_timestamp(pub_time_timestamp, 0)
                         .unwrap_or_else(Utc::now);
+                    let pub_time_beijing = utc_datetime_to_beijing_naive(pub_time);
                     let duration = (_duration > 0).then_some((_duration / 1000) as i32);
 
                     // 增量获取：跳过早于latest_row_at的集数
                     if let Some(latest_time) = latest_row_at {
-                        if pub_time <= latest_time {
-                            tracing::trace!("检查旧集数字段更新需求：{} (发布时间: {}, 最新时间: {})", episode_title_raw, pub_time, latest_time);
+                        if pub_time_beijing <= latest_time {
+                            tracing::trace!("检查旧集数字段更新需求：{} (发布时间: {}, 最新时间: {})", episode_title_raw, pub_time_beijing, latest_time);
 
                             // 为旧集数构建 VideoInfo，用于后续的字段更新检查
                             let episode_title = if !show_title.is_empty() {
@@ -603,7 +615,7 @@ impl Bangumi {
     pub fn to_selected_seasons_video_stream_incremental(
         &self,
         selected_seasons: Vec<String>,
-        latest_row_at: Option<chrono::DateTime<chrono::Utc>>,
+        latest_row_at: Option<NaiveDateTime>,
     ) -> Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>> {
         let client = self.client.clone();
         let media_id = self.media_id.clone();
@@ -795,12 +807,13 @@ impl Bangumi {
                     // 将发布时间戳转换为 DateTime<Utc>
                     let pub_time = DateTime::<Utc>::from_timestamp(pub_time_timestamp, 0)
                         .unwrap_or_else(Utc::now);
+                    let pub_time_beijing = utc_datetime_to_beijing_naive(pub_time);
                     let duration = (_duration > 0).then_some((_duration / 1000) as i32);
 
                     // 增量获取：跳过早于latest_row_at的集数
                     if let Some(latest_time) = latest_row_at {
-                        if pub_time <= latest_time {
-                            tracing::trace!("检查旧集数字段更新需求：{} (发布时间: {}, 最新时间: {})", episode_title_raw, pub_time, latest_time);
+                        if pub_time_beijing <= latest_time {
+                            tracing::trace!("检查旧集数字段更新需求：{} (发布时间: {}, 最新时间: {})", episode_title_raw, pub_time_beijing, latest_time);
 
                             // 为旧集数构建 VideoInfo，用于后续的字段更新检查
                             let episode_title = if !show_title.is_empty() {
@@ -907,5 +920,39 @@ impl Bangumi {
                 tracing::info!("选中季度番剧全量获取完成：处理了 {} 个季度，共 {} 集内容", seasons.len(), total_episodes);
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{NaiveDate, TimeZone};
+
+    #[test]
+    fn api_timestamp_to_beijing_naive_uses_utc_plus_eight() {
+        let timestamp = Utc.with_ymd_and_hms(2026, 6, 3, 14, 32, 31).unwrap().timestamp();
+
+        let parsed = api_timestamp_to_beijing_naive(timestamp).expect("timestamp should parse");
+
+        assert_eq!(
+            parsed,
+            NaiveDate::from_ymd_opt(2026, 6, 3)
+                .unwrap()
+                .and_hms_opt(22, 32, 31)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn incremental_cutoff_compares_api_time_as_beijing_naive() {
+        let latest_row_at = NaiveDate::from_ymd_opt(2026, 6, 3)
+            .unwrap()
+            .and_hms_opt(20, 52, 11)
+            .unwrap();
+        let timestamp = Utc.with_ymd_and_hms(2026, 6, 3, 14, 32, 31).unwrap().timestamp();
+
+        let api_time = api_timestamp_to_beijing_naive(timestamp).expect("timestamp should parse");
+
+        assert!(api_time > latest_row_at);
     }
 }

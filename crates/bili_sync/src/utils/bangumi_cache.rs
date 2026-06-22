@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use sea_orm::sea_query::{Alias, ColumnDef, Table};
 use sea_orm::{ConnectionTrait, DbConn};
 use serde::{Deserialize, Serialize};
@@ -90,13 +90,27 @@ pub fn serialize_cache(cache: &BangumiCache) -> Result<String> {
 }
 
 /// 检查缓存是否过期（默认24小时）
-pub fn is_cache_expired(cache_updated_at: Option<DateTime<Utc>>, max_age_hours: i64) -> bool {
+pub fn is_cache_expired(cache_updated_at: Option<NaiveDateTime>, max_age_hours: i64) -> bool {
     match cache_updated_at {
         Some(updated_at) => {
-            let now = crate::utils::time_format::beijing_now();
+            let now = crate::utils::time_format::now_naive();
             let age = now.signed_duration_since(updated_at);
             age.num_hours() > max_age_hours
         }
         None => true, // 没有缓存时间，视为过期
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn cache_expiration_uses_beijing_naive_time() {
+        let now = crate::utils::time_format::now_naive();
+
+        assert!(!is_cache_expired(Some(now - Duration::hours(23)), 24));
+        assert!(is_cache_expired(Some(now - Duration::hours(25)), 24));
     }
 }
