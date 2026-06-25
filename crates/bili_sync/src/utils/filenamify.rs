@@ -5,7 +5,7 @@ macro_rules! regex {
     }};
 }
 
-const MAX_FILENAME_BYTES: usize = 100;
+const MAX_FILENAME_BYTES: usize = 200;
 const UNIX_SEP_PLACEHOLDER: &str = "🔒UNIX_SEP_PROTECTED🔒";
 const WIN_SEP_PLACEHOLDER: &str = "🔒WIN_SEP_PROTECTED🔒";
 
@@ -27,7 +27,12 @@ fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
         end = next;
     }
 
-    input[..end].trim_matches(|c| c == ' ' || c == '_').to_string()
+    replace_outer_periods(input[..end].trim_matches(|c| c == ' ' || c == '_'))
+}
+
+fn replace_outer_periods(input: &str) -> String {
+    let outer_periods = regex!("^\\.+|\\.+$");
+    outer_periods.replace_all(input, "_").into_owned()
 }
 
 fn truncate_filename_segment(segment: &str) -> String {
@@ -97,9 +102,6 @@ pub fn filenamify_with_options<S: AsRef<str>>(input: S, preserve_template_separa
     // Windows保留名称：CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9（不区分大小写）
     let windows_reserved = regex!("^(con|prn|aux|nul|com\\d|lpt\\d)$");
 
-    // 文件名开头和结尾不能是点号
-    let outer_periods = regex!("^\\.+|\\.+$");
-
     // 全角字符映射
     let fullwidth_colon = regex!("："); // 全角冒号 → 半角冒号
     let fullwidth_space = regex!("　"); // 全角空格 → 半角空格
@@ -126,7 +128,7 @@ pub fn filenamify_with_options<S: AsRef<str>>(input: S, preserve_template_separa
     input = reserved.replace_all(&input, replacement).into_owned();
 
     // 5. 处理开头和结尾的点号
-    input = outer_periods.replace_all(&input, replacement).into_owned();
+    input = replace_outer_periods(&input);
 
     // 6. 检查Windows保留名称
     if windows_reserved.is_match(&input.to_lowercase()) {
@@ -283,5 +285,26 @@ mod tests {
         assert_eq!(parts[0], "UP主名");
         assert!(parts[1].len() <= super::MAX_FILENAME_BYTES);
         assert!(parts[1].is_char_boundary(parts[1].len()));
+    }
+
+    #[test]
+    fn test_truncated_name_does_not_end_with_period() {
+        let title = format!("{}..tail", "a".repeat(super::MAX_FILENAME_BYTES - 2));
+        let result = filenamify(title);
+
+        assert!(result.len() <= super::MAX_FILENAME_BYTES);
+        assert!(!result.ends_with('.'));
+    }
+
+    #[test]
+    fn test_truncated_path_segment_does_not_end_with_period() {
+        let title = format!("{}..tail", "a".repeat(super::MAX_FILENAME_BYTES - 2));
+        let result = filenamify_with_options(&format!("UP主名__UNIX_SEP__{}", title), true);
+        let parts = result.split("__UNIX_SEP__").collect::<Vec<_>>();
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "UP主名");
+        assert!(parts[1].len() <= super::MAX_FILENAME_BYTES);
+        assert!(!parts[1].ends_with('.'));
     }
 }
