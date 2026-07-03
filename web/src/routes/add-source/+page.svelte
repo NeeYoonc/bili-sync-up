@@ -36,7 +36,8 @@
 		X,
 		Plus as PlusIcon,
 		Filter as FilterIcon,
-		Info as InfoIcon
+		Info as InfoIcon,
+		Languages as LanguagesIcon
 	} from '@lucide/svelte';
 	import { onDestroy, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -46,6 +47,14 @@
 	import { IsMobile, IsTablet } from '$lib/hooks/is-mobile.svelte.js';
 	import { formatTimestamp } from '$lib/utils/timezone';
 	import { formatSubmissionDateLabel, formatSubmissionMetricLabel } from '$lib/utils/submission';
+
+	const DEFAULT_AI_SUBTITLE_LANGUAGE = 'zh-CN';
+	const AI_SUBTITLE_LANGUAGE_OPTIONS = [
+		{ value: 'zh-CN', label: '中文' },
+		{ value: 'en-US', label: '英语' },
+		{ value: 'ja-JP', label: '日语' },
+		{ value: 'ko-KR', label: '韩语' }
+	];
 
 	let sourceType: VideoCategory = 'collection';
 	let lastSourceType: VideoCategory = sourceType; // 记录上一次的源类型，用于检测切换
@@ -71,6 +80,8 @@
 	let splitChaptersAfterDownload = false; // 下载后按播放器章节切分为独立视频
 	let downloadDanmaku = true; // 下载弹幕（默认开启）
 	let downloadSubtitle = true; // 下载字幕（默认开启）
+	let downloadAiSubtitle = true; // 下载 B 站 AI 字幕（默认开启）
+	let aiSubtitleLanguage = DEFAULT_AI_SUBTITLE_LANGUAGE; // AI 字幕优先语言
 	let useDynamicApi = false; // 投稿源：使用动态API
 	let aiRename = false; // AI重命名（默认关闭）
 	let aiRenameVideoPrompt = ''; // AI重命名视频提示词
@@ -826,6 +837,8 @@
 			split_chapters_after_download: splitChaptersAfterDownload,
 			download_danmaku: downloadDanmaku,
 			download_subtitle: downloadSubtitle,
+			download_ai_subtitle: downloadAiSubtitle,
+			ai_subtitle_language: aiSubtitleLanguage.trim() || DEFAULT_AI_SUBTITLE_LANGUAGE,
 			use_dynamic_api: useDynamicApi,
 			ai_rename: aiRename,
 			ai_rename_video_prompt: aiRenameVideoPrompt.trim() || undefined,
@@ -984,6 +997,8 @@
 			splitChaptersAfterDownload = false;
 			downloadDanmaku = true;
 			downloadSubtitle = true;
+			downloadAiSubtitle = true;
+			aiSubtitleLanguage = DEFAULT_AI_SUBTITLE_LANGUAGE;
 			useDynamicApi = false;
 			aiRename = false;
 			aiRenameVideoPrompt = '';
@@ -2304,6 +2319,8 @@
 						split_chapters_after_download: splitChaptersAfterDownload,
 						download_danmaku: downloadDanmaku,
 						download_subtitle: downloadSubtitle,
+						download_ai_subtitle: downloadAiSubtitle,
+						ai_subtitle_language: aiSubtitleLanguage.trim() || DEFAULT_AI_SUBTITLE_LANGUAGE,
 						use_dynamic_api: useDynamicApi,
 						ai_rename: aiRename,
 						ai_rename_video_prompt: aiRenameVideoPrompt.trim() || undefined,
@@ -3263,6 +3280,48 @@
 										></div>
 									</label>
 								</div>
+
+								{#if downloadSubtitle}
+									<div
+										class="mt-3 rounded-md border border-blue-100 bg-blue-50 px-3 py-2 dark:border-blue-900 dark:bg-blue-950/40"
+									>
+										<div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+											<div class="flex items-center gap-2">
+												<LanguagesIcon class="h-4 w-4 text-blue-600 dark:text-blue-400" />
+												<div>
+													<span class="text-xs font-medium text-gray-700 dark:text-gray-300">
+														下载 AI 字幕
+													</span>
+													<p class="text-[10px] text-gray-500 dark:text-gray-400">
+														目标语言缺失时回退中文
+													</p>
+												</div>
+											</div>
+											<div class="flex flex-wrap items-center gap-2">
+												<label class="relative inline-flex cursor-pointer items-center">
+													<input
+														type="checkbox"
+														bind:checked={downloadAiSubtitle}
+														class="peer sr-only"
+													/>
+													<div
+														class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+													></div>
+												</label>
+												<select
+													bind:value={aiSubtitleLanguage}
+													disabled={!downloadAiSubtitle}
+													title="AI 字幕优先语言"
+													class="h-8 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+												>
+													{#each AI_SUBTITLE_LANGUAGE_OPTIONS as option}
+														<option value={option.value}>{option.label}</option>
+													{/each}
+												</select>
+											</div>
+										</div>
+									</div>
+								{/if}
 
 								<!-- AI重命名 -->
 								<div

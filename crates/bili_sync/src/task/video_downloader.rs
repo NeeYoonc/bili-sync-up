@@ -1531,6 +1531,8 @@ mod tests {
             split_chapters_after_download: Set(false),
             download_danmaku: Set(true),
             download_subtitle: Set(true),
+            download_ai_subtitle: Set(true),
+            ai_subtitle_language: Set("zh-CN".to_string()),
             ai_rename: Set(false),
             ai_rename_video_prompt: Set(String::new()),
             ai_rename_audio_prompt: Set(String::new()),

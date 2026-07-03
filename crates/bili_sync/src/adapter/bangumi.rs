@@ -46,6 +46,8 @@ pub struct BangumiSource {
     pub split_chapters_after_download: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
+    pub download_ai_subtitle: bool,
+    pub ai_subtitle_language: String,
     pub ai_rename: bool,
     pub ai_rename_video_prompt: String,
     pub ai_rename_audio_prompt: String,
@@ -567,6 +569,14 @@ impl VideoSource for BangumiSource {
 
     fn download_subtitle(&self) -> bool {
         self.download_subtitle
+    }
+
+    fn download_ai_subtitle(&self) -> bool {
+        self.download_ai_subtitle
+    }
+
+    fn ai_subtitle_language(&self) -> &str {
+        &self.ai_subtitle_language
     }
 
     fn ai_rename(&self) -> bool {

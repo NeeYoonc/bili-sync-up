@@ -296,8 +296,8 @@ async fn persist_submission_membership_state_to_video(
 
 use crate::adapter::{video_source_from, Args, VideoSource, VideoSourceEnum};
 use crate::bilibili::{
-    BestStream, BiliClient, BiliError, Dimension, FilterOption, PageAnalyzer, PageInfo, Stream as VideoStream, Video,
-    VideoChapter, VideoInfo,
+    BestStream, BiliClient, BiliError, Dimension, FilterOption, PageAnalyzer, PageInfo, Stream as VideoStream,
+    SubtitleDownloadOptions, Video, VideoChapter, VideoInfo,
 };
 use crate::config::ARGS;
 use crate::error::{DownloadAbortError, ExecutionStatus, ProcessPageError};
@@ -6495,6 +6495,8 @@ async fn download_page(
         video_model,
         &page_info,
         &subtitle_path,
+        video_source.download_ai_subtitle(),
+        video_source.ai_subtitle_language().to_string(),
         token.clone(),
     ));
 
@@ -9115,6 +9117,8 @@ pub async fn fetch_page_subtitle(
     video_model: &video::Model,
     page_info: &PageInfo,
     subtitle_path: &Path,
+    download_ai_subtitle: bool,
+    ai_subtitle_language: String,
     token: CancellationToken,
 ) -> Result<ExecutionStatus> {
     const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -9123,10 +9127,14 @@ pub async fn fetch_page_subtitle(
         return Ok(ExecutionStatus::Skipped);
     }
     let bili_video = Video::new(bili_client, video_model.bvid.clone());
+    let subtitle_options = SubtitleDownloadOptions {
+        download_ai_subtitle,
+        ai_subtitle_language,
+    };
     let subtitles = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
-        res = tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, bili_video.get_subtitles(page_info)) => match res {
+        res = tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, bili_video.get_subtitles_with_options(page_info, &subtitle_options)) => match res {
             Ok(inner) => inner?,
             Err(_) => {
                 bail!(
@@ -13718,6 +13726,8 @@ mod tests {
             split_chapters_after_download: Set(false),
             download_danmaku: Set(true),
             download_subtitle: Set(true),
+            download_ai_subtitle: Set(true),
+            ai_subtitle_language: Set("zh-CN".to_string()),
             ai_rename: Set(false),
             ai_rename_video_prompt: Set(String::new()),
             ai_rename_audio_prompt: Set(String::new()),

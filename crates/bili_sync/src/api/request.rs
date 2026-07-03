@@ -68,6 +68,10 @@ pub struct AddVideoSourceRequest {
     pub download_danmaku: Option<bool>,
     // 是否下载字幕文件（SRT）
     pub download_subtitle: Option<bool>,
+    // 是否下载 B 站 AI 字幕
+    pub download_ai_subtitle: Option<bool>,
+    // AI 字幕语言，默认 zh-CN；未命中时回退 zh-CN
+    pub ai_subtitle_language: Option<String>,
     // 是否启用AI重命名
     pub ai_rename: Option<bool>,
     // AI重命名视频提示词（覆盖全局配置）
@@ -126,6 +130,10 @@ pub struct UpdateVideoSourceDownloadOptionsRequest {
     pub download_danmaku: Option<bool>,
     /// 是否下载字幕文件（SRT）
     pub download_subtitle: Option<bool>,
+    /// 是否下载 B 站 AI 字幕
+    pub download_ai_subtitle: Option<bool>,
+    /// AI 字幕语言，默认 zh-CN；未命中时回退 zh-CN
+    pub ai_subtitle_language: Option<String>,
     /// 是否启用AI重命名
     pub ai_rename: Option<bool>,
     /// AI重命名视频提示词（覆盖全局配置）
