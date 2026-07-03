@@ -35,6 +35,30 @@ impl SubTitleInfo {
     }
 }
 
+impl SubTitlesInfo {
+    pub fn into_downloadable_subtitles(self) -> Vec<SubTitleInfo> {
+        let mut seen_languages = std::collections::HashSet::new();
+        let mut manual_subtitles = Vec::new();
+        let mut ai_subtitles = Vec::new();
+
+        for subtitle in self.subtitles {
+            if subtitle.is_ai_sub() {
+                ai_subtitles.push(subtitle);
+            } else if seen_languages.insert(subtitle.lan.clone()) {
+                manual_subtitles.push(subtitle);
+            }
+        }
+
+        for subtitle in ai_subtitles {
+            if seen_languages.insert(subtitle.lan.clone()) {
+                manual_subtitles.push(subtitle);
+            }
+        }
+
+        manual_subtitles
+    }
+}
+
 impl Display for SubTitleBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (idx, item) in self.0.iter().enumerate() {
@@ -72,5 +96,54 @@ mod tests {
         for (time, expect) in testcases.iter() {
             assert_eq!(super::format_time(*time), *expect);
         }
+    }
+
+    #[test]
+    fn downloadable_subtitles_include_ai_subtitles() {
+        let subtitles_info: super::SubTitlesInfo = serde_json::from_value(serde_json::json!({
+            "subtitles": [
+                {
+                    "lan": "zh-CN",
+                    "subtitle_url": "//aisubtitle.hdslb.com/bfs/subtitle/manual.json"
+                },
+                {
+                    "lan": "ai-zh",
+                    "subtitle_url": "//aisubtitle.hdslb.com/bfs/ai_subtitle/ai.json"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let subtitles = subtitles_info.into_downloadable_subtitles();
+
+        assert_eq!(subtitles.len(), 2);
+        assert!(subtitles
+            .iter()
+            .any(|subtitle| subtitle.subtitle_url.contains("/subtitle/")));
+        assert!(subtitles
+            .iter()
+            .any(|subtitle| subtitle.subtitle_url.contains("/ai_subtitle/")));
+    }
+
+    #[test]
+    fn downloadable_subtitles_prefer_manual_when_language_duplicates() {
+        let subtitles_info: super::SubTitlesInfo = serde_json::from_value(serde_json::json!({
+            "subtitles": [
+                {
+                    "lan": "zh-CN",
+                    "subtitle_url": "//aisubtitle.hdslb.com/bfs/ai_subtitle/ai.json"
+                },
+                {
+                    "lan": "zh-CN",
+                    "subtitle_url": "//aisubtitle.hdslb.com/bfs/subtitle/manual.json"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let subtitles = subtitles_info.into_downloadable_subtitles();
+
+        assert_eq!(subtitles.len(), 1);
+        assert!(subtitles[0].subtitle_url.contains("/subtitle/"));
     }
 }
