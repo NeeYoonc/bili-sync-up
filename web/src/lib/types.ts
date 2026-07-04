@@ -78,6 +78,8 @@ export interface VideoSource {
 	split_chapters_after_download: boolean; // 下载后按播放器章节切分为独立视频
 	download_danmaku: boolean; // 是否下载弹幕
 	download_subtitle: boolean; // 是否下载字幕
+	download_ai_subtitle: boolean; // 是否下载 B 站 AI 字幕
+	ai_subtitle_language: string; // AI 字幕优先语言
 	ai_rename: boolean; // 是否启用AI重命名
 	ai_rename_video_prompt: string; // AI重命名视频提示词
 	ai_rename_audio_prompt: string; // AI重命名音频提示词
@@ -252,6 +254,8 @@ export interface AddVideoSourceRequest {
 	split_chapters_after_download?: boolean; // 下载后按播放器章节切分为独立视频
 	download_danmaku?: boolean; // 是否下载弹幕（默认true）
 	download_subtitle?: boolean; // 是否下载字幕（默认true）
+	download_ai_subtitle?: boolean; // 是否下载 B 站 AI 字幕（默认true）
+	ai_subtitle_language?: string; // AI 字幕优先语言（默认 zh-CN）
 	use_dynamic_api?: boolean; // 投稿源：是否使用动态API
 	ai_rename?: boolean; // 是否启用AI重命名（默认false）
 	ai_rename_video_prompt?: string; // AI重命名视频提示词

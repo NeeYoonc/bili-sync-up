@@ -1618,6 +1618,8 @@ mod tests {
             split_chapters_after_download: false,
             download_danmaku: true,
             download_subtitle: true,
+            download_ai_subtitle: true,
+            ai_subtitle_language: "zh-CN".to_string(),
             ai_rename: false,
             ai_rename_video_prompt: String::new(),
             ai_rename_audio_prompt: String::new(),

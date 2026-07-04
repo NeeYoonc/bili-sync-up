@@ -165,6 +165,14 @@ impl VideoSource for collection::Model {
         self.download_subtitle
     }
 
+    fn download_ai_subtitle(&self) -> bool {
+        self.download_ai_subtitle
+    }
+
+    fn ai_subtitle_language(&self) -> &str {
+        &self.ai_subtitle_language
+    }
+
     fn ai_rename(&self) -> bool {
         self.ai_rename
     }

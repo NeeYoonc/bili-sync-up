@@ -11,7 +11,7 @@ use crate::bilibili::analyzer::PageAnalyzer;
 use crate::bilibili::client::BiliClient;
 use crate::bilibili::credential::encoded_query;
 use crate::bilibili::danmaku::{DanmakuElem, DmSegMobileReply};
-use crate::bilibili::subtitle::{SubTitle, SubTitleBody, SubTitleInfo, SubTitlesInfo};
+use crate::bilibili::subtitle::{SubTitle, SubTitleBody, SubTitleInfo, SubTitlesInfo, SubtitleDownloadOptions};
 use crate::bilibili::{Validate, VideoInfo, MIXIN_KEY};
 use crate::hardware::HardwareFingerprint;
 use crate::http::headers::create_api_headers;
@@ -1575,6 +1575,15 @@ impl<'a> Video<'a> {
     }
 
     pub async fn get_subtitles(&self, page: &PageInfo) -> Result<Vec<SubTitle>> {
+        self.get_subtitles_with_options(page, &SubtitleDownloadOptions::default())
+            .await
+    }
+
+    pub async fn get_subtitles_with_options(
+        &self,
+        page: &PageInfo,
+        options: &SubtitleDownloadOptions,
+    ) -> Result<Vec<SubTitle>> {
         let res = self
             .client
             .request(Method::GET, "https://api.bilibili.com/x/player/wbi/v2")
@@ -1600,9 +1609,8 @@ impl<'a> Video<'a> {
         // 接口返回的信息，包含了一系列的字幕，每个字幕包含了字幕的语言和 json 下载地址
         let subtitles_info: SubTitlesInfo = serde_json::from_value(subtitle_data.clone())?;
         let tasks = subtitles_info
-            .subtitles
+            .into_downloadable_subtitles(options)
             .into_iter()
-            .filter(|v| !v.is_ai_sub())
             .map(|v| self.get_subtitle(v))
             .collect::<FuturesUnordered<_>>();
         tasks.try_collect().await

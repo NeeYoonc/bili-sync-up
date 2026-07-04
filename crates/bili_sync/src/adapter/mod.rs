@@ -193,6 +193,16 @@ pub trait VideoSource {
         true // 默认实现：下载字幕
     }
 
+    /// 获取是否下载 B 站 AI 字幕（默认为 true）
+    fn download_ai_subtitle(&self) -> bool {
+        true
+    }
+
+    /// 获取 AI 字幕语言（默认为中文）
+    fn ai_subtitle_language(&self) -> &str {
+        "zh-CN"
+    }
+
     /// 获取是否启用AI重命名（默认为 false）
     fn ai_rename(&self) -> bool {
         false // 默认实现：不启用AI重命名
@@ -514,6 +524,8 @@ pub async fn bangumi_from<'a>(
             split_chapters_after_download: model.split_chapters_after_download,
             download_danmaku: model.download_danmaku,
             download_subtitle: model.download_subtitle,
+            download_ai_subtitle: model.download_ai_subtitle,
+            ai_subtitle_language: model.ai_subtitle_language,
             ai_rename: model.ai_rename,
             ai_rename_video_prompt: model.ai_rename_video_prompt,
             ai_rename_audio_prompt: model.ai_rename_audio_prompt,
@@ -560,6 +572,8 @@ pub async fn bangumi_from<'a>(
             split_chapters_after_download: false,
             download_danmaku: true,
             download_subtitle: true,
+            download_ai_subtitle: true,
+            ai_subtitle_language: "zh-CN".to_string(),
             ai_rename: false,
             ai_rename_video_prompt: String::new(),
             ai_rename_audio_prompt: String::new(),

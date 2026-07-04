@@ -42,6 +42,7 @@
 	import ListTreeIcon from '@lucide/svelte/icons/list-tree';
 	import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
 	import SubtitlesIcon from '@lucide/svelte/icons/subtitles';
+	import LanguagesIcon from '@lucide/svelte/icons/languages';
 	import ActivityIcon from '@lucide/svelte/icons/activity';
 	import BatteryChargingIcon from '@lucide/svelte/icons/battery-charging';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
@@ -52,6 +53,14 @@
 	import { buildAuthenticatedStreamUrl } from '$lib/utils/live-stream';
 	import { createManagedEventSource } from '$lib/utils/live-event-source';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+
+	const DEFAULT_AI_SUBTITLE_LANGUAGE = 'zh-CN';
+	const AI_SUBTITLE_LANGUAGE_OPTIONS = [
+		{ value: 'zh-CN', label: '中文' },
+		{ value: 'en-US', label: '英语' },
+		{ value: 'ja-JP', label: '日语' },
+		{ value: 'ko-KR', label: '韩语' }
+	];
 
 	let loading = false;
 	let bulkUpdating = false;
@@ -317,6 +326,16 @@
 
 	function isQueuedMessage(message?: string | null): boolean {
 		return message?.includes('加入队列') ?? false;
+	}
+
+	function normalizeAiSubtitleLanguage(language?: string | null): string {
+		const normalized = language?.trim();
+		return normalized || DEFAULT_AI_SUBTITLE_LANGUAGE;
+	}
+
+	function getAiSubtitleLanguageLabel(language?: string | null): string {
+		const normalized = normalizeAiSubtitleLanguage(language);
+		return AI_SUBTITLE_LANGUAGE_OPTIONS.find((option) => option.value === normalized)?.label ?? normalized;
 	}
 
 	function updateSourceInStore(sourceType: string, sourceId: number, updater: SourceUpdater) {
@@ -805,6 +824,60 @@
 					updateSourceInStore(sourceType, sourceId, (source) => ({
 						...source,
 						download_subtitle: data.download_subtitle
+					}));
+				}
+			}
+		);
+	}
+
+	async function handleToggleDownloadAiSubtitle(
+		sourceType: string,
+		sourceId: number,
+		currentDownloadAiSubtitle: boolean
+	) {
+		const newDownloadAiSubtitle = !currentDownloadAiSubtitle;
+		await updateAndApply(
+			() =>
+				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
+					download_ai_subtitle: newDownloadAiSubtitle
+				}),
+			{
+				successToast: () => ({
+					title: '设置更新成功',
+					description: newDownloadAiSubtitle ? '已启用 AI 字幕下载' : '已禁用 AI 字幕下载'
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						download_ai_subtitle: data.download_ai_subtitle,
+						ai_subtitle_language: data.ai_subtitle_language
+					}));
+				}
+			}
+		);
+	}
+
+	async function handleUpdateAiSubtitleLanguage(
+		sourceType: string,
+		sourceId: number,
+		language: string
+	) {
+		const nextLanguage = normalizeAiSubtitleLanguage(language);
+		await updateAndApply(
+			() =>
+				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
+					ai_subtitle_language: nextLanguage
+				}),
+			{
+				successToast: () => ({
+					title: '设置更新成功',
+					description: `AI 字幕优先语言已设置为 ${getAiSubtitleLanguageLabel(nextLanguage)}`
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						download_ai_subtitle: data.download_ai_subtitle,
+						ai_subtitle_language: data.ai_subtitle_language
 					}));
 				}
 			}
@@ -1404,6 +1477,12 @@
 													{/if}
 													{#if source.download_subtitle === false}
 														<span class="text-gray-500">字幕下载已禁用</span>
+													{:else if source.download_ai_subtitle === false}
+														<span class="text-gray-500">AI 字幕已禁用</span>
+													{:else}
+														<span class="text-blue-600">
+															AI 字幕 {getAiSubtitleLanguageLabel(source.ai_subtitle_language)}
+														</span>
 													{/if}
 													{#if source.ai_rename}
 														<span class="text-blue-600">
@@ -1413,7 +1492,7 @@
 												</div>
 											</div>
 
-											<div class="flex items-center justify-end gap-1 sm:ml-4">
+											<div class="flex flex-wrap items-center justify-end gap-1 sm:ml-4">
 												<!-- 启用/禁用 -->
 												<Button
 													size="sm"
@@ -1681,9 +1760,51 @@
 													<SubtitlesIcon
 														class="h-4 w-4 {source.download_subtitle !== false
 															? 'text-green-600'
+														: 'text-gray-400'}"
+													/>
+												</Button>
+
+												<!-- AI 字幕 -->
+												<Button
+													size="sm"
+													variant="ghost"
+													onclick={() =>
+														handleToggleDownloadAiSubtitle(
+															sourceConfig.type,
+															source.id,
+															source.download_ai_subtitle ?? true
+														)}
+													disabled={source.download_subtitle === false}
+													title={source.download_ai_subtitle !== false
+														? '禁用 AI 字幕下载'
+														: '启用 AI 字幕下载'}
+													class="h-8 w-8 p-0"
+												>
+													<LanguagesIcon
+														class="h-4 w-4 {source.download_subtitle !== false &&
+														source.download_ai_subtitle !== false
+															? 'text-blue-600'
 															: 'text-gray-400'}"
 													/>
 												</Button>
+
+												<select
+													value={normalizeAiSubtitleLanguage(source.ai_subtitle_language)}
+													disabled={source.download_subtitle === false ||
+														source.download_ai_subtitle === false}
+													title="AI 字幕优先语言，目标语言缺失时回退中文"
+													class="h-8 w-[76px] rounded-md border border-gray-200 bg-white px-1 text-xs text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
+													onchange={(event) =>
+														handleUpdateAiSubtitleLanguage(
+															sourceConfig.type,
+															source.id,
+															(event.currentTarget as HTMLSelectElement).value
+														)}
+												>
+													{#each AI_SUBTITLE_LANGUAGE_OPTIONS as option}
+														<option value={option.value}>{option.label}</option>
+													{/each}
+												</select>
 
 												<!-- AI重命名 -->
 												<Button

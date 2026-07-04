@@ -48,6 +48,7 @@ use crate::api::response::{
     VideoSourcesResponse, VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
+use crate::bilibili::DEFAULT_AI_SUBTITLE_LANGUAGE;
 use crate::utils::live_updates::{
     notify_video_sources_changed, notify_videos_changed, subscribe_queue_status_changed,
     subscribe_video_sources_changed, subscribe_videos_changed,
@@ -58,6 +59,22 @@ use crate::utils::status::{
 };
 
 const PAGE_STATUS_VIDEO_INDEX: usize = 1;
+
+fn normalize_ai_subtitle_language(language: &str) -> String {
+    let language = language.trim();
+    if language.is_empty() {
+        DEFAULT_AI_SUBTITLE_LANGUAGE.to_string()
+    } else {
+        language.to_string()
+    }
+}
+
+fn ai_subtitle_language_from_request(language: &Option<String>, fallback: &str) -> String {
+    language
+        .as_deref()
+        .map(normalize_ai_subtitle_language)
+        .unwrap_or_else(|| normalize_ai_subtitle_language(fallback))
+}
 
 // 全局静态的扫码登录服务实例
 use once_cell::sync::Lazy;
@@ -1307,6 +1324,8 @@ mod queue_sse_tests {
             split_chapters_after_download: Set(false),
             download_danmaku: Set(true),
             download_subtitle: Set(true),
+            download_ai_subtitle: Set(true),
+            ai_subtitle_language: Set("zh-CN".to_string()),
             ai_rename: Set(false),
             ai_rename_video_prompt: Set(String::new()),
             ai_rename_audio_prompt: Set(String::new()),
@@ -1357,6 +1376,8 @@ mod queue_sse_tests {
             split_chapters_after_download: Set(false),
             download_danmaku: Set(true),
             download_subtitle: Set(true),
+            download_ai_subtitle: Set(true),
+            ai_subtitle_language: Set("zh-CN".to_string()),
             ai_rename: Set(false),
             ai_rename_video_prompt: Set(String::new()),
             ai_rename_audio_prompt: Set(String::new()),
@@ -1396,6 +1417,8 @@ mod queue_sse_tests {
             split_chapters_after_download: Set(false),
             download_danmaku: Set(true),
             download_subtitle: Set(true),
+            download_ai_subtitle: Set(true),
+            ai_subtitle_language: Set("zh-CN".to_string()),
             ai_rename: Set(false),
             ai_rename_video_prompt: Set(String::new()),
             ai_rename_audio_prompt: Set(String::new()),
@@ -1433,6 +1456,8 @@ mod queue_sse_tests {
             split_chapters_after_download: Set(false),
             download_danmaku: Set(true),
             download_subtitle: Set(true),
+            download_ai_subtitle: Set(true),
+            ai_subtitle_language: Set("zh-CN".to_string()),
             ai_rename: Set(false),
             ai_rename_video_prompt: Set(String::new()),
             ai_rename_audio_prompt: Set(String::new()),
@@ -2246,6 +2271,8 @@ pub async fn get_video_sources(
                 split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
+                download_ai_subtitle: model.download_ai_subtitle,
+                ai_subtitle_language: model.ai_subtitle_language,
                 ai_rename: model.ai_rename,
                 ai_rename_video_prompt: model.ai_rename_video_prompt,
                 ai_rename_audio_prompt: model.ai_rename_audio_prompt,
@@ -2308,6 +2335,8 @@ pub async fn get_video_sources(
                 split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
+                download_ai_subtitle: model.download_ai_subtitle,
+                ai_subtitle_language: model.ai_subtitle_language,
                 ai_rename: model.ai_rename,
                 ai_rename_video_prompt: model.ai_rename_video_prompt,
                 ai_rename_audio_prompt: model.ai_rename_audio_prompt,
@@ -2370,6 +2399,8 @@ pub async fn get_video_sources(
                 split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
+                download_ai_subtitle: model.download_ai_subtitle,
+                ai_subtitle_language: model.ai_subtitle_language,
                 ai_rename: model.ai_rename,
                 ai_rename_video_prompt: model.ai_rename_video_prompt,
                 ai_rename_audio_prompt: model.ai_rename_audio_prompt,
@@ -2432,6 +2463,8 @@ pub async fn get_video_sources(
                 split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
+                download_ai_subtitle: model.download_ai_subtitle,
+                ai_subtitle_language: model.ai_subtitle_language,
                 ai_rename: model.ai_rename,
                 ai_rename_video_prompt: model.ai_rename_video_prompt,
                 ai_rename_audio_prompt: model.ai_rename_audio_prompt,
@@ -2513,6 +2546,8 @@ pub async fn get_video_sources(
                 split_chapters_after_download: model.split_chapters_after_download,
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
+                download_ai_subtitle: model.download_ai_subtitle,
+                ai_subtitle_language: model.ai_subtitle_language,
                 ai_rename: model.ai_rename,
                 ai_rename_video_prompt: model.ai_rename_video_prompt,
                 ai_rename_audio_prompt: model.ai_rename_audio_prompt,
@@ -4597,6 +4632,8 @@ pub async fn add_video_source_internal(
     // 使用主数据库连接
 
     let txn = crate::database::begin_traced_transaction(&db, "api.handler.add_video_source").await?;
+    let ai_subtitle_language =
+        ai_subtitle_language_from_request(&params.ai_subtitle_language, DEFAULT_AI_SUBTITLE_LANGUAGE);
 
     let result = match params.source_type.as_str() {
         "collection" => {
@@ -4728,6 +4765,8 @@ pub async fn add_video_source_internal(
                 split_chapters_after_download: sea_orm::Set(params.split_chapters_after_download.unwrap_or(false)),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
+                download_ai_subtitle: sea_orm::Set(params.download_ai_subtitle.unwrap_or(true)),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                 ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
                 ai_rename_video_prompt: sea_orm::Set(params.ai_rename_video_prompt.clone().unwrap_or_default()),
                 ai_rename_audio_prompt: sea_orm::Set(params.ai_rename_audio_prompt.clone().unwrap_or_default()),
@@ -4828,6 +4867,8 @@ pub async fn add_video_source_internal(
                 split_chapters_after_download: sea_orm::Set(params.split_chapters_after_download.unwrap_or(false)),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
+                download_ai_subtitle: sea_orm::Set(params.download_ai_subtitle.unwrap_or(true)),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                 ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
                 ai_rename_video_prompt: sea_orm::Set(params.ai_rename_video_prompt.clone().unwrap_or_default()),
                 ai_rename_audio_prompt: sea_orm::Set(params.ai_rename_audio_prompt.clone().unwrap_or_default()),
@@ -4909,6 +4950,8 @@ pub async fn add_video_source_internal(
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
+                download_ai_subtitle: sea_orm::Set(params.download_ai_subtitle.unwrap_or(true)),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                 ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
                 ai_rename_video_prompt: sea_orm::Set(params.ai_rename_video_prompt.clone().unwrap_or_default()),
                 ai_rename_audio_prompt: sea_orm::Set(params.ai_rename_audio_prompt.clone().unwrap_or_default()),
@@ -5226,6 +5269,8 @@ pub async fn add_video_source_internal(
                     split_chapters_after_download: sea_orm::Set(params.split_chapters_after_download.unwrap_or(false)),
                     download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                     download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
+                    download_ai_subtitle: sea_orm::Set(params.download_ai_subtitle.unwrap_or(true)),
+                    ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                     ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
                     ai_rename_video_prompt: sea_orm::Set(params.ai_rename_video_prompt.clone().unwrap_or_default()),
                     ai_rename_audio_prompt: sea_orm::Set(params.ai_rename_audio_prompt.clone().unwrap_or_default()),
@@ -5308,6 +5353,8 @@ pub async fn add_video_source_internal(
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
+                download_ai_subtitle: sea_orm::Set(params.download_ai_subtitle.unwrap_or(true)),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                 ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
                 ai_rename_video_prompt: sea_orm::Set(params.ai_rename_video_prompt.clone().unwrap_or_default()),
                 ai_rename_audio_prompt: sea_orm::Set(params.ai_rename_audio_prompt.clone().unwrap_or_default()),
@@ -7678,6 +7725,9 @@ pub async fn update_video_source_download_options_internal(
                 .unwrap_or(collection.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(collection.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(collection.download_subtitle);
+            let download_ai_subtitle = params.download_ai_subtitle.unwrap_or(collection.download_ai_subtitle);
+            let ai_subtitle_language =
+                ai_subtitle_language_from_request(&params.ai_subtitle_language, &collection.ai_subtitle_language);
             let collection_aggregate_enabled = params
                 .collection_aggregate_enabled
                 .unwrap_or(collection.aggregate_enabled);
@@ -7726,6 +7776,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
+                download_ai_subtitle: sea_orm::Set(download_ai_subtitle),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                 ai_rename: sea_orm::Set(ai_rename),
                 ai_rename_video_prompt: sea_orm::Set(ai_rename_video_prompt.clone()),
                 ai_rename_audio_prompt: sea_orm::Set(ai_rename_audio_prompt.clone()),
@@ -7750,6 +7802,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
+                download_ai_subtitle,
+                ai_subtitle_language,
                 ai_rename,
                 ai_rename_video_prompt,
                 ai_rename_audio_prompt,
@@ -7775,6 +7829,9 @@ pub async fn update_video_source_download_options_internal(
                 .unwrap_or(favorite.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(favorite.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(favorite.download_subtitle);
+            let download_ai_subtitle = params.download_ai_subtitle.unwrap_or(favorite.download_ai_subtitle);
+            let ai_subtitle_language =
+                ai_subtitle_language_from_request(&params.ai_subtitle_language, &favorite.ai_subtitle_language);
             let ai_rename = params.ai_rename.unwrap_or(favorite.ai_rename);
             let ai_rename_video_prompt = params
                 .ai_rename_video_prompt
@@ -7805,6 +7862,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
+                download_ai_subtitle: sea_orm::Set(download_ai_subtitle),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                 ai_rename: sea_orm::Set(ai_rename),
                 ai_rename_video_prompt: sea_orm::Set(ai_rename_video_prompt.clone()),
                 ai_rename_audio_prompt: sea_orm::Set(ai_rename_audio_prompt.clone()),
@@ -7829,6 +7888,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
+                download_ai_subtitle,
+                ai_subtitle_language,
                 ai_rename,
                 ai_rename_video_prompt,
                 ai_rename_audio_prompt,
@@ -7854,6 +7915,9 @@ pub async fn update_video_source_download_options_internal(
                 .unwrap_or(submission.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(submission.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(submission.download_subtitle);
+            let download_ai_subtitle = params.download_ai_subtitle.unwrap_or(submission.download_ai_subtitle);
+            let ai_subtitle_language =
+                ai_subtitle_language_from_request(&params.ai_subtitle_language, &submission.ai_subtitle_language);
             let ai_rename = params.ai_rename.unwrap_or(submission.ai_rename);
             let ai_rename_video_prompt = params
                 .ai_rename_video_prompt
@@ -7896,6 +7960,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
+                download_ai_subtitle: sea_orm::Set(download_ai_subtitle),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                 ai_rename: sea_orm::Set(ai_rename),
                 ai_rename_video_prompt: sea_orm::Set(ai_rename_video_prompt.clone()),
                 ai_rename_audio_prompt: sea_orm::Set(ai_rename_audio_prompt.clone()),
@@ -7926,6 +7992,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
+                download_ai_subtitle,
+                ai_subtitle_language,
                 ai_rename,
                 ai_rename_video_prompt,
                 ai_rename_audio_prompt,
@@ -7951,6 +8019,9 @@ pub async fn update_video_source_download_options_internal(
                 .unwrap_or(watch_later.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(watch_later.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(watch_later.download_subtitle);
+            let download_ai_subtitle = params.download_ai_subtitle.unwrap_or(watch_later.download_ai_subtitle);
+            let ai_subtitle_language =
+                ai_subtitle_language_from_request(&params.ai_subtitle_language, &watch_later.ai_subtitle_language);
             let ai_rename = params.ai_rename.unwrap_or(watch_later.ai_rename);
             let ai_rename_video_prompt = params
                 .ai_rename_video_prompt
@@ -7981,6 +8052,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
+                download_ai_subtitle: sea_orm::Set(download_ai_subtitle),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                 ai_rename: sea_orm::Set(ai_rename),
                 ai_rename_video_prompt: sea_orm::Set(ai_rename_video_prompt.clone()),
                 ai_rename_audio_prompt: sea_orm::Set(ai_rename_audio_prompt.clone()),
@@ -8005,6 +8078,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
+                download_ai_subtitle,
+                ai_subtitle_language,
                 ai_rename,
                 ai_rename_video_prompt,
                 ai_rename_audio_prompt,
@@ -8030,6 +8105,9 @@ pub async fn update_video_source_download_options_internal(
                 .unwrap_or(video_source.split_chapters_after_download);
             let download_danmaku = params.download_danmaku.unwrap_or(video_source.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(video_source.download_subtitle);
+            let download_ai_subtitle = params.download_ai_subtitle.unwrap_or(video_source.download_ai_subtitle);
+            let ai_subtitle_language =
+                ai_subtitle_language_from_request(&params.ai_subtitle_language, &video_source.ai_subtitle_language);
             let ai_rename = params.ai_rename.unwrap_or(video_source.ai_rename);
             let ai_rename_video_prompt = params
                 .ai_rename_video_prompt
@@ -8060,6 +8138,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download: sea_orm::Set(split_chapters_after_download),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
+                download_ai_subtitle: sea_orm::Set(download_ai_subtitle),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
                 ai_rename: sea_orm::Set(ai_rename),
                 ai_rename_video_prompt: sea_orm::Set(ai_rename_video_prompt.clone()),
                 ai_rename_audio_prompt: sea_orm::Set(ai_rename_audio_prompt.clone()),
@@ -8084,6 +8164,8 @@ pub async fn update_video_source_download_options_internal(
                 split_chapters_after_download,
                 download_danmaku,
                 download_subtitle,
+                download_ai_subtitle,
+                ai_subtitle_language,
                 ai_rename,
                 ai_rename_video_prompt,
                 ai_rename_audio_prompt,

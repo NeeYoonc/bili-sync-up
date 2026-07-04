@@ -166,6 +166,8 @@ pub struct UpdateVideoSourceDownloadOptionsResponse {
     pub split_chapters_after_download: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
+    pub download_ai_subtitle: bool,
+    pub ai_subtitle_language: String,
     pub ai_rename: bool,
     pub ai_rename_video_prompt: String,
     pub ai_rename_audio_prompt: String,
@@ -268,6 +270,8 @@ pub struct VideoSource {
     pub split_chapters_after_download: bool, // 是否在下载后按播放器章节切分为独立视频
     pub download_danmaku: bool,              // 是否下载弹幕文件
     pub download_subtitle: bool,             // 是否下载字幕文件
+    pub download_ai_subtitle: bool,          // 是否下载 B 站 AI 字幕
+    pub ai_subtitle_language: String,        // AI 字幕语言，默认 zh-CN
     pub ai_rename: bool,                     // 是否启用AI重命名
     pub ai_rename_video_prompt: String,      // AI重命名视频提示词
     pub ai_rename_audio_prompt: String,      // AI重命名音频提示词

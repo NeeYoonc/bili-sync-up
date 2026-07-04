@@ -398,6 +398,8 @@ class ApiClient {
 			split_chapters_after_download?: boolean;
 			download_danmaku?: boolean;
 			download_subtitle?: boolean;
+			download_ai_subtitle?: boolean;
+			ai_subtitle_language?: string;
 			use_dynamic_api?: boolean;
 			collection_aggregate_enabled?: boolean;
 			ai_rename?: boolean;
@@ -419,6 +421,8 @@ class ApiClient {
 			split_chapters_after_download: boolean;
 			download_danmaku: boolean;
 			download_subtitle: boolean;
+			download_ai_subtitle: boolean;
+			ai_subtitle_language: string;
 			ai_rename: boolean;
 			ai_rename_video_prompt: string;
 			ai_rename_audio_prompt: string;
@@ -442,6 +446,8 @@ class ApiClient {
 			split_chapters_after_download: boolean;
 			download_danmaku: boolean;
 			download_subtitle: boolean;
+			download_ai_subtitle: boolean;
+			ai_subtitle_language: string;
 			ai_rename: boolean;
 			ai_rename_video_prompt: string;
 			ai_rename_audio_prompt: string;
@@ -1206,6 +1212,8 @@ export const api = {
 			split_chapters_after_download?: boolean;
 			download_danmaku?: boolean;
 			download_subtitle?: boolean;
+			download_ai_subtitle?: boolean;
+			ai_subtitle_language?: string;
 			use_dynamic_api?: boolean;
 			ai_rename?: boolean;
 			ai_rename_video_prompt?: string;
