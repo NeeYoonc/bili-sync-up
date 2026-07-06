@@ -13516,8 +13516,26 @@ pub async fn populate_missing_video_cids(
 }
 
 /// 检查文件夹是否为同一视频的文件夹
+fn collect_folder_identity_names(folder_path: &std::path::Path, depth: usize, names: &mut Vec<String>) {
+    if depth > 4 {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(folder_path) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        let file_name = entry.file_name();
+        names.push(file_name.to_string_lossy().to_lowercase());
+        if entry_path.is_dir() {
+            collect_folder_identity_names(&entry_path, depth + 1, names);
+        }
+    }
+}
+
 fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Model) -> bool {
-    use std::fs;
     use std::sync::OnceLock;
 
     static BVID_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -13561,70 +13579,73 @@ fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Mode
     let mut found_other_bvid_files = false;
 
     // 先看目录内是否已有明确的视频身份。若目录里是别的 BVID，不能再用同标题/同 DB 路径误判。
-    if let Ok(entries) = fs::read_dir(folder_path) {
-        let bvid_re = BVID_RE.get_or_init(|| regex::Regex::new(r"bv[0-9a-z]{10}").expect("valid bvid regex"));
+    let bvid_re = BVID_RE.get_or_init(|| regex::Regex::new(r"bv[0-9a-z]{10}").expect("valid bvid regex"));
+    let mut identity_names = Vec::new();
+    collect_folder_identity_names(folder_path, 0, &mut identity_names);
 
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let file_name_str = file_name.to_string_lossy().to_lowercase();
+    for file_name_str in identity_names {
+        if cid_marker
+            .as_ref()
+            .map(|marker| file_name_str.contains(marker))
+            .unwrap_or(false)
+        {
+            debug!(
+                "✓ 通过CID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
+                folder_path.display(),
+                file_name_str
+            );
+            return true;
+        }
 
-            if cid_marker
-                .as_ref()
-                .map(|marker| file_name_str.contains(marker))
-                .unwrap_or(false)
+        if file_name_str.contains(&current_bvid) {
+            debug!(
+                "✓ 通过BVID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
+                folder_path.display(),
+                file_name_str
+            );
+            return true;
+        }
+
+        if bvid_re
+            .find_iter(&file_name_str)
+            .any(|matched| matched.as_str() != current_bvid)
+        {
+            found_other_bvid_files = true;
+            found_bvid_files = true;
+        }
+
+        if file_name_str.ends_with(".tmp_video")
+            || file_name_str.ends_with(".tmp_audio")
+            || file_name_str.ends_with(".tmp_flv")
+            || file_name_str.ends_with(".mp4")
+            || file_name_str.ends_with(".mkv")
+            || file_name_str.ends_with(".flv")
+            || file_name_str.ends_with(".webm")
+            || file_name_str.ends_with(".m4a")
+            || file_name_str.ends_with(".mp3")
+            || file_name_str.ends_with(".flac")
+            || file_name_str.ends_with(".aac")
+            || file_name_str.ends_with(".ogg")
+            || file_name_str.ends_with(".nfo")
+            || file_name_str.ends_with(".jpg")
+            || file_name_str.ends_with(".png")
+            || file_name_str.ends_with(".ass")
+            || file_name_str.ends_with(".srt")
+        {
+            found_media_files = true;
+        }
+
+        let video_title_clean = video_model
+            .name
+            .to_lowercase()
+            .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "");
+        if !video_title_clean.is_empty() && video_title_clean.len() > 3 {
+            let title_keywords: Vec<&str> = video_title_clean.split_whitespace().take(3).collect();
+            if title_keywords
+                .iter()
+                .any(|keyword| keyword.len() > 2 && file_name_str.contains(keyword))
             {
-                debug!(
-                    "✓ 通过CID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
-                    folder_path.display(),
-                    file_name_str
-                );
-                return true;
-            }
-
-            if file_name_str.contains(&current_bvid) {
-                debug!(
-                    "✓ 通过BVID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
-                    folder_path.display(),
-                    file_name_str
-                );
-                return true;
-            }
-
-            if bvid_re
-                .find_iter(&file_name_str)
-                .any(|matched| matched.as_str() != current_bvid)
-            {
-                found_other_bvid_files = true;
-                found_bvid_files = true;
-            }
-
-            if file_name_str.ends_with(".tmp_video")
-                || file_name_str.ends_with(".tmp_audio")
-                || file_name_str.ends_with(".mp4")
-                || file_name_str.ends_with(".mkv")
-                || file_name_str.ends_with(".flv")
-                || file_name_str.ends_with(".webm")
-                || file_name_str.ends_with(".nfo")
-                || file_name_str.ends_with(".jpg")
-                || file_name_str.ends_with(".png")
-                || file_name_str.ends_with(".ass")
-                || file_name_str.ends_with(".srt")
-            {
-                found_media_files = true;
-            }
-
-            let video_title_clean = video_model
-                .name
-                .to_lowercase()
-                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "");
-            if !video_title_clean.is_empty() && video_title_clean.len() > 3 {
-                let title_keywords: Vec<&str> = video_title_clean.split_whitespace().take(3).collect();
-                if title_keywords
-                    .iter()
-                    .any(|keyword| keyword.len() > 2 && file_name_str.contains(keyword))
-                {
-                    found_title_files = true;
-                }
+                found_title_files = true;
             }
         }
     }
@@ -13670,6 +13691,14 @@ fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Mode
             debug!("✓ 通过路径后缀匹配确认为同一视频文件夹");
             return true;
         }
+    }
+
+    if folder_leaf_contains_video_identity(db_path, video_model) && found_media_files && found_title_files {
+        debug!(
+            "✓ DB旧路径带当前视频身份，且目录内已有同标题下载文件，复用当前下载目录: {:?}",
+            folder_path
+        );
+        return true;
     }
 
     debug!("⚠ 数据库路径匹配失败，尝试文件内容检测");
@@ -14959,6 +14988,38 @@ mod tests {
         let unique_name = generate_unique_folder_name(&parent_dir, "测试UP/喵", &video, "20260428170830");
 
         assert_eq!(unique_name, "测试UP/喵-20260428170830-BV1NewVideo1");
+        fs::remove_dir_all(parent_dir).expect("应能清理临时目录");
+    }
+
+    #[test]
+    fn test_generate_unique_folder_name_reuses_partial_download_dir_from_identity_db_path() {
+        let parent_dir = unique_temp_dir("dedup-partial-download-dir");
+        let upper_dir = parent_dir.join("测试UP");
+        let title_dir = upper_dir.join("喵");
+        let season_dir = title_dir.join("Season 01");
+        fs::create_dir_all(&season_dir).expect("应能创建基础下载目录");
+        fs::write(season_dir.join("S01E01P01 - 塞尔达传说 王国之泪.m4a"), b"partial")
+            .expect("应能创建未完成下载留下的音频文件");
+
+        let video = video::Model {
+            name: "塞尔达传说 王国之泪".to_string(),
+            upper_name: "测试UP".to_string(),
+            bvid: "BV1PartialReuse".to_string(),
+            cid: Some(567890),
+            path: upper_dir
+                .join("喵-20260428170830-BV1PartialReuse")
+                .to_string_lossy()
+                .to_string(),
+            pubtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 28)
+                .unwrap()
+                .and_hms_opt(17, 8, 30)
+                .unwrap(),
+            ..Default::default()
+        };
+
+        let unique_name = generate_unique_folder_name(&parent_dir, "测试UP/喵", &video, "20260428170830");
+
+        assert_eq!(unique_name, "测试UP/喵");
         fs::remove_dir_all(parent_dir).expect("应能清理临时目录");
     }
 
