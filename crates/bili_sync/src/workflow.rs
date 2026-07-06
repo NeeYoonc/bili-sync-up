@@ -313,6 +313,19 @@ use crate::utils::scan_collector::create_new_video_info;
 use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX};
 
 const DB_LOCK_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
+const DOWNLOAD_RISK_CONTROL_RESUME_KEY: &str = "download_risk_control_resume_sources";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct DownloadRiskControlResumeSources {
+    #[serde(default)]
+    sources: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RiskControlResetSummary {
+    resetted_videos: usize,
+    resetted_pages: usize,
+}
 
 fn is_bili_request_failed_with_codes(err: &anyhow::Error, codes: &[i64]) -> bool {
     err.chain().any(|cause| {
@@ -345,6 +358,144 @@ fn inaccessible_reason_from_error(err: &anyhow::Error) -> &'static str {
 fn is_database_locked_error(err: &anyhow::Error) -> bool {
     let err_text = format!("{:#}", err);
     err_text.contains("database is locked") || err_text.contains("Database is locked")
+}
+
+fn download_risk_control_resume_source_key(video_source: &VideoSourceEnum) -> String {
+    match video_source {
+        VideoSourceEnum::Favorite(source) => format!("favorite:{}", source.id),
+        VideoSourceEnum::Collection(source) => format!("collection:{}", source.id),
+        VideoSourceEnum::Submission(source) => format!("submission:{}", source.id),
+        VideoSourceEnum::WatchLater(source) => format!("watch_later:{}", source.id),
+        VideoSourceEnum::BangumiSource(source) => format!("bangumi:{}", source.id),
+    }
+}
+
+async fn load_download_risk_control_resume_sources(
+    connection: &DatabaseConnection,
+) -> Result<DownloadRiskControlResumeSources> {
+    use bili_sync_entity::entities::config_item;
+
+    let item = config_item::Entity::find()
+        .filter(config_item::Column::KeyName.eq(DOWNLOAD_RISK_CONTROL_RESUME_KEY))
+        .one(connection)
+        .await?;
+
+    match item {
+        Some(item) => match serde_json::from_str(&item.value_json) {
+            Ok(resume_sources) => Ok(resume_sources),
+            Err(err) => {
+                warn!("解析下载风控断点失败，将忽略该断点配置: {}", err);
+                Ok(DownloadRiskControlResumeSources::default())
+            }
+        },
+        None => Ok(DownloadRiskControlResumeSources::default()),
+    }
+}
+
+async fn save_download_risk_control_resume_sources(
+    connection: &DatabaseConnection,
+    resume_sources: &DownloadRiskControlResumeSources,
+) -> Result<()> {
+    use bili_sync_entity::entities::config_item;
+
+    let value_json = serde_json::to_string(resume_sources)?;
+    let existing = config_item::Entity::find()
+        .filter(config_item::Column::KeyName.eq(DOWNLOAD_RISK_CONTROL_RESUME_KEY))
+        .one(connection)
+        .await?;
+
+    if let Some(existing_item) = existing {
+        let mut active_model: config_item::ActiveModel = existing_item.into();
+        active_model.value_json = Set(value_json);
+        active_model.updated_at = Set(now_standard_string());
+        active_model.update(connection).await?;
+    } else {
+        config_item::ActiveModel {
+            key_name: Set(DOWNLOAD_RISK_CONTROL_RESUME_KEY.to_string()),
+            value_json: Set(value_json),
+            updated_at: Set(now_standard_string()),
+        }
+        .insert(connection)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn has_download_risk_control_resume_mark(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    Ok(resume_sources.sources.contains(&source_key))
+}
+
+async fn mark_download_risk_control_resume(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<()> {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let mut resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    if resume_sources.sources.insert(source_key) {
+        save_download_risk_control_resume_sources(connection, &resume_sources).await?;
+    }
+    Ok(())
+}
+
+async fn clear_download_risk_control_resume(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<()> {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let mut resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    if resume_sources.sources.remove(&source_key) {
+        save_download_risk_control_resume_sources(connection, &resume_sources).await?;
+    }
+    Ok(())
+}
+
+async fn has_local_pending_downloads_for_source(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    let has_unfilled = !filter_unfilled_videos(video_source.filter_expr(), connection)
+        .await?
+        .is_empty();
+    let has_unhandled = !filter_unhandled_video_pages(video_source.filter_expr(), connection)
+        .await?
+        .is_empty();
+    let has_failed = !get_failed_videos_in_current_cycle(video_source.filter_expr(), connection)
+        .await?
+        .is_empty();
+
+    Ok(has_unfilled || has_unhandled || has_failed)
+}
+
+async fn should_skip_refresh_for_download_risk_control_resume(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    if !has_download_risk_control_resume_mark(video_source, connection).await? {
+        return Ok(false);
+    }
+
+    if has_local_pending_downloads_for_source(video_source, connection).await? {
+        info!(
+            "{}《{}》命中下载风控断点，本轮跳过远端列表刷新，直接续传本地未完成任务",
+            video_source.source_type_display(),
+            video_source.source_name_display()
+        );
+        return Ok(true);
+    }
+
+    clear_download_risk_control_resume(video_source, connection).await?;
+    info!(
+        "{}《{}》下载风控断点已无本地待处理任务，清除断点并恢复正常扫描",
+        video_source.source_type_display(),
+        video_source.source_name_display()
+    );
+    Ok(false)
 }
 
 async fn update_videos_model_with_lock_retry(
@@ -845,8 +996,13 @@ pub async fn process_video_source(
             }
         };
 
+    let resume_download_without_refresh =
+        !ARGS.scan_only && should_skip_refresh_for_download_risk_control_resume(&video_source, connection).await?;
+
     // 从视频流中获取新视频的简要信息，写入数据库，并获取新增视频数量和信息
-    let (new_video_count, new_videos) =
+    let (new_video_count, new_videos) = if resume_download_without_refresh {
+        (0, Vec::new())
+    } else {
         match refresh_video_source(&video_source, video_streams, connection, token.clone(), bili_client).await {
             Ok(result) => result,
             Err(e) => {
@@ -860,7 +1016,8 @@ pub async fn process_video_source(
                     return Err(e);
                 }
             }
-        };
+        }
+    };
 
     // Guard: skip further steps if paused/cancelled or no new videos in this round
     if crate::task::TASK_CONTROLLER.is_paused() || token.is_cancelled() {
@@ -962,6 +1119,12 @@ pub async fn process_video_source(
         {
             warn!("循环内重试失败的视频时出错: {:#}", e);
             // 重试失败不中断主流程，继续执行
+        }
+
+        if !token.is_cancelled() {
+            if let Err(err) = clear_download_risk_control_resume(&video_source, connection).await {
+                warn!("清除下载风控断点失败: {:#}", err);
+            }
         }
 
         // 批量 AI 重命名：在所有视频下载完成后统一执行
@@ -2175,6 +2338,14 @@ pub async fn download_unprocessed_videos(
     let current_config = crate::config::reload_config();
     let semaphore = Semaphore::new(current_config.concurrent_limit.video);
     let unhandled_videos_pages = filter_unhandled_video_pages(video_source.filter_expr(), connection).await?;
+    let risk_control_scope_video_ids = unhandled_videos_pages
+        .iter()
+        .map(|(video_model, _)| video_model.id)
+        .collect::<Vec<_>>();
+    let risk_control_scope_page_ids = unhandled_videos_pages
+        .iter()
+        .flat_map(|(_, pages_model)| pages_model.iter().map(|page_model| page_model.id))
+        .collect::<Vec<_>>();
 
     // up_seasonal：先基于“全部视频”统一分配合集/系列/多P季号，避免下载并发阶段按处理顺序漂移。
     if !unhandled_videos_pages.is_empty() && current_config.collection_folder_mode.as_ref() == "up_seasonal" {
@@ -2346,9 +2517,22 @@ pub async fn download_unprocessed_videos(
     if download_aborted {
         error!("下载触发风控，已终止所有任务，停止所有后续扫描");
 
-        // 自动重置风控导致的失败任务
-        if let Err(reset_err) = auto_reset_risk_control_failures(connection).await {
-            error!("自动重置风控失败任务时出错: {:#}", reset_err);
+        if let Err(mark_err) = mark_download_risk_control_resume(video_source, connection).await {
+            error!("保存下载风控断点失败: {:#}", mark_err);
+        }
+
+        match auto_reset_risk_control_failures_for_scope(
+            connection,
+            &risk_control_scope_video_ids,
+            &risk_control_scope_page_ids,
+        )
+        .await
+        {
+            Ok(summary) => info!(
+                "风控自动范围复位完成：重置了当前源 {} 个视频和 {} 个页面的未完成任务状态",
+                summary.resetted_videos, summary.resetted_pages
+            ),
+            Err(reset_err) => error!("自动范围复位风控失败任务时出错: {:#}", reset_err),
         }
 
         video_source.log_download_video_end();
@@ -10608,8 +10792,109 @@ async fn get_video_count_for_source(video_source: &VideoSourceEnum, connection: 
     Ok(count as usize)
 }
 
+fn dedup_positive_ids(ids: &[i32]) -> Vec<i32> {
+    let mut unique_ids = ids.iter().copied().filter(|id| *id > 0).collect::<Vec<_>>();
+    unique_ids.sort_unstable();
+    unique_ids.dedup();
+    unique_ids
+}
+
+fn reset_unfinished_status_for_risk_control<const N: usize>(status: &mut crate::utils::status::Status<N>) -> bool {
+    let original = u32::from(*status);
+    let all_ok = (0..N).all(|task_index| status.get(task_index) == STATUS_OK);
+
+    if all_ok {
+        if N > 0 {
+            status.set(0, STATUS_OK);
+        }
+        return u32::from(*status) != original;
+    }
+
+    for task_index in 0..N {
+        if status.get(task_index) != STATUS_OK {
+            status.set(task_index, 0);
+        }
+    }
+
+    u32::from(*status) != original
+}
+
+async fn auto_reset_risk_control_failures_for_scope(
+    connection: &DatabaseConnection,
+    video_ids: &[i32],
+    page_ids: &[i32],
+) -> Result<RiskControlResetSummary> {
+    use sea_orm::{ActiveValue::Unchanged, QuerySelect};
+
+    let video_ids = dedup_positive_ids(video_ids);
+    let page_ids = dedup_positive_ids(page_ids);
+    let scoped_videos = if video_ids.is_empty() {
+        Vec::new()
+    } else {
+        video::Entity::find()
+            .select_only()
+            .columns([video::Column::Id, video::Column::Name, video::Column::DownloadStatus])
+            .filter(video::Column::Id.is_in(video_ids))
+            .into_tuple::<(i32, String, u32)>()
+            .all(connection)
+            .await?
+    };
+    let scoped_pages = if page_ids.is_empty() {
+        Vec::new()
+    } else {
+        page::Entity::find()
+            .select_only()
+            .columns([page::Column::Id, page::Column::Name, page::Column::DownloadStatus])
+            .filter(page::Column::Id.is_in(page_ids))
+            .into_tuple::<(i32, String, u32)>()
+            .all(connection)
+            .await?
+    };
+
+    let mut summary = RiskControlResetSummary::default();
+    let txn = crate::database::begin_traced_transaction(connection, "workflow.reset_risk_control_scope").await?;
+
+    for (id, name, download_status) in scoped_videos {
+        let mut video_status = VideoStatus::from(download_status);
+        if reset_unfinished_status_for_risk_control(&mut video_status) {
+            video::Entity::update(video::ActiveModel {
+                id: Unchanged(id),
+                download_status: Set(video_status.into()),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+            summary.resetted_videos += 1;
+            debug!("重置当前风控范围内视频《{}》的未完成下载状态", name);
+        }
+    }
+
+    for (id, name, download_status) in scoped_pages {
+        let mut page_status = PageStatus::from(download_status);
+        if reset_unfinished_status_for_risk_control(&mut page_status) {
+            page::Entity::update(page::ActiveModel {
+                id: Unchanged(id),
+                download_status: Set(page_status.into()),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+            summary.resetted_pages += 1;
+            debug!("重置当前风控范围内分P《{}》的未完成下载状态", name);
+        }
+    }
+
+    txn.commit().await?;
+    if summary.resetted_videos > 0 || summary.resetted_pages > 0 {
+        notify_videos_changed();
+    }
+
+    Ok(summary)
+}
+
 /// 自动重置风控导致的失败任务
 /// 当检测到风控时，将所有失败状态(值为3)、正在进行状态(值为2)以及未完成的任务重置为未开始状态(值为0)
+#[allow(dead_code)]
 pub async fn auto_reset_risk_control_failures(connection: &DatabaseConnection) -> Result<()> {
     use crate::utils::status::{PageStatus, VideoStatus};
     use bili_sync_entity::{page, video};
@@ -13649,7 +13934,7 @@ mod tests {
     use bili_sync_migration::{Migrator, MigratorTrait};
     use handlebars::handlebars_helper;
     use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-    use sea_orm::{ActiveModelTrait, DatabaseConnection, Set, SqlxSqliteConnector};
+    use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, Set, SqlxSqliteConnector};
     use serde_json::json;
     use std::borrow::Cow;
     use std::fs;
@@ -13662,6 +13947,213 @@ mod tests {
         let mut dir = std::env::temp_dir();
         dir.push(format!("bili-sync-workflow-{}-{}", prefix, uuid::Uuid::new_v4()));
         dir
+    }
+
+    async fn insert_test_video_with_status(db: &DatabaseConnection, id: i32, submission_id: i32, download_status: u32) {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+
+        video::ActiveModel {
+            id: Set(id),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(Some(submission_id)),
+            source_id: Set(None),
+            source_type: Set(Some(4)),
+            upper_id: Set(1000 + i64::from(submission_id)),
+            upper_name: Set(format!("test upper {submission_id}")),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(Some(submission_id)),
+            name: Set(format!("test video {id}")),
+            path: Set(format!("/tmp/video-{id}")),
+            category: Set(1),
+            bvid: Set(format!("BVTEST{id:010}")),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(now),
+            pubtime: Set(now),
+            favtime: Set(now),
+            download_status: Set(download_status),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-01-01 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(true),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("should insert test video");
+    }
+
+    async fn insert_test_page_with_status(db: &DatabaseConnection, id: i32, video_id: i32, download_status: u32) {
+        page::ActiveModel {
+            id: Set(id),
+            video_id: Set(video_id),
+            cid: Set(10000 + i64::from(id)),
+            pid: Set(id),
+            name: Set(format!("test page {id}")),
+            width: Set(None),
+            height: Set(None),
+            duration: Set(60),
+            path: Set(None),
+            file_size_bytes: Set(None),
+            video_stream_size_bytes: Set(None),
+            audio_stream_size_bytes: Set(None),
+            image: Set(None),
+            download_status: Set(download_status),
+            created_at: Set("2026-01-01 00:00:00".to_string()),
+            play_video_streams: Set(None),
+            play_audio_streams: Set(None),
+            play_subtitle_streams: Set(None),
+            play_streams_updated_at: Set(None),
+            danmaku_last_synced_at: Set(None),
+            danmaku_sync_generation: Set(0),
+            danmaku_cid_snapshot: Set(None),
+            danmaku_last_write_count: Set(0),
+            ai_renamed: Set(Some(0)),
+        }
+        .insert(db)
+        .await
+        .expect("should insert test page");
+    }
+
+    #[tokio::test]
+    async fn test_risk_control_reset_is_limited_to_current_download_scope() {
+        let db = create_test_db("risk-control-reset-scope").await;
+        insert_test_submission(&db, 1, false, false).await;
+        insert_test_submission(&db, 2, false, false).await;
+
+        let incomplete_video_status = u32::from(VideoStatus::from([STATUS_OK, 2, STATUS_OK, 4, 0]));
+        let incomplete_page_status = u32::from(PageStatus::from([STATUS_OK, 2, STATUS_OK, 4, 0]));
+        let complete_page_status = u32::from(PageStatus::from([STATUS_OK; 5]));
+        insert_test_video_with_status(&db, 1, 1, incomplete_video_status).await;
+        insert_test_page_with_status(&db, 1, 1, incomplete_page_status).await;
+        insert_test_page_with_status(&db, 2, 1, complete_page_status).await;
+        insert_test_video_with_status(&db, 2, 2, incomplete_video_status).await;
+        insert_test_page_with_status(&db, 3, 2, incomplete_page_status).await;
+
+        let current_scope = filter_unhandled_video_pages(video::Column::SubmissionId.eq(1), &db)
+            .await
+            .expect("should query current scope");
+        let video_ids = current_scope
+            .iter()
+            .map(|(video_model, _)| video_model.id)
+            .collect::<Vec<_>>();
+        let page_ids = current_scope
+            .iter()
+            .flat_map(|(_, pages)| pages.iter().map(|page_model| page_model.id))
+            .collect::<Vec<_>>();
+
+        let summary = auto_reset_risk_control_failures_for_scope(&db, &video_ids, &page_ids)
+            .await
+            .expect("scoped reset should succeed");
+
+        assert_eq!(summary.resetted_videos, 1);
+        assert_eq!(summary.resetted_pages, 1);
+
+        let current_video = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("video should exist");
+        let current_page = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("page should exist");
+        let completed_page = page::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("page should exist");
+        let unrelated_video = video::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("video should exist");
+        let unrelated_page = page::Entity::find_by_id(3)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("page should exist");
+
+        assert_eq!(
+            <[u32; 5]>::from(VideoStatus::from(current_video.download_status)),
+            [STATUS_OK, 0, STATUS_OK, 0, 0]
+        );
+        assert_eq!(
+            <[u32; 5]>::from(PageStatus::from(current_page.download_status)),
+            [STATUS_OK, 0, STATUS_OK, 0, 0]
+        );
+        assert_eq!(completed_page.download_status, complete_page_status);
+        assert_eq!(unrelated_video.download_status, incomplete_video_status);
+        assert_eq!(unrelated_page.download_status, incomplete_page_status);
+    }
+
+    #[tokio::test]
+    async fn test_download_risk_control_resume_skips_remote_refresh_only_with_pending_work() {
+        let db = create_test_db("download-risk-resume-marker").await;
+        insert_test_submission(&db, 1, false, false).await;
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("submission should exist");
+        let video_source = VideoSourceEnum::Submission(submission_source);
+
+        mark_download_risk_control_resume(&video_source, &db)
+            .await
+            .expect("mark should succeed");
+        assert!(
+            !should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("resume check should succeed"),
+            "stale marker without pending work should not skip remote refresh"
+        );
+        assert!(
+            !has_download_risk_control_resume_mark(&video_source, &db)
+                .await
+                .expect("marker check should succeed"),
+            "stale marker should be cleared"
+        );
+
+        insert_test_video_with_status(&db, 1, 1, u32::from(VideoStatus::from([0; 5]))).await;
+        insert_test_page_with_status(&db, 1, 1, u32::from(PageStatus::from([0; 5]))).await;
+        mark_download_risk_control_resume(&video_source, &db)
+            .await
+            .expect("mark should succeed");
+
+        assert!(
+            should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("resume check should succeed"),
+            "marker with pending work should skip remote refresh"
+        );
+        assert!(
+            has_download_risk_control_resume_mark(&video_source, &db)
+                .await
+                .expect("marker check should succeed"),
+            "active marker should be kept until download succeeds"
+        );
     }
 
     #[test]
@@ -13691,6 +14183,18 @@ mod tests {
         let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
 
         Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        if let Err(err) = db
+            .execute(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "ALTER TABLE page ADD COLUMN ai_renamed INTEGER DEFAULT 0",
+            ))
+            .await
+        {
+            assert!(
+                err.to_string().contains("duplicate column"),
+                "应能补齐测试数据库 page.ai_renamed 字段: {err}"
+            );
+        }
         db
     }
 
