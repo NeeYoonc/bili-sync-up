@@ -442,6 +442,7 @@ async fn save_download_risk_control_resume_sources(
     Ok(())
 }
 
+#[cfg(test)]
 async fn has_download_risk_control_resume_mark(
     video_source: &VideoSourceEnum,
     connection: &DatabaseConnection,
@@ -547,25 +548,46 @@ async fn should_skip_refresh_for_download_risk_control_resume(
     video_source: &VideoSourceEnum,
     connection: &DatabaseConnection,
 ) -> Result<bool> {
-    if !has_download_risk_control_resume_mark(video_source, connection).await? {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    if !resume_sources.sources.contains(&source_key) {
         return Ok(false);
     }
 
-    if has_local_pending_downloads_for_source(video_source, connection).await? {
+    if !has_local_pending_downloads_for_source(video_source, connection).await? {
+        clear_download_risk_control_resume(video_source, connection).await?;
         info!(
-            "{}《{}》命中下载风控断点，本轮跳过远端列表刷新，直接续传本地未完成任务",
+            "{}《{}》下载风控断点已无本地待处理任务，清除断点并恢复正常扫描",
             video_source.source_type_display(),
             video_source.source_name_display()
         );
-        return Ok(true);
+        return Ok(false);
     }
 
-    clear_download_risk_control_resume(video_source, connection).await?;
-    info!(
-        "{}《{}》下载风控断点已无本地待处理任务，清除断点并恢复正常扫描",
-        video_source.source_type_display(),
-        video_source.source_name_display()
-    );
+    let now = current_unix_timestamp_secs();
+    match resume_sources.cooldown_until.get(&source_key).copied() {
+        Some(cooldown_until) if cooldown_until > now => {
+            info!(
+                "{}《{}》下载风控冷却仍未结束，交由冷却断点逻辑跳过本轮处理",
+                video_source.source_type_display(),
+                video_source.source_name_display()
+            );
+        }
+        Some(_) => {
+            info!(
+                "{}《{}》下载风控冷却已结束，本轮恢复远端列表刷新，随后继续处理本地未完成任务",
+                video_source.source_type_display(),
+                video_source.source_name_display()
+            );
+        }
+        None => {
+            info!(
+                "{}《{}》检测到旧格式下载风控断点，本轮恢复远端列表刷新并保留断点",
+                video_source.source_type_display(),
+                video_source.source_name_display()
+            );
+        }
+    }
     Ok(false)
 }
 
@@ -14284,7 +14306,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_risk_control_resume_skips_remote_refresh_only_with_pending_work() {
+    async fn test_download_risk_control_resume_marker_is_kept_only_with_pending_work() {
         let db = create_test_db("download-risk-resume-marker").await;
         insert_test_submission(&db, 1, false, false).await;
 
@@ -14318,10 +14340,10 @@ mod tests {
             .expect("mark should succeed");
 
         assert!(
-            should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
+            should_defer_download_risk_control_resume(&video_source, &db)
                 .await
-                .expect("resume check should succeed"),
-            "marker with pending work should skip remote refresh"
+                .expect("cooldown check should succeed"),
+            "fresh marker with pending work should cool down local resume"
         );
         assert!(
             has_download_risk_control_resume_mark(&video_source, &db)
@@ -14374,10 +14396,16 @@ mod tests {
             "expired cooldown should allow local resume"
         );
         assert!(
-            should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
+            !should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
                 .await
                 .expect("resume check should succeed"),
-            "expired cooldown with pending work should resume local queue without remote refresh"
+            "expired cooldown should allow remote refresh before processing local queue"
+        );
+        assert!(
+            has_download_risk_control_resume_mark(&video_source, &db)
+                .await
+                .expect("marker check should succeed"),
+            "expired cooldown should keep marker until downloads finish"
         );
     }
 
