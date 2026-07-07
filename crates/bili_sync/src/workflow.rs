@@ -69,6 +69,7 @@ struct SubmissionUpperIntroCacheEntry {
 const SUBMISSION_COLLECTION_META_CACHE_TTL_SECS: i64 = 30 * 60;
 const SUBMISSION_UPPER_INTRO_CACHE_TTL_SECS: i64 = 12 * 60 * 60;
 const SUBMISSION_MEMBERSHIP_QUERY_CHUNK_SIZE: usize = 300;
+const RISK_CONTROL_RESET_QUERY_CHUNK_SIZE: usize = 300;
 const ROOT_ALIAS_ASSET_FAILURE_RETRY_SECS: i64 = 10 * 60;
 const ROOT_ALIAS_ASSET_FORCE_REFRESH_DEBOUNCE_SECS: i64 = 5 * 60;
 
@@ -314,11 +315,16 @@ use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK, VIDEO_STATUS_NFO_
 
 const DB_LOCK_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
 const DOWNLOAD_RISK_CONTROL_RESUME_KEY: &str = "download_risk_control_resume_sources";
+const DOWNLOAD_RISK_CONTROL_MAX_COOLDOWN_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct DownloadRiskControlResumeSources {
     #[serde(default)]
     sources: HashSet<String>,
+    #[serde(default)]
+    cooldown_until: HashMap<String, i64>,
+    #[serde(default)]
+    risk_counts: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -368,6 +374,20 @@ fn download_risk_control_resume_source_key(video_source: &VideoSourceEnum) -> St
         VideoSourceEnum::WatchLater(source) => format!("watch_later:{}", source.id),
         VideoSourceEnum::BangumiSource(source) => format!("bangumi:{}", source.id),
     }
+}
+
+fn download_risk_control_resume_cooldown_secs(risk_count: u32) -> i64 {
+    let base_interval = crate::config::reload_config().interval.max(60);
+    let multipliers = [3_u64, 9, 27, 72];
+    let idx = risk_count.saturating_sub(1) as usize;
+    let multiplier = multipliers
+        .get(idx)
+        .copied()
+        .unwrap_or_else(|| *multipliers.last().expect("cooldown multipliers should not be empty"));
+
+    base_interval
+        .saturating_mul(multiplier)
+        .min(DOWNLOAD_RISK_CONTROL_MAX_COOLDOWN_SECS) as i64
 }
 
 async fn load_download_risk_control_resume_sources(
@@ -437,9 +457,19 @@ async fn mark_download_risk_control_resume(
 ) -> Result<()> {
     let source_key = download_risk_control_resume_source_key(video_source);
     let mut resume_sources = load_download_risk_control_resume_sources(connection).await?;
-    if resume_sources.sources.insert(source_key) {
-        save_download_risk_control_resume_sources(connection, &resume_sources).await?;
-    }
+    let risk_count = resume_sources
+        .risk_counts
+        .get(&source_key)
+        .copied()
+        .unwrap_or_default()
+        .saturating_add(1);
+    let cooldown_until =
+        current_unix_timestamp_secs().saturating_add(download_risk_control_resume_cooldown_secs(risk_count));
+
+    resume_sources.sources.insert(source_key.clone());
+    resume_sources.risk_counts.insert(source_key.clone(), risk_count);
+    resume_sources.cooldown_until.insert(source_key, cooldown_until);
+    save_download_risk_control_resume_sources(connection, &resume_sources).await?;
     Ok(())
 }
 
@@ -449,7 +479,10 @@ async fn clear_download_risk_control_resume(
 ) -> Result<()> {
     let source_key = download_risk_control_resume_source_key(video_source);
     let mut resume_sources = load_download_risk_control_resume_sources(connection).await?;
-    if resume_sources.sources.remove(&source_key) {
+    let removed = resume_sources.sources.remove(&source_key)
+        | resume_sources.cooldown_until.remove(&source_key).is_some()
+        | resume_sources.risk_counts.remove(&source_key).is_some();
+    if removed {
         save_download_risk_control_resume_sources(connection, &resume_sources).await?;
     }
     Ok(())
@@ -470,6 +503,44 @@ async fn has_local_pending_downloads_for_source(
         .is_empty();
 
     Ok(has_unfilled || has_unhandled || has_failed)
+}
+
+async fn should_defer_download_risk_control_resume(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    if !resume_sources.sources.contains(&source_key) {
+        return Ok(false);
+    }
+
+    if !has_local_pending_downloads_for_source(video_source, connection).await? {
+        clear_download_risk_control_resume(video_source, connection).await?;
+        info!(
+            "{}《{}》下载风控断点已无本地待处理任务，清除断点并恢复正常扫描",
+            video_source.source_type_display(),
+            video_source.source_name_display()
+        );
+        return Ok(false);
+    }
+
+    let now = current_unix_timestamp_secs();
+    let Some(cooldown_until) = resume_sources.cooldown_until.get(&source_key).copied() else {
+        return Ok(false);
+    };
+
+    if cooldown_until <= now {
+        return Ok(false);
+    }
+
+    info!(
+        "{}《{}》命中下载风控冷却，剩余 {} 秒，本轮跳过本地续传",
+        video_source.source_type_display(),
+        video_source.source_name_display(),
+        cooldown_until.saturating_sub(now)
+    );
+    Ok(true)
 }
 
 async fn should_skip_refresh_for_download_risk_control_resume(
@@ -995,6 +1066,10 @@ pub async fn process_video_source(
                 }
             }
         };
+
+    if !ARGS.scan_only && should_defer_download_risk_control_resume(&video_source, connection).await? {
+        return Ok((0, Vec::new()));
+    }
 
     let resume_download_without_refresh =
         !ARGS.scan_only && should_skip_refresh_for_download_risk_control_resume(&video_source, connection).await?;
@@ -10828,28 +10903,28 @@ async fn auto_reset_risk_control_failures_for_scope(
 
     let video_ids = dedup_positive_ids(video_ids);
     let page_ids = dedup_positive_ids(page_ids);
-    let scoped_videos = if video_ids.is_empty() {
-        Vec::new()
-    } else {
-        video::Entity::find()
+    let mut scoped_videos = Vec::new();
+    for chunk in video_ids.chunks(RISK_CONTROL_RESET_QUERY_CHUNK_SIZE) {
+        let mut rows = video::Entity::find()
             .select_only()
             .columns([video::Column::Id, video::Column::Name, video::Column::DownloadStatus])
-            .filter(video::Column::Id.is_in(video_ids))
+            .filter(video::Column::Id.is_in(chunk.iter().copied()))
             .into_tuple::<(i32, String, u32)>()
             .all(connection)
-            .await?
-    };
-    let scoped_pages = if page_ids.is_empty() {
-        Vec::new()
-    } else {
-        page::Entity::find()
+            .await?;
+        scoped_videos.append(&mut rows);
+    }
+    let mut scoped_pages = Vec::new();
+    for chunk in page_ids.chunks(RISK_CONTROL_RESET_QUERY_CHUNK_SIZE) {
+        let mut rows = page::Entity::find()
             .select_only()
             .columns([page::Column::Id, page::Column::Name, page::Column::DownloadStatus])
-            .filter(page::Column::Id.is_in(page_ids))
+            .filter(page::Column::Id.is_in(chunk.iter().copied()))
             .into_tuple::<(i32, String, u32)>()
             .all(connection)
-            .await?
-    };
+            .await?;
+        scoped_pages.append(&mut rows);
+    }
 
     let mut summary = RiskControlResetSummary::default();
     let txn = crate::database::begin_traced_transaction(connection, "workflow.reset_risk_control_scope").await?;
@@ -14180,6 +14255,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_risk_control_reset_chunks_large_page_scope() {
+        let db = create_test_db("risk-control-reset-large-page-scope").await;
+        insert_test_submission(&db, 1, false, false).await;
+
+        let incomplete_video_status = u32::from(VideoStatus::from([STATUS_OK, 2, STATUS_OK, 4, 0]));
+        let incomplete_page_status = u32::from(PageStatus::from([STATUS_OK, 2, STATUS_OK, 4, 0]));
+        insert_test_video_with_status(&db, 1, 1, incomplete_video_status).await;
+        insert_test_page_with_status(&db, 1, 1, incomplete_page_status).await;
+
+        let large_page_scope = (1..=40_000).collect::<Vec<_>>();
+        let summary = auto_reset_risk_control_failures_for_scope(&db, &[1], &large_page_scope)
+            .await
+            .expect("large page scope should be chunked to avoid sqlite variable limits");
+
+        assert_eq!(summary.resetted_videos, 1);
+        assert_eq!(summary.resetted_pages, 1);
+
+        let current_page = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("page should exist");
+        assert_eq!(
+            <[u32; 5]>::from(PageStatus::from(current_page.download_status)),
+            [STATUS_OK, 0, STATUS_OK, 0, 0]
+        );
+    }
+
+    #[tokio::test]
     async fn test_download_risk_control_resume_skips_remote_refresh_only_with_pending_work() {
         let db = create_test_db("download-risk-resume-marker").await;
         insert_test_submission(&db, 1, false, false).await;
@@ -14224,6 +14328,56 @@ mod tests {
                 .await
                 .expect("marker check should succeed"),
             "active marker should be kept until download succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_risk_control_resume_defers_until_cooldown_expires() {
+        let db = create_test_db("download-risk-resume-cooldown").await;
+        insert_test_submission(&db, 1, false, false).await;
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("submission should exist");
+        let video_source = VideoSourceEnum::Submission(submission_source);
+
+        insert_test_video_with_status(&db, 1, 1, u32::from(VideoStatus::from([0; 5]))).await;
+        insert_test_page_with_status(&db, 1, 1, u32::from(PageStatus::from([0; 5]))).await;
+        mark_download_risk_control_resume(&video_source, &db)
+            .await
+            .expect("mark should succeed");
+
+        assert!(
+            should_defer_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("cooldown check should succeed"),
+            "fresh download risk-control marker should cool down local resume"
+        );
+
+        let source_key = download_risk_control_resume_source_key(&video_source);
+        let mut resume_sources = load_download_risk_control_resume_sources(&db)
+            .await
+            .expect("marker should load");
+        resume_sources
+            .cooldown_until
+            .insert(source_key, current_unix_timestamp_secs().saturating_sub(1));
+        save_download_risk_control_resume_sources(&db, &resume_sources)
+            .await
+            .expect("expired marker should save");
+
+        assert!(
+            !should_defer_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("cooldown check should succeed"),
+            "expired cooldown should allow local resume"
+        );
+        assert!(
+            should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("resume check should succeed"),
+            "expired cooldown with pending work should resume local queue without remote refresh"
         );
     }
 
