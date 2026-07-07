@@ -13823,6 +13823,24 @@ fn find_existing_identity_sibling_path(computed_path: &std::path::Path, video_mo
     None
 }
 
+fn strip_video_identity_suffix_path(path: &std::path::Path, video_model: &video::Model) -> Option<PathBuf> {
+    let parent_dir = path.parent()?;
+    let folder_name = path.file_name()?.to_string_lossy();
+    let pubtime = video_model.pubtime.format("%Y%m%d%H%M%S").to_string();
+    let identity_suffix = format!("-{}", video_identity_suffix(video_model, &pubtime));
+
+    if !folder_name.to_lowercase().ends_with(&identity_suffix.to_lowercase()) {
+        return None;
+    }
+
+    let base_name = &folder_name[..folder_name.len() - identity_suffix.len()];
+    if base_name.is_empty() {
+        return None;
+    }
+
+    Some(parent_dir.join(base_name))
+}
+
 fn normalized_path_text(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let normalized = normalized.trim_end_matches('/').to_string();
@@ -13851,6 +13869,10 @@ fn path_is_same_or_child(path: &std::path::Path, parent: &std::path::Path) -> bo
     path_text_is_same_or_child(&path.to_string_lossy(), parent)
 }
 
+fn path_is_same_path(path: &std::path::Path, other: &std::path::Path) -> bool {
+    path_is_same_or_child(path, other) && path_is_same_or_child(other, path)
+}
+
 fn preserve_existing_video_path_for_redownload(
     video_source_base_path: &std::path::Path,
     computed_path: PathBuf,
@@ -13863,7 +13885,27 @@ fn preserve_existing_video_path_for_redownload(
     }
 
     let existing_path = std::path::Path::new(existing_path_text);
-    if path_is_same_or_child(&computed_path, existing_path) && path_is_same_or_child(existing_path, &computed_path) {
+    let has_page_under_computed_path = pages
+        .iter()
+        .filter_map(|page| page.path.as_deref())
+        .any(|page_path| path_text_is_same_or_child(page_path, &computed_path));
+
+    if strip_video_identity_suffix_path(existing_path, video_model)
+        .as_ref()
+        .map(|base_path| path_is_same_path(&computed_path, base_path))
+        .unwrap_or(false)
+        && (has_page_under_computed_path || is_same_video_folder(&computed_path, video_model))
+    {
+        debug!(
+            "重置/重下发现旧视频目录仅带唯一标识，基础目录已有当前视频内容，使用基础目录: bvid={}, existing='{}', computed='{}'",
+            video_model.bvid,
+            existing_path.display(),
+            computed_path.display()
+        );
+        return computed_path;
+    }
+
+    if path_is_same_path(&computed_path, existing_path) {
         if let Some(identity_path) = find_existing_identity_sibling_path(&computed_path, video_model) {
             debug!(
                 "重置/重下通过BV/CID找回已有视频目录: bvid={}, computed='{}', identity='{}'",
@@ -14899,6 +14941,64 @@ mod tests {
         let resolved = preserve_existing_video_path_for_redownload(&source_root, computed_path.clone(), &video, &pages);
 
         assert_eq!(resolved, computed_path);
+    }
+
+    #[test]
+    fn test_preserve_existing_video_path_for_redownload_prefers_migrated_base_dir() {
+        let source_root = unique_temp_dir("redownload-migrated-base-dir");
+        let upper_dir = source_root.join("樋口円香まどか");
+        let base_path = upper_dir.join("[Hi-Res]塞尔达传说 王国之泪 OST vol.2");
+        let identity_path = upper_dir.join("[Hi-Res]塞尔达传说 王国之泪 OST vol.2-20260706085729-BV1BPTU6JEPP");
+        let base_season_dir = base_path.join("Season 01");
+        let identity_season_dir = identity_path.join("Season 01");
+        fs::create_dir_all(&base_season_dir).expect("应能创建基础下载目录");
+        fs::create_dir_all(&identity_season_dir).expect("应能创建带身份后缀目录");
+        fs::write(base_season_dir.join("S01E34P01 - 塞尔达传说 王国之泪.m4a"), b"base").expect("应能创建已迁移分P文件");
+        fs::write(
+            identity_season_dir.join("S01E34P62 - 塞尔达传说 王国之泪.m4a"),
+            b"identity",
+        )
+        .expect("应能创建后续分P文件");
+
+        let pubtime = chrono::NaiveDate::from_ymd_opt(2026, 7, 6)
+            .unwrap()
+            .and_hms_opt(8, 57, 29)
+            .unwrap();
+        let video = video::Model {
+            name: "塞尔达传说 王国之泪".to_string(),
+            upper_name: "樋口円香まどか".to_string(),
+            bvid: "BV1BPTU6JEPP".to_string(),
+            path: identity_path.to_string_lossy().to_string(),
+            pubtime,
+            favtime: pubtime,
+            single_page: Some(false),
+            ..Default::default()
+        };
+        let pages = vec![
+            page::Model {
+                path: Some(
+                    base_season_dir
+                        .join("S01E34P01 - 塞尔达传说 王国之泪.m4a")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+            page::Model {
+                path: Some(
+                    identity_season_dir
+                        .join("S01E34P62 - 塞尔达传说 王国之泪.m4a")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+        ];
+
+        let resolved = preserve_existing_video_path_for_redownload(&source_root, base_path.clone(), &video, &pages);
+
+        assert_eq!(resolved, base_path);
+        fs::remove_dir_all(source_root).expect("应能清理临时目录");
     }
 
     #[test]
