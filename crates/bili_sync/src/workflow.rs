@@ -506,7 +506,7 @@ async fn has_local_pending_downloads_for_source(
     Ok(has_unfilled || has_unhandled || has_failed)
 }
 
-async fn should_defer_download_risk_control_resume(
+async fn should_skip_download_for_download_risk_control_resume(
     video_source: &VideoSourceEnum,
     connection: &DatabaseConnection,
 ) -> Result<bool> {
@@ -536,7 +536,7 @@ async fn should_defer_download_risk_control_resume(
     }
 
     info!(
-        "{}《{}》命中下载风控冷却，剩余 {} 秒，本轮跳过本地续传",
+        "{}《{}》命中下载风控冷却，剩余 {} 秒，本轮跳过下载阶段",
         video_source.source_type_display(),
         video_source.source_name_display(),
         cooldown_until.saturating_sub(now)
@@ -568,7 +568,7 @@ async fn should_skip_refresh_for_download_risk_control_resume(
     match resume_sources.cooldown_until.get(&source_key).copied() {
         Some(cooldown_until) if cooldown_until > now => {
             info!(
-                "{}《{}》下载风控冷却仍未结束，交由冷却断点逻辑跳过本轮处理",
+                "{}《{}》下载风控冷却仍未结束，本轮仍恢复远端列表刷新，下载阶段将跳过本地续传",
                 video_source.source_type_display(),
                 video_source.source_name_display()
             );
@@ -1089,10 +1089,6 @@ pub async fn process_video_source(
             }
         };
 
-    if !ARGS.scan_only && should_defer_download_risk_control_resume(&video_source, connection).await? {
-        return Ok((0, Vec::new()));
-    }
-
     let resume_download_without_refresh =
         !ARGS.scan_only && should_skip_refresh_for_download_risk_control_resume(&video_source, connection).await?;
 
@@ -1119,6 +1115,12 @@ pub async fn process_video_source(
     // Guard: skip further steps if paused/cancelled or no new videos in this round
     if crate::task::TASK_CONTROLLER.is_paused() || token.is_cancelled() {
         info!("任务已暂停/取消，跳过详情与下载阶段");
+        return Ok((new_video_count, new_videos));
+    }
+
+    let skip_download_for_risk_cooldown =
+        !ARGS.scan_only && should_skip_download_for_download_risk_control_resume(&video_source, connection).await?;
+    if skip_download_for_risk_cooldown {
         return Ok((new_video_count, new_videos));
     }
 
@@ -14340,10 +14342,16 @@ mod tests {
             .expect("mark should succeed");
 
         assert!(
-            should_defer_download_risk_control_resume(&video_source, &db)
+            !should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("refresh check should succeed"),
+            "active cooldown should still allow remote refresh"
+        );
+        assert!(
+            should_skip_download_for_download_risk_control_resume(&video_source, &db)
                 .await
                 .expect("cooldown check should succeed"),
-            "fresh marker with pending work should cool down local resume"
+            "active cooldown should skip local download resume after refresh"
         );
         assert!(
             has_download_risk_control_resume_mark(&video_source, &db)
@@ -14372,7 +14380,7 @@ mod tests {
             .expect("mark should succeed");
 
         assert!(
-            should_defer_download_risk_control_resume(&video_source, &db)
+            should_skip_download_for_download_risk_control_resume(&video_source, &db)
                 .await
                 .expect("cooldown check should succeed"),
             "fresh download risk-control marker should cool down local resume"
@@ -14390,7 +14398,7 @@ mod tests {
             .expect("expired marker should save");
 
         assert!(
-            !should_defer_download_risk_control_resume(&video_source, &db)
+            !should_skip_download_for_download_risk_control_resume(&video_source, &db)
                 .await
                 .expect("cooldown check should succeed"),
             "expired cooldown should allow local resume"
