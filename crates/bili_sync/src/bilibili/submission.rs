@@ -216,7 +216,7 @@ impl<'a> Submission<'a> {
                                 "UP主 {} 第 {} 页获取触发风控: {}",
                                 self.display_name(), page, classified_error.message
                             );
-                            return crate::error::DownloadAbortError().into();
+                            return crate::error::DownloadAbortError::rate_limited().into();
                         }
 
                         // 其他错误继续抛出

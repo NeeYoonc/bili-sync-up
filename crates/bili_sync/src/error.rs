@@ -3,9 +3,44 @@ use std::io;
 use anyhow::Result;
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadAbortReason {
+    RateLimited,
+    VerificationRequired,
+}
+
+impl std::fmt::Display for DownloadAbortReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RateLimited => write!(f, "Request too frequently"),
+            Self::VerificationRequired => write!(f, "Risk control verification required"),
+        }
+    }
+}
+
 #[derive(Error, Debug)]
-#[error("Request too frequently")]
-pub struct DownloadAbortError();
+#[error("{reason}")]
+pub struct DownloadAbortError {
+    reason: DownloadAbortReason,
+}
+
+impl DownloadAbortError {
+    pub fn rate_limited() -> Self {
+        Self {
+            reason: DownloadAbortReason::RateLimited,
+        }
+    }
+
+    pub fn verification_required() -> Self {
+        Self {
+            reason: DownloadAbortReason::VerificationRequired,
+        }
+    }
+
+    pub fn reason(&self) -> DownloadAbortReason {
+        self.reason
+    }
+}
 
 #[derive(Error, Debug)]
 pub struct ProcessPageError {
@@ -177,9 +212,13 @@ impl ErrorClassifier {
 
         for cause in err.chain() {
             // DownloadAbortError 用于风控/请求频率过高，不是充电视频
-            if cause.downcast_ref::<DownloadAbortError>().is_some() {
-                return ClassifiedError::new(ErrorType::RiskControl, "请求过于频繁，可能触发风控".to_string())
-                    .with_retry_policy(false, false); // 不重试，不可忽略（需要处理风控）
+            if let Some(abort_error) = cause.downcast_ref::<DownloadAbortError>() {
+                let message = match abort_error.reason() {
+                    DownloadAbortReason::RateLimited => "请求过于频繁，可能触发风控".to_string(),
+                    DownloadAbortReason::VerificationRequired => "触发B站风控验证，需要先完成验证".to_string(),
+                };
+                return ClassifiedError::new(ErrorType::RiskControl, message)
+                    .with_retry_policy(false, abort_error.reason() == DownloadAbortReason::VerificationRequired);
             }
 
             // HTTP 状态码错误
@@ -431,4 +470,32 @@ impl From<Result<ExecutionStatus>> for ExecutionStatus {
 
 fn is_ignored_reqwest_error(err: &reqwest::Error) -> bool {
     err.is_decode() || err.is_body() || err.is_timeout()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    #[test]
+    fn download_abort_error_keeps_risk_control_reason() {
+        let rate_limited = DownloadAbortError::rate_limited();
+        assert_eq!(rate_limited.reason(), DownloadAbortReason::RateLimited);
+
+        let verification_required = DownloadAbortError::verification_required();
+        assert_eq!(
+            verification_required.reason(),
+            DownloadAbortReason::VerificationRequired
+        );
+    }
+
+    #[test]
+    fn verification_required_abort_is_not_classified_as_rate_limit_backoff() {
+        let err = anyhow!(DownloadAbortError::verification_required());
+        let classified = ErrorClassifier::classify_error(&err);
+
+        assert_eq!(classified.error_type, ErrorType::RiskControl);
+        assert!(classified.should_ignore);
+        assert!(classified.message.contains("验证"));
+    }
 }

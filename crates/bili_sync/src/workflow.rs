@@ -301,7 +301,7 @@ use crate::bilibili::{
     SubtitleDownloadOptions, Video, VideoChapter, VideoInfo,
 };
 use crate::config::ARGS;
-use crate::error::{DownloadAbortError, ExecutionStatus, ProcessPageError};
+use crate::error::{DownloadAbortError, DownloadAbortReason, ExecutionStatus, ProcessPageError};
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
@@ -364,6 +364,33 @@ fn inaccessible_reason_from_error(err: &anyhow::Error) -> &'static str {
 fn is_database_locked_error(err: &anyhow::Error) -> bool {
     let err_text = format!("{:#}", err);
     err_text.contains("database is locked") || err_text.contains("Database is locked")
+}
+
+fn download_abort_reason_from_error(err: &anyhow::Error) -> Option<DownloadAbortReason> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<DownloadAbortError>().map(|err| err.reason()))
+}
+
+fn download_abort_from_risk_error(err: &anyhow::Error) -> DownloadAbortError {
+    let requires_verification = err.chain().any(|cause| {
+        cause
+            .downcast_ref::<BiliError>()
+            .is_some_and(|err| matches!(err, BiliError::RiskControlVerificationRequired(_)))
+    });
+
+    if requires_verification {
+        DownloadAbortError::verification_required()
+    } else {
+        DownloadAbortError::rate_limited()
+    }
+}
+
+fn download_abort_from_classified_risk_control(classified_error: &crate::error::ClassifiedError) -> DownloadAbortError {
+    if classified_error.should_ignore {
+        DownloadAbortError::verification_required()
+    } else {
+        DownloadAbortError::rate_limited()
+    }
 }
 
 fn download_risk_control_resume_source_key(video_source: &VideoSourceEnum) -> String {
@@ -1180,8 +1207,11 @@ pub async fn process_video_source(
     // 单独请求视频详情接口，获取视频的详情信息与所有的分页，写入数据库
     if let Err(e) = fetch_video_details(bili_client, &video_source, connection, token.clone()).await {
         // 新增：检查是否为风控导致的下载中止
-        if e.downcast_ref::<DownloadAbortError>().is_some() {
-            error!("获取视频详情时触发风控，已终止当前视频源的处理，停止所有后续扫描");
+        if let Some(reason) = download_abort_reason_from_error(&e) {
+            error!(
+                "获取视频详情时触发风控（原因：{}），已终止当前视频源的处理，停止所有后续扫描",
+                reason
+            );
             // 风控时应该返回错误，中断整个扫描循环，而不是继续处理下一个视频源
             return Err(e);
         }
@@ -1925,7 +1955,7 @@ pub async fn fetch_video_details(
                                     &video_model.bvid, &video_model.name, classified_error.message
                                 );
                                 // 返回一个特定的错误来中止整个批处理
-                                return Err(anyhow!(DownloadAbortError()));
+                                return Err(anyhow!(download_abort_from_risk_error(&e)));
                             }
 
                             error!(
@@ -2308,7 +2338,7 @@ pub async fn fetch_video_details(
 
                 let error_msg = e.to_string();
 
-                if e.downcast_ref::<DownloadAbortError>().is_some() || error_msg.contains("Download cancelled") {
+                if download_abort_reason_from_error(&e).is_some() || error_msg.contains("Download cancelled") {
                     token.cancel();
                     // drain the rest of the tasks
                     while stream.next().await.is_some() {}
@@ -2512,7 +2542,7 @@ pub async fn download_unprocessed_videos(
             )
         })
         .collect::<FuturesUnordered<_>>();
-    let mut download_aborted = false;
+    let mut download_abort_reason: Option<DownloadAbortReason> = None;
     let mut succeeded_count = 0usize;
     let mut failed_count = 0usize;
     let mut skipped_count = 0usize;
@@ -2521,7 +2551,7 @@ pub async fn download_unprocessed_videos(
     while let Some(res) = stream.next().await {
         match res {
             Ok(model) => {
-                if download_aborted {
+                if download_abort_reason.is_some() {
                     continue;
                 }
                 // 只有当 video_status 的 completed 标记位为 true 时，才算真正下载完成。
@@ -2591,12 +2621,14 @@ pub async fn download_unprocessed_videos(
                     continue; // 跳过暂停相关的错误，不触发风控
                 }
 
-                if e.downcast_ref::<DownloadAbortError>().is_some() || error_msg.contains("Download cancelled") {
-                    if !download_aborted {
-                        debug!("检测到风控或取消信号，开始中止所有下载任务");
+                if let Some(reason) = download_abort_reason_from_error(&e) {
+                    if download_abort_reason.is_none() {
+                        debug!("检测到下载中止信号（原因：{}），开始中止所有下载任务", reason);
                         token.cancel(); // 立即取消所有其他正在运行的任务
-                        download_aborted = true;
+                        download_abort_reason = Some(reason);
                     }
+                } else if error_msg.contains("Download cancelled") && download_abort_reason.is_some() {
+                    debug!("收到风控中止后的级联取消信号，忽略: {}", error_msg);
                 } else {
                     // 检查是否为暂停相关错误
                     let error_msg = e.to_string();
@@ -2613,30 +2645,37 @@ pub async fn download_unprocessed_videos(
         }
     }
 
-    if download_aborted {
-        error!("下载触发风控，已终止所有任务，停止所有后续扫描");
+    if let Some(reason) = download_abort_reason {
+        error!("下载阶段中止，原因：{}，已终止所有任务，停止所有后续扫描", reason);
 
-        if let Err(mark_err) = mark_download_risk_control_resume(video_source, connection).await {
-            error!("保存下载风控断点失败: {:#}", mark_err);
-        }
+        if matches!(reason, DownloadAbortReason::RateLimited) {
+            if let Err(mark_err) = mark_download_risk_control_resume(video_source, connection).await {
+                error!("保存下载风控断点失败: {:#}", mark_err);
+            }
 
-        match auto_reset_risk_control_failures_for_scope(
-            connection,
-            &risk_control_scope_video_ids,
-            &risk_control_scope_page_ids,
-        )
-        .await
-        {
-            Ok(summary) => info!(
-                "风控自动范围复位完成：重置了当前源 {} 个视频和 {} 个页面的未完成任务状态",
-                summary.resetted_videos, summary.resetted_pages
-            ),
-            Err(reset_err) => error!("自动范围复位风控失败任务时出错: {:#}", reset_err),
+            match auto_reset_risk_control_failures_for_scope(
+                connection,
+                &risk_control_scope_video_ids,
+                &risk_control_scope_page_ids,
+            )
+            .await
+            {
+                Ok(summary) => info!(
+                    "风控自动范围复位完成：重置了当前源 {} 个视频和 {} 个页面的未完成任务状态",
+                    summary.resetted_videos, summary.resetted_pages
+                ),
+                Err(reset_err) => error!("自动范围复位风控失败任务时出错: {:#}", reset_err),
+            }
+        } else {
+            warn!("下载阶段需要风控验证，本轮不写入下载冷却断点，也不自动复位本地任务状态");
         }
 
         video_source.log_download_video_end();
         // 风控时返回错误，中断整个扫描循环
-        bail!(DownloadAbortError());
+        bail!(match reason {
+            DownloadAbortReason::RateLimited => DownloadAbortError::rate_limited(),
+            DownloadAbortReason::VerificationRequired => DownloadAbortError::verification_required(),
+        });
     }
     video_source.log_download_video_end();
 
@@ -3267,7 +3306,7 @@ pub async fn retry_failed_videos_once(
                     continue; // 跳过暂停相关的错误，不触发风控
                 }
 
-                if e.downcast_ref::<DownloadAbortError>().is_some() || error_msg.contains("Download cancelled") {
+                if download_abort_reason_from_error(&e).is_some() || error_msg.contains("Download cancelled") {
                     if !download_aborted {
                         debug!("重试过程中检测到风控或取消信号，停止重试");
                         token.cancel();
@@ -5688,7 +5727,7 @@ async fn download_video_pages(
         .nth(4)
         .context("page download result not found")?
     {
-        if e.downcast_ref::<DownloadAbortError>().is_some() {
+        if download_abort_reason_from_error(&e).is_some() {
             if path_changed {
                 if let Err(persist_err) = persist_video_path_if_materialized_with_lock_retry(
                     ingest_video_id,
@@ -5983,7 +6022,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
             }
         })
         .collect::<FuturesUnordered<_>>();
-    let (mut download_aborted, mut target_status) = (false, STATUS_OK);
+    let (mut download_abort_reason, mut target_status) = (None, STATUS_OK);
     let mut cancelled_by_user = false;
     let mut failed_pages: Vec<String> = Vec::new(); // 收集失败的分页信息
     let mut changed_pages: Vec<page::ActiveModel> = Vec::new();
@@ -5994,7 +6033,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
     while let Some((res, page_pid, page_name)) = stream.next().await {
         match res {
             Ok(outcome) => {
-                if download_aborted {
+                if download_abort_reason.is_some() {
                     continue;
                 }
                 let model = outcome.model;
@@ -6041,14 +6080,14 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                 }
 
                 // 2. 检查是否是真正的风控错误（DownloadAbortError）
-                if e.downcast_ref::<DownloadAbortError>().is_some() {
+                if let Some(reason) = download_abort_reason_from_error(&e) {
                     warn!(
-                        "检测到真正的风控错误，中止所有下载任务 - 第{}页 {}",
-                        page_pid, page_name
+                        "检测到下载中止错误（原因：{}），中止所有下载任务 - 第{}页 {}",
+                        reason, page_pid, page_name
                     );
-                    if !download_aborted {
+                    if download_abort_reason.is_none() {
                         token.cancel();
-                        download_aborted = true;
+                        download_abort_reason = Some(reason);
                     }
                     continue;
                 }
@@ -6119,12 +6158,15 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
         update_pages_model(changed_pages, args.connection).await?;
     }
 
-    if download_aborted {
+    if let Some(reason) = download_abort_reason {
         error!(
-            "下载视频「{}」的分页时触发风控，将异常向上传递..",
-            &args.video_model.name
+            "下载视频「{}」的分页时中止，原因：{}，将异常向上传递..",
+            &args.video_model.name, reason
         );
-        bail!(DownloadAbortError());
+        bail!(match reason {
+            DownloadAbortReason::RateLimited => DownloadAbortError::rate_limited(),
+            DownloadAbortReason::VerificationRequired => DownloadAbortError::verification_required(),
+        });
     }
     if cancelled_by_user {
         info!("分页下载因用户暂停而终止，跳过失败汇总: {}", &args.video_model.name);
@@ -6953,12 +6995,12 @@ async fn download_page(
             if e.downcast_ref::<BiliError>()
                 .is_some_and(|bili_error| matches!(bili_error, BiliError::RiskControlOccurred))
             {
-                bail!(DownloadAbortError());
+                bail!(DownloadAbortError::rate_limited());
             }
         }
         ExecutionStatus::ClassifiedFailed(ref classified_error) => {
             if classified_error.error_type == crate::error::ErrorType::RiskControl {
-                bail!(DownloadAbortError());
+                bail!(download_abort_from_classified_risk_control(classified_error));
             }
         }
         _ => {}
@@ -10486,7 +10528,7 @@ async fn get_season_info_from_api(
         let classified_error = crate::error::ErrorClassifier::classify_error(&error);
         if classified_error.error_type == crate::error::ErrorType::RiskControl {
             // 风控错误，触发下载中止
-            return Err(anyhow!(crate::error::DownloadAbortError()));
+            return Err(anyhow!(download_abort_from_classified_risk_control(&classified_error)));
         }
 
         // 其他错误正常返回，使用BiliError以便被错误分类系统处理
@@ -14828,6 +14870,29 @@ mod tests {
 
         assert!(is_database_locked_error(&locked_err));
         assert!(!is_database_locked_error(&other_err));
+    }
+
+    #[test]
+    fn test_download_abort_reason_only_rate_limited_uses_cooldown_backoff() {
+        let rate_limited = anyhow!(DownloadAbortError::rate_limited());
+        let verification_required = anyhow!(DownloadAbortError::verification_required());
+
+        assert_eq!(
+            download_abort_reason_from_error(&rate_limited),
+            Some(DownloadAbortReason::RateLimited)
+        );
+        assert_eq!(
+            download_abort_reason_from_error(&verification_required),
+            Some(DownloadAbortReason::VerificationRequired)
+        );
+
+        let classified =
+            crate::error::ClassifiedError::new(crate::error::ErrorType::RiskControl, "captcha required".to_string())
+                .with_retry_policy(false, true);
+        assert_eq!(
+            download_abort_from_classified_risk_control(&classified).reason(),
+            DownloadAbortReason::VerificationRequired
+        );
     }
 
     #[test]
