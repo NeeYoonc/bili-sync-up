@@ -445,15 +445,15 @@ fn default_enable_large_source_download_limit() -> bool {
 }
 
 fn default_large_source_download_threshold() -> usize {
-    500
+    1000
 }
 
 fn default_large_source_max_videos_per_round() -> usize {
-    10
+    0
 }
 
 fn default_large_source_max_pages_per_round() -> usize {
-    50
+    2000
 }
 
 fn default_large_source_concurrent_video() -> usize {
@@ -519,9 +519,9 @@ mod submission_risk_control_config_tests {
             serde_json::from_str("{}").expect("empty risk-control config should use defaults");
 
         assert!(config.enable_large_source_download_limit);
-        assert_eq!(config.large_source_download_threshold, 500);
-        assert_eq!(config.large_source_max_videos_per_round, 10);
-        assert_eq!(config.large_source_max_pages_per_round, 50);
+        assert_eq!(config.large_source_download_threshold, 1000);
+        assert_eq!(config.large_source_max_videos_per_round, 0);
+        assert_eq!(config.large_source_max_pages_per_round, 2000);
         assert_eq!(config.large_source_concurrent_video, 1);
         assert_eq!(config.large_source_concurrent_page, 1);
         assert_eq!(config.large_source_playurl_limit, 1);

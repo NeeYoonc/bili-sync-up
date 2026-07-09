@@ -24,7 +24,7 @@ Add unit tests proving omitted JSON receives safe defaults and update params per
 
 - [x] **Step 2: Implement fields and API mapping**
 
-Add these fields with defaults: `enable_large_source_download_limit=true`, `large_source_download_threshold=500`, `large_source_max_videos_per_round=10`, `large_source_max_pages_per_round=50`, `large_source_concurrent_video=1`, `large_source_concurrent_page=1`, `large_source_playurl_limit=1`, `large_source_playurl_duration_ms=1000`, `audio_only_use_low_qn_for_playurl=true`.
+Add these fields with defaults: `enable_large_source_download_limit=true`, `large_source_download_threshold=1000`, `large_source_max_videos_per_round=0`, `large_source_max_pages_per_round=2000`, `large_source_concurrent_video=1`, `large_source_concurrent_page=1`, `large_source_playurl_limit=1`, `large_source_playurl_duration_ms=1000`, `audio_only_use_low_qn_for_playurl=true`.
 
 - [x] **Step 3: Verify config tests**
 

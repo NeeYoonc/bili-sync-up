@@ -189,9 +189,9 @@
 		sourceDelaySeconds: 2,
 		submissionSourceDelaySeconds: 5,
 		dynamicApiDelayMultiplier: 1.5,
-		largeSourceDownloadThreshold: 500,
-		largeSourceMaxVideosPerRound: 10,
-		largeSourceMaxPagesPerRound: 50,
+		largeSourceDownloadThreshold: 1000,
+		largeSourceMaxVideosPerRound: 0,
+		largeSourceMaxPagesPerRound: 2000,
 		largeSourceConcurrentVideo: 1,
 		largeSourceConcurrentPage: 1,
 		largeSourcePlayurlLimit: 1,
@@ -334,9 +334,9 @@
 	let enableDynamicApiDelay = true;
 	let dynamicApiDelayMultiplier = 1.5;
 	let enableLargeSourceDownloadLimit = true;
-	let largeSourceDownloadThreshold = 500;
-	let largeSourceMaxVideosPerRound = 10;
-	let largeSourceMaxPagesPerRound = 50;
+	let largeSourceDownloadThreshold = 1000;
+	let largeSourceMaxVideosPerRound = 0;
+	let largeSourceMaxPagesPerRound = 2000;
 	let largeSourceConcurrentVideo = 1;
 	let largeSourceConcurrentPage = 1;
 	let largeSourcePlayurlLimit = 1;
@@ -3401,7 +3401,7 @@
 									bind:value={largeSourceDownloadThreshold}
 									min="1"
 									max="100000"
-									placeholder="500"
+									placeholder="1000"
 								/>
 								<p class="text-muted-foreground text-xs">源内视频数超过该值时启用下载阶段保护</p>
 							</div>
@@ -3414,7 +3414,7 @@
 									bind:value={largeSourceMaxVideosPerRound}
 									min="0"
 									max="10000"
-									placeholder="10"
+									placeholder="0"
 								/>
 								<p class="text-muted-foreground text-xs">0 表示不限制；未下载的视频下轮继续处理</p>
 							</div>
@@ -3427,7 +3427,7 @@
 									bind:value={largeSourceMaxPagesPerRound}
 									min="0"
 									max="100000"
-									placeholder="50"
+									placeholder="2000"
 								/>
 								<p class="text-muted-foreground text-xs">按整视频截断，避免半个多P视频被误标完成</p>
 							</div>

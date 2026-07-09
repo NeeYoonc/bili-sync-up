@@ -14637,18 +14637,18 @@ mod tests {
     fn test_large_source_download_policy_overrides_concurrency_and_playurl_rate() {
         let config = crate::config::SubmissionRiskControlConfig::default();
 
-        let normal = LargeSourceDownloadPolicy::from_config(&config, 500, 3, 2);
+        let normal = LargeSourceDownloadPolicy::from_config(&config, 1000, 3, 2);
         assert!(!normal.active);
         assert_eq!(normal.video_concurrency, 3);
         assert_eq!(normal.page_concurrency, 2);
         assert!(normal.playurl_rate_limit.is_none());
 
-        let large = LargeSourceDownloadPolicy::from_config(&config, 501, 3, 2);
+        let large = LargeSourceDownloadPolicy::from_config(&config, 1001, 3, 2);
         assert!(large.active);
         assert_eq!(large.video_concurrency, 1);
         assert_eq!(large.page_concurrency, 1);
-        assert_eq!(large.max_videos_per_round, Some(10));
-        assert_eq!(large.max_pages_per_round, Some(50));
+        assert_eq!(large.max_videos_per_round, None);
+        assert_eq!(large.max_pages_per_round, Some(2000));
         assert_eq!(
             large.playurl_rate_limit,
             Some(crate::bilibili::PlayurlRateLimitConfig {
