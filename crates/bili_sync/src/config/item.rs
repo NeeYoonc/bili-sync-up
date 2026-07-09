@@ -255,6 +255,33 @@ pub struct SubmissionRiskControlConfig {
     /// 动态API延迟倍数（相对基础请求延迟）
     #[serde(default = "default_dynamic_api_delay_multiplier")]
     pub dynamic_api_delay_multiplier: f64,
+    /// 是否启用大源下载阶段保护（限制取流并发、每轮下载预算和 playurl 频率）
+    #[serde(default = "default_enable_large_source_download_limit")]
+    pub enable_large_source_download_limit: bool,
+    /// 大源下载保护阈值（源内视频数超过该值时生效）
+    #[serde(default = "default_large_source_download_threshold")]
+    pub large_source_download_threshold: usize,
+    /// 大源每轮最多处理的视频数；0 表示不限制
+    #[serde(default = "default_large_source_max_videos_per_round")]
+    pub large_source_max_videos_per_round: usize,
+    /// 大源每轮最多处理的分页数；按整视频截断，0 表示不限制
+    #[serde(default = "default_large_source_max_pages_per_round")]
+    pub large_source_max_pages_per_round: usize,
+    /// 大源下载阶段视频并发
+    #[serde(default = "default_large_source_concurrent_video")]
+    pub large_source_concurrent_video: usize,
+    /// 大源下载阶段单视频分页并发
+    #[serde(default = "default_large_source_concurrent_page")]
+    pub large_source_concurrent_page: usize,
+    /// 大源 playurl 请求窗口内允许数量
+    #[serde(default = "default_large_source_playurl_limit")]
+    pub large_source_playurl_limit: usize,
+    /// 大源 playurl 请求窗口时长（毫秒）
+    #[serde(default = "default_large_source_playurl_duration_ms")]
+    pub large_source_playurl_duration_ms: u64,
+    /// 仅音频下载时使用低 qn 请求 playurl，避免从 8K 开始探测
+    #[serde(default = "default_audio_only_use_low_qn_for_playurl")]
+    pub audio_only_use_low_qn_for_playurl: bool,
 }
 
 /// UP主投稿源扫描优化配置
@@ -413,6 +440,42 @@ fn default_dynamic_api_delay_multiplier() -> f64 {
     1.5
 }
 
+fn default_enable_large_source_download_limit() -> bool {
+    true
+}
+
+fn default_large_source_download_threshold() -> usize {
+    1000
+}
+
+fn default_large_source_max_videos_per_round() -> usize {
+    0
+}
+
+fn default_large_source_max_pages_per_round() -> usize {
+    2000
+}
+
+fn default_large_source_concurrent_video() -> usize {
+    1
+}
+
+fn default_large_source_concurrent_page() -> usize {
+    1
+}
+
+fn default_large_source_playurl_limit() -> usize {
+    1
+}
+
+fn default_large_source_playurl_duration_ms() -> u64 {
+    1000
+}
+
+fn default_audio_only_use_low_qn_for_playurl() -> bool {
+    true
+}
+
 impl Default for SubmissionRiskControlConfig {
     fn default() -> Self {
         Self {
@@ -433,7 +496,60 @@ impl Default for SubmissionRiskControlConfig {
             submission_source_delay_seconds: default_submission_source_delay_seconds(),
             enable_dynamic_api_delay: default_enable_dynamic_api_delay(),
             dynamic_api_delay_multiplier: default_dynamic_api_delay_multiplier(),
+            enable_large_source_download_limit: default_enable_large_source_download_limit(),
+            large_source_download_threshold: default_large_source_download_threshold(),
+            large_source_max_videos_per_round: default_large_source_max_videos_per_round(),
+            large_source_max_pages_per_round: default_large_source_max_pages_per_round(),
+            large_source_concurrent_video: default_large_source_concurrent_video(),
+            large_source_concurrent_page: default_large_source_concurrent_page(),
+            large_source_playurl_limit: default_large_source_playurl_limit(),
+            large_source_playurl_duration_ms: default_large_source_playurl_duration_ms(),
+            audio_only_use_low_qn_for_playurl: default_audio_only_use_low_qn_for_playurl(),
         }
+    }
+}
+
+#[cfg(test)]
+mod submission_risk_control_config_tests {
+    use super::SubmissionRiskControlConfig;
+
+    #[test]
+    fn large_source_download_limit_defaults_are_safe_for_playurl() {
+        let config: SubmissionRiskControlConfig =
+            serde_json::from_str("{}").expect("empty risk-control config should use defaults");
+
+        assert!(config.enable_large_source_download_limit);
+        assert_eq!(config.large_source_download_threshold, 1000);
+        assert_eq!(config.large_source_max_videos_per_round, 0);
+        assert_eq!(config.large_source_max_pages_per_round, 2000);
+        assert_eq!(config.large_source_concurrent_video, 1);
+        assert_eq!(config.large_source_concurrent_page, 1);
+        assert_eq!(config.large_source_playurl_limit, 1);
+        assert_eq!(config.large_source_playurl_duration_ms, 1000);
+        assert!(config.audio_only_use_low_qn_for_playurl);
+    }
+
+    #[test]
+    fn large_source_download_limit_serializes_with_existing_risk_control_config() {
+        let config = SubmissionRiskControlConfig {
+            enable_large_source_download_limit: true,
+            large_source_download_threshold: 123,
+            large_source_max_videos_per_round: 7,
+            large_source_max_pages_per_round: 31,
+            large_source_concurrent_video: 2,
+            large_source_concurrent_page: 1,
+            large_source_playurl_limit: 1,
+            large_source_playurl_duration_ms: 1500,
+            audio_only_use_low_qn_for_playurl: true,
+            ..SubmissionRiskControlConfig::default()
+        };
+
+        let value = serde_json::to_value(config).expect("config should serialize");
+
+        assert_eq!(value["large_source_download_threshold"], 123);
+        assert_eq!(value["large_source_max_videos_per_round"], 7);
+        assert_eq!(value["large_source_playurl_duration_ms"], 1500);
+        assert_eq!(value["audio_only_use_low_qn_for_playurl"], true);
     }
 }
 

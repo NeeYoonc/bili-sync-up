@@ -189,6 +189,13 @@
 		sourceDelaySeconds: 2,
 		submissionSourceDelaySeconds: 5,
 		dynamicApiDelayMultiplier: 1.5,
+		largeSourceDownloadThreshold: 1000,
+		largeSourceMaxVideosPerRound: 0,
+		largeSourceMaxPagesPerRound: 2000,
+		largeSourceConcurrentVideo: 1,
+		largeSourceConcurrentPage: 1,
+		largeSourcePlayurlLimit: 1,
+		largeSourcePlayurlDurationMs: 1000,
 		aria2HealthCheckInterval: 300,
 		riskControlTimeout: 300,
 		autoSolveMaxRetries: 3,
@@ -326,6 +333,15 @@
 	let submissionSourceDelaySeconds = 5;
 	let enableDynamicApiDelay = true;
 	let dynamicApiDelayMultiplier = 1.5;
+	let enableLargeSourceDownloadLimit = true;
+	let largeSourceDownloadThreshold = 1000;
+	let largeSourceMaxVideosPerRound = 0;
+	let largeSourceMaxPagesPerRound = 2000;
+	let largeSourceConcurrentVideo = 1;
+	let largeSourceConcurrentPage = 1;
+	let largeSourcePlayurlLimit = 1;
+	let largeSourcePlayurlDurationMs = 1000;
+	let audioOnlyUseLowQnForPlayurl = true;
 
 	// aria2监控配置
 	let enableAria2HealthCheck = false;
@@ -682,6 +698,23 @@
 		submissionSourceDelaySeconds = config.submission_source_delay_seconds ?? 5;
 		enableDynamicApiDelay = config.enable_dynamic_api_delay ?? true;
 		dynamicApiDelayMultiplier = config.dynamic_api_delay_multiplier ?? 1.5;
+		enableLargeSourceDownloadLimit = config.enable_large_source_download_limit ?? true;
+		largeSourceDownloadThreshold =
+			config.large_source_download_threshold ?? DEFAULT_CONFIG_VALUES.largeSourceDownloadThreshold;
+		largeSourceMaxVideosPerRound =
+			config.large_source_max_videos_per_round ??
+			DEFAULT_CONFIG_VALUES.largeSourceMaxVideosPerRound;
+		largeSourceMaxPagesPerRound =
+			config.large_source_max_pages_per_round ?? DEFAULT_CONFIG_VALUES.largeSourceMaxPagesPerRound;
+		largeSourceConcurrentVideo =
+			config.large_source_concurrent_video ?? DEFAULT_CONFIG_VALUES.largeSourceConcurrentVideo;
+		largeSourceConcurrentPage =
+			config.large_source_concurrent_page ?? DEFAULT_CONFIG_VALUES.largeSourceConcurrentPage;
+		largeSourcePlayurlLimit =
+			config.large_source_playurl_limit ?? DEFAULT_CONFIG_VALUES.largeSourcePlayurlLimit;
+		largeSourcePlayurlDurationMs =
+			config.large_source_playurl_duration_ms ?? DEFAULT_CONFIG_VALUES.largeSourcePlayurlDurationMs;
+		audioOnlyUseLowQnForPlayurl = config.audio_only_use_low_qn_for_playurl ?? true;
 
 		// 风控验证配置
 		riskControlEnabled = config.risk_control?.enabled ?? false;
@@ -1145,6 +1178,36 @@
 				dynamicApiDelayMultiplier,
 				DEFAULT_CONFIG_VALUES.dynamicApiDelayMultiplier
 			),
+			enable_large_source_download_limit: enableLargeSourceDownloadLimit,
+			large_source_download_threshold: normalizeNumberInput(
+				largeSourceDownloadThreshold,
+				DEFAULT_CONFIG_VALUES.largeSourceDownloadThreshold
+			),
+			large_source_max_videos_per_round: normalizeNumberInput(
+				largeSourceMaxVideosPerRound,
+				DEFAULT_CONFIG_VALUES.largeSourceMaxVideosPerRound
+			),
+			large_source_max_pages_per_round: normalizeNumberInput(
+				largeSourceMaxPagesPerRound,
+				DEFAULT_CONFIG_VALUES.largeSourceMaxPagesPerRound
+			),
+			large_source_concurrent_video: normalizeNumberInput(
+				largeSourceConcurrentVideo,
+				DEFAULT_CONFIG_VALUES.largeSourceConcurrentVideo
+			),
+			large_source_concurrent_page: normalizeNumberInput(
+				largeSourceConcurrentPage,
+				DEFAULT_CONFIG_VALUES.largeSourceConcurrentPage
+			),
+			large_source_playurl_limit: normalizeNumberInput(
+				largeSourcePlayurlLimit,
+				DEFAULT_CONFIG_VALUES.largeSourcePlayurlLimit
+			),
+			large_source_playurl_duration_ms: normalizeNumberInput(
+				largeSourcePlayurlDurationMs,
+				DEFAULT_CONFIG_VALUES.largeSourcePlayurlDurationMs
+			),
+			audio_only_use_low_qn_for_playurl: audioOnlyUseLowQnForPlayurl,
 			// aria2监控配置
 			enable_aria2_health_check: enableAria2HealthCheck,
 			enable_aria2_auto_restart: enableAria2AutoRestart,
@@ -3306,6 +3369,144 @@
 							UP主投稿通常需要更长的延迟，因为其视频数量可能较多。设置为0可禁用延迟。
 						</p>
 					</div>
+				</div>
+			</div>
+
+			<!-- 大源下载限制配置 -->
+			<div
+				class="rounded-lg border border-red-200 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950/20"
+			>
+				<h3 class="mb-3 text-sm font-medium text-red-800 dark:text-red-200">🧯 大源下载限制配置</h3>
+				<div class="space-y-4">
+					<div class="flex items-center space-x-2">
+						<input
+							type="checkbox"
+							id="enable-large-source-download-limit"
+							bind:checked={enableLargeSourceDownloadLimit}
+							class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+						/>
+						<Label for="enable-large-source-download-limit" class="text-sm">启用大源下载保护</Label>
+						<p class="text-muted-foreground ml-2 text-xs">
+							针对超大投稿源限制下载并发、每轮下载数量和 playurl 请求频率
+						</p>
+					</div>
+
+					{#if enableLargeSourceDownloadLimit}
+						<div class="grid grid-cols-1 gap-4 {isMobile ? 'sm:grid-cols-1' : 'md:grid-cols-2'}">
+							<div class="space-y-2">
+								<Label for="large-source-download-threshold">大源判定阈值（视频数）</Label>
+								<Input
+									id="large-source-download-threshold"
+									type="number"
+									bind:value={largeSourceDownloadThreshold}
+									min="1"
+									max="100000"
+									placeholder="1000"
+								/>
+								<p class="text-muted-foreground text-xs">源内视频数超过该值时启用下载阶段保护</p>
+							</div>
+
+							<div class="space-y-2">
+								<Label for="large-source-max-videos-per-round">每轮最多下载视频数</Label>
+								<Input
+									id="large-source-max-videos-per-round"
+									type="number"
+									bind:value={largeSourceMaxVideosPerRound}
+									min="0"
+									max="10000"
+									placeholder="0"
+								/>
+								<p class="text-muted-foreground text-xs">0 表示不限制；未下载的视频下轮继续处理</p>
+							</div>
+
+							<div class="space-y-2">
+								<Label for="large-source-max-pages-per-round">每轮最多下载分页数</Label>
+								<Input
+									id="large-source-max-pages-per-round"
+									type="number"
+									bind:value={largeSourceMaxPagesPerRound}
+									min="0"
+									max="100000"
+									placeholder="2000"
+								/>
+								<p class="text-muted-foreground text-xs">按整视频截断，避免半个多P视频被误标完成</p>
+							</div>
+
+							<div class="space-y-2">
+								<Label for="large-source-concurrent-video">下载视频并发</Label>
+								<Input
+									id="large-source-concurrent-video"
+									type="number"
+									bind:value={largeSourceConcurrentVideo}
+									min="1"
+									max="32"
+									placeholder="1"
+								/>
+								<p class="text-muted-foreground text-xs">
+									大源下载阶段建议保持 1，降低连续取流压力
+								</p>
+							</div>
+
+							<div class="space-y-2">
+								<Label for="large-source-concurrent-page">单视频分页并发</Label>
+								<Input
+									id="large-source-concurrent-page"
+									type="number"
+									bind:value={largeSourceConcurrentPage}
+									min="1"
+									max="32"
+									placeholder="1"
+								/>
+								<p class="text-muted-foreground text-xs">控制同一视频多P分页并发下载数量</p>
+							</div>
+
+							<div class="space-y-2">
+								<Label for="large-source-playurl-limit">playurl 请求数</Label>
+								<Input
+									id="large-source-playurl-limit"
+									type="number"
+									bind:value={largeSourcePlayurlLimit}
+									min="1"
+									max="100"
+									placeholder="1"
+								/>
+								<p class="text-muted-foreground text-xs">每个限制窗口内允许的取流请求数</p>
+							</div>
+
+							<div class="space-y-2">
+								<Label for="large-source-playurl-duration-ms">playurl 限制窗口（毫秒）</Label>
+								<Input
+									id="large-source-playurl-duration-ms"
+									type="number"
+									bind:value={largeSourcePlayurlDurationMs}
+									min="1"
+									max="60000"
+									placeholder="1000"
+								/>
+								<p class="text-muted-foreground text-xs">默认 1000 毫秒，即每秒最多 1 次取流请求</p>
+							</div>
+
+							<div class="flex items-center space-x-2">
+								<input
+									type="checkbox"
+									id="audio-only-use-low-qn-for-playurl"
+									bind:checked={audioOnlyUseLowQnForPlayurl}
+									class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+								/>
+								<Label for="audio-only-use-low-qn-for-playurl" class="text-sm"
+									>仅音频下载使用低清晰度取流</Label
+								>
+							</div>
+						</div>
+
+						<div class="rounded-lg bg-red-100 p-3 dark:bg-red-900/20">
+							<p class="text-sm text-red-700 dark:text-red-300">
+								<strong>说明：</strong
+								>大源保护只限制下载阶段；已下载成功的视频会正常更新状态，未进入本轮预算的视频不会误写断点，下次扫描会继续从未完成部分处理。
+								默认 playurl 限速为 1 次/秒。
+							</p>
+						</div>
+					{/if}
 				</div>
 			</div>
 

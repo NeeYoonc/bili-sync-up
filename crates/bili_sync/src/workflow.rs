@@ -69,6 +69,7 @@ struct SubmissionUpperIntroCacheEntry {
 const SUBMISSION_COLLECTION_META_CACHE_TTL_SECS: i64 = 30 * 60;
 const SUBMISSION_UPPER_INTRO_CACHE_TTL_SECS: i64 = 12 * 60 * 60;
 const SUBMISSION_MEMBERSHIP_QUERY_CHUNK_SIZE: usize = 300;
+const RISK_CONTROL_RESET_QUERY_CHUNK_SIZE: usize = 300;
 const ROOT_ALIAS_ASSET_FAILURE_RETRY_SECS: i64 = 10 * 60;
 const ROOT_ALIAS_ASSET_FORCE_REFRESH_DEBOUNCE_SECS: i64 = 5 * 60;
 
@@ -300,7 +301,7 @@ use crate::bilibili::{
     SubtitleDownloadOptions, Video, VideoChapter, VideoInfo,
 };
 use crate::config::ARGS;
-use crate::error::{DownloadAbortError, ExecutionStatus, ProcessPageError};
+use crate::error::{DownloadAbortError, DownloadAbortReason, ExecutionStatus, ProcessPageError};
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
@@ -313,6 +314,102 @@ use crate::utils::scan_collector::create_new_video_info;
 use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX};
 
 const DB_LOCK_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
+const DOWNLOAD_RISK_CONTROL_RESUME_KEY: &str = "download_risk_control_resume_sources";
+const DOWNLOAD_RISK_CONTROL_MAX_COOLDOWN_SECS: u64 = 24 * 60 * 60;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct DownloadRiskControlResumeSources {
+    #[serde(default)]
+    sources: HashSet<String>,
+    #[serde(default)]
+    cooldown_until: HashMap<String, i64>,
+    #[serde(default)]
+    risk_counts: HashMap<String, u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RiskControlResetSummary {
+    resetted_videos: usize,
+    resetted_pages: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LargeSourceDownloadPolicy {
+    active: bool,
+    video_concurrency: usize,
+    page_concurrency: usize,
+    max_videos_per_round: Option<usize>,
+    max_pages_per_round: Option<usize>,
+    playurl_rate_limit: Option<crate::bilibili::PlayurlRateLimitConfig>,
+}
+
+impl LargeSourceDownloadPolicy {
+    fn from_config(
+        config: &crate::config::SubmissionRiskControlConfig,
+        source_video_count: usize,
+        default_video_concurrency: usize,
+        default_page_concurrency: usize,
+    ) -> Self {
+        let active =
+            config.enable_large_source_download_limit && source_video_count > config.large_source_download_threshold;
+
+        if !active {
+            return Self {
+                active: false,
+                video_concurrency: default_video_concurrency.max(1),
+                page_concurrency: default_page_concurrency.max(1),
+                max_videos_per_round: None,
+                max_pages_per_round: None,
+                playurl_rate_limit: None,
+            };
+        }
+
+        Self {
+            active: true,
+            video_concurrency: config.large_source_concurrent_video.max(1),
+            page_concurrency: config.large_source_concurrent_page.max(1),
+            max_videos_per_round: non_zero_limit(config.large_source_max_videos_per_round),
+            max_pages_per_round: non_zero_limit(config.large_source_max_pages_per_round),
+            playurl_rate_limit: Some(crate::bilibili::PlayurlRateLimitConfig {
+                limit: config.large_source_playurl_limit.max(1),
+                duration_ms: config.large_source_playurl_duration_ms.max(1),
+            }),
+        }
+    }
+}
+
+fn non_zero_limit(value: usize) -> Option<usize> {
+    (value > 0).then_some(value)
+}
+
+fn limit_large_source_download_queue<T, U>(
+    queue: Vec<(T, Vec<U>)>,
+    max_videos: Option<usize>,
+    max_pages: Option<usize>,
+) -> Vec<(T, Vec<U>)> {
+    if max_videos.is_none() && max_pages.is_none() {
+        return queue;
+    }
+
+    let mut selected = Vec::new();
+    let mut selected_pages = 0usize;
+
+    for (video, pages) in queue {
+        if max_videos.is_some_and(|limit| selected.len() >= limit) {
+            break;
+        }
+
+        let page_count = pages.len();
+        if max_pages.is_some_and(|limit| !selected.is_empty() && selected_pages.saturating_add(page_count) > limit) {
+            break;
+        }
+
+        selected_pages = selected_pages.saturating_add(page_count);
+        selected.push((video, pages));
+    }
+
+    selected
+}
 
 fn is_bili_request_failed_with_codes(err: &anyhow::Error, codes: &[i64]) -> bool {
     err.chain().any(|cause| {
@@ -345,6 +442,258 @@ fn inaccessible_reason_from_error(err: &anyhow::Error) -> &'static str {
 fn is_database_locked_error(err: &anyhow::Error) -> bool {
     let err_text = format!("{:#}", err);
     err_text.contains("database is locked") || err_text.contains("Database is locked")
+}
+
+fn download_abort_reason_from_error(err: &anyhow::Error) -> Option<DownloadAbortReason> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<DownloadAbortError>().map(|err| err.reason()))
+}
+
+fn download_abort_from_risk_error(err: &anyhow::Error) -> DownloadAbortError {
+    let requires_verification = err.chain().any(|cause| {
+        cause
+            .downcast_ref::<BiliError>()
+            .is_some_and(|err| matches!(err, BiliError::RiskControlVerificationRequired(_)))
+    });
+
+    if requires_verification {
+        DownloadAbortError::verification_required()
+    } else {
+        DownloadAbortError::rate_limited()
+    }
+}
+
+fn download_abort_from_classified_risk_control(classified_error: &crate::error::ClassifiedError) -> DownloadAbortError {
+    if classified_error.should_ignore {
+        DownloadAbortError::verification_required()
+    } else {
+        DownloadAbortError::rate_limited()
+    }
+}
+
+fn download_risk_control_resume_source_key(video_source: &VideoSourceEnum) -> String {
+    match video_source {
+        VideoSourceEnum::Favorite(source) => format!("favorite:{}", source.id),
+        VideoSourceEnum::Collection(source) => format!("collection:{}", source.id),
+        VideoSourceEnum::Submission(source) => format!("submission:{}", source.id),
+        VideoSourceEnum::WatchLater(source) => format!("watch_later:{}", source.id),
+        VideoSourceEnum::BangumiSource(source) => format!("bangumi:{}", source.id),
+    }
+}
+
+fn download_risk_control_resume_cooldown_secs(risk_count: u32) -> i64 {
+    let base_interval = crate::config::reload_config().interval.max(60);
+    let multipliers = [3_u64, 9, 27, 72];
+    let idx = risk_count.saturating_sub(1) as usize;
+    let multiplier = multipliers
+        .get(idx)
+        .copied()
+        .unwrap_or_else(|| *multipliers.last().expect("cooldown multipliers should not be empty"));
+
+    base_interval
+        .saturating_mul(multiplier)
+        .min(DOWNLOAD_RISK_CONTROL_MAX_COOLDOWN_SECS) as i64
+}
+
+async fn load_download_risk_control_resume_sources(
+    connection: &DatabaseConnection,
+) -> Result<DownloadRiskControlResumeSources> {
+    use bili_sync_entity::entities::config_item;
+
+    let item = config_item::Entity::find()
+        .filter(config_item::Column::KeyName.eq(DOWNLOAD_RISK_CONTROL_RESUME_KEY))
+        .one(connection)
+        .await?;
+
+    match item {
+        Some(item) => match serde_json::from_str(&item.value_json) {
+            Ok(resume_sources) => Ok(resume_sources),
+            Err(err) => {
+                warn!("解析下载风控断点失败，将忽略该断点配置: {}", err);
+                Ok(DownloadRiskControlResumeSources::default())
+            }
+        },
+        None => Ok(DownloadRiskControlResumeSources::default()),
+    }
+}
+
+async fn save_download_risk_control_resume_sources(
+    connection: &DatabaseConnection,
+    resume_sources: &DownloadRiskControlResumeSources,
+) -> Result<()> {
+    use bili_sync_entity::entities::config_item;
+
+    let value_json = serde_json::to_string(resume_sources)?;
+    let existing = config_item::Entity::find()
+        .filter(config_item::Column::KeyName.eq(DOWNLOAD_RISK_CONTROL_RESUME_KEY))
+        .one(connection)
+        .await?;
+
+    if let Some(existing_item) = existing {
+        let mut active_model: config_item::ActiveModel = existing_item.into();
+        active_model.value_json = Set(value_json);
+        active_model.updated_at = Set(now_standard_string());
+        active_model.update(connection).await?;
+    } else {
+        config_item::ActiveModel {
+            key_name: Set(DOWNLOAD_RISK_CONTROL_RESUME_KEY.to_string()),
+            value_json: Set(value_json),
+            updated_at: Set(now_standard_string()),
+        }
+        .insert(connection)
+        .await?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+async fn has_download_risk_control_resume_mark(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    Ok(resume_sources.sources.contains(&source_key))
+}
+
+async fn mark_download_risk_control_resume(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<()> {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let mut resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    let risk_count = resume_sources
+        .risk_counts
+        .get(&source_key)
+        .copied()
+        .unwrap_or_default()
+        .saturating_add(1);
+    let cooldown_until =
+        current_unix_timestamp_secs().saturating_add(download_risk_control_resume_cooldown_secs(risk_count));
+
+    resume_sources.sources.insert(source_key.clone());
+    resume_sources.risk_counts.insert(source_key.clone(), risk_count);
+    resume_sources.cooldown_until.insert(source_key, cooldown_until);
+    save_download_risk_control_resume_sources(connection, &resume_sources).await?;
+    Ok(())
+}
+
+async fn clear_download_risk_control_resume(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<()> {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let mut resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    let removed = resume_sources.sources.remove(&source_key)
+        | resume_sources.cooldown_until.remove(&source_key).is_some()
+        | resume_sources.risk_counts.remove(&source_key).is_some();
+    if removed {
+        save_download_risk_control_resume_sources(connection, &resume_sources).await?;
+    }
+    Ok(())
+}
+
+async fn has_local_pending_downloads_for_source(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    let has_unfilled = !filter_unfilled_videos(video_source.filter_expr(), connection)
+        .await?
+        .is_empty();
+    let has_unhandled = !filter_unhandled_video_pages(video_source.filter_expr(), connection)
+        .await?
+        .is_empty();
+    let has_failed = !get_failed_videos_in_current_cycle(video_source.filter_expr(), connection)
+        .await?
+        .is_empty();
+
+    Ok(has_unfilled || has_unhandled || has_failed)
+}
+
+async fn should_skip_download_for_download_risk_control_resume(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    if !resume_sources.sources.contains(&source_key) {
+        return Ok(false);
+    }
+
+    if !has_local_pending_downloads_for_source(video_source, connection).await? {
+        clear_download_risk_control_resume(video_source, connection).await?;
+        info!(
+            "{}《{}》下载风控断点已无本地待处理任务，清除断点并恢复正常扫描",
+            video_source.source_type_display(),
+            video_source.source_name_display()
+        );
+        return Ok(false);
+    }
+
+    let now = current_unix_timestamp_secs();
+    let Some(cooldown_until) = resume_sources.cooldown_until.get(&source_key).copied() else {
+        return Ok(false);
+    };
+
+    if cooldown_until <= now {
+        return Ok(false);
+    }
+
+    info!(
+        "{}《{}》命中下载风控冷却，剩余 {} 秒，本轮跳过下载阶段",
+        video_source.source_type_display(),
+        video_source.source_name_display(),
+        cooldown_until.saturating_sub(now)
+    );
+    Ok(true)
+}
+
+async fn should_skip_refresh_for_download_risk_control_resume(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    let source_key = download_risk_control_resume_source_key(video_source);
+    let resume_sources = load_download_risk_control_resume_sources(connection).await?;
+    if !resume_sources.sources.contains(&source_key) {
+        return Ok(false);
+    }
+
+    if !has_local_pending_downloads_for_source(video_source, connection).await? {
+        clear_download_risk_control_resume(video_source, connection).await?;
+        info!(
+            "{}《{}》下载风控断点已无本地待处理任务，清除断点并恢复正常扫描",
+            video_source.source_type_display(),
+            video_source.source_name_display()
+        );
+        return Ok(false);
+    }
+
+    let now = current_unix_timestamp_secs();
+    match resume_sources.cooldown_until.get(&source_key).copied() {
+        Some(cooldown_until) if cooldown_until > now => {
+            info!(
+                "{}《{}》下载风控冷却仍未结束，本轮仍恢复远端列表刷新，下载阶段将跳过本地续传",
+                video_source.source_type_display(),
+                video_source.source_name_display()
+            );
+        }
+        Some(_) => {
+            info!(
+                "{}《{}》下载风控冷却已结束，本轮恢复远端列表刷新，随后继续处理本地未完成任务",
+                video_source.source_type_display(),
+                video_source.source_name_display()
+            );
+        }
+        None => {
+            info!(
+                "{}《{}》检测到旧格式下载风控断点，本轮恢复远端列表刷新并保留断点",
+                video_source.source_type_display(),
+                video_source.source_name_display()
+            );
+        }
+    }
+    Ok(false)
 }
 
 async fn update_videos_model_with_lock_retry(
@@ -845,8 +1194,13 @@ pub async fn process_video_source(
             }
         };
 
+    let resume_download_without_refresh =
+        !ARGS.scan_only && should_skip_refresh_for_download_risk_control_resume(&video_source, connection).await?;
+
     // 从视频流中获取新视频的简要信息，写入数据库，并获取新增视频数量和信息
-    let (new_video_count, new_videos) =
+    let (new_video_count, new_videos) = if resume_download_without_refresh {
+        (0, Vec::new())
+    } else {
         match refresh_video_source(&video_source, video_streams, connection, token.clone(), bili_client).await {
             Ok(result) => result,
             Err(e) => {
@@ -860,11 +1214,18 @@ pub async fn process_video_source(
                     return Err(e);
                 }
             }
-        };
+        }
+    };
 
     // Guard: skip further steps if paused/cancelled or no new videos in this round
     if crate::task::TASK_CONTROLLER.is_paused() || token.is_cancelled() {
         info!("任务已暂停/取消，跳过详情与下载阶段");
+        return Ok((new_video_count, new_videos));
+    }
+
+    let skip_download_for_risk_cooldown =
+        !ARGS.scan_only && should_skip_download_for_download_risk_control_resume(&video_source, connection).await?;
+    if skip_download_for_risk_cooldown {
         return Ok((new_video_count, new_videos));
     }
 
@@ -924,8 +1285,11 @@ pub async fn process_video_source(
     // 单独请求视频详情接口，获取视频的详情信息与所有的分页，写入数据库
     if let Err(e) = fetch_video_details(bili_client, &video_source, connection, token.clone()).await {
         // 新增：检查是否为风控导致的下载中止
-        if e.downcast_ref::<DownloadAbortError>().is_some() {
-            error!("获取视频详情时触发风控，已终止当前视频源的处理，停止所有后续扫描");
+        if let Some(reason) = download_abort_reason_from_error(&e) {
+            error!(
+                "获取视频详情时触发风控（原因：{}），已终止当前视频源的处理，停止所有后续扫描",
+                reason
+            );
             // 风控时应该返回错误，中断整个扫描循环，而不是继续处理下一个视频源
             return Err(e);
         }
@@ -962,6 +1326,12 @@ pub async fn process_video_source(
         {
             warn!("循环内重试失败的视频时出错: {:#}", e);
             // 重试失败不中断主流程，继续执行
+        }
+
+        if !token.is_cancelled() {
+            if let Err(err) = clear_download_risk_control_resume(&video_source, connection).await {
+                warn!("清除下载风控断点失败: {:#}", err);
+            }
         }
 
         // 批量 AI 重命名：在所有视频下载完成后统一执行
@@ -1663,7 +2033,7 @@ pub async fn fetch_video_details(
                                     &video_model.bvid, &video_model.name, classified_error.message
                                 );
                                 // 返回一个特定的错误来中止整个批处理
-                                return Err(anyhow!(DownloadAbortError()));
+                                return Err(anyhow!(download_abort_from_risk_error(&e)));
                             }
 
                             error!(
@@ -2046,7 +2416,7 @@ pub async fn fetch_video_details(
 
                 let error_msg = e.to_string();
 
-                if e.downcast_ref::<DownloadAbortError>().is_some() || error_msg.contains("Download cancelled") {
+                if download_abort_reason_from_error(&e).is_some() || error_msg.contains("Download cancelled") {
                     token.cancel();
                     // drain the rest of the tasks
                     while stream.next().await.is_some() {}
@@ -2173,8 +2543,52 @@ pub async fn download_unprocessed_videos(
     }
     video_source.log_download_video_start();
     let current_config = crate::config::reload_config();
-    let semaphore = Semaphore::new(current_config.concurrent_limit.video);
-    let unhandled_videos_pages = filter_unhandled_video_pages(video_source.filter_expr(), connection).await?;
+    let source_video_count = get_video_count_for_source(video_source, connection).await?;
+    let large_source_policy = LargeSourceDownloadPolicy::from_config(
+        &current_config.submission_risk_control,
+        source_video_count,
+        current_config.concurrent_limit.video,
+        current_config.concurrent_limit.page,
+    );
+    let semaphore = Semaphore::new(large_source_policy.video_concurrency);
+    let mut unhandled_videos_pages = filter_unhandled_video_pages(video_source.filter_expr(), connection).await?;
+    let original_unhandled_video_count = unhandled_videos_pages.len();
+    let original_unhandled_page_count = unhandled_videos_pages
+        .iter()
+        .map(|(_, pages_model)| pages_model.len())
+        .sum::<usize>();
+    if large_source_policy.active {
+        unhandled_videos_pages = limit_large_source_download_queue(
+            unhandled_videos_pages,
+            large_source_policy.max_videos_per_round,
+            large_source_policy.max_pages_per_round,
+        );
+        let limited_page_count = unhandled_videos_pages
+            .iter()
+            .map(|(_, pages_model)| pages_model.len())
+            .sum::<usize>();
+        info!(
+            "{}「{}」启用大源下载保护：源内视频 {} 个，本轮待处理 {}→{} 个视频、{}→{} 个分页，下载并发 video/page={}/{}, playurl 限速={:?}",
+            video_source.source_type_display(),
+            video_source.source_name_display(),
+            source_video_count,
+            original_unhandled_video_count,
+            unhandled_videos_pages.len(),
+            original_unhandled_page_count,
+            limited_page_count,
+            large_source_policy.video_concurrency,
+            large_source_policy.page_concurrency,
+            large_source_policy.playurl_rate_limit
+        );
+    }
+    let risk_control_scope_video_ids = unhandled_videos_pages
+        .iter()
+        .map(|(video_model, _)| video_model.id)
+        .collect::<Vec<_>>();
+    let risk_control_scope_page_ids = unhandled_videos_pages
+        .iter()
+        .flat_map(|(_, pages_model)| pages_model.iter().map(|page_model| page_model.id))
+        .collect::<Vec<_>>();
 
     // up_seasonal：先基于“全部视频”统一分配合集/系列/多P季号，避免下载并发阶段按处理顺序漂移。
     if !unhandled_videos_pages.is_empty() && current_config.collection_folder_mode.as_ref() == "up_seasonal" {
@@ -2237,123 +2651,149 @@ pub async fn download_unprocessed_videos(
                 &semaphore,
                 downloader,
                 should_download_upper,
+                large_source_policy.page_concurrency,
                 &chapter_episode_plans,
                 token.clone(),
             )
         })
         .collect::<FuturesUnordered<_>>();
-    let mut download_aborted = false;
+    let mut download_abort_reason: Option<DownloadAbortReason> = None;
     let mut succeeded_count = 0usize;
     let mut failed_count = 0usize;
     let mut skipped_count = 0usize;
     let mut stream = tasks;
     // 使用循环和select来处理任务，以便在检测到取消信号时立即停止
-    while let Some(res) = stream.next().await {
-        match res {
-            Ok(model) => {
-                if download_aborted {
-                    continue;
-                }
-                // 只有当 video_status 的 completed 标记位为 true 时，才算真正下载完成。
-                // 避免“用户暂停/取消时，任务被误判为成功完成”。
-                let video_name = match &model.name {
-                    sea_orm::ActiveValue::Set(v) | sea_orm::ActiveValue::Unchanged(v) => v.clone(),
-                    _ => "未知".to_string(),
-                };
-                let completed = match &model.download_status {
-                    sea_orm::ActiveValue::Set(v) | sea_orm::ActiveValue::Unchanged(v) => {
-                        VideoStatus::from(*v).get_completed()
+    crate::bilibili::with_playurl_rate_limit(large_source_policy.playurl_rate_limit, async {
+        while let Some(res) = stream.next().await {
+            match res {
+                Ok(model) => {
+                    if download_abort_reason.is_some() {
+                        continue;
                     }
-                    _ => false,
-                };
-                if completed {
-                    succeeded_count += 1;
-                } else {
-                    skipped_count += 1;
-                    info!("下载任务未完成（可能因用户暂停/取消），不计入成功: {}", video_name);
-                }
-                // 任务成功完成，更新数据库
-                if let Err(db_err) = update_videos_model_with_lock_retry(vec![model.clone()], connection).await {
-                    error!("更新数据库失败: {:#}", db_err);
-
-                    // 发送数据库错误通知（异步执行，不阻塞主流程）
-                    use sea_orm::ActiveValue;
-                    let video_bvid = match &model.bvid {
-                        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
+                    // 只有当 video_status 的 completed 标记位为 true 时，才算真正下载完成。
+                    // 避免“用户暂停/取消时，任务被误判为成功完成”。
+                    let video_name = match &model.name {
+                        sea_orm::ActiveValue::Set(v) | sea_orm::ActiveValue::Unchanged(v) => v.clone(),
                         _ => "未知".to_string(),
                     };
-                    let error_msg = format!("{:#}", db_err);
-                    tokio::spawn(async move {
-                        use crate::utils::notification::send_error_notification;
-                        if let Err(e) = send_error_notification(
-                            "数据库错误",
-                            &error_msg,
-                            Some(&format!("视频: {}\nBVID: {}", video_name, video_bvid)),
-                        )
-                        .await
-                        {
-                            tracing::warn!("发送数据库错误通知失败: {}", e);
+                    let completed = match &model.download_status {
+                        sea_orm::ActiveValue::Set(v) | sea_orm::ActiveValue::Unchanged(v) => {
+                            VideoStatus::from(*v).get_completed()
                         }
-                    });
-                }
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-
-                // 调试：输出完整的错误信息
-                debug!("检查下载错误消息: '{}'", error_msg);
-                debug!("完整错误链: {:#}", e);
-                debug!("是否包含'任务已暂停': {}", error_msg.contains("任务已暂停"));
-                debug!("是否包含'停止下载': {}", error_msg.contains("停止下载"));
-                debug!(
-                    "是否包含'Download cancelled': {}",
-                    error_msg.contains("Download cancelled")
-                );
-
-                // 检查是否是暂停导致的失败，只有在任务暂停时才将 Download cancelled 视为暂停错误
-                if error_msg.contains("任务已暂停")
-                    || error_msg.contains("停止下载")
-                    || error_msg.contains("用户主动暂停任务")
-                    || (error_msg.contains("Download cancelled") && crate::task::TASK_CONTROLLER.is_paused())
-                {
-                    skipped_count += 1;
-                    info!("下载任务因用户暂停而终止: {}", error_msg);
-                    continue; // 跳过暂停相关的错误，不触发风控
-                }
-
-                if e.downcast_ref::<DownloadAbortError>().is_some() || error_msg.contains("Download cancelled") {
-                    if !download_aborted {
-                        debug!("检测到风控或取消信号，开始中止所有下载任务");
-                        token.cancel(); // 立即取消所有其他正在运行的任务
-                        download_aborted = true;
-                    }
-                } else {
-                    // 检查是否为暂停相关错误
-                    let error_msg = e.to_string();
-                    if error_msg.contains("用户主动暂停任务") || error_msg.contains("任务已暂停") {
-                        skipped_count += 1;
-                        info!("下载任务因用户暂停而终止");
+                        _ => false,
+                    };
+                    if completed {
+                        succeeded_count += 1;
                     } else {
-                        failed_count += 1;
-                        // 任务返回了非中止的错误
-                        error!("下载任务失败: {:#}", e);
+                        skipped_count += 1;
+                        info!("下载任务未完成（可能因用户暂停/取消），不计入成功: {}", video_name);
+                    }
+                    // 任务成功完成，更新数据库
+                    if let Err(db_err) = update_videos_model_with_lock_retry(vec![model.clone()], connection).await {
+                        error!("更新数据库失败: {:#}", db_err);
+
+                        // 发送数据库错误通知（异步执行，不阻塞主流程）
+                        use sea_orm::ActiveValue;
+                        let video_bvid = match &model.bvid {
+                            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
+                            _ => "未知".to_string(),
+                        };
+                        let error_msg = format!("{:#}", db_err);
+                        tokio::spawn(async move {
+                            use crate::utils::notification::send_error_notification;
+                            if let Err(e) = send_error_notification(
+                                "数据库错误",
+                                &error_msg,
+                                Some(&format!("视频: {}\nBVID: {}", video_name, video_bvid)),
+                            )
+                            .await
+                            {
+                                tracing::warn!("发送数据库错误通知失败: {}", e);
+                            }
+                        });
+                    }
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+
+                    // 调试：输出完整的错误信息
+                    debug!("检查下载错误消息: '{}'", error_msg);
+                    debug!("完整错误链: {:#}", e);
+                    debug!("是否包含'任务已暂停': {}", error_msg.contains("任务已暂停"));
+                    debug!("是否包含'停止下载': {}", error_msg.contains("停止下载"));
+                    debug!(
+                        "是否包含'Download cancelled': {}",
+                        error_msg.contains("Download cancelled")
+                    );
+
+                    // 检查是否是暂停导致的失败，只有在任务暂停时才将 Download cancelled 视为暂停错误
+                    if error_msg.contains("任务已暂停")
+                        || error_msg.contains("停止下载")
+                        || error_msg.contains("用户主动暂停任务")
+                        || (error_msg.contains("Download cancelled") && crate::task::TASK_CONTROLLER.is_paused())
+                    {
+                        skipped_count += 1;
+                        info!("下载任务因用户暂停而终止: {}", error_msg);
+                        continue; // 跳过暂停相关的错误，不触发风控
+                    }
+
+                    if let Some(reason) = download_abort_reason_from_error(&e) {
+                        if download_abort_reason.is_none() {
+                            debug!("检测到下载中止信号（原因：{}），开始中止所有下载任务", reason);
+                            token.cancel(); // 立即取消所有其他正在运行的任务
+                            download_abort_reason = Some(reason);
+                        }
+                    } else if error_msg.contains("Download cancelled") && download_abort_reason.is_some() {
+                        debug!("收到风控中止后的级联取消信号，忽略: {}", error_msg);
+                    } else {
+                        // 检查是否为暂停相关错误
+                        let error_msg = e.to_string();
+                        if error_msg.contains("用户主动暂停任务") || error_msg.contains("任务已暂停") {
+                            skipped_count += 1;
+                            info!("下载任务因用户暂停而终止");
+                        } else {
+                            failed_count += 1;
+                            // 任务返回了非中止的错误
+                            error!("下载任务失败: {:#}", e);
+                        }
                     }
                 }
             }
         }
-    }
+    })
+    .await;
 
-    if download_aborted {
-        error!("下载触发风控，已终止所有任务，停止所有后续扫描");
+    if let Some(reason) = download_abort_reason {
+        error!("下载阶段中止，原因：{}，已终止所有任务，停止所有后续扫描", reason);
 
-        // 自动重置风控导致的失败任务
-        if let Err(reset_err) = auto_reset_risk_control_failures(connection).await {
-            error!("自动重置风控失败任务时出错: {:#}", reset_err);
+        if matches!(reason, DownloadAbortReason::RateLimited) {
+            if let Err(mark_err) = mark_download_risk_control_resume(video_source, connection).await {
+                error!("保存下载风控断点失败: {:#}", mark_err);
+            }
+
+            match auto_reset_risk_control_failures_for_scope(
+                connection,
+                &risk_control_scope_video_ids,
+                &risk_control_scope_page_ids,
+            )
+            .await
+            {
+                Ok(summary) => info!(
+                    "风控自动范围复位完成：重置了当前源 {} 个视频和 {} 个页面的未完成任务状态",
+                    summary.resetted_videos, summary.resetted_pages
+                ),
+                Err(reset_err) => error!("自动范围复位风控失败任务时出错: {:#}", reset_err),
+            }
+        } else {
+            warn!("下载阶段需要风控验证，本轮不写入下载冷却断点，也不自动复位本地任务状态");
         }
 
         video_source.log_download_video_end();
         // 风控时返回错误，中断整个扫描循环
-        bail!(DownloadAbortError());
+        bail!(match reason {
+            DownloadAbortReason::RateLimited => DownloadAbortError::rate_limited(),
+            DownloadAbortReason::VerificationRequired => DownloadAbortError::verification_required(),
+        });
     }
     video_source.log_download_video_end();
 
@@ -2872,17 +3312,54 @@ pub async fn retry_failed_videos_once(
         info!("任务已暂停/取消，跳过失败视频重试阶段");
         return Ok(());
     }
-    let failed_videos_pages = get_failed_videos_in_current_cycle(video_source.filter_expr(), connection).await?;
+    let current_config = crate::config::reload_config();
+    let source_video_count = get_video_count_for_source(video_source, connection).await?;
+    let large_source_policy = LargeSourceDownloadPolicy::from_config(
+        &current_config.submission_risk_control,
+        source_video_count,
+        current_config.concurrent_limit.video,
+        current_config.concurrent_limit.page,
+    );
+    let mut failed_videos_pages = get_failed_videos_in_current_cycle(video_source.filter_expr(), connection).await?;
 
     if failed_videos_pages.is_empty() {
         debug!("当前循环中没有失败的视频需要重试");
         return Ok(());
     }
 
+    let original_failed_video_count = failed_videos_pages.len();
+    let original_failed_page_count = failed_videos_pages
+        .iter()
+        .map(|(_, pages_model)| pages_model.len())
+        .sum::<usize>();
+    if large_source_policy.active {
+        failed_videos_pages = limit_large_source_download_queue(
+            failed_videos_pages,
+            large_source_policy.max_videos_per_round,
+            large_source_policy.max_pages_per_round,
+        );
+        let limited_page_count = failed_videos_pages
+            .iter()
+            .map(|(_, pages_model)| pages_model.len())
+            .sum::<usize>();
+        info!(
+            "{}「{}」失败重试启用大源下载保护：源内视频 {} 个，本轮重试 {}→{} 个视频、{}→{} 个分页，下载并发 video/page={}/{}, playurl 限速={:?}",
+            video_source.source_type_display(),
+            video_source.source_name_display(),
+            source_video_count,
+            original_failed_video_count,
+            failed_videos_pages.len(),
+            original_failed_page_count,
+            limited_page_count,
+            large_source_policy.video_concurrency,
+            large_source_policy.page_concurrency,
+            large_source_policy.playurl_rate_limit
+        );
+    }
+
     info!("开始重试当前循环中的 {} 个失败视频", failed_videos_pages.len());
 
-    let current_config = crate::config::reload_config();
-    let semaphore = Semaphore::new(current_config.concurrent_limit.video);
+    let semaphore = Semaphore::new(large_source_policy.video_concurrency);
     let chapter_episode_plans = preallocate_chapter_episode_plans(
         bili_client,
         video_source,
@@ -2923,6 +3400,7 @@ pub async fn retry_failed_videos_once(
                 &semaphore,
                 downloader,
                 should_download_upper,
+                large_source_policy.page_concurrency,
                 &chapter_episode_plans,
                 token.clone(),
             )
@@ -2933,70 +3411,73 @@ pub async fn retry_failed_videos_once(
     let mut stream = tasks;
     let mut retry_success_count = 0;
 
-    while let Some(res) = stream.next().await {
-        match res {
-            Ok(model) => {
-                if download_aborted {
-                    continue;
-                }
-                retry_success_count += 1;
-                if let Err(db_err) = update_videos_model_with_lock_retry(vec![model.clone()], connection).await {
-                    error!("重试后更新数据库失败: {:#}", db_err);
-
-                    // 发送数据库错误通知（异步执行，不阻塞主流程）
-                    use sea_orm::ActiveValue;
-                    let video_name = match &model.name {
-                        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
-                        _ => "未知".to_string(),
-                    };
-                    let video_bvid = match &model.bvid {
-                        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
-                        _ => "未知".to_string(),
-                    };
-                    let error_msg = format!("{:#}", db_err);
-                    tokio::spawn(async move {
-                        use crate::utils::notification::send_error_notification;
-                        if let Err(e) = send_error_notification(
-                            "数据库错误",
-                            &error_msg,
-                            Some(&format!(
-                                "视频: {}\nBVID: {}\n（重试后更新失败）",
-                                video_name, video_bvid
-                            )),
-                        )
-                        .await
-                        {
-                            tracing::warn!("发送数据库错误通知失败: {}", e);
-                        }
-                    });
-                }
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-
-                // 检查是否是暂停导致的失败，只有在任务暂停时才将 Download cancelled 视为暂停错误
-                if error_msg.contains("任务已暂停")
-                    || error_msg.contains("停止下载")
-                    || error_msg.contains("用户主动暂停任务")
-                    || (error_msg.contains("Download cancelled") && crate::task::TASK_CONTROLLER.is_paused())
-                {
-                    info!("重试任务因用户暂停而终止: {}", error_msg);
-                    continue; // 跳过暂停相关的错误，不触发风控
-                }
-
-                if e.downcast_ref::<DownloadAbortError>().is_some() || error_msg.contains("Download cancelled") {
-                    if !download_aborted {
-                        debug!("重试过程中检测到风控或取消信号，停止重试");
-                        token.cancel();
-                        download_aborted = true;
+    crate::bilibili::with_playurl_rate_limit(large_source_policy.playurl_rate_limit, async {
+        while let Some(res) = stream.next().await {
+            match res {
+                Ok(model) => {
+                    if download_aborted {
+                        continue;
                     }
-                } else {
-                    // 重试失败，但不中断其他重试任务
-                    debug!("视频重试失败: {:#}", e);
+                    retry_success_count += 1;
+                    if let Err(db_err) = update_videos_model_with_lock_retry(vec![model.clone()], connection).await {
+                        error!("重试后更新数据库失败: {:#}", db_err);
+
+                        // 发送数据库错误通知（异步执行，不阻塞主流程）
+                        use sea_orm::ActiveValue;
+                        let video_name = match &model.name {
+                            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
+                            _ => "未知".to_string(),
+                        };
+                        let video_bvid = match &model.bvid {
+                            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
+                            _ => "未知".to_string(),
+                        };
+                        let error_msg = format!("{:#}", db_err);
+                        tokio::spawn(async move {
+                            use crate::utils::notification::send_error_notification;
+                            if let Err(e) = send_error_notification(
+                                "数据库错误",
+                                &error_msg,
+                                Some(&format!(
+                                    "视频: {}\nBVID: {}\n（重试后更新失败）",
+                                    video_name, video_bvid
+                                )),
+                            )
+                            .await
+                            {
+                                tracing::warn!("发送数据库错误通知失败: {}", e);
+                            }
+                        });
+                    }
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+
+                    // 检查是否是暂停导致的失败，只有在任务暂停时才将 Download cancelled 视为暂停错误
+                    if error_msg.contains("任务已暂停")
+                        || error_msg.contains("停止下载")
+                        || error_msg.contains("用户主动暂停任务")
+                        || (error_msg.contains("Download cancelled") && crate::task::TASK_CONTROLLER.is_paused())
+                    {
+                        info!("重试任务因用户暂停而终止: {}", error_msg);
+                        continue; // 跳过暂停相关的错误，不触发风控
+                    }
+
+                    if download_abort_reason_from_error(&e).is_some() || error_msg.contains("Download cancelled") {
+                        if !download_aborted {
+                            debug!("重试过程中检测到风控或取消信号，停止重试");
+                            token.cancel();
+                            download_aborted = true;
+                        }
+                    } else {
+                        // 重试失败，但不中断其他重试任务
+                        debug!("视频重试失败: {:#}", e);
+                    }
                 }
             }
         }
-    }
+    })
+    .await;
 
     if download_aborted {
         warn!("重试过程中触发风控，已停止重试");
@@ -3020,6 +3501,7 @@ struct DownloadPageArgs<'a> {
     connection: &'a DatabaseConnection,
     downloader: &'a UnifiedDownloader,
     base_path: &'a Path,
+    page_concurrency: usize,
     chapter_episode_plans: &'a HashMap<i32, ChapterEpisodePlan>,
     inline_total_file_size_bytes: Arc<TokioMutex<Option<i64>>>,
     inline_chapters_split: Arc<TokioMutex<bool>>,
@@ -3043,6 +3525,7 @@ async fn download_video_pages(
     semaphore: &Semaphore,
     downloader: &UnifiedDownloader,
     should_download_upper: bool,
+    page_concurrency: usize,
     chapter_episode_plans: &HashMap<i32, ChapterEpisodePlan>,
     token: CancellationToken,
 ) -> Result<video::ActiveModel> {
@@ -5017,6 +5500,7 @@ async fn download_video_pages(
                 connection,
                 downloader,
                 base_path: &base_path,
+                page_concurrency,
                 chapter_episode_plans,
                 inline_total_file_size_bytes: inline_total_file_size_bytes.clone(),
                 inline_chapters_split: inline_chapters_split.clone(),
@@ -5405,7 +5889,7 @@ async fn download_video_pages(
         .nth(4)
         .context("page download result not found")?
     {
-        if e.downcast_ref::<DownloadAbortError>().is_some() {
+        if download_abort_reason_from_error(&e).is_some() {
             if path_changed {
                 if let Err(persist_err) = persist_video_path_if_materialized_with_lock_retry(
                     ingest_video_id,
@@ -5663,8 +6147,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
         return Ok(ExecutionStatus::Skipped);
     }
 
-    let current_config = crate::config::reload_config();
-    let child_semaphore = Arc::new(Semaphore::new(current_config.concurrent_limit.page));
+    let child_semaphore = Arc::new(Semaphore::new(args.page_concurrency.max(1)));
     let original_pages = args.pages.clone();
     let tasks = args
         .pages
@@ -5700,7 +6183,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
             }
         })
         .collect::<FuturesUnordered<_>>();
-    let (mut download_aborted, mut target_status) = (false, STATUS_OK);
+    let (mut download_abort_reason, mut target_status) = (None, STATUS_OK);
     let mut cancelled_by_user = false;
     let mut failed_pages: Vec<String> = Vec::new(); // 收集失败的分页信息
     let mut changed_pages: Vec<page::ActiveModel> = Vec::new();
@@ -5711,7 +6194,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
     while let Some((res, page_pid, page_name)) = stream.next().await {
         match res {
             Ok(outcome) => {
-                if download_aborted {
+                if download_abort_reason.is_some() {
                     continue;
                 }
                 let model = outcome.model;
@@ -5758,14 +6241,14 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                 }
 
                 // 2. 检查是否是真正的风控错误（DownloadAbortError）
-                if e.downcast_ref::<DownloadAbortError>().is_some() {
+                if let Some(reason) = download_abort_reason_from_error(&e) {
                     warn!(
-                        "检测到真正的风控错误，中止所有下载任务 - 第{}页 {}",
-                        page_pid, page_name
+                        "检测到下载中止错误（原因：{}），中止所有下载任务 - 第{}页 {}",
+                        reason, page_pid, page_name
                     );
-                    if !download_aborted {
+                    if download_abort_reason.is_none() {
                         token.cancel();
-                        download_aborted = true;
+                        download_abort_reason = Some(reason);
                     }
                     continue;
                 }
@@ -5836,12 +6319,15 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
         update_pages_model(changed_pages, args.connection).await?;
     }
 
-    if download_aborted {
+    if let Some(reason) = download_abort_reason {
         error!(
-            "下载视频「{}」的分页时触发风控，将异常向上传递..",
-            &args.video_model.name
+            "下载视频「{}」的分页时中止，原因：{}，将异常向上传递..",
+            &args.video_model.name, reason
         );
-        bail!(DownloadAbortError());
+        bail!(match reason {
+            DownloadAbortReason::RateLimited => DownloadAbortError::rate_limited(),
+            DownloadAbortReason::VerificationRequired => DownloadAbortError::verification_required(),
+        });
     }
     if cancelled_by_user {
         info!("分页下载因用户暂停而终止，跳过失败汇总: {}", &args.video_model.name);
@@ -6670,12 +7156,12 @@ async fn download_page(
             if e.downcast_ref::<BiliError>()
                 .is_some_and(|bili_error| matches!(bili_error, BiliError::RiskControlOccurred))
             {
-                bail!(DownloadAbortError());
+                bail!(DownloadAbortError::rate_limited());
             }
         }
         ExecutionStatus::ClassifiedFailed(ref classified_error) => {
             if classified_error.error_type == crate::error::ErrorType::RiskControl {
-                bail!(DownloadAbortError());
+                bail!(download_abort_from_classified_risk_control(classified_error));
             }
         }
         _ => {}
@@ -7774,8 +8260,12 @@ async fn fetch_page_video(
     // 获取用户配置的筛选选项（用于按画质范围请求播放地址，避免拿到高画质单流后被过滤导致无视频流）
     let config = crate::config::reload_config();
     let filter_option = &config.filter_option;
-    let max_qn = filter_option.video_max_quality as u32;
-    let min_qn = filter_option.video_min_quality as u32;
+    let (max_qn, min_qn) = crate::bilibili::effective_playurl_qn_range(
+        filter_option.video_max_quality as u32,
+        filter_option.video_min_quality as u32,
+        audio_only,
+        config.submission_risk_control.audio_only_use_low_qn_for_playurl,
+    );
 
     let mut retried_after_playurl_refresh = false;
 
@@ -10203,7 +10693,7 @@ async fn get_season_info_from_api(
         let classified_error = crate::error::ErrorClassifier::classify_error(&error);
         if classified_error.error_type == crate::error::ErrorType::RiskControl {
             // 风控错误，触发下载中止
-            return Err(anyhow!(crate::error::DownloadAbortError()));
+            return Err(anyhow!(download_abort_from_classified_risk_control(&classified_error)));
         }
 
         // 其他错误正常返回，使用BiliError以便被错误分类系统处理
@@ -10608,8 +11098,109 @@ async fn get_video_count_for_source(video_source: &VideoSourceEnum, connection: 
     Ok(count as usize)
 }
 
+fn dedup_positive_ids(ids: &[i32]) -> Vec<i32> {
+    let mut unique_ids = ids.iter().copied().filter(|id| *id > 0).collect::<Vec<_>>();
+    unique_ids.sort_unstable();
+    unique_ids.dedup();
+    unique_ids
+}
+
+fn reset_unfinished_status_for_risk_control<const N: usize>(status: &mut crate::utils::status::Status<N>) -> bool {
+    let original = u32::from(*status);
+    let all_ok = (0..N).all(|task_index| status.get(task_index) == STATUS_OK);
+
+    if all_ok {
+        if N > 0 {
+            status.set(0, STATUS_OK);
+        }
+        return u32::from(*status) != original;
+    }
+
+    for task_index in 0..N {
+        if status.get(task_index) != STATUS_OK {
+            status.set(task_index, 0);
+        }
+    }
+
+    u32::from(*status) != original
+}
+
+async fn auto_reset_risk_control_failures_for_scope(
+    connection: &DatabaseConnection,
+    video_ids: &[i32],
+    page_ids: &[i32],
+) -> Result<RiskControlResetSummary> {
+    use sea_orm::{ActiveValue::Unchanged, QuerySelect};
+
+    let video_ids = dedup_positive_ids(video_ids);
+    let page_ids = dedup_positive_ids(page_ids);
+    let mut scoped_videos = Vec::new();
+    for chunk in video_ids.chunks(RISK_CONTROL_RESET_QUERY_CHUNK_SIZE) {
+        let mut rows = video::Entity::find()
+            .select_only()
+            .columns([video::Column::Id, video::Column::Name, video::Column::DownloadStatus])
+            .filter(video::Column::Id.is_in(chunk.iter().copied()))
+            .into_tuple::<(i32, String, u32)>()
+            .all(connection)
+            .await?;
+        scoped_videos.append(&mut rows);
+    }
+    let mut scoped_pages = Vec::new();
+    for chunk in page_ids.chunks(RISK_CONTROL_RESET_QUERY_CHUNK_SIZE) {
+        let mut rows = page::Entity::find()
+            .select_only()
+            .columns([page::Column::Id, page::Column::Name, page::Column::DownloadStatus])
+            .filter(page::Column::Id.is_in(chunk.iter().copied()))
+            .into_tuple::<(i32, String, u32)>()
+            .all(connection)
+            .await?;
+        scoped_pages.append(&mut rows);
+    }
+
+    let mut summary = RiskControlResetSummary::default();
+    let txn = crate::database::begin_traced_transaction(connection, "workflow.reset_risk_control_scope").await?;
+
+    for (id, name, download_status) in scoped_videos {
+        let mut video_status = VideoStatus::from(download_status);
+        if reset_unfinished_status_for_risk_control(&mut video_status) {
+            video::Entity::update(video::ActiveModel {
+                id: Unchanged(id),
+                download_status: Set(video_status.into()),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+            summary.resetted_videos += 1;
+            debug!("重置当前风控范围内视频《{}》的未完成下载状态", name);
+        }
+    }
+
+    for (id, name, download_status) in scoped_pages {
+        let mut page_status = PageStatus::from(download_status);
+        if reset_unfinished_status_for_risk_control(&mut page_status) {
+            page::Entity::update(page::ActiveModel {
+                id: Unchanged(id),
+                download_status: Set(page_status.into()),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+            summary.resetted_pages += 1;
+            debug!("重置当前风控范围内分P《{}》的未完成下载状态", name);
+        }
+    }
+
+    txn.commit().await?;
+    if summary.resetted_videos > 0 || summary.resetted_pages > 0 {
+        notify_videos_changed();
+    }
+
+    Ok(summary)
+}
+
 /// 自动重置风控导致的失败任务
 /// 当检测到风控时，将所有失败状态(值为3)、正在进行状态(值为2)以及未完成的任务重置为未开始状态(值为0)
+#[allow(dead_code)]
 pub async fn auto_reset_risk_control_failures(connection: &DatabaseConnection) -> Result<()> {
     use crate::utils::status::{PageStatus, VideoStatus};
     use bili_sync_entity::{page, video};
@@ -13231,8 +13822,26 @@ pub async fn populate_missing_video_cids(
 }
 
 /// 检查文件夹是否为同一视频的文件夹
+fn collect_folder_identity_names(folder_path: &std::path::Path, depth: usize, names: &mut Vec<String>) {
+    if depth > 4 {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(folder_path) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        let file_name = entry.file_name();
+        names.push(file_name.to_string_lossy().to_lowercase());
+        if entry_path.is_dir() {
+            collect_folder_identity_names(&entry_path, depth + 1, names);
+        }
+    }
+}
+
 fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Model) -> bool {
-    use std::fs;
     use std::sync::OnceLock;
 
     static BVID_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -13276,70 +13885,73 @@ fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Mode
     let mut found_other_bvid_files = false;
 
     // 先看目录内是否已有明确的视频身份。若目录里是别的 BVID，不能再用同标题/同 DB 路径误判。
-    if let Ok(entries) = fs::read_dir(folder_path) {
-        let bvid_re = BVID_RE.get_or_init(|| regex::Regex::new(r"bv[0-9a-z]{10}").expect("valid bvid regex"));
+    let bvid_re = BVID_RE.get_or_init(|| regex::Regex::new(r"bv[0-9a-z]{10}").expect("valid bvid regex"));
+    let mut identity_names = Vec::new();
+    collect_folder_identity_names(folder_path, 0, &mut identity_names);
 
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let file_name_str = file_name.to_string_lossy().to_lowercase();
+    for file_name_str in identity_names {
+        if cid_marker
+            .as_ref()
+            .map(|marker| file_name_str.contains(marker))
+            .unwrap_or(false)
+        {
+            debug!(
+                "✓ 通过CID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
+                folder_path.display(),
+                file_name_str
+            );
+            return true;
+        }
 
-            if cid_marker
-                .as_ref()
-                .map(|marker| file_name_str.contains(marker))
-                .unwrap_or(false)
+        if file_name_str.contains(&current_bvid) {
+            debug!(
+                "✓ 通过BVID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
+                folder_path.display(),
+                file_name_str
+            );
+            return true;
+        }
+
+        if bvid_re
+            .find_iter(&file_name_str)
+            .any(|matched| matched.as_str() != current_bvid)
+        {
+            found_other_bvid_files = true;
+            found_bvid_files = true;
+        }
+
+        if file_name_str.ends_with(".tmp_video")
+            || file_name_str.ends_with(".tmp_audio")
+            || file_name_str.ends_with(".tmp_flv")
+            || file_name_str.ends_with(".mp4")
+            || file_name_str.ends_with(".mkv")
+            || file_name_str.ends_with(".flv")
+            || file_name_str.ends_with(".webm")
+            || file_name_str.ends_with(".m4a")
+            || file_name_str.ends_with(".mp3")
+            || file_name_str.ends_with(".flac")
+            || file_name_str.ends_with(".aac")
+            || file_name_str.ends_with(".ogg")
+            || file_name_str.ends_with(".nfo")
+            || file_name_str.ends_with(".jpg")
+            || file_name_str.ends_with(".png")
+            || file_name_str.ends_with(".ass")
+            || file_name_str.ends_with(".srt")
+        {
+            found_media_files = true;
+        }
+
+        let video_title_clean = video_model
+            .name
+            .to_lowercase()
+            .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "");
+        if !video_title_clean.is_empty() && video_title_clean.len() > 3 {
+            let title_keywords: Vec<&str> = video_title_clean.split_whitespace().take(3).collect();
+            if title_keywords
+                .iter()
+                .any(|keyword| keyword.len() > 2 && file_name_str.contains(keyword))
             {
-                debug!(
-                    "✓ 通过CID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
-                    folder_path.display(),
-                    file_name_str
-                );
-                return true;
-            }
-
-            if file_name_str.contains(&current_bvid) {
-                debug!(
-                    "✓ 通过BVID文件匹配确认为同一视频文件夹: {} (匹配文件: {})",
-                    folder_path.display(),
-                    file_name_str
-                );
-                return true;
-            }
-
-            if bvid_re
-                .find_iter(&file_name_str)
-                .any(|matched| matched.as_str() != current_bvid)
-            {
-                found_other_bvid_files = true;
-                found_bvid_files = true;
-            }
-
-            if file_name_str.ends_with(".tmp_video")
-                || file_name_str.ends_with(".tmp_audio")
-                || file_name_str.ends_with(".mp4")
-                || file_name_str.ends_with(".mkv")
-                || file_name_str.ends_with(".flv")
-                || file_name_str.ends_with(".webm")
-                || file_name_str.ends_with(".nfo")
-                || file_name_str.ends_with(".jpg")
-                || file_name_str.ends_with(".png")
-                || file_name_str.ends_with(".ass")
-                || file_name_str.ends_with(".srt")
-            {
-                found_media_files = true;
-            }
-
-            let video_title_clean = video_model
-                .name
-                .to_lowercase()
-                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "");
-            if !video_title_clean.is_empty() && video_title_clean.len() > 3 {
-                let title_keywords: Vec<&str> = video_title_clean.split_whitespace().take(3).collect();
-                if title_keywords
-                    .iter()
-                    .any(|keyword| keyword.len() > 2 && file_name_str.contains(keyword))
-                {
-                    found_title_files = true;
-                }
+                found_title_files = true;
             }
         }
     }
@@ -13385,6 +13997,14 @@ fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Mode
             debug!("✓ 通过路径后缀匹配确认为同一视频文件夹");
             return true;
         }
+    }
+
+    if folder_leaf_contains_video_identity(db_path, video_model) && found_media_files && found_title_files {
+        debug!(
+            "✓ DB旧路径带当前视频身份，且目录内已有同标题下载文件，复用当前下载目录: {:?}",
+            folder_path
+        );
+        return true;
     }
 
     debug!("⚠ 数据库路径匹配失败，尝试文件内容检测");
@@ -13509,6 +14129,24 @@ fn find_existing_identity_sibling_path(computed_path: &std::path::Path, video_mo
     None
 }
 
+fn strip_video_identity_suffix_path(path: &std::path::Path, video_model: &video::Model) -> Option<PathBuf> {
+    let parent_dir = path.parent()?;
+    let folder_name = path.file_name()?.to_string_lossy();
+    let pubtime = video_model.pubtime.format("%Y%m%d%H%M%S").to_string();
+    let identity_suffix = format!("-{}", video_identity_suffix(video_model, &pubtime));
+
+    if !folder_name.to_lowercase().ends_with(&identity_suffix.to_lowercase()) {
+        return None;
+    }
+
+    let base_name = &folder_name[..folder_name.len() - identity_suffix.len()];
+    if base_name.is_empty() {
+        return None;
+    }
+
+    Some(parent_dir.join(base_name))
+}
+
 fn normalized_path_text(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let normalized = normalized.trim_end_matches('/').to_string();
@@ -13537,6 +14175,10 @@ fn path_is_same_or_child(path: &std::path::Path, parent: &std::path::Path) -> bo
     path_text_is_same_or_child(&path.to_string_lossy(), parent)
 }
 
+fn path_is_same_path(path: &std::path::Path, other: &std::path::Path) -> bool {
+    path_is_same_or_child(path, other) && path_is_same_or_child(other, path)
+}
+
 fn preserve_existing_video_path_for_redownload(
     video_source_base_path: &std::path::Path,
     computed_path: PathBuf,
@@ -13549,7 +14191,27 @@ fn preserve_existing_video_path_for_redownload(
     }
 
     let existing_path = std::path::Path::new(existing_path_text);
-    if path_is_same_or_child(&computed_path, existing_path) && path_is_same_or_child(existing_path, &computed_path) {
+    let has_page_under_computed_path = pages
+        .iter()
+        .filter_map(|page| page.path.as_deref())
+        .any(|page_path| path_text_is_same_or_child(page_path, &computed_path));
+
+    if strip_video_identity_suffix_path(existing_path, video_model)
+        .as_ref()
+        .map(|base_path| path_is_same_path(&computed_path, base_path))
+        .unwrap_or(false)
+        && (has_page_under_computed_path || is_same_video_folder(&computed_path, video_model))
+    {
+        debug!(
+            "重置/重下发现旧视频目录仅带唯一标识，基础目录已有当前视频内容，使用基础目录: bvid={}, existing='{}', computed='{}'",
+            video_model.bvid,
+            existing_path.display(),
+            computed_path.display()
+        );
+        return computed_path;
+    }
+
+    if path_is_same_path(&computed_path, existing_path) {
         if let Some(identity_path) = find_existing_identity_sibling_path(&computed_path, video_model) {
             debug!(
                 "重置/重下通过BV/CID找回已有视频目录: bvid={}, computed='{}', identity='{}'",
@@ -13649,7 +14311,7 @@ mod tests {
     use bili_sync_migration::{Migrator, MigratorTrait};
     use handlebars::handlebars_helper;
     use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-    use sea_orm::{ActiveModelTrait, DatabaseConnection, Set, SqlxSqliteConnector};
+    use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, Set, SqlxSqliteConnector};
     use serde_json::json;
     use std::borrow::Cow;
     use std::fs;
@@ -13664,6 +14326,304 @@ mod tests {
         dir
     }
 
+    async fn insert_test_video_with_status(db: &DatabaseConnection, id: i32, submission_id: i32, download_status: u32) {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+
+        video::ActiveModel {
+            id: Set(id),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(Some(submission_id)),
+            source_id: Set(None),
+            source_type: Set(Some(4)),
+            upper_id: Set(1000 + i64::from(submission_id)),
+            upper_name: Set(format!("test upper {submission_id}")),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(Some(submission_id)),
+            name: Set(format!("test video {id}")),
+            path: Set(format!("/tmp/video-{id}")),
+            category: Set(1),
+            bvid: Set(format!("BVTEST{id:010}")),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(now),
+            pubtime: Set(now),
+            favtime: Set(now),
+            download_status: Set(download_status),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-01-01 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(true),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("should insert test video");
+    }
+
+    async fn insert_test_page_with_status(db: &DatabaseConnection, id: i32, video_id: i32, download_status: u32) {
+        page::ActiveModel {
+            id: Set(id),
+            video_id: Set(video_id),
+            cid: Set(10000 + i64::from(id)),
+            pid: Set(id),
+            name: Set(format!("test page {id}")),
+            width: Set(None),
+            height: Set(None),
+            duration: Set(60),
+            path: Set(None),
+            file_size_bytes: Set(None),
+            video_stream_size_bytes: Set(None),
+            audio_stream_size_bytes: Set(None),
+            image: Set(None),
+            download_status: Set(download_status),
+            created_at: Set("2026-01-01 00:00:00".to_string()),
+            play_video_streams: Set(None),
+            play_audio_streams: Set(None),
+            play_subtitle_streams: Set(None),
+            play_streams_updated_at: Set(None),
+            danmaku_last_synced_at: Set(None),
+            danmaku_sync_generation: Set(0),
+            danmaku_cid_snapshot: Set(None),
+            danmaku_last_write_count: Set(0),
+            ai_renamed: Set(Some(0)),
+        }
+        .insert(db)
+        .await
+        .expect("should insert test page");
+    }
+
+    #[tokio::test]
+    async fn test_risk_control_reset_is_limited_to_current_download_scope() {
+        let db = create_test_db("risk-control-reset-scope").await;
+        insert_test_submission(&db, 1, false, false).await;
+        insert_test_submission(&db, 2, false, false).await;
+
+        let incomplete_video_status = u32::from(VideoStatus::from([STATUS_OK, 2, STATUS_OK, 4, 0]));
+        let incomplete_page_status = u32::from(PageStatus::from([STATUS_OK, 2, STATUS_OK, 4, 0]));
+        let complete_page_status = u32::from(PageStatus::from([STATUS_OK; 5]));
+        insert_test_video_with_status(&db, 1, 1, incomplete_video_status).await;
+        insert_test_page_with_status(&db, 1, 1, incomplete_page_status).await;
+        insert_test_page_with_status(&db, 2, 1, complete_page_status).await;
+        insert_test_video_with_status(&db, 2, 2, incomplete_video_status).await;
+        insert_test_page_with_status(&db, 3, 2, incomplete_page_status).await;
+
+        let current_scope = filter_unhandled_video_pages(video::Column::SubmissionId.eq(1), &db)
+            .await
+            .expect("should query current scope");
+        let video_ids = current_scope
+            .iter()
+            .map(|(video_model, _)| video_model.id)
+            .collect::<Vec<_>>();
+        let page_ids = current_scope
+            .iter()
+            .flat_map(|(_, pages)| pages.iter().map(|page_model| page_model.id))
+            .collect::<Vec<_>>();
+
+        let summary = auto_reset_risk_control_failures_for_scope(&db, &video_ids, &page_ids)
+            .await
+            .expect("scoped reset should succeed");
+
+        assert_eq!(summary.resetted_videos, 1);
+        assert_eq!(summary.resetted_pages, 1);
+
+        let current_video = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("video should exist");
+        let current_page = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("page should exist");
+        let completed_page = page::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("page should exist");
+        let unrelated_video = video::Entity::find_by_id(2)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("video should exist");
+        let unrelated_page = page::Entity::find_by_id(3)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("page should exist");
+
+        assert_eq!(
+            <[u32; 5]>::from(VideoStatus::from(current_video.download_status)),
+            [STATUS_OK, 0, STATUS_OK, 0, 0]
+        );
+        assert_eq!(
+            <[u32; 5]>::from(PageStatus::from(current_page.download_status)),
+            [STATUS_OK, 0, STATUS_OK, 0, 0]
+        );
+        assert_eq!(completed_page.download_status, complete_page_status);
+        assert_eq!(unrelated_video.download_status, incomplete_video_status);
+        assert_eq!(unrelated_page.download_status, incomplete_page_status);
+    }
+
+    #[tokio::test]
+    async fn test_risk_control_reset_chunks_large_page_scope() {
+        let db = create_test_db("risk-control-reset-large-page-scope").await;
+        insert_test_submission(&db, 1, false, false).await;
+
+        let incomplete_video_status = u32::from(VideoStatus::from([STATUS_OK, 2, STATUS_OK, 4, 0]));
+        let incomplete_page_status = u32::from(PageStatus::from([STATUS_OK, 2, STATUS_OK, 4, 0]));
+        insert_test_video_with_status(&db, 1, 1, incomplete_video_status).await;
+        insert_test_page_with_status(&db, 1, 1, incomplete_page_status).await;
+
+        let large_page_scope = (1..=40_000).collect::<Vec<_>>();
+        let summary = auto_reset_risk_control_failures_for_scope(&db, &[1], &large_page_scope)
+            .await
+            .expect("large page scope should be chunked to avoid sqlite variable limits");
+
+        assert_eq!(summary.resetted_videos, 1);
+        assert_eq!(summary.resetted_pages, 1);
+
+        let current_page = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("page should exist");
+        assert_eq!(
+            <[u32; 5]>::from(PageStatus::from(current_page.download_status)),
+            [STATUS_OK, 0, STATUS_OK, 0, 0]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_risk_control_resume_marker_is_kept_only_with_pending_work() {
+        let db = create_test_db("download-risk-resume-marker").await;
+        insert_test_submission(&db, 1, false, false).await;
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("submission should exist");
+        let video_source = VideoSourceEnum::Submission(submission_source);
+
+        mark_download_risk_control_resume(&video_source, &db)
+            .await
+            .expect("mark should succeed");
+        assert!(
+            !should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("resume check should succeed"),
+            "stale marker without pending work should not skip remote refresh"
+        );
+        assert!(
+            !has_download_risk_control_resume_mark(&video_source, &db)
+                .await
+                .expect("marker check should succeed"),
+            "stale marker should be cleared"
+        );
+
+        insert_test_video_with_status(&db, 1, 1, u32::from(VideoStatus::from([0; 5]))).await;
+        insert_test_page_with_status(&db, 1, 1, u32::from(PageStatus::from([0; 5]))).await;
+        mark_download_risk_control_resume(&video_source, &db)
+            .await
+            .expect("mark should succeed");
+
+        assert!(
+            !should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("refresh check should succeed"),
+            "active cooldown should still allow remote refresh"
+        );
+        assert!(
+            should_skip_download_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("cooldown check should succeed"),
+            "active cooldown should skip local download resume after refresh"
+        );
+        assert!(
+            has_download_risk_control_resume_mark(&video_source, &db)
+                .await
+                .expect("marker check should succeed"),
+            "active marker should be kept until download succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_risk_control_resume_defers_until_cooldown_expires() {
+        let db = create_test_db("download-risk-resume-cooldown").await;
+        insert_test_submission(&db, 1, false, false).await;
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("submission should exist");
+        let video_source = VideoSourceEnum::Submission(submission_source);
+
+        insert_test_video_with_status(&db, 1, 1, u32::from(VideoStatus::from([0; 5]))).await;
+        insert_test_page_with_status(&db, 1, 1, u32::from(PageStatus::from([0; 5]))).await;
+        mark_download_risk_control_resume(&video_source, &db)
+            .await
+            .expect("mark should succeed");
+
+        assert!(
+            should_skip_download_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("cooldown check should succeed"),
+            "fresh download risk-control marker should cool down local resume"
+        );
+
+        let source_key = download_risk_control_resume_source_key(&video_source);
+        let mut resume_sources = load_download_risk_control_resume_sources(&db)
+            .await
+            .expect("marker should load");
+        resume_sources
+            .cooldown_until
+            .insert(source_key, current_unix_timestamp_secs().saturating_sub(1));
+        save_download_risk_control_resume_sources(&db, &resume_sources)
+            .await
+            .expect("expired marker should save");
+
+        assert!(
+            !should_skip_download_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("cooldown check should succeed"),
+            "expired cooldown should allow local resume"
+        );
+        assert!(
+            !should_skip_refresh_for_download_risk_control_resume(&video_source, &db)
+                .await
+                .expect("resume check should succeed"),
+            "expired cooldown should allow remote refresh before processing local queue"
+        );
+        assert!(
+            has_download_risk_control_resume_mark(&video_source, &db)
+                .await
+                .expect("marker check should succeed"),
+            "expired cooldown should keep marker until downloads finish"
+        );
+    }
+
     #[test]
     fn test_video_nfo_gate_uses_nfo_status_not_upper_face_status() {
         let status = VideoStatus::from([STATUS_OK, 0, STATUS_OK, STATUS_OK, STATUS_OK]);
@@ -13671,6 +14631,49 @@ mod tests {
 
         assert!(video_status_should_run_nfo(&separate_status));
         assert!(!video_status_should_run_upper_face(&separate_status));
+    }
+
+    #[test]
+    fn test_large_source_download_policy_overrides_concurrency_and_playurl_rate() {
+        let config = crate::config::SubmissionRiskControlConfig::default();
+
+        let normal = LargeSourceDownloadPolicy::from_config(&config, 1000, 3, 2);
+        assert!(!normal.active);
+        assert_eq!(normal.video_concurrency, 3);
+        assert_eq!(normal.page_concurrency, 2);
+        assert!(normal.playurl_rate_limit.is_none());
+
+        let large = LargeSourceDownloadPolicy::from_config(&config, 1001, 3, 2);
+        assert!(large.active);
+        assert_eq!(large.video_concurrency, 1);
+        assert_eq!(large.page_concurrency, 1);
+        assert_eq!(large.max_videos_per_round, None);
+        assert_eq!(large.max_pages_per_round, Some(2000));
+        assert_eq!(
+            large.playurl_rate_limit,
+            Some(crate::bilibili::PlayurlRateLimitConfig {
+                limit: 1,
+                duration_ms: 1000,
+            })
+        );
+    }
+
+    #[test]
+    fn test_limit_large_source_download_queue_keeps_whole_videos() {
+        let queue = vec![("v1", vec![1, 2, 3]), ("v2", vec![4, 5]), ("v3", vec![6])];
+
+        let selected = limit_large_source_download_queue(queue, Some(3), Some(4));
+
+        assert_eq!(selected, vec![("v1", vec![1, 2, 3])]);
+    }
+
+    #[test]
+    fn test_limit_large_source_download_queue_keeps_first_video_when_it_exceeds_page_budget() {
+        let queue = vec![("v1", vec![1, 2, 3, 4, 5]), ("v2", vec![6])];
+
+        let selected = limit_large_source_download_queue(queue, Some(10), Some(4));
+
+        assert_eq!(selected, vec![("v1", vec![1, 2, 3, 4, 5])]);
     }
 
     async fn create_test_db(prefix: &str) -> DatabaseConnection {
@@ -13691,6 +14694,18 @@ mod tests {
         let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
 
         Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        if let Err(err) = db
+            .execute(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "ALTER TABLE page ADD COLUMN ai_renamed INTEGER DEFAULT 0",
+            ))
+            .await
+        {
+            assert!(
+                err.to_string().contains("duplicate column"),
+                "应能补齐测试数据库 page.ai_renamed 字段: {err}"
+            );
+        }
         db
     }
 
@@ -14066,6 +15081,29 @@ mod tests {
     }
 
     #[test]
+    fn test_download_abort_reason_only_rate_limited_uses_cooldown_backoff() {
+        let rate_limited = anyhow!(DownloadAbortError::rate_limited());
+        let verification_required = anyhow!(DownloadAbortError::verification_required());
+
+        assert_eq!(
+            download_abort_reason_from_error(&rate_limited),
+            Some(DownloadAbortReason::RateLimited)
+        );
+        assert_eq!(
+            download_abort_reason_from_error(&verification_required),
+            Some(DownloadAbortReason::VerificationRequired)
+        );
+
+        let classified =
+            crate::error::ClassifiedError::new(crate::error::ErrorType::RiskControl, "captcha required".to_string())
+                .with_retry_policy(false, true);
+        assert_eq!(
+            download_abort_from_classified_risk_control(&classified).reason(),
+            DownloadAbortReason::VerificationRequired
+        );
+    }
+
+    #[test]
     fn test_should_keep_db_video_path_override_ignores_stale_original_path() {
         assert!(!should_keep_db_video_path_override(
             "/videos/old-path",
@@ -14369,6 +15407,64 @@ mod tests {
     }
 
     #[test]
+    fn test_preserve_existing_video_path_for_redownload_prefers_migrated_base_dir() {
+        let source_root = unique_temp_dir("redownload-migrated-base-dir");
+        let upper_dir = source_root.join("樋口円香まどか");
+        let base_path = upper_dir.join("[Hi-Res]塞尔达传说 王国之泪 OST vol.2");
+        let identity_path = upper_dir.join("[Hi-Res]塞尔达传说 王国之泪 OST vol.2-20260706085729-BV1BPTU6JEPP");
+        let base_season_dir = base_path.join("Season 01");
+        let identity_season_dir = identity_path.join("Season 01");
+        fs::create_dir_all(&base_season_dir).expect("应能创建基础下载目录");
+        fs::create_dir_all(&identity_season_dir).expect("应能创建带身份后缀目录");
+        fs::write(base_season_dir.join("S01E34P01 - 塞尔达传说 王国之泪.m4a"), b"base").expect("应能创建已迁移分P文件");
+        fs::write(
+            identity_season_dir.join("S01E34P62 - 塞尔达传说 王国之泪.m4a"),
+            b"identity",
+        )
+        .expect("应能创建后续分P文件");
+
+        let pubtime = chrono::NaiveDate::from_ymd_opt(2026, 7, 6)
+            .unwrap()
+            .and_hms_opt(8, 57, 29)
+            .unwrap();
+        let video = video::Model {
+            name: "塞尔达传说 王国之泪".to_string(),
+            upper_name: "樋口円香まどか".to_string(),
+            bvid: "BV1BPTU6JEPP".to_string(),
+            path: identity_path.to_string_lossy().to_string(),
+            pubtime,
+            favtime: pubtime,
+            single_page: Some(false),
+            ..Default::default()
+        };
+        let pages = vec![
+            page::Model {
+                path: Some(
+                    base_season_dir
+                        .join("S01E34P01 - 塞尔达传说 王国之泪.m4a")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+            page::Model {
+                path: Some(
+                    identity_season_dir
+                        .join("S01E34P62 - 塞尔达传说 王国之泪.m4a")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+        ];
+
+        let resolved = preserve_existing_video_path_for_redownload(&source_root, base_path.clone(), &video, &pages);
+
+        assert_eq!(resolved, base_path);
+        fs::remove_dir_all(source_root).expect("应能清理临时目录");
+    }
+
+    #[test]
     fn test_generate_unique_folder_name_locks_severe_conflict_to_timestamp_bvid_suffix() {
         let parent_dir = unique_temp_dir("dedup-timestamp-bvid-locked");
         let upper_dir = parent_dir.join("测试UP");
@@ -14455,6 +15551,38 @@ mod tests {
         let unique_name = generate_unique_folder_name(&parent_dir, "测试UP/喵", &video, "20260428170830");
 
         assert_eq!(unique_name, "测试UP/喵-20260428170830-BV1NewVideo1");
+        fs::remove_dir_all(parent_dir).expect("应能清理临时目录");
+    }
+
+    #[test]
+    fn test_generate_unique_folder_name_reuses_partial_download_dir_from_identity_db_path() {
+        let parent_dir = unique_temp_dir("dedup-partial-download-dir");
+        let upper_dir = parent_dir.join("测试UP");
+        let title_dir = upper_dir.join("喵");
+        let season_dir = title_dir.join("Season 01");
+        fs::create_dir_all(&season_dir).expect("应能创建基础下载目录");
+        fs::write(season_dir.join("S01E01P01 - 塞尔达传说 王国之泪.m4a"), b"partial")
+            .expect("应能创建未完成下载留下的音频文件");
+
+        let video = video::Model {
+            name: "塞尔达传说 王国之泪".to_string(),
+            upper_name: "测试UP".to_string(),
+            bvid: "BV1PartialReuse".to_string(),
+            cid: Some(567890),
+            path: upper_dir
+                .join("喵-20260428170830-BV1PartialReuse")
+                .to_string_lossy()
+                .to_string(),
+            pubtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 28)
+                .unwrap()
+                .and_hms_opt(17, 8, 30)
+                .unwrap(),
+            ..Default::default()
+        };
+
+        let unique_name = generate_unique_folder_name(&parent_dir, "测试UP/喵", &video, "20260428170830");
+
+        assert_eq!(unique_name, "测试UP/喵");
         fs::remove_dir_all(parent_dir).expect("应能清理临时目录");
     }
 
