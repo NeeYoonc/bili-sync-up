@@ -3,7 +3,11 @@ use futures::stream::FuturesUnordered;
 use futures::TryStreamExt;
 use prost::Message;
 use reqwest::{Method, StatusCode};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -26,6 +30,70 @@ static DATA: &[char] = &[
 ];
 
 const PLAYURL_QUALITY_LEVELS: [u32; 10] = [127, 126, 125, 120, 116, 112, 80, 64, 32, 16];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayurlRateLimitConfig {
+    pub limit: usize,
+    pub duration_ms: u64,
+}
+
+struct PlayurlScopedLimiter {
+    config: PlayurlRateLimitConfig,
+    recent_requests: Mutex<VecDeque<Instant>>,
+}
+
+impl PlayurlScopedLimiter {
+    fn new(config: PlayurlRateLimitConfig) -> Self {
+        Self {
+            config,
+            recent_requests: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    async fn acquire(&self) {
+        let limit = self.config.limit.max(1);
+        let window = Duration::from_millis(self.config.duration_ms.max(1));
+
+        loop {
+            let mut recent_requests = self.recent_requests.lock().await;
+            let now = Instant::now();
+            while recent_requests
+                .front()
+                .is_some_and(|instant| now.duration_since(*instant) >= window)
+            {
+                recent_requests.pop_front();
+            }
+
+            if recent_requests.len() < limit {
+                recent_requests.push_back(now);
+                return;
+            }
+
+            let sleep_for = recent_requests
+                .front()
+                .map(|instant| window.saturating_sub(now.duration_since(*instant)))
+                .unwrap_or(window);
+            drop(recent_requests);
+            tokio::time::sleep(sleep_for).await;
+        }
+    }
+}
+
+tokio::task_local! {
+    static PLAYURL_RATE_LIMITER: Option<Arc<PlayurlScopedLimiter>>;
+}
+
+pub async fn with_playurl_rate_limit<T>(config: Option<PlayurlRateLimitConfig>, future: impl Future<Output = T>) -> T {
+    PLAYURL_RATE_LIMITER
+        .scope(config.map(|config| Arc::new(PlayurlScopedLimiter::new(config))), future)
+        .await
+}
+
+async fn wait_for_scoped_playurl_rate_limit() {
+    if let Ok(Some(limiter)) = PLAYURL_RATE_LIMITER.try_with(Clone::clone) {
+        limiter.acquire().await;
+    }
+}
 
 fn build_playurl_quality_fallback_levels(mut max_qn: u32, mut min_qn: u32) -> Vec<u32> {
     if max_qn < min_qn {
@@ -1096,6 +1164,7 @@ impl<'a> Video<'a> {
                 .query(&encoded_params)
                 .headers(create_api_headers());
 
+            wait_for_scoped_playurl_rate_limit().await;
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -1485,6 +1554,7 @@ impl<'a> Video<'a> {
 
         // 番剧请求头日志已在建造器时设置
 
+        wait_for_scoped_playurl_rate_limit().await;
         let response = request.send().await;
         match &response {
             Ok(resp) => {
@@ -1792,5 +1862,25 @@ mod tests {
         assert_eq!(build_playurl_quality_fallback_levels(116, 80), vec![116, 112, 80]);
         // 传入反向范围时应自动纠正
         assert_eq!(build_playurl_quality_fallback_levels(16, 80), vec![80, 64, 32, 16]);
+    }
+
+    #[test]
+    fn test_audio_only_low_qn_playurl_range_uses_single_low_quality_probe() {
+        assert_eq!(effective_playurl_qn_range(127, 16, true, true), (16, 16));
+        assert_eq!(effective_playurl_qn_range(127, 16, true, false), (127, 16));
+        assert_eq!(effective_playurl_qn_range(127, 16, false, true), (127, 16));
+    }
+}
+
+pub(crate) fn effective_playurl_qn_range(
+    max_qn: u32,
+    min_qn: u32,
+    audio_only: bool,
+    audio_only_use_low_qn_for_playurl: bool,
+) -> (u32, u32) {
+    if audio_only && audio_only_use_low_qn_for_playurl {
+        (16, 16)
+    } else {
+        (max_qn, min_qn)
     }
 }

@@ -21,7 +21,10 @@ use serde::{Deserialize, Deserializer};
 pub use submission::Submission;
 pub(crate) use subtitle::{SubtitleDownloadOptions, DEFAULT_AI_SUBTITLE_LANGUAGE};
 pub use verification_coordinator::{VerificationRequest, VERIFICATION_COORDINATOR};
-pub use video::{bvid_to_aid, Dimension, PageInfo, Video, VideoChapter};
+pub(crate) use video::effective_playurl_qn_range;
+pub use video::{
+    bvid_to_aid, with_playurl_rate_limit, Dimension, PageInfo, PlayurlRateLimitConfig, Video, VideoChapter,
+};
 pub use watch_later::WatchLater;
 pub mod bangumi;
 

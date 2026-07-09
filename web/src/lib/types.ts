@@ -360,6 +360,15 @@ export interface ConfigResponse {
 	submission_source_delay_seconds?: number;
 	enable_dynamic_api_delay?: boolean;
 	dynamic_api_delay_multiplier?: number;
+	enable_large_source_download_limit?: boolean;
+	large_source_download_threshold?: number;
+	large_source_max_videos_per_round?: number;
+	large_source_max_pages_per_round?: number;
+	large_source_concurrent_video?: number;
+	large_source_concurrent_page?: number;
+	large_source_playurl_limit?: number;
+	large_source_playurl_duration_ms?: number;
+	audio_only_use_low_qn_for_playurl?: boolean;
 	// UP主投稿源扫描策略
 	submission_scan_batch_size?: number;
 	submission_adaptive_scan?: boolean;
@@ -533,6 +542,15 @@ export interface UpdateConfigRequest {
 	submission_source_delay_seconds?: number;
 	enable_dynamic_api_delay?: boolean;
 	dynamic_api_delay_multiplier?: number;
+	enable_large_source_download_limit?: boolean;
+	large_source_download_threshold?: number;
+	large_source_max_videos_per_round?: number;
+	large_source_max_pages_per_round?: number;
+	large_source_concurrent_video?: number;
+	large_source_concurrent_page?: number;
+	large_source_playurl_limit?: number;
+	large_source_playurl_duration_ms?: number;
+	audio_only_use_low_qn_for_playurl?: boolean;
 	// UP主投稿源扫描策略
 	submission_scan_batch_size?: number;
 	submission_adaptive_scan?: boolean;

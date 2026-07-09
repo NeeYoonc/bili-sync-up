@@ -9793,6 +9793,15 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         submission_source_delay_seconds: config.submission_risk_control.submission_source_delay_seconds,
         enable_dynamic_api_delay: config.submission_risk_control.enable_dynamic_api_delay,
         dynamic_api_delay_multiplier: config.submission_risk_control.dynamic_api_delay_multiplier,
+        enable_large_source_download_limit: config.submission_risk_control.enable_large_source_download_limit,
+        large_source_download_threshold: config.submission_risk_control.large_source_download_threshold,
+        large_source_max_videos_per_round: config.submission_risk_control.large_source_max_videos_per_round,
+        large_source_max_pages_per_round: config.submission_risk_control.large_source_max_pages_per_round,
+        large_source_concurrent_video: config.submission_risk_control.large_source_concurrent_video,
+        large_source_concurrent_page: config.submission_risk_control.large_source_concurrent_page,
+        large_source_playurl_limit: config.submission_risk_control.large_source_playurl_limit,
+        large_source_playurl_duration_ms: config.submission_risk_control.large_source_playurl_duration_ms,
+        audio_only_use_low_qn_for_playurl: config.submission_risk_control.audio_only_use_low_qn_for_playurl,
         // UP主投稿源扫描策略
         submission_scan_batch_size: config.submission_scan_strategy.batch_size,
         submission_adaptive_scan: config.submission_scan_strategy.adaptive_enabled,
@@ -10374,6 +10383,15 @@ pub async fn update_config(
             auto_backoff_max_multiplier: params.auto_backoff_max_multiplier,
             source_delay_seconds: params.source_delay_seconds,
             submission_source_delay_seconds: params.submission_source_delay_seconds,
+            enable_large_source_download_limit: params.enable_large_source_download_limit,
+            large_source_download_threshold: params.large_source_download_threshold,
+            large_source_max_videos_per_round: params.large_source_max_videos_per_round,
+            large_source_max_pages_per_round: params.large_source_max_pages_per_round,
+            large_source_concurrent_video: params.large_source_concurrent_video,
+            large_source_concurrent_page: params.large_source_concurrent_page,
+            large_source_playurl_limit: params.large_source_playurl_limit,
+            large_source_playurl_duration_ms: params.large_source_playurl_duration_ms,
+            audio_only_use_low_qn_for_playurl: params.audio_only_use_low_qn_for_playurl,
             // UP主投稿源扫描策略
             submission_scan_batch_size: params.submission_scan_batch_size,
             submission_adaptive_scan: params.submission_adaptive_scan,
@@ -10488,6 +10506,15 @@ fn config_update_field_display_name(field: &str) -> String {
         "submission_source_delay_seconds" => Some("投稿源切换延迟"),
         "enable_dynamic_api_delay" => Some("动态API延迟开关"),
         "dynamic_api_delay_multiplier" => Some("动态API延迟倍率"),
+        "enable_large_source_download_limit" => Some("大源下载保护开关"),
+        "large_source_download_threshold" => Some("大源下载保护阈值"),
+        "large_source_max_videos_per_round" => Some("大源每轮视频上限"),
+        "large_source_max_pages_per_round" => Some("大源每轮分页上限"),
+        "large_source_concurrent_video" => Some("大源视频并发"),
+        "large_source_concurrent_page" => Some("大源分页并发"),
+        "large_source_playurl_limit" => Some("大源playurl请求限制"),
+        "large_source_playurl_duration_ms" => Some("大源playurl限制窗口"),
+        "audio_only_use_low_qn_for_playurl" => Some("音频源低清晰度取流"),
         "submission_scan_batch_size" => Some("投稿每轮扫描上限"),
         "submission_adaptive_scan" => Some("投稿自适应扫描开关"),
         "submission_adaptive_max_hours" => Some("投稿自适应最大间隔"),
@@ -11355,6 +11382,81 @@ pub async fn update_config_internal(
         }
     }
 
+    if let Some(enabled) = params.enable_large_source_download_limit {
+        if enabled != config.submission_risk_control.enable_large_source_download_limit {
+            config.submission_risk_control.enable_large_source_download_limit = enabled;
+            updated_fields.push("enable_large_source_download_limit");
+        }
+    }
+
+    if let Some(threshold) = params.large_source_download_threshold {
+        if threshold != config.submission_risk_control.large_source_download_threshold {
+            config.submission_risk_control.large_source_download_threshold = threshold;
+            updated_fields.push("large_source_download_threshold");
+        }
+    }
+
+    if let Some(limit) = params.large_source_max_videos_per_round {
+        if limit != config.submission_risk_control.large_source_max_videos_per_round {
+            config.submission_risk_control.large_source_max_videos_per_round = limit;
+            updated_fields.push("large_source_max_videos_per_round");
+        }
+    }
+
+    if let Some(limit) = params.large_source_max_pages_per_round {
+        if limit != config.submission_risk_control.large_source_max_pages_per_round {
+            config.submission_risk_control.large_source_max_pages_per_round = limit;
+            updated_fields.push("large_source_max_pages_per_round");
+        }
+    }
+
+    if let Some(concurrency) = params.large_source_concurrent_video {
+        if concurrency == 0 {
+            return Err(anyhow!("大源视频并发必须大于0").into());
+        }
+        if concurrency != config.submission_risk_control.large_source_concurrent_video {
+            config.submission_risk_control.large_source_concurrent_video = concurrency;
+            updated_fields.push("large_source_concurrent_video");
+        }
+    }
+
+    if let Some(concurrency) = params.large_source_concurrent_page {
+        if concurrency == 0 {
+            return Err(anyhow!("大源分页并发必须大于0").into());
+        }
+        if concurrency != config.submission_risk_control.large_source_concurrent_page {
+            config.submission_risk_control.large_source_concurrent_page = concurrency;
+            updated_fields.push("large_source_concurrent_page");
+        }
+    }
+
+    if let Some(limit) = params.large_source_playurl_limit {
+        if limit == 0 {
+            return Err(anyhow!("大源playurl请求限制必须大于0").into());
+        }
+        if limit != config.submission_risk_control.large_source_playurl_limit {
+            config.submission_risk_control.large_source_playurl_limit = limit;
+            updated_fields.push("large_source_playurl_limit");
+        }
+    }
+
+    if let Some(duration_ms) = params.large_source_playurl_duration_ms {
+        if duration_ms == 0 {
+            return Err(anyhow!("大源playurl限制窗口必须大于0").into());
+        }
+        if duration_ms != config.submission_risk_control.large_source_playurl_duration_ms {
+            config.submission_risk_control.large_source_playurl_duration_ms = duration_ms;
+            updated_fields.push("large_source_playurl_duration_ms");
+        }
+    }
+
+    if let Some(enabled) = params.audio_only_use_low_qn_for_playurl {
+        if enabled != config.submission_risk_control.audio_only_use_low_qn_for_playurl {
+            config.submission_risk_control.audio_only_use_low_qn_for_playurl = enabled;
+            updated_fields.push("audio_only_use_low_qn_for_playurl");
+        }
+    }
+
     // UP主投稿源扫描策略
     if let Some(size) = params.submission_scan_batch_size {
         if size != config.submission_scan_strategy.batch_size {
@@ -11934,7 +12036,16 @@ pub async fn update_config_internal(
                 | "source_delay_seconds"
                 | "submission_source_delay_seconds"
                 | "enable_dynamic_api_delay"
-                | "dynamic_api_delay_multiplier" => {
+                | "dynamic_api_delay_multiplier"
+                | "enable_large_source_download_limit"
+                | "large_source_download_threshold"
+                | "large_source_max_videos_per_round"
+                | "large_source_max_pages_per_round"
+                | "large_source_concurrent_video"
+                | "large_source_concurrent_page"
+                | "large_source_playurl_limit"
+                | "large_source_playurl_duration_ms"
+                | "audio_only_use_low_qn_for_playurl" => {
                     manager
                         .update_config_item(
                             "submission_risk_control",
