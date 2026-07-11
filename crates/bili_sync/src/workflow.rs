@@ -6523,10 +6523,11 @@ async fn download_page(
 
     // 获取是否仅下载音频的设置
     let audio_only = video_source.audio_only();
+    let m4a_only_mode = audio_only && video_source.audio_only_m4a_only();
 
     // 仅音频模式下，如果启用了audio_only_m4a_only，跳过所有sidecar文件
     // separate_status[0] = 封面, [2] = NFO, [3] = 弹幕, [4] = 字幕
-    if audio_only && video_source.audio_only_m4a_only() {
+    if m4a_only_mode {
         separate_status[0] = false; // 跳过封面
         separate_status[2] = false; // 跳过NFO
         separate_status[3] = false; // 跳过弹幕
@@ -7167,6 +7168,22 @@ async fn download_page(
         _ => {}
     }
 
+    if let Some(updated_file_size_bytes) = maybe_embed_cover_into_audio(
+        audio_only,
+        m4a_only_mode,
+        video_model,
+        &page_model,
+        downloader,
+        &video_path,
+        &poster_path_for_chapters,
+        &results,
+        token.clone(),
+    )
+    .await
+    {
+        page_file_size_bytes = Some(updated_file_size_bytes);
+    }
+
     // AI 自动重命名（仅非番剧 + 单源开关 + 全局开关）
     // 检查 video_path 是否存在，如果不存在可能是：
     // 1) 同视频其他分P已经重命名了目录
@@ -7365,7 +7382,7 @@ async fn download_page(
         )
         .await
         {
-            Ok(Some(outcome)) if !outcome.files.is_empty() => {
+            Ok(Some(mut outcome)) if !outcome.files.is_empty() => {
                 let sidecar_result = if should_write_chapter_sidecars {
                     write_chapter_sidecars(
                         video_model,
@@ -7381,6 +7398,19 @@ async fn download_page(
                 };
                 match sidecar_result {
                     Ok(_) => {
+                        maybe_embed_cover_into_chapter_audio_outputs(
+                            audio_only,
+                            m4a_only_mode,
+                            video_model,
+                            &page_model,
+                            downloader,
+                            &mut outcome,
+                            &poster_path_for_chapters,
+                            &video_path,
+                            token.clone(),
+                        )
+                        .await;
+
                         match sync_chapter_pages_after_split(connection, video_model, &page_model, &outcome).await {
                             Ok(_) => {
                                 if let Err(err) = remove_original_page_artifacts(
@@ -7880,6 +7910,288 @@ struct PageVideoFetchResult {
 
 fn to_db_file_size(size: u64) -> i64 {
     i64::try_from(size).unwrap_or(i64::MAX)
+}
+
+fn unique_temp_audio_cover_path(media_path: &Path) -> PathBuf {
+    let parent = media_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = media_path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy())
+        .unwrap_or_else(|| "audio".into());
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    parent.join(format!(".{}.embed-cover.{}.jpg", stem, timestamp_ms))
+}
+
+fn page_cover_url_for_embedding<'a>(video_model: &'a video::Model, page_model: &'a page::Model) -> Option<&'a str> {
+    let url = if video_model.single_page.unwrap_or(true) {
+        video_model.cover.as_str()
+    } else {
+        page_model.image.as_deref().unwrap_or(video_model.cover.as_str())
+    };
+    let url = url.trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
+async fn maybe_embed_cover_into_audio(
+    audio_only: bool,
+    m4a_only_mode: bool,
+    video_model: &video::Model,
+    page_model: &page::Model,
+    downloader: &UnifiedDownloader,
+    media_path: &Path,
+    poster_path: &Path,
+    results: &[ExecutionStatus],
+    token: CancellationToken,
+) -> Option<i64> {
+    if !audio_only || token.is_cancelled() {
+        return None;
+    }
+
+    let media_downloaded = matches!(results.get(1), Some(ExecutionStatus::Succeeded));
+    let cover_downloaded_or_repaired = matches!(results.get(0), Some(ExecutionStatus::Succeeded));
+    if !media_downloaded && !cover_downloaded_or_repaired {
+        return None;
+    }
+
+    let media_exists = tokio::fs::metadata(media_path)
+        .await
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false);
+    if !media_exists {
+        debug!(
+            "跳过音频封面内嵌：音频文件不存在或为空，视频「{}」第{}页: {}",
+            video_model.name,
+            page_model.pid,
+            media_path.display()
+        );
+        return None;
+    }
+
+    let mut temporary_cover_path: Option<PathBuf> = None;
+    let cover_path = match tokio::fs::metadata(poster_path).await {
+        Ok(metadata) if metadata.len() > 0 => poster_path.to_path_buf(),
+        _ if m4a_only_mode && media_downloaded => {
+            let Some(cover_url) = page_cover_url_for_embedding(video_model, page_model) else {
+                debug!(
+                    "跳过音频封面内嵌：没有可用封面 URL，视频「{}」第{}页",
+                    video_model.name, page_model.pid
+                );
+                return None;
+            };
+            let temp_cover_path = unique_temp_audio_cover_path(media_path);
+            if let Err(err) = ensure_parent_dir_for_file(&temp_cover_path).await {
+                warn!(
+                    "创建音频临时封面目录失败，跳过封面内嵌: 视频「{}」第{}页: {:#}",
+                    video_model.name, page_model.pid, err
+                );
+                return None;
+            }
+            let urls = vec![cover_url];
+            let fetch_result = tokio::select! {
+                biased;
+                _ = token.cancelled() => return None,
+                res = downloader.fetch_with_fallback(&urls, &temp_cover_path) => res,
+            };
+            if let Err(err) = fetch_result {
+                warn!(
+                    "下载音频临时封面失败，跳过封面内嵌: 视频「{}」第{}页: {:#}",
+                    video_model.name, page_model.pid, err
+                );
+                let _ = fs::remove_file(&temp_cover_path).await;
+                return None;
+            }
+            temporary_cover_path = Some(temp_cover_path.clone());
+            temp_cover_path
+        }
+        _ => {
+            debug!(
+                "跳过音频封面内嵌：封面文件不存在或为空，视频「{}」第{}页: {}",
+                video_model.name,
+                page_model.pid,
+                poster_path.display()
+            );
+            return None;
+        }
+    };
+
+    let embed_result = crate::downloader::embed_cover_into_m4a_with_ffmpeg(media_path, &cover_path).await;
+    if let Some(temp_cover_path) = temporary_cover_path {
+        let _ = fs::remove_file(temp_cover_path).await;
+    }
+
+    match embed_result {
+        Ok(()) => match tokio::fs::metadata(media_path).await {
+            Ok(metadata) => {
+                info!(
+                    "已将封面内嵌到音频文件: 视频「{}」第{}页 -> {}",
+                    video_model.name,
+                    page_model.pid,
+                    media_path.display()
+                );
+                Some(to_db_file_size(metadata.len()))
+            }
+            Err(err) => {
+                warn!(
+                    "封面内嵌成功但读取音频文件大小失败: 视频「{}」第{}页: {:#}",
+                    video_model.name, page_model.pid, err
+                );
+                None
+            }
+        },
+        Err(err) => {
+            warn!(
+                "音频封面内嵌失败，保留原有音频/封面文件: 视频「{}」第{}页: {:#}",
+                video_model.name, page_model.pid, err
+            );
+            None
+        }
+    }
+}
+
+async fn maybe_prepare_audio_cover_for_embedding(
+    m4a_only_mode: bool,
+    video_model: &video::Model,
+    page_model: &page::Model,
+    downloader: &UnifiedDownloader,
+    poster_path: &Path,
+    temp_base_media_path: &Path,
+    token: CancellationToken,
+) -> Option<(PathBuf, bool)> {
+    match tokio::fs::metadata(poster_path).await {
+        Ok(metadata) if metadata.len() > 0 => return Some((poster_path.to_path_buf(), false)),
+        _ if !m4a_only_mode => return None,
+        _ => {}
+    }
+
+    let Some(cover_url) = page_cover_url_for_embedding(video_model, page_model) else {
+        debug!(
+            "跳过音频封面内嵌：没有可用封面 URL，视频「{}」第{}页",
+            video_model.name, page_model.pid
+        );
+        return None;
+    };
+
+    let temp_cover_path = unique_temp_audio_cover_path(temp_base_media_path);
+    if let Err(err) = ensure_parent_dir_for_file(&temp_cover_path).await {
+        warn!(
+            "创建音频临时封面目录失败，跳过封面内嵌: 视频「{}」第{}页: {:#}",
+            video_model.name, page_model.pid, err
+        );
+        return None;
+    }
+
+    let urls = vec![cover_url];
+    let fetch_result = tokio::select! {
+        biased;
+        _ = token.cancelled() => return None,
+        res = downloader.fetch_with_fallback(&urls, &temp_cover_path) => res,
+    };
+    if let Err(err) = fetch_result {
+        warn!(
+            "下载音频临时封面失败，跳过封面内嵌: 视频「{}」第{}页: {:#}",
+            video_model.name, page_model.pid, err
+        );
+        let _ = fs::remove_file(&temp_cover_path).await;
+        return None;
+    }
+
+    Some((temp_cover_path, true))
+}
+
+async fn maybe_embed_cover_into_chapter_audio_outputs(
+    audio_only: bool,
+    m4a_only_mode: bool,
+    video_model: &video::Model,
+    page_model: &page::Model,
+    downloader: &UnifiedDownloader,
+    outcome: &mut ChapterSplitOutcome,
+    poster_path: &Path,
+    temp_base_media_path: &Path,
+    token: CancellationToken,
+) {
+    if !audio_only || token.is_cancelled() || outcome.files.is_empty() {
+        return;
+    }
+
+    let Some((cover_path, is_temporary_cover)) = maybe_prepare_audio_cover_for_embedding(
+        m4a_only_mode,
+        video_model,
+        page_model,
+        downloader,
+        poster_path,
+        temp_base_media_path,
+        token.clone(),
+    )
+    .await
+    else {
+        debug!(
+            "跳过章节音频封面内嵌：封面文件不存在或为空，视频「{}」第{}页: {}",
+            video_model.name,
+            page_model.pid,
+            poster_path.display()
+        );
+        return;
+    };
+
+    let mut embedded_count = 0usize;
+    for chapter_file in outcome.files.iter_mut() {
+        if token.is_cancelled() {
+            break;
+        }
+
+        match crate::downloader::embed_cover_into_m4a_with_ffmpeg(&chapter_file.path, &cover_path).await {
+            Ok(()) => {
+                embedded_count += 1;
+                match tokio::fs::metadata(&chapter_file.path).await {
+                    Ok(metadata) => {
+                        chapter_file.size_bytes = to_db_file_size(metadata.len());
+                    }
+                    Err(err) => {
+                        warn!(
+                            "章节音频封面内嵌成功但读取文件大小失败: 视频「{}」第{}页章节{}: {:#}",
+                            video_model.name,
+                            page_model.pid,
+                            chapter_file.index + 1,
+                            err
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "章节音频封面内嵌失败，保留原章节音频文件: 视频「{}」第{}页章节{} -> {}: {:#}",
+                    video_model.name,
+                    page_model.pid,
+                    chapter_file.index + 1,
+                    chapter_file.path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    outcome.total_size_bytes = outcome
+        .files
+        .iter()
+        .fold(0i64, |total, file| total.saturating_add(file.size_bytes));
+
+    if is_temporary_cover {
+        let _ = fs::remove_file(&cover_path).await;
+    }
+
+    if embedded_count > 0 {
+        info!(
+            "已将封面内嵌到 {} 个章节音频文件: 视频「{}」第{}页",
+            embedded_count, video_model.name, page_model.pid
+        );
+    }
 }
 
 async fn download_page_video_from_streams(
