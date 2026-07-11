@@ -618,6 +618,104 @@ fn unique_temp_path_for_media(input_path: &Path, label: &str, extension: &str) -
     parent.join(format!(".{}.{}.{}.{}", file_name, label, timestamp_ms, extension))
 }
 
+fn audio_codec_needs_mp4_muxer_for_m4a(codec_name: &str) -> bool {
+    codec_name.eq_ignore_ascii_case("flac")
+}
+
+fn is_ipod_muxer_flac_unsupported_error(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("ipod") && stderr.contains("codec flac") && stderr.contains("not currently supported in container")
+}
+
+async fn probe_primary_audio_codec(audio_path: &Path) -> Option<String> {
+    let audio_path_str = audio_path.to_string_lossy().to_string();
+    let output = match tokio::process::Command::new(resolve_media_tool_path("ffprobe"))
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            &audio_path_str,
+        ])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(err) => {
+            debug!(
+                "探测音频编码失败，封面内嵌将使用默认 M4A muxer: {}，error={:#}",
+                audio_path.display(),
+                err
+            );
+            return None;
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = str::from_utf8(&output.stderr).unwrap_or("unknown");
+        debug!(
+            "探测音频编码失败，封面内嵌将使用默认 M4A muxer: {}，ffprobe={}",
+            audio_path.display(),
+            stderr.trim()
+        );
+        return None;
+    }
+
+    str::from_utf8(&output.stdout)
+        .ok()
+        .and_then(|stdout| stdout.lines().map(str::trim).find(|line| !line.is_empty()))
+        .map(|codec| codec.to_ascii_lowercase())
+}
+
+fn build_embed_cover_args(audio_path: &str, cover_path: &str, output_path: &str, force_mp4_muxer: bool) -> Vec<String> {
+    // M4A/MP4 容器内嵌封面使用 attached_pic 视频流。
+    // 只映射原文件音频流和新的封面图，避免重复保留旧封面或误把混合流视频也写回 m4a。
+    // 音频流直接 copy；封面统一转成 mjpeg，兼容实际下载到 PNG/WebP 但文件名仍是 .jpg 的情况。
+    let mut args = vec![
+        "-i".to_string(),
+        audio_path.to_string(),
+        "-i".to_string(),
+        cover_path.to_string(),
+        "-map".to_string(),
+        "0:a".to_string(),
+        "-map".to_string(),
+        "1:v:0".to_string(),
+        "-map_metadata".to_string(),
+        "0".to_string(),
+        "-c:a".to_string(),
+        "copy".to_string(),
+        "-c:v".to_string(),
+        "mjpeg".to_string(),
+        "-q:v".to_string(),
+        "2".to_string(),
+        "-disposition:v:0".to_string(),
+        "attached_pic".to_string(),
+        "-metadata:s:v".to_string(),
+        "title=Album cover".to_string(),
+        "-metadata:s:v".to_string(),
+        "comment=Cover (front)".to_string(),
+        "-movflags".to_string(),
+        "+faststart".to_string(),
+    ];
+
+    // .m4a 后缀会让 ffmpeg 默认使用 ipod muxer；ipod muxer 不支持 FLAC。
+    // B 站的无损音频常见为“FLAC 音频流 + .m4a/MP4 容器”，因此这类文件
+    // 内嵌封面时强制使用 mp4 muxer，避免每个分P都报
+    // "codec flac ... not currently supported in container"。
+    if force_mp4_muxer {
+        args.push("-f".to_string());
+        args.push("mp4".to_string());
+    }
+
+    args.push("-y".to_string());
+    args.push(output_path.to_string());
+    args
+}
+
 pub async fn embed_cover_into_m4a_with_ffmpeg(audio_path: &Path, cover_path: &Path) -> Result<()> {
     ensure!(
         tokio::fs::metadata(audio_path).await.is_ok(),
@@ -637,42 +735,39 @@ pub async fn embed_cover_into_m4a_with_ffmpeg(audio_path: &Path, cover_path: &Pa
     let cover_path_str = cover_path.to_string_lossy().to_string();
     let tmp_output_path_str = tmp_output_path.to_string_lossy().to_string();
 
-    // M4A/MP4 容器内嵌封面使用 attached_pic 视频流。
-    // 只映射原文件音频流和新的封面图，避免重复保留旧封面或误把混合流视频也写回 m4a。
-    // 音频流直接 copy；封面统一转成 mjpeg，兼容实际下载到 PNG/WebP 但文件名仍是 .jpg 的情况。
-    let args = [
-        "-i",
-        &audio_path_str,
-        "-i",
-        &cover_path_str,
-        "-map",
-        "0:a",
-        "-map",
-        "1:v:0",
-        "-map_metadata",
-        "0",
-        "-c:a",
-        "copy",
-        "-c:v",
-        "mjpeg",
-        "-q:v",
-        "2",
-        "-disposition:v:0",
-        "attached_pic",
-        "-metadata:s:v",
-        "title=Album cover",
-        "-metadata:s:v",
-        "comment=Cover (front)",
-        "-movflags",
-        "+faststart",
-        "-y",
-        &tmp_output_path_str,
-    ];
+    let audio_codec = probe_primary_audio_codec(audio_path).await;
+    let force_mp4_muxer = audio_codec.as_deref().is_some_and(audio_codec_needs_mp4_muxer_for_m4a);
+    if force_mp4_muxer {
+        debug!(
+            "检测到 FLAC-in-M4A 音频，封面内嵌改用 MP4 muxer: {}",
+            audio_path.display()
+        );
+    }
 
-    let output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+    let args = build_embed_cover_args(&audio_path_str, &cover_path_str, &tmp_output_path_str, force_mp4_muxer);
+
+    let mut output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
         .args(args)
         .output()
         .await?;
+    if !output.status.success() {
+        let stderr = str::from_utf8(&output.stderr).unwrap_or("unknown").to_string();
+        let _ = fs::remove_file(&tmp_output_path).await;
+        if !force_mp4_muxer && is_ipod_muxer_flac_unsupported_error(&stderr) {
+            debug!(
+                "默认 M4A/ipod muxer 不支持 FLAC，封面内嵌改用 MP4 muxer 重试: {}",
+                audio_path.display()
+            );
+            let retry_args = build_embed_cover_args(&audio_path_str, &cover_path_str, &tmp_output_path_str, true);
+            output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+                .args(retry_args)
+                .output()
+                .await?;
+        } else {
+            bail!("ffmpeg cover embed error: {}", stderr.trim());
+        }
+    }
+
     if !output.status.success() {
         let stderr = str::from_utf8(&output.stderr).unwrap_or("unknown");
         let _ = fs::remove_file(&tmp_output_path).await;
@@ -844,5 +939,45 @@ mod tests {
         let err = anyhow!("failed to download from [\"https://cdn.example/video.m4s\"]: 所有URL尝试失败");
 
         assert!(should_refresh_playurl_after_download_error(&err));
+    }
+
+    #[test]
+    fn flac_audio_uses_mp4_muxer_for_m4a_cover_embedding() {
+        assert!(audio_codec_needs_mp4_muxer_for_m4a("flac"));
+        assert!(audio_codec_needs_mp4_muxer_for_m4a("FLAC"));
+        assert!(!audio_codec_needs_mp4_muxer_for_m4a("aac"));
+    }
+
+    #[test]
+    fn detects_ipod_muxer_flac_unsupported_error() {
+        let stderr =
+            "[ipod @ 0x123] Could not find tag for codec flac in stream #0, codec not currently supported in container";
+
+        assert!(is_ipod_muxer_flac_unsupported_error(stderr));
+        assert!(!is_ipod_muxer_flac_unsupported_error("some other ffmpeg error"));
+    }
+
+    #[test]
+    fn embed_cover_args_force_mp4_muxer_before_output_path() {
+        let args = build_embed_cover_args("audio.m4a", "cover.jpg", "out.m4a", true);
+
+        let muxer_index = args
+            .iter()
+            .position(|arg| arg == "-f")
+            .expect("should set output muxer");
+        assert_eq!(args.get(muxer_index + 1).map(String::as_str), Some("mp4"));
+        assert!(
+            muxer_index < args.len() - 1,
+            "output muxer must be specified before output path"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("out.m4a"));
+    }
+
+    #[test]
+    fn embed_cover_args_keep_default_muxer_for_regular_m4a() {
+        let args = build_embed_cover_args("audio.m4a", "cover.jpg", "out.m4a", false);
+
+        assert!(!args.iter().any(|arg| arg == "-f"));
+        assert_eq!(args.last().map(String::as_str), Some("out.m4a"));
     }
 }
