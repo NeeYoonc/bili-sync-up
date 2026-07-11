@@ -538,6 +538,7 @@ pub struct ConfigResponse {
     pub dynamic_api_delay_multiplier: f64,
     pub enable_large_source_download_limit: bool,
     pub large_source_download_threshold: usize,
+    pub large_source_download_page_threshold: usize,
     pub large_source_max_videos_per_round: usize,
     pub large_source_max_pages_per_round: usize,
     pub large_source_concurrent_video: usize,

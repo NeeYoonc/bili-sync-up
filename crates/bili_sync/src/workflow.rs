@@ -13,7 +13,7 @@ use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt, TryStreamExt};
 use sea_orm::entity::prelude::*;
 use sea_orm::ActiveValue::Set;
-use sea_orm::{DatabaseBackend, Statement};
+use sea_orm::{DatabaseBackend, JoinType, QuerySelect, Statement};
 use tokio::fs;
 use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use tokio::time::{sleep, Duration};
@@ -336,6 +336,7 @@ struct RiskControlResetSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LargeSourceDownloadPolicy {
     active: bool,
+    trigger_reasons: Vec<LargeSourceDownloadTrigger>,
     video_concurrency: usize,
     page_concurrency: usize,
     max_videos_per_round: Option<usize>,
@@ -343,19 +344,52 @@ struct LargeSourceDownloadPolicy {
     playurl_rate_limit: Option<crate::bilibili::PlayurlRateLimitConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LargeSourceDownloadTrigger {
+    SourceVideoCount,
+    SourcePageCount,
+    PendingPageCount,
+}
+
+impl LargeSourceDownloadTrigger {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SourceVideoCount => "源内视频数超过阈值",
+            Self::SourcePageCount => "源内分P数超过阈值",
+            Self::PendingPageCount => "本轮待处理分P数超过阈值",
+        }
+    }
+}
+
 impl LargeSourceDownloadPolicy {
     fn from_config(
         config: &crate::config::SubmissionRiskControlConfig,
         source_video_count: usize,
+        source_page_count: usize,
+        pending_page_count: usize,
         default_video_concurrency: usize,
         default_page_concurrency: usize,
     ) -> Self {
-        let active =
-            config.enable_large_source_download_limit && source_video_count > config.large_source_download_threshold;
+        let mut trigger_reasons = Vec::new();
+        if config.enable_large_source_download_limit {
+            if source_video_count > config.large_source_download_threshold {
+                trigger_reasons.push(LargeSourceDownloadTrigger::SourceVideoCount);
+            }
+            if config.large_source_download_page_threshold > 0 {
+                if source_page_count > config.large_source_download_page_threshold {
+                    trigger_reasons.push(LargeSourceDownloadTrigger::SourcePageCount);
+                } else if pending_page_count > config.large_source_download_page_threshold {
+                    trigger_reasons.push(LargeSourceDownloadTrigger::PendingPageCount);
+                }
+            }
+        }
+
+        let active = !trigger_reasons.is_empty();
 
         if !active {
             return Self {
                 active: false,
+                trigger_reasons,
                 video_concurrency: default_video_concurrency.max(1),
                 page_concurrency: default_page_concurrency.max(1),
                 max_videos_per_round: None,
@@ -366,6 +400,7 @@ impl LargeSourceDownloadPolicy {
 
         Self {
             active: true,
+            trigger_reasons,
             video_concurrency: config.large_source_concurrent_video.max(1),
             page_concurrency: config.large_source_concurrent_page.max(1),
             max_videos_per_round: non_zero_limit(config.large_source_max_videos_per_round),
@@ -375,6 +410,18 @@ impl LargeSourceDownloadPolicy {
                 duration_ms: config.large_source_playurl_duration_ms.max(1),
             }),
         }
+    }
+
+    fn trigger_reason_display(&self) -> String {
+        if self.trigger_reasons.is_empty() {
+            return "未触发".to_string();
+        }
+
+        self.trigger_reasons
+            .iter()
+            .map(|reason| reason.label())
+            .collect::<Vec<_>>()
+            .join("、")
     }
 }
 
@@ -2543,20 +2590,23 @@ pub async fn download_unprocessed_videos(
     }
     video_source.log_download_video_start();
     let current_config = crate::config::reload_config();
-    let source_video_count = get_video_count_for_source(video_source, connection).await?;
-    let large_source_policy = LargeSourceDownloadPolicy::from_config(
-        &current_config.submission_risk_control,
-        source_video_count,
-        current_config.concurrent_limit.video,
-        current_config.concurrent_limit.page,
-    );
-    let semaphore = Semaphore::new(large_source_policy.video_concurrency);
     let mut unhandled_videos_pages = filter_unhandled_video_pages(video_source.filter_expr(), connection).await?;
     let original_unhandled_video_count = unhandled_videos_pages.len();
     let original_unhandled_page_count = unhandled_videos_pages
         .iter()
         .map(|(_, pages_model)| pages_model.len())
         .sum::<usize>();
+    let source_video_count = get_video_count_for_source(video_source, connection).await?;
+    let source_page_count = get_page_count_for_source(video_source, connection).await?;
+    let large_source_policy = LargeSourceDownloadPolicy::from_config(
+        &current_config.submission_risk_control,
+        source_video_count,
+        source_page_count,
+        original_unhandled_page_count,
+        current_config.concurrent_limit.video,
+        current_config.concurrent_limit.page,
+    );
+    let semaphore = Semaphore::new(large_source_policy.video_concurrency);
     if large_source_policy.active {
         unhandled_videos_pages = limit_large_source_download_queue(
             unhandled_videos_pages,
@@ -2568,14 +2618,16 @@ pub async fn download_unprocessed_videos(
             .map(|(_, pages_model)| pages_model.len())
             .sum::<usize>();
         info!(
-            "{}「{}」启用大源下载保护：源内视频 {} 个，本轮待处理 {}→{} 个视频、{}→{} 个分页，下载并发 video/page={}/{}, playurl 限速={:?}",
+            "{}「{}」启用大源下载保护：源内视频 {} 个、源内分P {} 个，本轮待处理 {}→{} 个视频、{}→{} 个分页，触发原因={}，下载并发 video/page={}/{}, playurl 限速={:?}",
             video_source.source_type_display(),
             video_source.source_name_display(),
             source_video_count,
+            source_page_count,
             original_unhandled_video_count,
             unhandled_videos_pages.len(),
             original_unhandled_page_count,
             limited_page_count,
+            large_source_policy.trigger_reason_display(),
             large_source_policy.video_concurrency,
             large_source_policy.page_concurrency,
             large_source_policy.playurl_rate_limit
@@ -3313,13 +3365,6 @@ pub async fn retry_failed_videos_once(
         return Ok(());
     }
     let current_config = crate::config::reload_config();
-    let source_video_count = get_video_count_for_source(video_source, connection).await?;
-    let large_source_policy = LargeSourceDownloadPolicy::from_config(
-        &current_config.submission_risk_control,
-        source_video_count,
-        current_config.concurrent_limit.video,
-        current_config.concurrent_limit.page,
-    );
     let mut failed_videos_pages = get_failed_videos_in_current_cycle(video_source.filter_expr(), connection).await?;
 
     if failed_videos_pages.is_empty() {
@@ -3332,6 +3377,16 @@ pub async fn retry_failed_videos_once(
         .iter()
         .map(|(_, pages_model)| pages_model.len())
         .sum::<usize>();
+    let source_video_count = get_video_count_for_source(video_source, connection).await?;
+    let source_page_count = get_page_count_for_source(video_source, connection).await?;
+    let large_source_policy = LargeSourceDownloadPolicy::from_config(
+        &current_config.submission_risk_control,
+        source_video_count,
+        source_page_count,
+        original_failed_page_count,
+        current_config.concurrent_limit.video,
+        current_config.concurrent_limit.page,
+    );
     if large_source_policy.active {
         failed_videos_pages = limit_large_source_download_queue(
             failed_videos_pages,
@@ -3343,14 +3398,16 @@ pub async fn retry_failed_videos_once(
             .map(|(_, pages_model)| pages_model.len())
             .sum::<usize>();
         info!(
-            "{}「{}」失败重试启用大源下载保护：源内视频 {} 个，本轮重试 {}→{} 个视频、{}→{} 个分页，下载并发 video/page={}/{}, playurl 限速={:?}",
+            "{}「{}」失败重试启用大源下载保护：源内视频 {} 个、源内分P {} 个，本轮重试 {}→{} 个视频、{}→{} 个分页，触发原因={}，下载并发 video/page={}/{}, playurl 限速={:?}",
             video_source.source_type_display(),
             video_source.source_name_display(),
             source_video_count,
+            source_page_count,
             original_failed_video_count,
             failed_videos_pages.len(),
             original_failed_page_count,
             limited_page_count,
+            large_source_policy.trigger_reason_display(),
             large_source_policy.video_concurrency,
             large_source_policy.page_concurrency,
             large_source_policy.playurl_rate_limit
@@ -11410,6 +11467,16 @@ async fn get_video_count_for_source(video_source: &VideoSourceEnum, connection: 
     Ok(count as usize)
 }
 
+/// 获取特定视频源已识别的分P数量，用于少量视频但超多分P的投稿源触发下载保护。
+async fn get_page_count_for_source(video_source: &VideoSourceEnum, connection: &DatabaseConnection) -> Result<usize> {
+    let count = page::Entity::find()
+        .join(JoinType::InnerJoin, page::Relation::Video.def())
+        .filter(video_source.filter_expr())
+        .count(connection)
+        .await?;
+    Ok(count as usize)
+}
+
 fn dedup_positive_ids(ids: &[i32]) -> Vec<i32> {
     let mut unique_ids = ids.iter().copied().filter(|id| *id > 0).collect::<Vec<_>>();
     unique_ids.sort_unstable();
@@ -14949,14 +15016,18 @@ mod tests {
     fn test_large_source_download_policy_overrides_concurrency_and_playurl_rate() {
         let config = crate::config::SubmissionRiskControlConfig::default();
 
-        let normal = LargeSourceDownloadPolicy::from_config(&config, 1000, 3, 2);
+        let normal = LargeSourceDownloadPolicy::from_config(&config, 1000, 1000, 1000, 3, 2);
         assert!(!normal.active);
         assert_eq!(normal.video_concurrency, 3);
         assert_eq!(normal.page_concurrency, 2);
         assert!(normal.playurl_rate_limit.is_none());
 
-        let large = LargeSourceDownloadPolicy::from_config(&config, 1001, 3, 2);
+        let large = LargeSourceDownloadPolicy::from_config(&config, 1001, 10, 10, 3, 2);
         assert!(large.active);
+        assert_eq!(
+            large.trigger_reasons,
+            vec![LargeSourceDownloadTrigger::SourceVideoCount]
+        );
         assert_eq!(large.video_concurrency, 1);
         assert_eq!(large.page_concurrency, 1);
         assert_eq!(large.max_videos_per_round, None);
@@ -14968,6 +15039,53 @@ mod tests {
                 duration_ms: 1000,
             })
         );
+    }
+
+    #[test]
+    fn test_large_source_download_policy_can_trigger_by_page_count() {
+        let config = crate::config::SubmissionRiskControlConfig::default();
+
+        let source_page_large = LargeSourceDownloadPolicy::from_config(&config, 10, 1001, 1001, 3, 2);
+        assert!(source_page_large.active);
+        assert_eq!(
+            source_page_large.trigger_reasons,
+            vec![LargeSourceDownloadTrigger::SourcePageCount]
+        );
+
+        let pending_page_large = LargeSourceDownloadPolicy::from_config(&config, 10, 0, 1001, 3, 2);
+        assert!(pending_page_large.active);
+        assert_eq!(
+            pending_page_large.trigger_reasons,
+            vec![LargeSourceDownloadTrigger::PendingPageCount]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_source_page_count_for_source_uses_join_filter() {
+        let db = create_test_db("large-source-page-count").await;
+        insert_test_submission(&db, 1, false, false).await;
+        insert_test_submission(&db, 2, false, false).await;
+
+        let incomplete_video_status = u32::from(VideoStatus::from([0; 5]));
+        insert_test_video_with_status(&db, 1, 1, incomplete_video_status).await;
+        insert_test_page_with_status(&db, 1, 1, u32::from(PageStatus::from([0; 5]))).await;
+        insert_test_page_with_status(&db, 2, 1, u32::from(PageStatus::from([0; 5]))).await;
+        insert_test_page_with_status(&db, 3, 1, u32::from(PageStatus::from([0; 5]))).await;
+        insert_test_video_with_status(&db, 2, 2, incomplete_video_status).await;
+        insert_test_page_with_status(&db, 4, 2, u32::from(PageStatus::from([0; 5]))).await;
+
+        let submission_source = submission::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query should succeed")
+            .expect("submission should exist");
+        let video_source = VideoSourceEnum::Submission(submission_source);
+
+        let source_page_count = get_page_count_for_source(&video_source, &db)
+            .await
+            .expect("page count should query through joined video source filter");
+
+        assert_eq!(source_page_count, 3);
     }
 
     #[test]

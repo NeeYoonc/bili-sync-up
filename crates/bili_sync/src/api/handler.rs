@@ -9795,6 +9795,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         dynamic_api_delay_multiplier: config.submission_risk_control.dynamic_api_delay_multiplier,
         enable_large_source_download_limit: config.submission_risk_control.enable_large_source_download_limit,
         large_source_download_threshold: config.submission_risk_control.large_source_download_threshold,
+        large_source_download_page_threshold: config.submission_risk_control.large_source_download_page_threshold,
         large_source_max_videos_per_round: config.submission_risk_control.large_source_max_videos_per_round,
         large_source_max_pages_per_round: config.submission_risk_control.large_source_max_pages_per_round,
         large_source_concurrent_video: config.submission_risk_control.large_source_concurrent_video,
@@ -10385,6 +10386,7 @@ pub async fn update_config(
             submission_source_delay_seconds: params.submission_source_delay_seconds,
             enable_large_source_download_limit: params.enable_large_source_download_limit,
             large_source_download_threshold: params.large_source_download_threshold,
+            large_source_download_page_threshold: params.large_source_download_page_threshold,
             large_source_max_videos_per_round: params.large_source_max_videos_per_round,
             large_source_max_pages_per_round: params.large_source_max_pages_per_round,
             large_source_concurrent_video: params.large_source_concurrent_video,
@@ -10508,6 +10510,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "dynamic_api_delay_multiplier" => Some("动态API延迟倍率"),
         "enable_large_source_download_limit" => Some("大源下载保护开关"),
         "large_source_download_threshold" => Some("大源下载保护阈值"),
+        "large_source_download_page_threshold" => Some("大源下载保护分P阈值"),
         "large_source_max_videos_per_round" => Some("大源每轮视频上限"),
         "large_source_max_pages_per_round" => Some("大源每轮分页上限"),
         "large_source_concurrent_video" => Some("大源视频并发"),
@@ -11396,6 +11399,13 @@ pub async fn update_config_internal(
         }
     }
 
+    if let Some(threshold) = params.large_source_download_page_threshold {
+        if threshold != config.submission_risk_control.large_source_download_page_threshold {
+            config.submission_risk_control.large_source_download_page_threshold = threshold;
+            updated_fields.push("large_source_download_page_threshold");
+        }
+    }
+
     if let Some(limit) = params.large_source_max_videos_per_round {
         if limit != config.submission_risk_control.large_source_max_videos_per_round {
             config.submission_risk_control.large_source_max_videos_per_round = limit;
@@ -12039,6 +12049,7 @@ pub async fn update_config_internal(
                 | "dynamic_api_delay_multiplier"
                 | "enable_large_source_download_limit"
                 | "large_source_download_threshold"
+                | "large_source_download_page_threshold"
                 | "large_source_max_videos_per_round"
                 | "large_source_max_pages_per_round"
                 | "large_source_concurrent_video"
