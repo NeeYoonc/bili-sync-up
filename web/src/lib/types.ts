@@ -362,6 +362,7 @@ export interface ConfigResponse {
 	dynamic_api_delay_multiplier?: number;
 	enable_large_source_download_limit?: boolean;
 	large_source_download_threshold?: number;
+	large_source_download_page_threshold?: number;
 	large_source_max_videos_per_round?: number;
 	large_source_max_pages_per_round?: number;
 	large_source_concurrent_video?: number;
@@ -544,6 +545,7 @@ export interface UpdateConfigRequest {
 	dynamic_api_delay_multiplier?: number;
 	enable_large_source_download_limit?: boolean;
 	large_source_download_threshold?: number;
+	large_source_download_page_threshold?: number;
 	large_source_max_videos_per_round?: number;
 	large_source_max_pages_per_round?: number;
 	large_source_concurrent_video?: number;

@@ -270,6 +270,7 @@ pub struct UpdateConfigRequest {
     pub dynamic_api_delay_multiplier: Option<f64>,
     pub enable_large_source_download_limit: Option<bool>,
     pub large_source_download_threshold: Option<usize>,
+    pub large_source_download_page_threshold: Option<usize>,
     pub large_source_max_videos_per_round: Option<usize>,
     pub large_source_max_pages_per_round: Option<usize>,
     pub large_source_concurrent_video: Option<usize>,

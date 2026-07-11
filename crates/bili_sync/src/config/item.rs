@@ -261,6 +261,9 @@ pub struct SubmissionRiskControlConfig {
     /// 大源下载保护阈值（源内视频数超过该值时生效）
     #[serde(default = "default_large_source_download_threshold")]
     pub large_source_download_threshold: usize,
+    /// 大源下载保护分P阈值（源内分P数或本轮待处理分P数超过该值时生效，0 表示关闭分P阈值判定）
+    #[serde(default = "default_large_source_download_page_threshold")]
+    pub large_source_download_page_threshold: usize,
     /// 大源每轮最多处理的视频数；0 表示不限制
     #[serde(default = "default_large_source_max_videos_per_round")]
     pub large_source_max_videos_per_round: usize,
@@ -448,6 +451,10 @@ fn default_large_source_download_threshold() -> usize {
     1000
 }
 
+fn default_large_source_download_page_threshold() -> usize {
+    1000
+}
+
 fn default_large_source_max_videos_per_round() -> usize {
     0
 }
@@ -498,6 +505,7 @@ impl Default for SubmissionRiskControlConfig {
             dynamic_api_delay_multiplier: default_dynamic_api_delay_multiplier(),
             enable_large_source_download_limit: default_enable_large_source_download_limit(),
             large_source_download_threshold: default_large_source_download_threshold(),
+            large_source_download_page_threshold: default_large_source_download_page_threshold(),
             large_source_max_videos_per_round: default_large_source_max_videos_per_round(),
             large_source_max_pages_per_round: default_large_source_max_pages_per_round(),
             large_source_concurrent_video: default_large_source_concurrent_video(),
@@ -520,6 +528,7 @@ mod submission_risk_control_config_tests {
 
         assert!(config.enable_large_source_download_limit);
         assert_eq!(config.large_source_download_threshold, 1000);
+        assert_eq!(config.large_source_download_page_threshold, 1000);
         assert_eq!(config.large_source_max_videos_per_round, 0);
         assert_eq!(config.large_source_max_pages_per_round, 2000);
         assert_eq!(config.large_source_concurrent_video, 1);
@@ -534,6 +543,7 @@ mod submission_risk_control_config_tests {
         let config = SubmissionRiskControlConfig {
             enable_large_source_download_limit: true,
             large_source_download_threshold: 123,
+            large_source_download_page_threshold: 456,
             large_source_max_videos_per_round: 7,
             large_source_max_pages_per_round: 31,
             large_source_concurrent_video: 2,
@@ -547,6 +557,7 @@ mod submission_risk_control_config_tests {
         let value = serde_json::to_value(config).expect("config should serialize");
 
         assert_eq!(value["large_source_download_threshold"], 123);
+        assert_eq!(value["large_source_download_page_threshold"], 456);
         assert_eq!(value["large_source_max_videos_per_round"], 7);
         assert_eq!(value["large_source_playurl_duration_ms"], 1500);
         assert_eq!(value["audio_only_use_low_qn_for_playurl"], true);

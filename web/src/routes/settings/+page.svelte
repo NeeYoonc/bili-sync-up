@@ -190,6 +190,7 @@
 		submissionSourceDelaySeconds: 5,
 		dynamicApiDelayMultiplier: 1.5,
 		largeSourceDownloadThreshold: 1000,
+		largeSourceDownloadPageThreshold: 1000,
 		largeSourceMaxVideosPerRound: 0,
 		largeSourceMaxPagesPerRound: 2000,
 		largeSourceConcurrentVideo: 1,
@@ -335,6 +336,7 @@
 	let dynamicApiDelayMultiplier = 1.5;
 	let enableLargeSourceDownloadLimit = true;
 	let largeSourceDownloadThreshold = 1000;
+	let largeSourceDownloadPageThreshold = 1000;
 	let largeSourceMaxVideosPerRound = 0;
 	let largeSourceMaxPagesPerRound = 2000;
 	let largeSourceConcurrentVideo = 1;
@@ -701,6 +703,9 @@
 		enableLargeSourceDownloadLimit = config.enable_large_source_download_limit ?? true;
 		largeSourceDownloadThreshold =
 			config.large_source_download_threshold ?? DEFAULT_CONFIG_VALUES.largeSourceDownloadThreshold;
+		largeSourceDownloadPageThreshold =
+			config.large_source_download_page_threshold ??
+			DEFAULT_CONFIG_VALUES.largeSourceDownloadPageThreshold;
 		largeSourceMaxVideosPerRound =
 			config.large_source_max_videos_per_round ??
 			DEFAULT_CONFIG_VALUES.largeSourceMaxVideosPerRound;
@@ -1182,6 +1187,10 @@
 			large_source_download_threshold: normalizeNumberInput(
 				largeSourceDownloadThreshold,
 				DEFAULT_CONFIG_VALUES.largeSourceDownloadThreshold
+			),
+			large_source_download_page_threshold: normalizeNumberInput(
+				largeSourceDownloadPageThreshold,
+				DEFAULT_CONFIG_VALUES.largeSourceDownloadPageThreshold
 			),
 			large_source_max_videos_per_round: normalizeNumberInput(
 				largeSourceMaxVideosPerRound,
@@ -3387,7 +3396,7 @@
 						/>
 						<Label for="enable-large-source-download-limit" class="text-sm">启用大源下载保护</Label>
 						<p class="text-muted-foreground ml-2 text-xs">
-							针对超大投稿源限制下载并发、每轮下载数量和 playurl 请求频率
+							针对视频数或分P数较大的投稿源限制下载并发、每轮下载数量和 playurl 请求频率
 						</p>
 					</div>
 
@@ -3404,6 +3413,21 @@
 									placeholder="1000"
 								/>
 								<p class="text-muted-foreground text-xs">源内视频数超过该值时启用下载阶段保护</p>
+							</div>
+
+							<div class="space-y-2">
+								<Label for="large-source-download-page-threshold">大源判定阈值（分P数）</Label>
+								<Input
+									id="large-source-download-page-threshold"
+									type="number"
+									bind:value={largeSourceDownloadPageThreshold}
+									min="0"
+									max="100000"
+									placeholder="1000"
+								/>
+								<p class="text-muted-foreground text-xs">
+									源内已识别分P数或本轮待处理分P数超过该值时启用下载阶段保护；0 表示关闭分P阈值判定
+								</p>
 							</div>
 
 							<div class="space-y-2">
@@ -3502,7 +3526,7 @@
 						<div class="rounded-lg bg-red-100 p-3 dark:bg-red-900/20">
 							<p class="text-sm text-red-700 dark:text-red-300">
 								<strong>说明：</strong
-								>大源保护只限制下载阶段；已下载成功的视频会正常更新状态，未进入本轮预算的视频不会误写断点，下次扫描会继续从未完成部分处理。
+								>大源保护只限制下载阶段；视频数或分P数超过阈值都会触发。已下载成功的视频会正常更新状态，未进入本轮预算的视频不会误写断点，下次扫描会继续从未完成部分处理。
 								默认 playurl 限速为 1 次/秒。
 							</p>
 						</div>
