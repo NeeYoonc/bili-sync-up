@@ -605,6 +605,109 @@ pub async fn remux_with_ffmpeg(input_path: &Path, output_path: &Path) -> Result<
     Ok(())
 }
 
+fn unique_temp_path_for_media(input_path: &Path, label: &str, extension: &str) -> PathBuf {
+    let parent = input_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = input_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "media".into());
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    parent.join(format!(".{}.{}.{}.{}", file_name, label, timestamp_ms, extension))
+}
+
+pub async fn embed_cover_into_m4a_with_ffmpeg(audio_path: &Path, cover_path: &Path) -> Result<()> {
+    ensure!(
+        tokio::fs::metadata(audio_path).await.is_ok(),
+        "音频文件不存在: {}",
+        audio_path.display()
+    );
+    ensure!(
+        tokio::fs::metadata(cover_path).await.is_ok(),
+        "封面文件不存在: {}",
+        cover_path.display()
+    );
+
+    let tmp_output_path = unique_temp_path_for_media(audio_path, "cover", "m4a");
+    let backup_path = unique_temp_path_for_media(audio_path, "backup", "m4a");
+
+    let audio_path_str = audio_path.to_string_lossy().to_string();
+    let cover_path_str = cover_path.to_string_lossy().to_string();
+    let tmp_output_path_str = tmp_output_path.to_string_lossy().to_string();
+
+    // M4A/MP4 容器内嵌封面使用 attached_pic 视频流。
+    // 只映射原文件音频流和新的封面图，避免重复保留旧封面或误把混合流视频也写回 m4a。
+    // 音频流直接 copy；封面统一转成 mjpeg，兼容实际下载到 PNG/WebP 但文件名仍是 .jpg 的情况。
+    let args = [
+        "-i",
+        &audio_path_str,
+        "-i",
+        &cover_path_str,
+        "-map",
+        "0:a",
+        "-map",
+        "1:v:0",
+        "-map_metadata",
+        "0",
+        "-c:a",
+        "copy",
+        "-c:v",
+        "mjpeg",
+        "-q:v",
+        "2",
+        "-disposition:v:0",
+        "attached_pic",
+        "-metadata:s:v",
+        "title=Album cover",
+        "-metadata:s:v",
+        "comment=Cover (front)",
+        "-movflags",
+        "+faststart",
+        "-y",
+        &tmp_output_path_str,
+    ];
+
+    let output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+        .args(args)
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = str::from_utf8(&output.stderr).unwrap_or("unknown");
+        let _ = fs::remove_file(&tmp_output_path).await;
+        bail!("ffmpeg cover embed error: {}", stderr.trim());
+    }
+
+    let output_size = tokio::fs::metadata(&tmp_output_path)
+        .await
+        .with_context(|| format!("无法读取封面内嵌后的临时文件: {}", tmp_output_path.display()))?
+        .len();
+    ensure!(
+        output_size > 0,
+        "封面内嵌后的临时文件为空: {}",
+        tmp_output_path.display()
+    );
+
+    fs::rename(audio_path, &backup_path)
+        .await
+        .with_context(|| format!("备份原音频文件失败: {}", audio_path.display()))?;
+    if let Err(err) = fs::rename(&tmp_output_path, audio_path).await {
+        if let Err(restore_err) = fs::rename(&backup_path, audio_path).await {
+            error!(
+                "封面内嵌失败后恢复原音频文件也失败: {} -> {}, error={:#}",
+                backup_path.display(),
+                audio_path.display(),
+                restore_err
+            );
+        }
+        return Err(err).with_context(|| format!("替换封面内嵌后的音频文件失败: {}", audio_path.display()));
+    }
+
+    let _ = fs::remove_file(&backup_path).await;
+    Ok(())
+}
+
 pub async fn split_media_segments_with_ffmpeg(
     input_path: &Path,
     output_paths: &[PathBuf],
