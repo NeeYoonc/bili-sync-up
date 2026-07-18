@@ -7,13 +7,7 @@ export interface ApiResponse<T> {
 
 // 排序字段枚举
 export type SortBy =
-	| 'id'
-	| 'name'
-	| 'upper_name'
-	| 'created_at'
-	| 'pubtime'
-	| 'is_charge_video'
-	| 'file_size';
+	'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime' | 'is_charge_video' | 'file_size';
 
 // 排序顺序枚举
 export type SortOrder = 'asc' | 'desc';
@@ -38,6 +32,41 @@ export interface VideosRequest {
 // 关键词过滤模式类型
 export type KeywordFilterMode = 'blacklist' | 'whitelist';
 
+// 视频/音频流过滤配置
+export type VideoQuality =
+	| 'Quality360p'
+	| 'Quality480p'
+	| 'Quality720p'
+	| 'Quality1080p'
+	| 'Quality1080pPLUS'
+	| 'Quality1080p60'
+	| 'Quality4k'
+	| 'QualityHdr'
+	| 'QualityDolby'
+	| 'Quality8k';
+
+export type AudioQuality =
+	| 'Quality64k'
+	| 'Quality132k'
+	| 'QualityDolby'
+	| 'QualityHiRES'
+	| 'QualityDolbyBangumi'
+	| 'Quality192k';
+
+export type VideoCodec = 'AVC' | 'HEV' | 'AV1';
+
+export interface FilterOption {
+	video_max_quality: VideoQuality;
+	video_min_quality: VideoQuality;
+	audio_max_quality: AudioQuality;
+	audio_min_quality: AudioQuality;
+	codecs: VideoCodec[];
+	no_dolby_video: boolean;
+	no_dolby_audio: boolean;
+	no_hdr: boolean;
+	no_hires: boolean;
+}
+
 // 视频来源类型
 export interface VideoSource {
 	id: number;
@@ -60,6 +89,7 @@ export interface VideoSource {
 	selected_seasons?: string[];
 	selected_videos?: string | null; // 投稿源：选中视频（JSON字符串）
 	use_dynamic_api?: boolean; // 投稿源：是否使用动态API
+	filter_option?: FilterOption | null; // 视频源级流过滤配置，空表示继承全局
 	// 新的双列表模式关键词过滤
 	blacklist_keywords?: string[]; // 黑名单关键词列表（匹配的视频将被排除）
 	whitelist_keywords?: string[]; // 白名单关键词列表（只下载匹配的视频）
@@ -247,6 +277,7 @@ export interface AddVideoSourceRequest {
 	merge_to_source_id?: number;
 	keyword_filters?: string[]; // 关键词过滤器列表（支持正则表达式）
 	keyword_filter_mode?: KeywordFilterMode; // 关键词过滤模式: "blacklist"（排除匹配）或 "whitelist"（只下载匹配）
+	filter_option?: FilterOption | null; // 视频源级流过滤配置，空表示继承全局
 	// 下载选项
 	audio_only?: boolean; // 仅下载音频（输出m4a格式）
 	audio_only_m4a_only?: boolean; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）

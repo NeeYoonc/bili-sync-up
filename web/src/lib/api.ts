@@ -1,6 +1,7 @@
 import type {
 	ApiResponse,
 	VideoSourcesResponse,
+	FilterOption,
 	VideosRequest,
 	VideosResponse,
 	VideoResponse,
@@ -409,6 +410,7 @@ class ApiClient {
 			ai_rename_enable_collection?: boolean;
 			ai_rename_enable_bangumi?: boolean;
 			ai_rename_rename_parent_dir?: boolean;
+			filter_option?: FilterOption | null;
 		}
 	): Promise<
 		ApiResponse<{
@@ -433,6 +435,7 @@ class ApiClient {
 			use_dynamic_api: boolean;
 			collection_aggregate_enabled: boolean;
 			collection_aggregate_season_number?: number;
+			filter_option?: FilterOption | null;
 			message: string;
 		}>
 	> {
@@ -458,6 +461,7 @@ class ApiClient {
 			use_dynamic_api: boolean;
 			collection_aggregate_enabled: boolean;
 			collection_aggregate_season_number?: number;
+			filter_option?: FilterOption | null;
 			message: string;
 		}>(`/video-sources/${sourceType}/${id}/download-options`, options);
 	}
@@ -1222,6 +1226,7 @@ export const api = {
 			ai_rename_enable_collection?: boolean;
 			ai_rename_enable_bangumi?: boolean;
 			ai_rename_rename_parent_dir?: boolean;
+			filter_option?: FilterOption | null;
 		}
 	) => apiClient.updateVideoSourceDownloadOptions(sourceType, id, options),
 

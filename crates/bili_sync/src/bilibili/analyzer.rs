@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::bilibili::error::BiliError;
 
@@ -8,7 +9,18 @@ pub struct PageAnalyzer {
 }
 
 #[derive(
-    Debug, strum::FromRepr, strum::EnumString, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy,
+    Debug,
+    strum::FromRepr,
+    strum::EnumString,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    ToSchema,
 )]
 pub enum VideoQuality {
     Quality360p = 16,
@@ -40,7 +52,7 @@ impl std::fmt::Display for VideoQuality {
     }
 }
 
-#[derive(Debug, Clone, Copy, strum::FromRepr, strum::EnumString, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, strum::FromRepr, strum::EnumString, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub enum AudioQuality {
     Quality64k = 30216,
     Quality132k = 30232,
@@ -84,6 +96,7 @@ impl AudioQuality {
     Deserialize,
     Clone,
     Copy,
+    ToSchema,
 )]
 pub enum VideoCodecs {
     #[strum(serialize = "HEV")]
@@ -109,7 +122,7 @@ impl TryFrom<u64> for VideoCodecs {
 }
 
 // 视频流的筛选偏好
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct FilterOption {
     pub video_max_quality: VideoQuality,
     pub video_min_quality: VideoQuality,

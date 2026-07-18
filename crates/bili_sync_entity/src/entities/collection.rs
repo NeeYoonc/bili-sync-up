@@ -17,6 +17,7 @@ pub struct Model {
     pub enabled: bool,
     pub scan_deleted_videos: bool,
     pub scan_deleted_videos_once: bool,
+    pub filter_option: Option<serde_json::Value>,
     pub cover: Option<String>,
     pub keyword_filters: Option<String>,
     pub keyword_filter_mode: Option<String>,

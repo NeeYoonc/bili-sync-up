@@ -48,7 +48,7 @@ use crate::api::response::{
     VideoSourcesResponse, VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
-use crate::bilibili::DEFAULT_AI_SUBTITLE_LANGUAGE;
+use crate::bilibili::{FilterOption, DEFAULT_AI_SUBTITLE_LANGUAGE};
 use crate::utils::live_updates::{
     notify_video_sources_changed, notify_videos_changed, subscribe_queue_status_changed,
     subscribe_video_sources_changed, subscribe_videos_changed,
@@ -74,6 +74,29 @@ fn ai_subtitle_language_from_request(language: &Option<String>, fallback: &str) 
         .as_deref()
         .map(normalize_ai_subtitle_language)
         .unwrap_or_else(|| normalize_ai_subtitle_language(fallback))
+}
+
+fn resolve_source_filter_option_update(
+    current: Option<serde_json::Value>,
+    requested: &Option<Option<FilterOption>>,
+) -> Result<Option<serde_json::Value>, ApiError> {
+    match requested {
+        Some(Some(filter_option)) => Ok(Some(serde_json::to_value(filter_option)?)),
+        Some(None) => Ok(None),
+        None => Ok(current),
+    }
+}
+
+fn source_filter_option_to_response(value: Option<serde_json::Value>) -> Result<Option<FilterOption>, ApiError> {
+    value.map(serde_json::from_value).transpose().map_err(ApiError::from)
+}
+
+fn source_filter_option_to_json(value: &Option<FilterOption>) -> Result<Option<serde_json::Value>, ApiError> {
+    value
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(ApiError::from)
 }
 
 // 全局静态的扫码登录服务实例
@@ -2246,6 +2269,7 @@ pub async fn get_video_sources(
                 latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
+                filter_option: model.filter_option.and_then(|value| serde_json::from_value(value).ok()),
                 f_id: None,
                 s_id: Some(model.s_id),
                 m_id: Some(model.m_id),
@@ -2310,6 +2334,7 @@ pub async fn get_video_sources(
                 latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
+                filter_option: model.filter_option.and_then(|value| serde_json::from_value(value).ok()),
                 f_id: Some(model.f_id),
                 s_id: None,
                 m_id: None,
@@ -2374,6 +2399,7 @@ pub async fn get_video_sources(
                 latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
+                filter_option: model.filter_option.and_then(|value| serde_json::from_value(value).ok()),
                 f_id: None,
                 s_id: None,
                 m_id: None,
@@ -2438,6 +2464,7 @@ pub async fn get_video_sources(
                 latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
+                filter_option: model.filter_option.and_then(|value| serde_json::from_value(value).ok()),
                 f_id: None,
                 s_id: None,
                 m_id: None,
@@ -2521,6 +2548,7 @@ pub async fn get_video_sources(
                 latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
+                filter_option: model.filter_option.and_then(|value| serde_json::from_value(value).ok()),
                 f_id: None,
                 s_id: None,
                 m_id: None,
@@ -4595,6 +4623,7 @@ pub async fn add_video_source(
             up_id: params.up_id.clone(),
             collection_type: params.collection_type.clone(),
             collection_aggregate_enabled: params.collection_aggregate_enabled,
+            filter_option: params.filter_option.clone(),
             media_id: params.media_id.clone(),
             ep_id: params.ep_id.clone(),
             download_all_seasons: params.download_all_seasons,
@@ -4634,6 +4663,7 @@ pub async fn add_video_source_internal(
     let txn = crate::database::begin_traced_transaction(&db, "api.handler.add_video_source").await?;
     let ai_subtitle_language =
         ai_subtitle_language_from_request(&params.ai_subtitle_language, DEFAULT_AI_SUBTITLE_LANGUAGE);
+    let source_filter_option = source_filter_option_to_json(&params.filter_option)?;
 
     let result = match params.source_type.as_str() {
         "collection" => {
@@ -4744,6 +4774,7 @@ pub async fn add_video_source_internal(
                 enabled: sea_orm::Set(true),
                 scan_deleted_videos: sea_orm::Set(false),
                 scan_deleted_videos_once: sea_orm::Set(false),
+                filter_option: sea_orm::Set(source_filter_option.clone()),
                 cover: sea_orm::Set(cover_url),
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
@@ -4852,6 +4883,7 @@ pub async fn add_video_source_internal(
                 enabled: sea_orm::Set(true),
                 scan_deleted_videos: sea_orm::Set(false),
                 scan_deleted_videos_once: sea_orm::Set(false),
+                filter_option: sea_orm::Set(source_filter_option.clone()),
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
                 blacklist_keywords: sea_orm::Set(None),
@@ -4933,6 +4965,7 @@ pub async fn add_video_source_internal(
                 last_scan_at: sea_orm::Set(None),
                 next_scan_at: sea_orm::Set(None),
                 no_update_streak: sea_orm::Set(0),
+                filter_option: sea_orm::Set(source_filter_option.clone()),
                 selected_videos: sea_orm::Set(
                     params
                         .selected_videos
@@ -5108,6 +5141,17 @@ pub async fn add_video_source_internal(
                     merge_message.push_str(&format!("番剧名称已更新为: {}", params.name));
                 }
 
+                // 更新源级流过滤配置（如果添加请求携带了自定义配置）
+                if source_filter_option.is_some() && source_filter_option != existing.filter_option {
+                    existing.filter_option = source_filter_option.clone();
+                    updated = true;
+
+                    if !merge_message.is_empty() {
+                        merge_message.push('，');
+                    }
+                    merge_message.push_str("源级码率设置已更新");
+                }
+
                 if updated {
                     // 更新数据库记录 - 修复：正确使用ActiveModel更新
                     let mut existing_update = video_source::ActiveModel {
@@ -5137,6 +5181,10 @@ pub async fn add_video_source_internal(
                     // 更新名称（如果有变更）
                     if !params.name.is_empty() && params.name != existing.name {
                         existing_update.name = sea_orm::Set(params.name.clone());
+                    }
+
+                    if source_filter_option.is_some() {
+                        existing_update.filter_option = sea_orm::Set(source_filter_option.clone());
                     }
 
                     video_source::Entity::update(existing_update).exec(&txn).await?;
@@ -5261,6 +5309,7 @@ pub async fn add_video_source_internal(
                     ep_id: sea_orm::Set(params.ep_id),
                     scan_deleted_videos: sea_orm::Set(false),
                     scan_deleted_videos_once: sea_orm::Set(false),
+                    filter_option: sea_orm::Set(source_filter_option.clone()),
                     download_all_seasons: sea_orm::Set(Some(download_all_seasons)),
                     selected_seasons: sea_orm::Set(selected_seasons_json),
                     keyword_filters: sea_orm::Set(keyword_filters_json),
@@ -5341,6 +5390,7 @@ pub async fn add_video_source_internal(
                 enabled: sea_orm::Set(true),
                 scan_deleted_videos: sea_orm::Set(false),
                 scan_deleted_videos_once: sea_orm::Set(false),
+                filter_option: sea_orm::Set(source_filter_option.clone()),
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
                 blacklist_keywords: sea_orm::Set(None),
@@ -7765,6 +7815,9 @@ pub async fn update_video_source_download_options_internal(
             let ai_rename_rename_parent_dir = params
                 .ai_rename_rename_parent_dir
                 .unwrap_or(collection.ai_rename_rename_parent_dir);
+            let filter_option =
+                resolve_source_filter_option_update(collection.filter_option.clone(), &params.filter_option)?;
+            let response_filter_option = source_filter_option_to_response(filter_option.clone())?;
 
             collection::Entity::update(collection::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
@@ -7785,6 +7838,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_collection: sea_orm::Set(ai_rename_enable_collection),
                 ai_rename_enable_bangumi: sea_orm::Set(ai_rename_enable_bangumi),
                 ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
+                filter_option: sea_orm::Set(filter_option),
                 ..Default::default()
             })
             .exec(&txn)
@@ -7812,6 +7866,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_bangumi,
                 ai_rename_rename_parent_dir,
                 use_dynamic_api: false,
+                filter_option: response_filter_option,
                 message: format!("合集 {} 的下载选项已更新", collection.name),
             }
         }
@@ -7853,6 +7908,9 @@ pub async fn update_video_source_download_options_internal(
             let ai_rename_rename_parent_dir = params
                 .ai_rename_rename_parent_dir
                 .unwrap_or(favorite.ai_rename_rename_parent_dir);
+            let filter_option =
+                resolve_source_filter_option_update(favorite.filter_option.clone(), &params.filter_option)?;
+            let response_filter_option = source_filter_option_to_response(filter_option.clone())?;
 
             favorite::Entity::update(favorite::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
@@ -7871,6 +7929,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_collection: sea_orm::Set(ai_rename_enable_collection),
                 ai_rename_enable_bangumi: sea_orm::Set(ai_rename_enable_bangumi),
                 ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
+                filter_option: sea_orm::Set(filter_option),
                 ..Default::default()
             })
             .exec(&txn)
@@ -7898,6 +7957,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_bangumi,
                 ai_rename_rename_parent_dir,
                 use_dynamic_api: false,
+                filter_option: response_filter_option,
                 message: format!("收藏夹 {} 的下载选项已更新", favorite.name),
             }
         }
@@ -7940,6 +8000,9 @@ pub async fn update_video_source_download_options_internal(
                 .ai_rename_rename_parent_dir
                 .unwrap_or(submission.ai_rename_rename_parent_dir);
             let use_dynamic_api = params.use_dynamic_api.unwrap_or(submission.use_dynamic_api);
+            let filter_option =
+                resolve_source_filter_option_update(submission.filter_option.clone(), &params.filter_option)?;
+            let response_filter_option = source_filter_option_to_response(filter_option.clone())?;
             let mut dynamic_api_full_synced = submission.dynamic_api_full_synced;
             let mut latest_row_at_override: Option<String> = None;
 
@@ -7971,6 +8034,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
                 use_dynamic_api: sea_orm::Set(use_dynamic_api),
                 dynamic_api_full_synced: sea_orm::Set(dynamic_api_full_synced),
+                filter_option: sea_orm::Set(filter_option),
                 ..Default::default()
             };
 
@@ -8002,6 +8066,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_bangumi,
                 ai_rename_rename_parent_dir,
                 use_dynamic_api,
+                filter_option: response_filter_option,
                 message: format!("UP主投稿 {} 的下载选项已更新", submission.upper_name),
             }
         }
@@ -8043,6 +8108,9 @@ pub async fn update_video_source_download_options_internal(
             let ai_rename_rename_parent_dir = params
                 .ai_rename_rename_parent_dir
                 .unwrap_or(watch_later.ai_rename_rename_parent_dir);
+            let filter_option =
+                resolve_source_filter_option_update(watch_later.filter_option.clone(), &params.filter_option)?;
+            let response_filter_option = source_filter_option_to_response(filter_option.clone())?;
 
             watch_later::Entity::update(watch_later::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
@@ -8061,6 +8129,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_collection: sea_orm::Set(ai_rename_enable_collection),
                 ai_rename_enable_bangumi: sea_orm::Set(ai_rename_enable_bangumi),
                 ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
+                filter_option: sea_orm::Set(filter_option),
                 ..Default::default()
             })
             .exec(&txn)
@@ -8088,6 +8157,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_bangumi,
                 ai_rename_rename_parent_dir,
                 use_dynamic_api: false,
+                filter_option: response_filter_option,
                 message: "稍后观看的下载选项已更新".to_string(),
             }
         }
@@ -8129,6 +8199,9 @@ pub async fn update_video_source_download_options_internal(
             let ai_rename_rename_parent_dir = params
                 .ai_rename_rename_parent_dir
                 .unwrap_or(video_source.ai_rename_rename_parent_dir);
+            let filter_option =
+                resolve_source_filter_option_update(video_source.filter_option.clone(), &params.filter_option)?;
+            let response_filter_option = source_filter_option_to_response(filter_option.clone())?;
 
             video_source::Entity::update(video_source::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
@@ -8147,6 +8220,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_collection: sea_orm::Set(ai_rename_enable_collection),
                 ai_rename_enable_bangumi: sea_orm::Set(ai_rename_enable_bangumi),
                 ai_rename_rename_parent_dir: sea_orm::Set(ai_rename_rename_parent_dir),
+                filter_option: sea_orm::Set(filter_option),
                 ..Default::default()
             })
             .exec(&txn)
@@ -8174,6 +8248,7 @@ pub async fn update_video_source_download_options_internal(
                 ai_rename_enable_bangumi,
                 ai_rename_rename_parent_dir,
                 use_dynamic_api: false,
+                filter_option: response_filter_option,
                 message: format!("番剧 {} 的下载选项已更新", video_source.name),
             }
         }

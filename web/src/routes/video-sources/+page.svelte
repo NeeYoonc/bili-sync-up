@@ -19,12 +19,21 @@
 	import SubmissionSelectionDialog from '$lib/components/submission-selection-dialog.svelte';
 	import KeywordFilterDialog from '$lib/components/keyword-filter-dialog.svelte';
 	import AiPromptDialog from '$lib/components/ai-prompt-dialog.svelte';
+	import FilterOptionEditor from '$lib/components/filter-option-editor.svelte';
 	import SectionHeader from '$lib/components/section-header.svelte';
 	import Loading from '$lib/components/ui/Loading.svelte';
 	import SelectAllButton from '$lib/components/select-all-button.svelte';
 	import EmptyState from '$lib/components/empty-state.svelte';
 	import AiRenameHistoryDialog from '$lib/components/ai-rename-history-dialog.svelte';
-	import type { VideoSource, VideoSourcesResponse } from '$lib/types';
+	import type {
+		AudioQuality,
+		ConfigResponse,
+		FilterOption,
+		VideoCodec,
+		VideoQuality,
+		VideoSource,
+		VideoSourcesResponse
+	} from '$lib/types';
 
 	// 图标导入
 	import PlusIcon from '@lucide/svelte/icons/plus';
@@ -47,6 +56,7 @@
 	import BatteryChargingIcon from '@lucide/svelte/icons/battery-charging';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
+	import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { formatCompactTimestampOrFallback } from '$lib/utils/timezone';
@@ -61,6 +71,38 @@
 		{ value: 'ja-JP', label: '日语' },
 		{ value: 'ko-KR', label: '韩语' }
 	];
+	const VALID_VIDEO_QUALITIES = new Set<VideoQuality>([
+		'Quality360p',
+		'Quality480p',
+		'Quality720p',
+		'Quality1080p',
+		'Quality1080pPLUS',
+		'Quality1080p60',
+		'Quality4k',
+		'QualityHdr',
+		'QualityDolby',
+		'Quality8k'
+	]);
+	const VALID_AUDIO_QUALITIES = new Set<AudioQuality>([
+		'Quality64k',
+		'Quality132k',
+		'QualityDolby',
+		'QualityHiRES',
+		'QualityDolbyBangumi',
+		'Quality192k'
+	]);
+	const VALID_VIDEO_CODECS = new Set<VideoCodec>(['AVC', 'HEV', 'AV1']);
+	const DEFAULT_FILTER_OPTION: FilterOption = {
+		video_max_quality: 'Quality8k',
+		video_min_quality: 'Quality360p',
+		audio_max_quality: 'QualityHiRES',
+		audio_min_quality: 'Quality64k',
+		codecs: ['AVC', 'HEV', 'AV1'],
+		no_dolby_video: false,
+		no_dolby_audio: false,
+		no_hdr: false,
+		no_hires: false
+	};
 
 	let loading = false;
 	let bulkUpdating = false;
@@ -116,6 +158,17 @@
 		id: 0,
 		name: ''
 	};
+
+	// 源级流过滤/码率设置对话框状态
+	let showFilterOptionDialog = false;
+	let filterOptionInfo = {
+		type: '',
+		id: 0,
+		name: ''
+	};
+	let filterOptionDraft: FilterOption = { ...DEFAULT_FILTER_OPTION, codecs: [...DEFAULT_FILTER_OPTION.codecs] };
+	let filterOptionInheritGlobal = true;
+	let filterOptionSaving = false;
 
 	// AI提示词对话框状态
 	let showAiPromptDialog = false;
@@ -336,6 +389,54 @@
 	function getAiSubtitleLanguageLabel(language?: string | null): string {
 		const normalized = normalizeAiSubtitleLanguage(language);
 		return AI_SUBTITLE_LANGUAGE_OPTIONS.find((option) => option.value === normalized)?.label ?? normalized;
+	}
+
+	function cloneFilterOption(option: FilterOption): FilterOption {
+		return {
+			...option,
+			codecs: [...option.codecs]
+		};
+	}
+
+	function normalizeVideoQuality(value: string | undefined, fallback: VideoQuality): VideoQuality {
+		return value && VALID_VIDEO_QUALITIES.has(value as VideoQuality) ? (value as VideoQuality) : fallback;
+	}
+
+	function normalizeAudioQuality(value: string | undefined, fallback: AudioQuality): AudioQuality {
+		return value && VALID_AUDIO_QUALITIES.has(value as AudioQuality) ? (value as AudioQuality) : fallback;
+	}
+
+	function normalizeVideoCodecs(values: string[] | undefined): VideoCodec[] {
+		const codecs = values?.filter((codec): codec is VideoCodec =>
+			VALID_VIDEO_CODECS.has(codec as VideoCodec)
+		);
+		return codecs && codecs.length > 0 ? codecs : [...DEFAULT_FILTER_OPTION.codecs];
+	}
+
+	function filterOptionFromConfig(config: ConfigResponse): FilterOption {
+		return {
+			video_max_quality: normalizeVideoQuality(
+				config.video_max_quality,
+				DEFAULT_FILTER_OPTION.video_max_quality
+			),
+			video_min_quality: normalizeVideoQuality(
+				config.video_min_quality,
+				DEFAULT_FILTER_OPTION.video_min_quality
+			),
+			audio_max_quality: normalizeAudioQuality(
+				config.audio_max_quality,
+				DEFAULT_FILTER_OPTION.audio_max_quality
+			),
+			audio_min_quality: normalizeAudioQuality(
+				config.audio_min_quality,
+				DEFAULT_FILTER_OPTION.audio_min_quality
+			),
+			codecs: normalizeVideoCodecs(config.codecs),
+			no_dolby_video: config.no_dolby_video ?? DEFAULT_FILTER_OPTION.no_dolby_video,
+			no_dolby_audio: config.no_dolby_audio ?? DEFAULT_FILTER_OPTION.no_dolby_audio,
+			no_hdr: config.no_hdr ?? DEFAULT_FILTER_OPTION.no_hdr,
+			no_hires: config.no_hires ?? DEFAULT_FILTER_OPTION.no_hires
+		};
 	}
 
 	function updateSourceInStore(sourceType: string, sourceId: number, updater: SourceUpdater) {
@@ -643,6 +744,56 @@
 				}
 			}
 		);
+	}
+
+	async function handleOpenFilterOptionDialog(sourceType: string, source: VideoSource) {
+		filterOptionInfo = {
+			type: sourceType,
+			id: source.id,
+			name: source.name
+		};
+		filterOptionInheritGlobal = !source.filter_option;
+		filterOptionDraft = cloneFilterOption(source.filter_option ?? DEFAULT_FILTER_OPTION);
+		showFilterOptionDialog = true;
+
+		if (!source.filter_option) {
+			const response = await runRequest(() => api.getConfig(), {
+				context: '加载全局流过滤设置失败'
+			});
+			if (response) {
+				filterOptionDraft = filterOptionFromConfig(response.data);
+			}
+		}
+	}
+
+	async function handleSaveFilterOption() {
+		if (!filterOptionInheritGlobal && filterOptionDraft.codecs.length === 0) {
+			toast.error('保存失败', { description: '至少保留一个编解码器' });
+			return;
+		}
+
+		filterOptionSaving = true;
+		const result = await runRequest(
+			() =>
+				api.updateVideoSourceDownloadOptions(filterOptionInfo.type, filterOptionInfo.id, {
+					filter_option: filterOptionInheritGlobal ? null : cloneFilterOption(filterOptionDraft)
+				}),
+			{ context: '保存源级流过滤设置失败' }
+		);
+		filterOptionSaving = false;
+		if (!result) return;
+
+		if (!result.data.success) {
+			toast.error('保存失败', { description: result.data.message });
+			return;
+		}
+
+		updateSourceInStore(filterOptionInfo.type, filterOptionInfo.id, (source) => ({
+			...source,
+			filter_option: result.data.filter_option ?? null
+		}));
+		toast.success(filterOptionInheritGlobal ? '已恢复继承全局流过滤设置' : '已保存源级码率设置');
+		showFilterOptionDialog = false;
 	}
 
 	// 切换仅下载音频设置
@@ -1469,6 +1620,9 @@
 													{#if source.split_chapters_after_download}
 														<span class="text-emerald-600">分章下载</span>
 													{/if}
+													{#if source.filter_option}
+														<span class="text-cyan-600">自定义码率</span>
+													{/if}
 													{#if source.use_dynamic_api}
 														<span class="text-blue-600">动态API已启用</span>
 													{/if}
@@ -1619,6 +1773,21 @@
 														class="h-4 w-4 {source.scan_deleted_videos_once
 															? 'text-orange-600'
 															: 'text-gray-400'}"
+													/>
+												</Button>
+
+												<!-- 源级流过滤/码率设置 -->
+												<Button
+													size="sm"
+													variant="ghost"
+													onclick={() => handleOpenFilterOptionDialog(sourceConfig.type, source)}
+													title={source.filter_option
+														? '编辑源级码率/流过滤'
+														: '设置源级码率/流过滤'}
+													class="h-8 w-8 p-0"
+												>
+													<SlidersHorizontalIcon
+														class="h-4 w-4 {source.filter_option ? 'text-cyan-600' : 'text-gray-400'}"
 													/>
 												</Button>
 
@@ -1972,6 +2141,62 @@
 				onclick={saveSubmissionScanConfig}
 			>
 				{submissionScanConfigSaving ? '保存中…' : '保存'}
+			</Button>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>
+
+<!-- 源级流过滤/码率设置对话框 -->
+<AlertDialog.Root bind:open={showFilterOptionDialog}>
+	<AlertDialog.Content class="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+		<AlertDialog.Header>
+			<AlertDialog.Title title="单独设置该同步源使用的视频/音频质量筛选规则">
+				源级码率设置
+			</AlertDialog.Title>
+			<AlertDialog.Description>
+				为「{filterOptionInfo.name}」单独设置视频质量、音频质量和编码优先级；继承全局时会使用设置页的全局视频质量配置。
+			</AlertDialog.Description>
+		</AlertDialog.Header>
+
+		<div class="mt-4 space-y-5">
+			<div class="flex items-center justify-between rounded-lg border p-3">
+				<div class="space-y-1">
+					<Label for="filter-option-inherit-global">继承全局流过滤设置</Label>
+					<p class="text-muted-foreground text-xs">
+						开启后清空该源的自定义配置；关闭后保存当前编辑器内容作为该源专用码率规则。
+					</p>
+				</div>
+				<Switch
+					id="filter-option-inherit-global"
+					disabled={filterOptionSaving}
+					bind:checked={filterOptionInheritGlobal}
+				/>
+			</div>
+
+			{#if filterOptionInheritGlobal}
+				<div class="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+					当前将继承全局配置。如需给该专集、UP、收藏夹或稍后再看任务单独限码率，请关闭上面的开关。
+				</div>
+			{:else}
+				<FilterOptionEditor
+					value={filterOptionDraft}
+					disabled={filterOptionSaving}
+					on:change={(event) => (filterOptionDraft = event.detail)}
+				/>
+			{/if}
+		</div>
+
+		<AlertDialog.Footer class="mt-4">
+			<Button
+				size="sm"
+				variant="outline"
+				disabled={filterOptionSaving}
+				onclick={() => (showFilterOptionDialog = false)}
+			>
+				取消
+			</Button>
+			<Button size="sm" disabled={filterOptionSaving} onclick={handleSaveFilterOption}>
+				{filterOptionSaving ? '保存中…' : '保存'}
 			</Button>
 		</AlertDialog.Footer>
 	</AlertDialog.Content>

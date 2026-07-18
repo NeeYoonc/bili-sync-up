@@ -3,6 +3,7 @@
 	import api from '$lib/api';
 	import BatchCheckbox from '$lib/components/batch-checkbox.svelte';
 	import BiliImage from '$lib/components/bili-image.svelte';
+	import FilterOptionEditor from '$lib/components/filter-option-editor.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import EmptyState from '$lib/components/empty-state.svelte';
 	import SectionHeader from '$lib/components/section-header.svelte';
@@ -29,7 +30,11 @@
 		ConfigResponse,
 		UserCollectionInfo,
 		AddVideoSourceRequest,
-		KeywordFilterMode
+		KeywordFilterMode,
+		FilterOption,
+		VideoQuality,
+		AudioQuality,
+		VideoCodec
 	} from '$lib/types';
 	import {
 		Search,
@@ -37,7 +42,8 @@
 		Plus as PlusIcon,
 		Filter as FilterIcon,
 		Info as InfoIcon,
-		Languages as LanguagesIcon
+		Languages as LanguagesIcon,
+		SlidersHorizontal as SlidersHorizontalIcon
 	} from '@lucide/svelte';
 	import { onDestroy, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -55,6 +61,38 @@
 		{ value: 'ja-JP', label: '日语' },
 		{ value: 'ko-KR', label: '韩语' }
 	];
+	const VALID_VIDEO_QUALITIES = new Set<VideoQuality>([
+		'Quality360p',
+		'Quality480p',
+		'Quality720p',
+		'Quality1080p',
+		'Quality1080pPLUS',
+		'Quality1080p60',
+		'Quality4k',
+		'QualityHdr',
+		'QualityDolby',
+		'Quality8k'
+	]);
+	const VALID_AUDIO_QUALITIES = new Set<AudioQuality>([
+		'Quality64k',
+		'Quality132k',
+		'QualityDolby',
+		'QualityHiRES',
+		'QualityDolbyBangumi',
+		'Quality192k'
+	]);
+	const VALID_VIDEO_CODECS = new Set<VideoCodec>(['AVC', 'HEV', 'AV1']);
+	const DEFAULT_FILTER_OPTION: FilterOption = {
+		video_max_quality: 'Quality8k',
+		video_min_quality: 'Quality360p',
+		audio_max_quality: 'QualityHiRES',
+		audio_min_quality: 'Quality64k',
+		codecs: ['AVC', 'HEV', 'AV1'],
+		no_dolby_video: false,
+		no_dolby_audio: false,
+		no_hdr: false,
+		no_hires: false
+	};
 
 	let sourceType: VideoCategory = 'collection';
 	let lastSourceType: VideoCategory = sourceType; // 记录上一次的源类型，用于检测切换
@@ -82,6 +120,15 @@
 	let downloadSubtitle = true; // 下载字幕（默认开启）
 	let downloadAiSubtitle = true; // 下载 B 站 AI 字幕（默认开启）
 	let aiSubtitleLanguage = DEFAULT_AI_SUBTITLE_LANGUAGE; // AI 字幕优先语言
+	let filterOptionInheritGlobal = true; // 是否继承全局流过滤/码率设置
+	let filterOptionDraft: FilterOption = {
+		...DEFAULT_FILTER_OPTION,
+		codecs: [...DEFAULT_FILTER_OPTION.codecs]
+	};
+	let globalFilterOptionDefault: FilterOption = {
+		...DEFAULT_FILTER_OPTION,
+		codecs: [...DEFAULT_FILTER_OPTION.codecs]
+	};
 	let useDynamicApi = false; // 投稿源：使用动态API
 	let aiRename = false; // AI重命名（默认关闭）
 	let aiRenameVideoPrompt = ''; // AI重命名视频提示词
@@ -337,6 +384,58 @@
 		collectionQuickSubscribePathTemplate = config.collection_quick_subscribe_path || '';
 		submissionQuickSubscribePathTemplate = config.submission_quick_subscribe_path || '';
 		bangumiQuickSubscribePathTemplate = config.bangumi_quick_subscribe_path || '';
+		globalFilterOptionDefault = filterOptionFromConfig(config);
+		if (filterOptionInheritGlobal) {
+			filterOptionDraft = cloneFilterOption(globalFilterOptionDefault);
+		}
+	}
+
+	function cloneFilterOption(option: FilterOption): FilterOption {
+		return {
+			...option,
+			codecs: [...option.codecs]
+		};
+	}
+
+	function normalizeVideoQuality(value: string | undefined, fallback: VideoQuality): VideoQuality {
+		return value && VALID_VIDEO_QUALITIES.has(value as VideoQuality) ? (value as VideoQuality) : fallback;
+	}
+
+	function normalizeAudioQuality(value: string | undefined, fallback: AudioQuality): AudioQuality {
+		return value && VALID_AUDIO_QUALITIES.has(value as AudioQuality) ? (value as AudioQuality) : fallback;
+	}
+
+	function normalizeVideoCodecs(values: string[] | undefined): VideoCodec[] {
+		const codecs = values?.filter((codec): codec is VideoCodec =>
+			VALID_VIDEO_CODECS.has(codec as VideoCodec)
+		);
+		return codecs && codecs.length > 0 ? codecs : [...DEFAULT_FILTER_OPTION.codecs];
+	}
+
+	function filterOptionFromConfig(config: ConfigResponse): FilterOption {
+		return {
+			video_max_quality: normalizeVideoQuality(
+				config.video_max_quality,
+				DEFAULT_FILTER_OPTION.video_max_quality
+			),
+			video_min_quality: normalizeVideoQuality(
+				config.video_min_quality,
+				DEFAULT_FILTER_OPTION.video_min_quality
+			),
+			audio_max_quality: normalizeAudioQuality(
+				config.audio_max_quality,
+				DEFAULT_FILTER_OPTION.audio_max_quality
+			),
+			audio_min_quality: normalizeAudioQuality(
+				config.audio_min_quality,
+				DEFAULT_FILTER_OPTION.audio_min_quality
+			),
+			codecs: normalizeVideoCodecs(config.codecs),
+			no_dolby_video: config.no_dolby_video ?? DEFAULT_FILTER_OPTION.no_dolby_video,
+			no_dolby_audio: config.no_dolby_audio ?? DEFAULT_FILTER_OPTION.no_dolby_audio,
+			no_hdr: config.no_hdr ?? DEFAULT_FILTER_OPTION.no_hdr,
+			no_hires: config.no_hires ?? DEFAULT_FILTER_OPTION.no_hires
+		};
 	}
 
 	// 订阅的合集相关
@@ -814,6 +913,11 @@
 			return;
 		}
 
+		if (!filterOptionInheritGlobal && filterOptionDraft.codecs.length === 0) {
+			toast.error('码率设置无效', { description: '至少保留一个编解码器' });
+			return;
+		}
+
 		// 番剧特殊验证
 		if (sourceType === 'bangumi') {
 			// 如果不是下载全部季度，且没有选择任何季度，且不是单季度情况，则提示错误
@@ -843,6 +947,7 @@
 			ai_rename: aiRename,
 			ai_rename_video_prompt: aiRenameVideoPrompt.trim() || undefined,
 			ai_rename_audio_prompt: aiRenameAudioPrompt.trim() || undefined,
+			filter_option: filterOptionInheritGlobal ? undefined : cloneFilterOption(filterOptionDraft),
 			// AI重命名高级选项（仅当开启高级选项时传递）
 			ai_rename_enable_multi_page: showAiRenameAdvanced ? aiRenameEnableMultiPage : undefined,
 			ai_rename_enable_collection: showAiRenameAdvanced ? aiRenameEnableCollection : undefined,
@@ -999,6 +1104,8 @@
 			downloadSubtitle = true;
 			downloadAiSubtitle = true;
 			aiSubtitleLanguage = DEFAULT_AI_SUBTITLE_LANGUAGE;
+			filterOptionInheritGlobal = true;
+			filterOptionDraft = cloneFilterOption(globalFilterOptionDefault);
 			useDynamicApi = false;
 			aiRename = false;
 			aiRenameVideoPrompt = '';
@@ -2293,6 +2400,10 @@
 			});
 			return;
 		}
+		if (!filterOptionInheritGlobal && filterOptionDraft.codecs.length === 0) {
+			toast.error('码率设置无效', { description: '至少保留一个编解码器' });
+			return;
+		}
 		batchProgress = { current: 0, total: batchSelectedItems.size };
 
 		const selectedItems = Array.from(batchSelectedItems.entries());
@@ -2325,6 +2436,9 @@
 						ai_rename: aiRename,
 						ai_rename_video_prompt: aiRenameVideoPrompt.trim() || undefined,
 						ai_rename_audio_prompt: aiRenameAudioPrompt.trim() || undefined,
+						filter_option: filterOptionInheritGlobal
+							? undefined
+							: cloneFilterOption(filterOptionDraft),
 						ai_rename_enable_multi_page: showAiRenameAdvanced
 							? aiRenameEnableMultiPage
 							: undefined,
@@ -3497,6 +3611,51 @@
 									</div>
 								{/if}
 							</div>
+						</div>
+
+						<!-- 源级码率/流过滤设置 -->
+						<div class="space-y-3">
+							<div
+								class="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-800 dark:bg-blue-950/30"
+							>
+								<div class="flex items-center gap-2 pr-3">
+									<SlidersHorizontalIcon class="h-4 w-4 text-blue-600 dark:text-blue-400" />
+									<div>
+										<span class="text-sm font-medium text-blue-800 dark:text-blue-200">
+											源级码率/流过滤
+										</span>
+										<p class="text-[10px] text-blue-600 dark:text-blue-300">
+											可为本次添加的专集、UP、收藏夹、稍后观看或番剧单独设置质量筛选规则
+										</p>
+									</div>
+								</div>
+								<div class="flex items-center gap-2">
+									<span class="text-xs text-blue-700 dark:text-blue-300">继承全局</span>
+									<label class="relative inline-flex cursor-pointer items-center">
+										<input
+											type="checkbox"
+											bind:checked={filterOptionInheritGlobal}
+											class="peer sr-only"
+										/>
+										<div
+											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+										></div>
+									</label>
+								</div>
+							</div>
+
+							{#if filterOptionInheritGlobal}
+								<p class="text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs">
+									当前新源会继承设置页的全局视频/音频质量配置；关闭“继承全局”后可为该同步源单独限码率。
+								</p>
+							{:else}
+								<div class="rounded-md border border-blue-200 bg-white p-4 dark:border-blue-800 dark:bg-gray-900">
+									<FilterOptionEditor
+										value={filterOptionDraft}
+										on:change={(event) => (filterOptionDraft = event.detail)}
+									/>
+								</div>
+							{/if}
 						</div>
 
 						<!-- 关键词过滤器（可折叠，双列表模式） -->
@@ -5158,7 +5317,7 @@
 		transition:fade
 	>
 		<div
-			class="bg-card mx-4 w-full max-w-md rounded-lg border shadow-lg"
+			class="bg-card mx-4 max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg border shadow-lg"
 			transition:fly={{ y: -50 }}
 		>
 			<div class="border-b p-4">
@@ -5208,6 +5367,47 @@
 								>{'{{name}}'}</code
 							> 变量。
 						</p>
+					{/if}
+				</div>
+
+				<div class="space-y-3">
+					<div
+						class="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-800 dark:bg-blue-950/30"
+					>
+						<div class="flex items-center gap-2 pr-3">
+							<SlidersHorizontalIcon class="h-4 w-4 text-blue-600 dark:text-blue-400" />
+							<div>
+								<div class="text-sm font-medium text-blue-800 dark:text-blue-200">
+									批量源级码率/流过滤
+								</div>
+								<p class="mt-1 text-xs text-blue-600 dark:text-blue-300">
+									当前设置会应用到本次批量添加的每个视频源。
+								</p>
+							</div>
+						</div>
+						<div class="flex items-center gap-2">
+							<span class="text-xs text-blue-700 dark:text-blue-300">继承全局</span>
+							<label class="relative inline-flex cursor-pointer items-center">
+								<input
+									type="checkbox"
+									bind:checked={filterOptionInheritGlobal}
+									class="peer sr-only"
+								/>
+								<div
+									class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+								></div>
+							</label>
+						</div>
+					</div>
+
+					{#if !filterOptionInheritGlobal}
+						<div class="rounded-md border border-blue-200 bg-white p-4 dark:border-blue-800 dark:bg-gray-900">
+							<FilterOptionEditor
+								value={filterOptionDraft}
+								disabled={batchAdding}
+								on:change={(event) => (filterOptionDraft = event.detail)}
+							/>
+						</div>
 					{/if}
 				</div>
 

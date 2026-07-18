@@ -160,6 +160,11 @@ pub trait VideoSource {
         None
     }
 
+    /// 获取视频源级流过滤配置；None 表示继承全局配置
+    fn filter_option(&self) -> Option<&serde_json::Value> {
+        None
+    }
+
     /// 获取是否仅下载音频（默认为 false）
     fn audio_only(&self) -> bool {
         false // 默认实现：下载视频
@@ -518,6 +523,7 @@ pub async fn bangumi_from<'a>(
             max_duration_seconds: model.max_duration_seconds,
             published_after: model.published_after,
             published_before: model.published_before,
+            filter_option: model.filter_option,
             audio_only: model.audio_only,
             audio_only_m4a_only: model.audio_only_m4a_only,
             flat_folder: model.flat_folder,
@@ -566,6 +572,7 @@ pub async fn bangumi_from<'a>(
             max_duration_seconds: None,
             published_after: None,
             published_before: None,
+            filter_option: None,
             audio_only: false,
             audio_only_m4a_only: false,
             flat_folder: false,
