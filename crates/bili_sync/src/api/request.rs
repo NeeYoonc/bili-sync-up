@@ -2,6 +2,8 @@ use serde::Deserialize;
 use utoipa::IntoParams;
 use utoipa::ToSchema;
 
+use crate::bilibili::FilterOption;
+
 #[derive(Clone, Deserialize, IntoParams, Default)]
 pub struct VideosRequest {
     pub collection: Option<i32>,
@@ -45,6 +47,9 @@ pub struct AddVideoSourceRequest {
     pub collection_type: Option<String>,
     // 是否启用合集聚合（仅当source_type为"collection"时有效）
     pub collection_aggregate_enabled: Option<bool>,
+    /// 视频源级流过滤配置；缺失或 null 表示继承全局配置
+    #[serde(default)]
+    pub filter_option: Option<FilterOption>,
     // 番剧特有字段
     pub media_id: Option<String>,
     pub ep_id: Option<String>,
@@ -152,6 +157,9 @@ pub struct UpdateVideoSourceDownloadOptionsRequest {
     pub use_dynamic_api: Option<bool>,
     /// 是否启用合集聚合（仅collection有效）
     pub collection_aggregate_enabled: Option<bool>,
+    /// 视频源级流过滤配置：字段缺失保持不变，null 表示继承全局，对象表示使用自定义配置
+    #[serde(default)]
+    pub filter_option: Option<Option<FilterOption>>,
 }
 
 // 更新投稿源选中视频列表的请求结构体

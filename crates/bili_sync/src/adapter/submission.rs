@@ -266,6 +266,10 @@ impl VideoSource for submission::Model {
         self.published_before.clone()
     }
 
+    fn filter_option(&self) -> Option<&serde_json::Value> {
+        self.filter_option.as_ref()
+    }
+
     fn audio_only(&self) -> bool {
         self.audio_only
     }

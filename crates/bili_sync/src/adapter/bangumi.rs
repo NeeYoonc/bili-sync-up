@@ -40,6 +40,7 @@ pub struct BangumiSource {
     pub max_duration_seconds: Option<i32>,
     pub published_after: Option<String>,
     pub published_before: Option<String>,
+    pub filter_option: Option<serde_json::Value>,
     pub audio_only: bool,
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
@@ -545,6 +546,10 @@ impl VideoSource for BangumiSource {
 
     fn get_published_before(&self) -> Option<String> {
         self.published_before.clone()
+    }
+
+    fn filter_option(&self) -> Option<&serde_json::Value> {
+        self.filter_option.as_ref()
     }
 
     fn audio_only(&self) -> bool {

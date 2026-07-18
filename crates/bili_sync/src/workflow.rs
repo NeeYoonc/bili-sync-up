@@ -2590,6 +2590,18 @@ pub async fn download_unprocessed_videos(
     }
     video_source.log_download_video_start();
     let current_config = crate::config::reload_config();
+    let source_filter_option = video_source
+        .filter_option()
+        .map(|value| serde_json::from_value::<FilterOption>(value.clone()))
+        .transpose()
+        .with_context(|| {
+            format!(
+                "解析{}「{}」自定义流过滤设置失败",
+                video_source.source_type_display(),
+                video_source.source_name_display()
+            )
+        })?;
+    let effective_filter_option = source_filter_option.unwrap_or_else(|| current_config.filter_option.clone());
     let mut unhandled_videos_pages = filter_unhandled_video_pages(video_source.filter_expr(), connection).await?;
     let original_unhandled_video_count = unhandled_videos_pages.len();
     let original_unhandled_page_count = unhandled_videos_pages
@@ -2705,6 +2717,7 @@ pub async fn download_unprocessed_videos(
                 should_download_upper,
                 large_source_policy.page_concurrency,
                 &chapter_episode_plans,
+                &effective_filter_option,
                 token.clone(),
             )
         })
@@ -3365,6 +3378,18 @@ pub async fn retry_failed_videos_once(
         return Ok(());
     }
     let current_config = crate::config::reload_config();
+    let source_filter_option = video_source
+        .filter_option()
+        .map(|value| serde_json::from_value::<FilterOption>(value.clone()))
+        .transpose()
+        .with_context(|| {
+            format!(
+                "解析{}「{}」自定义流过滤设置失败",
+                video_source.source_type_display(),
+                video_source.source_name_display()
+            )
+        })?;
+    let effective_filter_option = source_filter_option.unwrap_or_else(|| current_config.filter_option.clone());
     let mut failed_videos_pages = get_failed_videos_in_current_cycle(video_source.filter_expr(), connection).await?;
 
     if failed_videos_pages.is_empty() {
@@ -3459,6 +3484,7 @@ pub async fn retry_failed_videos_once(
                 should_download_upper,
                 large_source_policy.page_concurrency,
                 &chapter_episode_plans,
+                &effective_filter_option,
                 token.clone(),
             )
         })
@@ -3560,6 +3586,7 @@ struct DownloadPageArgs<'a> {
     base_path: &'a Path,
     page_concurrency: usize,
     chapter_episode_plans: &'a HashMap<i32, ChapterEpisodePlan>,
+    filter_option: &'a FilterOption,
     inline_total_file_size_bytes: Arc<TokioMutex<Option<i64>>>,
     inline_chapters_split: Arc<TokioMutex<bool>>,
 }
@@ -3584,6 +3611,7 @@ async fn download_video_pages(
     should_download_upper: bool,
     page_concurrency: usize,
     chapter_episode_plans: &HashMap<i32, ChapterEpisodePlan>,
+    filter_option: &FilterOption,
     token: CancellationToken,
 ) -> Result<video::ActiveModel> {
     let _permit = tokio::select! {
@@ -5559,6 +5587,7 @@ async fn download_video_pages(
                 base_path: &base_path,
                 page_concurrency,
                 chapter_episode_plans,
+                filter_option,
                 inline_total_file_size_bytes: inline_total_file_size_bytes.clone(),
                 inline_chapters_split: inline_chapters_split.clone(),
             },
@@ -6220,6 +6249,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
             let connection = args.connection;
             let downloader = args.downloader;
             let base_path = args.base_path;
+            let filter_option = args.filter_option;
             let chapter_episode_plan = args.chapter_episode_plans.get(&page_model.id).cloned();
             async move {
                 let result = download_page(
@@ -6232,6 +6262,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                     downloader,
                     base_path,
                     chapter_episode_plan,
+                    filter_option,
                     token_clone,
                 )
                 .await;
@@ -6557,6 +6588,7 @@ async fn download_page(
     downloader: &UnifiedDownloader,
     base_path: &Path,
     chapter_episode_plan: Option<ChapterEpisodePlan>,
+    filter_option: &FilterOption,
     token: CancellationToken,
 ) -> Result<PageDownloadOutcome> {
     let _permit = tokio::select! {
@@ -7003,6 +7035,7 @@ async fn download_page(
         &page_info,
         &video_path,
         audio_only,
+        filter_option,
         token.clone(),
     ));
     let res_3_fut = Box::pin(generate_page_nfo(
@@ -8597,6 +8630,7 @@ async fn fetch_page_video(
     page_info: &PageInfo,
     page_path: &Path,
     audio_only: bool,
+    filter_option: &FilterOption,
     token: CancellationToken,
 ) -> Result<PageVideoFetchResult> {
     if !should_run {
@@ -8628,7 +8662,6 @@ async fn fetch_page_video(
 
     // 获取用户配置的筛选选项（用于按画质范围请求播放地址，避免拿到高画质单流后被过滤导致无视频流）
     let config = crate::config::reload_config();
-    let filter_option = &config.filter_option;
     let (max_qn, min_qn) = crate::bilibili::effective_playurl_qn_range(
         filter_option.video_max_quality as u32,
         filter_option.video_min_quality as u32,

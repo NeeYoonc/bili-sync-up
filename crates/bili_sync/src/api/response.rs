@@ -2,6 +2,7 @@ use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::bilibili::FilterOption;
 use crate::utils::status::{PageStatus, VideoStatus};
 
 #[derive(Debug, Serialize, ToSchema, Default)]
@@ -176,6 +177,7 @@ pub struct UpdateVideoSourceDownloadOptionsResponse {
     pub ai_rename_enable_bangumi: bool,
     pub ai_rename_rename_parent_dir: bool,
     pub use_dynamic_api: bool,
+    pub filter_option: Option<FilterOption>,
     pub message: String,
 }
 
@@ -279,6 +281,8 @@ pub struct VideoSource {
     pub ai_rename_enable_collection: bool,   // 对合集视频启用AI重命名
     pub ai_rename_enable_bangumi: bool,      // 对番剧启用AI重命名
     pub ai_rename_rename_parent_dir: bool,   // AI重命名时重命名上级目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_option: Option<FilterOption>, // 视频源级流过滤配置，None 表示继承全局
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_dynamic_api: Option<bool>, // 投稿源：是否使用动态API
 }
