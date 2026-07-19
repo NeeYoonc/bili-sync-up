@@ -165,6 +165,7 @@ pub struct UpdateVideoSourceDownloadOptionsResponse {
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
     pub split_chapters_after_download: bool,
+    pub download_charge_videos: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
     pub download_ai_subtitle: bool,
@@ -270,6 +271,7 @@ pub struct VideoSource {
     pub audio_only_m4a_only: bool,           // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
     pub flat_folder: bool,                   // 是否启用平铺目录模式
     pub split_chapters_after_download: bool, // 是否在下载后按播放器章节切分为独立视频
+    pub download_charge_videos: bool,        // 是否下载充电专享视频
     pub download_danmaku: bool,              // 是否下载弹幕文件
     pub download_subtitle: bool,             // 是否下载字幕文件
     pub download_ai_subtitle: bool,          // 是否下载 B 站 AI 字幕

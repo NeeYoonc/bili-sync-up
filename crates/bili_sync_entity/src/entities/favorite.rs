@@ -30,6 +30,7 @@ pub struct Model {
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
     pub split_chapters_after_download: bool,
+    pub download_charge_videos: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
     pub download_ai_subtitle: bool,

@@ -106,6 +106,7 @@ export interface VideoSource {
 	audio_only_m4a_only: boolean; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
 	flat_folder: boolean; // 平铺目录模式（不为每个视频创建子文件夹）
 	split_chapters_after_download: boolean; // 下载后按播放器章节切分为独立视频
+	download_charge_videos: boolean; // 是否下载充电视频
 	download_danmaku: boolean; // 是否下载弹幕
 	download_subtitle: boolean; // 是否下载字幕
 	download_ai_subtitle: boolean; // 是否下载 B 站 AI 字幕
@@ -283,6 +284,7 @@ export interface AddVideoSourceRequest {
 	audio_only_m4a_only?: boolean; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
 	flat_folder?: boolean; // 平铺目录模式（不为每个视频创建子文件夹）
 	split_chapters_after_download?: boolean; // 下载后按播放器章节切分为独立视频
+	download_charge_videos?: boolean; // 是否下载充电视频（默认true）
 	download_danmaku?: boolean; // 是否下载弹幕（默认true）
 	download_subtitle?: boolean; // 是否下载字幕（默认true）
 	download_ai_subtitle?: boolean; // 是否下载 B 站 AI 字幕（默认true）

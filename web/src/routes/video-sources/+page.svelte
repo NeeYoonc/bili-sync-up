@@ -904,6 +904,33 @@
 		);
 	}
 
+	// 切换充电视频媒体下载设置
+	async function handleToggleDownloadChargeVideos(
+		sourceType: string,
+		sourceId: number,
+		currentDownloadChargeVideos: boolean
+	) {
+		const newDownloadChargeVideos = !currentDownloadChargeVideos;
+		await updateAndApply(
+			() =>
+				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
+					download_charge_videos: newDownloadChargeVideos
+				}),
+			{
+				successToast: () => ({
+					title: '设置更新成功',
+					description: newDownloadChargeVideos ? '已启用充电视频下载' : '已禁用充电视频下载'
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						download_charge_videos: data.download_charge_videos
+					}));
+				}
+			}
+		);
+	}
+
 	// 切换动态API（仅投稿源）
 	async function handleToggleDynamicApi(sourceId: number, currentUseDynamicApi: boolean) {
 		const newUseDynamicApi = !currentUseDynamicApi;
@@ -1623,6 +1650,9 @@
 													{#if source.filter_option}
 														<span class="text-cyan-600">自定义码率</span>
 													{/if}
+													{#if source.download_charge_videos === false}
+														<span class="text-pink-600">充电视频下载已禁用</span>
+													{/if}
 													{#if source.use_dynamic_api}
 														<span class="text-blue-600">动态API已启用</span>
 													{/if}
@@ -1699,6 +1729,27 @@
 														/>
 													</Button>
 												{/if}
+
+												<Button
+													size="sm"
+													variant="ghost"
+													onclick={() =>
+														handleToggleDownloadChargeVideos(
+															sourceConfig.type,
+															source.id,
+															source.download_charge_videos ?? true
+														)}
+													title={source.download_charge_videos !== false
+														? '禁用充电视频下载'
+														: '启用充电视频下载'}
+													class="h-8 w-8 p-0"
+												>
+													<BatteryChargingIcon
+														class="h-4 w-4 {source.download_charge_videos !== false
+															? 'text-pink-600'
+															: 'text-gray-400'}"
+													/>
+												</Button>
 
 												{#if sourceConfig.type !== 'bangumi'}
 													<Button
