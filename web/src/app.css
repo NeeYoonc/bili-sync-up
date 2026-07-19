@@ -115,8 +115,44 @@
 	* {
 		@apply border-border outline-ring/50;
 	}
+	html {
+		color-scheme: light;
+		background-color: var(--background);
+	}
+	html.dark {
+		color-scheme: dark;
+	}
 	body {
 		@apply bg-background text-foreground;
+	}
+	select,
+	option,
+	optgroup {
+		color-scheme: light;
+		background-color: var(--background);
+		color: var(--foreground);
+	}
+	html.dark select,
+	html.dark option,
+	html.dark optgroup {
+		color-scheme: dark;
+	}
+	select option:checked {
+		background-color: var(--primary);
+		color: var(--primary-foreground);
+	}
+	[data-slot='alert-dialog-content'],
+	[data-slot='dialog-content'],
+	[data-slot='sheet-content'],
+	[data-slot='tooltip-content'] {
+		color-scheme: inherit;
+		background-color: var(--background);
+		color: var(--foreground);
+	}
+	[data-slot='alert-dialog-overlay'],
+	[data-slot='dialog-overlay'],
+	[data-slot='sheet-overlay'] {
+		color-scheme: inherit;
 	}
 }
 
