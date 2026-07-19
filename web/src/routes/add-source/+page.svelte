@@ -14,6 +14,7 @@
 	import Loading from '$lib/components/ui/Loading.svelte';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import { CustomSelect } from '$lib/components/ui/select';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import type {
 		SearchResultItem,
@@ -2662,15 +2663,13 @@
 						<!-- 视频源类型 -->
 						<div class="space-y-2">
 							<Label for="source-type">视频源类型</Label>
-							<select
+							<CustomSelect
 								id="source-type"
-								bind:value={sourceType}
+								value={sourceType}
+								options={sourceTypeOptions}
+								onChange={(nextValue) => (sourceType = nextValue as VideoCategory)}
 								class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-							>
-								{#each sourceTypeOptions as option (option.value)}
-									<option value={option.value}>{option.label}</option>
-								{/each}
-							</select>
+							/>
 							<p class="text-muted-foreground text-sm">{currentTypeDescription}</p>
 						</div>
 
@@ -2849,15 +2848,13 @@
 						{#if sourceType === 'collection' && isManualInput}
 							<div class="space-y-2">
 								<Label for="collection-type">合集类型</Label>
-								<select
+								<CustomSelect
 									id="collection-type"
-									bind:value={collectionType}
+									value={collectionType}
+									options={collectionTypeOptions}
+									onChange={(nextValue) => (collectionType = String(nextValue ?? 'season'))}
 									class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-								>
-									{#each collectionTypeOptions as option (option.value)}
-										<option value={option.value}>{option.label}</option>
-									{/each}
-								</select>
+								/>
 								<p class="text-sm text-orange-600">
 									⚠️ 手动输入合集ID时需要指定类型，建议从{isCompactLayout
 										? '下方'
@@ -2992,19 +2989,18 @@
 									{#if existingBangumiSources.length > 0}
 										<div class="mt-3 space-y-2">
 											<Label class="text-sm font-medium">合并选项（可选）</Label>
-											<select
-												bind:value={mergeToSourceId}
+											<CustomSelect
+												value={mergeToSourceId}
+												options={[
+													{ value: null, label: '作为新的独立番剧源添加' },
+													...existingBangumiSources.map((source) => ({
+														value: source.id,
+														label: `合并到：${source.name}${source.season_id ? ` (Season ID: ${source.season_id})` : ''}${source.media_id ? ` (Media ID: ${source.media_id})` : ''}`
+													}))
+												]}
+												onChange={(nextValue) => (mergeToSourceId = nextValue as number | null)}
 												class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:ring-1 focus:ring-purple-500 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
-											>
-												<option value={null}>作为新的独立番剧源添加</option>
-												{#each existingBangumiSources as source}
-													<option value={source.id}>
-														合并到：{source.name}
-														{#if source.season_id}(Season ID: {source.season_id}){/if}
-														{#if source.media_id}(Media ID: {source.media_id}){/if}
-													</option>
-												{/each}
-											</select>
+											/>
 											{#if mergeToSourceId}
 												<p class="text-xs text-orange-600">
 													⚠️ 合并后，新番剧的内容将添加到选中的现有番剧源中，不会创建新的番剧源
@@ -3461,16 +3457,16 @@
 														class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
 													></div>
 												</label>
-												<select
-													bind:value={aiSubtitleLanguage}
+												<CustomSelect
+													value={aiSubtitleLanguage}
+													options={AI_SUBTITLE_LANGUAGE_OPTIONS}
 													disabled={!downloadAiSubtitle}
 													title="AI 字幕优先语言"
+													onChange={(nextValue) =>
+														(aiSubtitleLanguage = String(nextValue ?? DEFAULT_AI_SUBTITLE_LANGUAGE))}
+													size="sm"
 													class="h-8 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-												>
-													{#each AI_SUBTITLE_LANGUAGE_OPTIONS as option}
-														<option value={option.value}>{option.label}</option>
-													{/each}
-												</select>
+												/>
 											</div>
 										</div>
 									</div>

@@ -57,6 +57,7 @@ function applyTheme(currentTheme: Theme) {
 	} else {
 		root.classList.remove('dark');
 	}
+	root.style.colorScheme = shouldBeDark ? 'dark' : 'light';
 
 	isDark.set(shouldBeDark);
 }

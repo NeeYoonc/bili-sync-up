@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui/button';
 	import { Label } from '$lib/components/ui/label';
+	import { CustomSelect } from '$lib/components/ui/select';
 	import { createEventDispatcher } from 'svelte';
 	import type { AudioQuality, FilterOption, VideoCodec, VideoQuality } from '$lib/types';
 
@@ -62,80 +63,56 @@
 		);
 	}
 
-	function handleAddCodec(event: Event) {
-		const select = event.currentTarget as HTMLSelectElement;
-		const codec = select.value as VideoCodec;
-		if (codec && !value.codecs.includes(codec)) {
-			updateField('codecs', [...value.codecs, codec]);
-		}
-		select.value = '';
-	}
 </script>
 
 <div class="space-y-5">
 	<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
 		<div class="space-y-2">
 			<Label for="source-video-max-quality">视频最高质量</Label>
-			<select
+			<CustomSelect
 				id="source-video-max-quality"
 				value={value.video_max_quality}
+				options={videoQualityOptions}
 				{disabled}
-				onchange={(event) =>
-					updateField('video_max_quality', (event.currentTarget as HTMLSelectElement).value as VideoQuality)}
+				onChange={(nextValue) => updateField('video_max_quality', nextValue as VideoQuality)}
 				class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-			>
-				{#each videoQualityOptions as option (option.value)}
-					<option value={option.value}>{option.label}</option>
-				{/each}
-			</select>
+			/>
 		</div>
 
 		<div class="space-y-2">
 			<Label for="source-video-min-quality">视频最低质量</Label>
-			<select
+			<CustomSelect
 				id="source-video-min-quality"
 				value={value.video_min_quality}
+				options={videoQualityOptions}
 				{disabled}
-				onchange={(event) =>
-					updateField('video_min_quality', (event.currentTarget as HTMLSelectElement).value as VideoQuality)}
+				onChange={(nextValue) => updateField('video_min_quality', nextValue as VideoQuality)}
 				class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-			>
-				{#each videoQualityOptions as option (option.value)}
-					<option value={option.value}>{option.label}</option>
-				{/each}
-			</select>
+			/>
 		</div>
 
 		<div class="space-y-2">
 			<Label for="source-audio-max-quality">音频最高质量</Label>
-			<select
+			<CustomSelect
 				id="source-audio-max-quality"
 				value={value.audio_max_quality}
+				options={audioQualityOptions}
 				{disabled}
-				onchange={(event) =>
-					updateField('audio_max_quality', (event.currentTarget as HTMLSelectElement).value as AudioQuality)}
+				onChange={(nextValue) => updateField('audio_max_quality', nextValue as AudioQuality)}
 				class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-			>
-				{#each audioQualityOptions as option (option.value)}
-					<option value={option.value}>{option.label}</option>
-				{/each}
-			</select>
+			/>
 		</div>
 
 		<div class="space-y-2">
 			<Label for="source-audio-min-quality">音频最低质量</Label>
-			<select
+			<CustomSelect
 				id="source-audio-min-quality"
 				value={value.audio_min_quality}
+				options={audioQualityOptions}
 				{disabled}
-				onchange={(event) =>
-					updateField('audio_min_quality', (event.currentTarget as HTMLSelectElement).value as AudioQuality)}
+				onChange={(nextValue) => updateField('audio_min_quality', nextValue as AudioQuality)}
 				class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-			>
-				{#each audioQualityOptions as option (option.value)}
-					<option value={option.value}>{option.label}</option>
-				{/each}
-			</select>
+			/>
 		</div>
 	</div>
 
@@ -184,19 +161,21 @@
 			{/each}
 
 			{#if value.codecs.length < codecOptions.length}
-				<select
-					value=""
+				<CustomSelect
+					value={null}
+					options={codecOptions
+						.filter((option) => !value.codecs.includes(option.value))
+						.map((option) => ({ value: option.value, label: option.label }))}
+					placeholder="添加编解码器..."
 					{disabled}
-					onchange={handleAddCodec}
+					clearAfterSelect
+					onChange={(nextValue) => {
+						if (nextValue) {
+							updateField('codecs', [...value.codecs, nextValue as VideoCodec]);
+						}
+					}}
 					class="border-input bg-background h-9 w-full rounded-md border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-				>
-					<option value="" disabled>添加编解码器...</option>
-					{#each codecOptions as option (option.value)}
-						{#if !value.codecs.includes(option.value)}
-							<option value={option.value}>{option.label}</option>
-						{/if}
-					{/each}
-				</select>
+				/>
 			{/if}
 		</div>
 	</div>

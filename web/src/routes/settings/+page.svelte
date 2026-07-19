@@ -6,6 +6,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Textarea } from '$lib/components/ui/textarea';
 	import { Badge } from '$lib/components/ui/badge';
+	import { CustomSelect } from '$lib/components/ui/select';
 	import { SheetFooter } from '$lib/components/ui/sheet';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import QrLogin from '$lib/components/qr-login.svelte';
@@ -572,15 +573,6 @@
 
 	function removeCodec(index: number) {
 		codecs = codecs.filter((_, i) => i !== index);
-	}
-
-	function handleAddCodec(e: Event) {
-		const target = e.target as HTMLSelectElement;
-		const value = target.value;
-		if (value && !codecs.includes(value)) {
-			codecs = [...codecs, value];
-			target.value = '';
-		}
 	}
 
 	onMount(async () => {
@@ -1986,15 +1978,17 @@
 			<div class="grid grid-cols-1 gap-4 {isMobile ? 'sm:grid-cols-1' : 'md:grid-cols-2'}">
 				<div class="space-y-2">
 					<Label for="collection-folder-mode">合集/投稿目录模式</Label>
-					<select
+					<CustomSelect
 						id="collection-folder-mode"
-						bind:value={collectionFolderMode}
+						value={collectionFolderMode}
+						options={[
+							{ value: 'separate', label: '分离模式' },
+							{ value: 'unified', label: '统一模式' },
+							{ value: 'up_seasonal', label: '投稿源同UP分季（仅投稿源）' }
+						]}
+						onChange={(nextValue) => (collectionFolderMode = String(nextValue ?? 'unified'))}
 						class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-					>
-						<option value="separate">分离模式</option>
-						<option value="unified" selected>统一模式</option>
-						<option value="up_seasonal">投稿源同UP分季（仅投稿源）</option>
-					</select>
+					/>
 					<p class="text-muted-foreground text-sm">
 						分离模式：每个视频独立文件夹<br />
 						统一模式：所有视频在合集文件夹下<br />
@@ -2031,15 +2025,13 @@
 
 			<div class="space-y-2">
 				<Label for="nfo-time-type">NFO文件时间类型</Label>
-				<select
+				<CustomSelect
 					id="nfo-time-type"
-					bind:value={nfoTimeType}
+					value={nfoTimeType}
+					options={nfoTimeTypeOptions}
+					onChange={(nextValue) => (nfoTimeType = String(nextValue ?? 'favtime'))}
 					class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-				>
-					{#each nfoTimeTypeOptions as option (option.value)}
-						<option value={option.value}>{option.label}</option>
-					{/each}
-				</select>
+				/>
 				<p class="text-muted-foreground text-sm">
 					选择NFO文件中使用的时间类型。
 					<span class="font-medium text-amber-600">注意：</span>
@@ -2129,54 +2121,46 @@
 			<div class="grid grid-cols-1 gap-4 {isMobile ? 'sm:grid-cols-1' : 'md:grid-cols-2'}">
 				<div class="space-y-2">
 					<Label for="video-max-quality">视频最高质量</Label>
-					<select
+					<CustomSelect
 						id="video-max-quality"
-						bind:value={videoMaxQuality}
+						value={videoMaxQuality}
+						options={videoQualityOptions}
+						onChange={(nextValue) => (videoMaxQuality = String(nextValue ?? 'Quality8k'))}
 						class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-					>
-						{#each videoQualityOptions as option (option.value)}
-							<option value={option.value}>{option.label}</option>
-						{/each}
-					</select>
+					/>
 				</div>
 
 				<div class="space-y-2">
 					<Label for="video-min-quality">视频最低质量</Label>
-					<select
+					<CustomSelect
 						id="video-min-quality"
-						bind:value={videoMinQuality}
+						value={videoMinQuality}
+						options={videoQualityOptions}
+						onChange={(nextValue) => (videoMinQuality = String(nextValue ?? 'Quality360p'))}
 						class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-					>
-						{#each videoQualityOptions as option (option.value)}
-							<option value={option.value}>{option.label}</option>
-						{/each}
-					</select>
+					/>
 				</div>
 
 				<div class="space-y-2">
 					<Label for="audio-max-quality">音频最高质量</Label>
-					<select
+					<CustomSelect
 						id="audio-max-quality"
-						bind:value={audioMaxQuality}
+						value={audioMaxQuality}
+						options={audioQualityOptions}
+						onChange={(nextValue) => (audioMaxQuality = String(nextValue ?? 'QualityHiRES'))}
 						class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-					>
-						{#each audioQualityOptions as option (option.value)}
-							<option value={option.value}>{option.label}</option>
-						{/each}
-					</select>
+					/>
 				</div>
 
 				<div class="space-y-2">
 					<Label for="audio-min-quality">音频最低质量</Label>
-					<select
+					<CustomSelect
 						id="audio-min-quality"
-						bind:value={audioMinQuality}
+						value={audioMinQuality}
+						options={audioQualityOptions}
+						onChange={(nextValue) => (audioMinQuality = String(nextValue ?? 'Quality64k'))}
 						class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-					>
-						{#each audioQualityOptions as option (option.value)}
-							<option value={option.value}>{option.label}</option>
-						{/each}
-					</select>
+					/>
 				</div>
 			</div>
 
@@ -2254,18 +2238,21 @@
 
 					{#if codecs.length < codecOptions.length}
 						<div class="mt-2">
-							<select
+							<CustomSelect
 								class="w-full rounded-md border p-2 text-sm"
-								onchange={handleAddCodec}
-								value=""
-							>
-								<option value="" disabled>添加编解码器...</option>
-								{#each codecOptions as option (option.value)}
-									{#if !codecs.includes(option.value)}
-										<option value={option.value}>{option.label}</option>
-									{/if}
-								{/each}
-							</select>
+								value={null}
+								options={codecOptions
+									.filter((option) => !codecs.includes(option.value))
+									.map((option) => ({ value: option.value, label: option.label }))}
+								placeholder="添加编解码器..."
+								clearAfterSelect
+								onChange={(nextValue) => {
+									const codec = String(nextValue ?? '');
+									if (codec && !codecs.includes(codec)) {
+										codecs = [...codecs, codec];
+									}
+								}}
+							/>
 						</div>
 					{/if}
 				</div>
@@ -4046,17 +4033,22 @@
 
 				<div class="space-y-2">
 					<Label for="notification-channel">选择推送渠道</Label>
-					<select
+					<CustomSelect
 						id="notification-channel"
-						bind:value={activeNotificationChannel}
+						value={activeNotificationChannel}
+						options={[
+							{ value: 'none', label: '无' },
+							{ value: 'serverchan', label: 'Server酱' },
+							{ value: 'serverchan3', label: 'Server酱3' },
+							{ value: 'wecom', label: '企业微信群机器人' },
+							{ value: 'webhook', label: 'Webhook' }
+						]}
+						onChange={(nextValue) =>
+							(activeNotificationChannel = String(
+								nextValue ?? 'none'
+							) as typeof activeNotificationChannel)}
 						class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-					>
-						<option value="none">无</option>
-						<option value="serverchan">Server酱</option>
-						<option value="serverchan3">Server酱3</option>
-						<option value="wecom">企业微信群机器人</option>
-						<option value="webhook">Webhook</option>
-					</select>
+					/>
 					<p class="text-muted-foreground text-sm">选择一个推送渠道，所有推送将发送到该渠道</p>
 				</div>
 			</div>
@@ -4098,16 +4090,19 @@
 
 					<div class="space-y-2">
 						<Label for="generic-webhook-format">Webhook格式</Label>
-						<select
+						<CustomSelect
 							id="generic-webhook-format"
-							bind:value={webhookFormat}
+							value={webhookFormat}
+							options={[
+								{ value: 'auto', label: '自动识别（推荐）' },
+								{ value: 'generic', label: '通用 JSON' },
+								{ value: 'opensend', label: 'openSend' },
+								{ value: 'custom', label: '自定义 JSON' }
+							]}
+							onChange={(nextValue) =>
+								(webhookFormat = String(nextValue ?? 'auto') as typeof webhookFormat)}
 							class="bg-background border-input ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-						>
-							<option value="auto">自动识别（推荐）</option>
-							<option value="generic">通用 JSON</option>
-							<option value="opensend">openSend</option>
-							<option value="custom">自定义 JSON</option>
-						</select>
+						/>
 						<p class="text-muted-foreground text-sm">
 							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头；自定义 JSON
 							可自行定义 POST Body 结构
@@ -4264,14 +4259,16 @@
 
 					<div class="space-y-2">
 						<Label for="wecom-msgtype">消息格式</Label>
-						<select
+						<CustomSelect
 							id="wecom-msgtype"
-							bind:value={wecomMsgtype}
+							value={wecomMsgtype}
+							options={[
+								{ value: 'markdown', label: 'Markdown格式（推荐）' },
+								{ value: 'text', label: '纯文本格式' }
+							]}
+							onChange={(nextValue) => (wecomMsgtype = String(nextValue ?? 'markdown'))}
 							class="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm file:border-0 file:bg-transparent file:text-sm file:font-medium focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-						>
-							<option value="markdown">Markdown格式（推荐）</option>
-							<option value="text">纯文本格式</option>
-						</select>
+						/>
 						<p class="text-muted-foreground text-sm">Markdown格式支持富文本显示，纯文本更简洁</p>
 					</div>
 
@@ -4487,15 +4484,17 @@
 
 				<div class="space-y-2">
 					<Label for="risk-control-mode">验证模式</Label>
-					<select
+					<CustomSelect
 						id="risk-control-mode"
-						bind:value={riskControlMode}
+						value={riskControlMode}
+						options={[
+							{ value: 'manual', label: 'manual - 手动验证' },
+							{ value: 'auto', label: 'auto - 自动验证' },
+							{ value: 'skip', label: 'skip - 跳过验证' }
+						]}
+						onChange={(nextValue) => (riskControlMode = String(nextValue ?? 'manual'))}
 						class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-					>
-						<option value="manual">manual - 手动验证</option>
-						<option value="auto">auto - 自动验证</option>
-						<option value="skip">skip - 跳过验证</option>
-					</select>
+					/>
 					<p class="text-muted-foreground text-xs">
 						manual: 弹出验证页面进行手动验证；auto: 使用第三方服务自动解决验证码；skip:
 						直接跳过风控验证
@@ -4524,14 +4523,16 @@
 
 						<div class="space-y-2">
 							<Label for="auto-solve-service">验证码服务</Label>
-							<select
+							<CustomSelect
 								id="auto-solve-service"
-								bind:value={autoSolveService}
+								value={autoSolveService}
+								options={[
+									{ value: '2captcha', label: '2Captcha' },
+									{ value: 'anticaptcha', label: 'AntiCaptcha' }
+								]}
+								onChange={(nextValue) => (autoSolveService = String(nextValue ?? '2captcha'))}
 								class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-							>
-								<option value="2captcha">2Captcha</option>
-								<option value="anticaptcha">AntiCaptcha</option>
-							</select>
+							/>
 							<p class="text-muted-foreground text-xs">选择验证码识别服务提供商</p>
 						</div>
 
@@ -4689,16 +4690,18 @@
 				<!-- API提供商 -->
 				<div class="space-y-2">
 					<Label for="ai-rename-provider">API提供商</Label>
-					<select
+					<CustomSelect
 						id="ai-rename-provider"
-						bind:value={aiRenameProvider}
+						value={aiRenameProvider}
+						options={[
+							{ value: 'deepseek', label: 'DeepSeek (付费API)' },
+							{ value: 'deepseek-web', label: 'DeepSeek Web (免费)' },
+							{ value: 'openai', label: 'OpenAI' },
+							{ value: 'custom', label: '自定义 (OpenAI兼容)' }
+						]}
+						onChange={(nextValue) => (aiRenameProvider = String(nextValue ?? 'deepseek'))}
 						class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-					>
-						<option value="deepseek">DeepSeek (付费API)</option>
-						<option value="deepseek-web">DeepSeek Web (免费)</option>
-						<option value="openai">OpenAI</option>
-						<option value="custom">自定义 (OpenAI兼容)</option>
-					</select>
+					/>
 					<p class="text-muted-foreground text-xs">
 						{#if aiRenameProvider === 'deepseek-web'}
 							使用 chat.deepseek.com 免费 Web API，需要从浏览器获取 Token
