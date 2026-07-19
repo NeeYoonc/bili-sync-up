@@ -188,6 +188,11 @@ pub trait VideoSource {
         false
     }
 
+    /// 是否下载充电专享视频（默认为 true，保持历史行为）
+    fn download_charge_videos(&self) -> bool {
+        true
+    }
+
     /// 获取是否下载弹幕（默认为 true）
     fn download_danmaku(&self) -> bool {
         true // 默认实现：下载弹幕
@@ -528,6 +533,7 @@ pub async fn bangumi_from<'a>(
             audio_only_m4a_only: model.audio_only_m4a_only,
             flat_folder: model.flat_folder,
             split_chapters_after_download: model.split_chapters_after_download,
+            download_charge_videos: model.download_charge_videos,
             download_danmaku: model.download_danmaku,
             download_subtitle: model.download_subtitle,
             download_ai_subtitle: model.download_ai_subtitle,
@@ -577,6 +583,7 @@ pub async fn bangumi_from<'a>(
             audio_only_m4a_only: false,
             flat_folder: false,
             split_chapters_after_download: false,
+            download_charge_videos: true,
             download_danmaku: true,
             download_subtitle: true,
             download_ai_subtitle: true,

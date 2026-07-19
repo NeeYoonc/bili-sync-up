@@ -68,6 +68,7 @@ mod m20260414_000001_add_danmaku_sync_fields;
 mod m20260415_000001_add_split_chapters_to_sources;
 mod m20260704_000001_add_ai_subtitle_settings;
 mod m20260718_000001_add_source_filter_option;
+mod m20260719_000001_add_source_download_charge_videos;
 
 pub struct Migrator;
 
@@ -143,6 +144,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260415_000001_add_split_chapters_to_sources::Migration),
             Box::new(m20260704_000001_add_ai_subtitle_settings::Migration),
             Box::new(m20260718_000001_add_source_filter_option::Migration),
+            Box::new(m20260719_000001_add_source_download_charge_videos::Migration),
         ]
     }
 }

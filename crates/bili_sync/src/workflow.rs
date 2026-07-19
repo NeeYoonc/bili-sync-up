@@ -7016,6 +7016,7 @@ async fn download_page(
     let nfo_path_for_chapters = nfo_path.clone();
     let danmaku_path_for_chapters = danmaku_path.clone();
     let subtitle_path_for_chapters = subtitle_path.clone();
+    let skip_charge_video_media_download = video_model.is_charge_video && !video_source.download_charge_videos();
     let res_1_fut = Box::pin(fetch_page_poster(
         separate_status[0],
         video_model,
@@ -7035,6 +7036,7 @@ async fn download_page(
         &page_info,
         &video_path,
         audio_only,
+        video_source.download_charge_videos(),
         filter_option,
         token.clone(),
     ));
@@ -7563,7 +7565,9 @@ async fn download_page(
     let final_video_path = chapter_primary_path.unwrap_or_else(|| video_path.clone());
 
     let final_video_path_str = final_video_path.to_string_lossy().to_string();
-    let final_page_path = if inaccessible_reason.is_some() {
+    let final_page_path = if skip_charge_video_media_download {
+        original_page_model.path.clone()
+    } else if inaccessible_reason.is_some() {
         original_page_model
             .path
             .clone()
@@ -8630,12 +8634,29 @@ async fn fetch_page_video(
     page_info: &PageInfo,
     page_path: &Path,
     audio_only: bool,
+    download_charge_videos: bool,
     filter_option: &FilterOption,
     token: CancellationToken,
 ) -> Result<PageVideoFetchResult> {
     if !should_run {
         return Ok(PageVideoFetchResult {
             status: ExecutionStatus::Skipped,
+            file_size_bytes: None,
+            video_stream_size_bytes: None,
+            audio_stream_size_bytes: None,
+        });
+    }
+
+    if video_model.is_charge_video && !download_charge_videos {
+        info!(
+            "视频源已禁用充电视频媒体下载，跳过媒体文件: 视频「{}」第{}页 {} -> {}",
+            &video_model.name,
+            page_info.page,
+            &page_info.name,
+            page_path.display()
+        );
+        return Ok(PageVideoFetchResult {
+            status: ExecutionStatus::Succeeded,
             file_size_bytes: None,
             video_stream_size_bytes: None,
             audio_stream_size_bytes: None,
@@ -9003,8 +9024,9 @@ async fn preallocate_chapter_episode_plans(
             let Some(group_key) = chapter_episode_group_key(video_source, video_model, &config) else {
                 return Vec::new();
             };
-            let should_prefetch_chapters =
-                video_model.single_page.unwrap_or(true) && !is_charge_video_locked(video_model);
+            let should_prefetch_chapters = video_model.single_page.unwrap_or(true)
+                && !is_charge_video_locked(video_model)
+                && (!video_model.is_charge_video || video_source.download_charge_videos());
             let mut pages = pages_model.clone();
             pages.sort_by_key(|page| (page.pid, page.id));
             pages
@@ -15172,6 +15194,51 @@ mod tests {
         db
     }
 
+    #[tokio::test]
+    async fn fetch_page_video_skips_charge_media_when_source_switch_is_off() {
+        let db = create_test_db("charge-download-switch").await;
+        insert_test_video_with_status(&db, 1, 1, 0).await;
+        let mut video_model = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询测试视频")
+            .expect("测试视频应存在");
+        video_model.is_charge_video = true;
+        video_model.charge_can_play = true;
+
+        let bili_client = BiliClient::new(String::new());
+        let downloader = UnifiedDownloader::new_native(bili_client.client.clone());
+        let page_path = unique_temp_dir("charge-download-switch-media").join("charge.mp4");
+        let page_info = PageInfo {
+            cid: 1,
+            page: 1,
+            name: "充电视频".to_string(),
+            duration: 1,
+            ..Default::default()
+        };
+
+        let result = fetch_page_video(
+            true,
+            &bili_client,
+            &video_model,
+            &db,
+            1,
+            &downloader,
+            &page_info,
+            &page_path,
+            false,
+            false,
+            &FilterOption::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("关闭源级充电视频下载时应直接跳过媒体下载");
+
+        assert!(matches!(result.status, ExecutionStatus::Succeeded));
+        assert_eq!(result.file_size_bytes, None);
+        assert!(!page_path.exists(), "关闭充电视频下载不应创建媒体或占位文件");
+    }
+
     async fn insert_test_submission(
         db: &DatabaseConnection,
         id: i32,
@@ -15188,6 +15255,7 @@ mod tests {
             enabled: Set(true),
             scan_deleted_videos: Set(scan_deleted_videos),
             scan_deleted_videos_once: Set(scan_deleted_videos_once),
+            filter_option: Set(None),
             selected_videos: Set(None),
             keyword_filters: Set(None),
             keyword_filter_mode: Set(None),
@@ -15202,6 +15270,7 @@ mod tests {
             audio_only_m4a_only: Set(false),
             flat_folder: Set(false),
             split_chapters_after_download: Set(false),
+            download_charge_videos: Set(true),
             download_danmaku: Set(true),
             download_subtitle: Set(true),
             download_ai_subtitle: Set(true),

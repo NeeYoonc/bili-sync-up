@@ -116,6 +116,7 @@
 	let audioOnlyM4aOnly = false; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
 	let flatFolder = false; // 平铺目录模式
 	let splitChaptersAfterDownload = false; // 下载后按播放器章节切分为独立视频
+	let downloadChargeVideos = true; // 下载充电视频（默认开启）
 	let downloadDanmaku = true; // 下载弹幕（默认开启）
 	let downloadSubtitle = true; // 下载字幕（默认开启）
 	let downloadAiSubtitle = true; // 下载 B 站 AI 字幕（默认开启）
@@ -939,6 +940,7 @@
 			audio_only_m4a_only: audioOnlyM4aOnly,
 			flat_folder: flatFolder,
 			split_chapters_after_download: splitChaptersAfterDownload,
+			download_charge_videos: downloadChargeVideos,
 			download_danmaku: downloadDanmaku,
 			download_subtitle: downloadSubtitle,
 			download_ai_subtitle: downloadAiSubtitle,
@@ -1100,6 +1102,7 @@
 			audioOnlyM4aOnly = false;
 			flatFolder = false;
 			splitChaptersAfterDownload = false;
+			downloadChargeVideos = true;
 			downloadDanmaku = true;
 			downloadSubtitle = true;
 			downloadAiSubtitle = true;
@@ -2428,6 +2431,7 @@
 						audio_only_m4a_only: audioOnlyM4aOnly,
 						flat_folder: flatFolder,
 						split_chapters_after_download: splitChaptersAfterDownload,
+						download_charge_videos: downloadChargeVideos,
 						download_danmaku: downloadDanmaku,
 						download_subtitle: downloadSubtitle,
 						download_ai_subtitle: downloadAiSubtitle,
@@ -3283,6 +3287,41 @@
 										/>
 										<div
 											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-emerald-600 peer-focus:ring-2 peer-focus:ring-emerald-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-emerald-500"
+										></div>
+									</label>
+								</div>
+
+								<!-- 下载充电视频 -->
+								<div
+									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
+								>
+									<div class="flex items-center gap-2">
+										<svg
+											class="h-4 w-4 text-pink-600 dark:text-pink-400"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												stroke-width="2"
+												d="M13 10V3L4 14h7v7l9-11h-7z"
+											/>
+										</svg>
+										<div>
+											<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
+												>下载充电视频</span
+											>
+											<p class="text-[10px] text-gray-500 dark:text-gray-400">
+												关闭后，识别为充电专享的视频只保留元数据，不下载媒体或占位文件
+											</p>
+										</div>
+									</div>
+									<label class="relative inline-flex cursor-pointer items-center">
+										<input type="checkbox" bind:checked={downloadChargeVideos} class="peer sr-only" />
+										<div
+											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-pink-600 peer-focus:ring-2 peer-focus:ring-pink-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-pink-500"
 										></div>
 									</label>
 								</div>

@@ -51,6 +51,8 @@ pub struct AddVideoSourceTask {
     pub collection_aggregate_enabled: Option<bool>,
     #[serde(default)]
     pub filter_option: Option<crate::bilibili::FilterOption>,
+    #[serde(default)]
+    pub download_charge_videos: Option<bool>,
     pub media_id: Option<String>,
     pub ep_id: Option<String>,
     pub download_all_seasons: Option<bool>,
@@ -1860,6 +1862,7 @@ impl AddTaskQueue {
                 collection_type: task.collection_type.clone(),
                 collection_aggregate_enabled: task.collection_aggregate_enabled,
                 filter_option: task.filter_option.clone(),
+                download_charge_videos: task.download_charge_videos,
                 media_id: task.media_id.clone(),
                 ep_id: task.ep_id.clone(),
                 download_all_seasons: task.download_all_seasons,
