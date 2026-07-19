@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { Button } from '$lib/components/ui/button';
+	import { CustomSelect } from '$lib/components/ui/select';
 	// import * as Tabs from '$lib/components/ui/tabs'; // 未使用，已注释
 	import * as Card from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -836,48 +837,54 @@
 				<!-- 日志数量选择 -->
 				<div class="flex items-center gap-2">
 					<label for="perPage" class="text-sm font-medium whitespace-nowrap">每页显示:</label>
-					<select
+					<CustomSelect
 						id="perPage"
-						bind:value={perPage}
-						on:change={() => {
+						value={perPage}
+						options={[
+							{ value: 50, label: '50' },
+							{ value: 100, label: '100' },
+							{ value: 200, label: '200' },
+							{ value: 500, label: '500' },
+							{ value: 1000, label: '1000' },
+							{ value: 5000, label: '5000' }
+						]}
+						onChange={(nextValue) => {
+							perPage = Number(nextValue ?? 100);
 							currentPage = 1;
 							const level = currentTab === 'all' ? undefined : (currentTab as LogLevel);
 							loadLogs(level, 1);
 						}}
+						size="sm"
 						class="border-input bg-background h-8 rounded-md border px-2 py-1 text-sm"
-					>
-						<option value={50}>50</option>
-						<option value={100}>100</option>
-						<option value={200}>200</option>
-						<option value={500}>500</option>
-						<option value={1000}>1000</option>
-						<option value={5000}>5000</option>
-					</select>
+					/>
 				</div>
 
 				<!-- 日志文件选择（每轮生成新文件） -->
 				<div class="flex items-center gap-2">
 					<label for="logFile" class="text-sm font-medium whitespace-nowrap">日志文件:</label>
-					<select
+					<CustomSelect
 						id="logFile"
-						bind:value={selectedLogFile}
+						value={selectedLogFile}
+						options={visibleLogFiles.length === 0
+							? [
+									{
+										value: '',
+										label: logFilesError || '暂无可选日志文件（请先运行一轮任务）',
+										disabled: true
+									}
+								]
+							: visibleLogFiles.map((file) => ({
+									value: file.file_name,
+									label: `[${String(file.level).toUpperCase()}] ${formatUnixSeconds(
+										file.modified
+									)}（${formatBytes(file.size)}）`,
+									title: file.file_name
+								}))}
+						onChange={(nextValue) => (selectedLogFile = String(nextValue ?? ''))}
+						size="sm"
 						class="border-input bg-background h-8 max-w-[260px] rounded-md border px-2 py-1 text-sm"
 						disabled={isLoadingLogFiles || !isAuthenticated}
-					>
-						{#if visibleLogFiles.length === 0}
-							<option value="" disabled>
-								{logFilesError || '暂无可选日志文件（请先运行一轮任务）'}
-							</option>
-						{:else}
-							{#each visibleLogFiles as file (file.file_name)}
-								<option value={file.file_name} title={file.file_name}>
-									[{String(file.level).toUpperCase()}] {formatUnixSeconds(file.modified)}（{formatBytes(
-										file.size
-									)}）
-								</option>
-							{/each}
-						{/if}
-					</select>
+					/>
 				</div>
 
 				<Button variant="outline" size="sm" onclick={handleRefresh} disabled={isLoading}>

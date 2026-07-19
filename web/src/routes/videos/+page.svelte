@@ -10,6 +10,7 @@
 	import SelectAllButton from '$lib/components/select-all-button.svelte';
 	import EmptyState from '$lib/components/empty-state.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
+	import { CustomSelect } from '$lib/components/ui/select';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import FilterIcon from '@lucide/svelte/icons/filter';
@@ -991,24 +992,25 @@
 				<div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
 					<!-- 排序下拉框 - 在移动端占满宽度 -->
 					<div class="w-full sm:w-auto">
-						<select
+						<CustomSelect
 							class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full rounded-md border px-3 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-auto"
 							value="{currentSortBy}_{currentSortOrder}"
-							onchange={(e) => {
-								const { sortBy, sortOrder } = parseSortValue(e.currentTarget.value);
+							options={[
+								{ value: 'id_desc', label: '添加时间 (最新)' },
+								{ value: 'id_asc', label: '添加时间 (最早)' },
+								{ value: 'pubtime_desc', label: '发布时间 (最新)' },
+								{ value: 'pubtime_asc', label: '发布时间 (最早)' },
+								{ value: 'is_charge_video_desc', label: '充电视频在前' },
+								{ value: 'file_size_desc', label: '文件大小 (最大)' },
+								{ value: 'file_size_asc', label: '文件大小 (最小)' },
+								{ value: 'name_asc', label: '名称 (A-Z)' },
+								{ value: 'name_desc', label: '名称 (Z-A)' }
+							]}
+							onChange={(nextValue) => {
+								const { sortBy, sortOrder } = parseSortValue(String(nextValue ?? 'id_desc'));
 								handleSortChange(sortBy, sortOrder);
 							}}
-						>
-							<option value="id_desc">添加时间 (最新)</option>
-							<option value="id_asc">添加时间 (最早)</option>
-							<option value="pubtime_desc">发布时间 (最新)</option>
-							<option value="pubtime_asc">发布时间 (最早)</option>
-							<option value="is_charge_video_desc">充电视频在前</option>
-							<option value="file_size_desc">文件大小 (最大)</option>
-							<option value="file_size_asc">文件大小 (最小)</option>
-							<option value="name_asc">名称 (A-Z)</option>
-							<option value="name_desc">名称 (Z-A)</option>
-						</select>
+						/>
 					</div>
 
 					<!-- 显示数量设置 -->
@@ -1181,15 +1183,12 @@
 					<span class="text-sm font-medium">按分辨率筛选</span>
 				</div>
 				<div class="mt-2 w-full sm:max-w-xs">
-					<select
+					<CustomSelect
 						class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full rounded-md border px-3 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none"
-						bind:value={selectedResolution}
-						onchange={(e) => handleResolutionChange(e.currentTarget.value)}
-					>
-						{#each RESOLUTION_OPTIONS as option}
-							<option value={option.value}>{option.label}</option>
-						{/each}
-					</select>
+						value={selectedResolution}
+						options={RESOLUTION_OPTIONS}
+						onChange={(nextValue) => handleResolutionChange(String(nextValue ?? ''))}
+					/>
 				</div>
 			</div>
 		</div>

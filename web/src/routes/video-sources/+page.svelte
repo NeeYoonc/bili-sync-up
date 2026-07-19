@@ -6,6 +6,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Switch } from '$lib/components/ui/switch';
+	import { CustomSelect } from '$lib/components/ui/select';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import { toast } from 'svelte-sonner';
@@ -2008,23 +2009,21 @@
 													/>
 												</Button>
 
-												<select
+												<CustomSelect
 													value={normalizeAiSubtitleLanguage(source.ai_subtitle_language)}
+													options={AI_SUBTITLE_LANGUAGE_OPTIONS}
 													disabled={source.download_subtitle === false ||
 														source.download_ai_subtitle === false}
 													title="AI 字幕优先语言，目标语言缺失时回退中文"
 													class="h-8 w-[76px] rounded-md border border-gray-200 bg-white px-1 text-xs text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
-													onchange={(event) =>
+													size="sm"
+													onChange={(nextValue) =>
 														handleUpdateAiSubtitleLanguage(
 															sourceConfig.type,
 															source.id,
-															(event.currentTarget as HTMLSelectElement).value
+															String(nextValue ?? DEFAULT_AI_SUBTITLE_LANGUAGE)
 														)}
-												>
-													{#each AI_SUBTITLE_LANGUAGE_OPTIONS as option}
-														<option value={option.value}>{option.label}</option>
-													{/each}
-												</select>
+												/>
 
 												<!-- AI重命名 -->
 												<Button
