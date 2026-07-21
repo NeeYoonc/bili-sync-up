@@ -120,8 +120,7 @@
 		const isBangumi = video.bangumi_title !== undefined;
 
 		if (isBangumi) {
-			// 番剧任务名称：VideoStatus[2] 对应 tvshow.nfo 生成
-			const bangumiTaskNames = ['视频封面', '视频信息', 'tvshow.nfo', 'UP主信息', '分P下载'];
+			const bangumiTaskNames = ['视频封面', 'tvshow.nfo / season.nfo', 'UP主头像', 'UP主信息', '分P下载'];
 			return bangumiTaskNames[index] || `任务${index + 1}`;
 		} else {
 			// 普通视频任务名称：VideoStatus[2] 对应 UP主头像下载

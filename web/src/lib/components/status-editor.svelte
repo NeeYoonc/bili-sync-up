@@ -22,7 +22,7 @@
 	$: videoTaskNames = (() => {
 		const isBangumi = video.bangumi_title !== undefined;
 		if (isBangumi) {
-			return ['视频封面', '视频信息', 'tvshow.nfo', 'UP主信息', '分P下载'];
+			return ['视频封面', 'tvshow.nfo / season.nfo', 'UP主头像', 'UP主信息', '分P下载'];
 		}
 		return ['视频封面', '视频信息', 'UP主头像', 'UP主信息', '分P下载'];
 	})();
