@@ -59,6 +59,14 @@ import type {
 import { ErrorType } from './types';
 import { wsManager } from './ws';
 
+type ResetSpecificTasksOptions =
+	| number[]
+	| {
+			taskIndexes?: number[];
+			videoTaskIndexes?: number[];
+			pageTaskIndexes?: number[];
+	  };
+
 // API 基础配置
 const API_BASE_URL = '/api';
 
@@ -289,17 +297,24 @@ class ApiClient {
 
 	/**
 	 * 选择性重置特定任务
-	 * @param taskIndexes 要重置的任务索引列表
+	 * @param taskIndexes 要重置的任务索引列表；也可分别传 videoTaskIndexes / pageTaskIndexes
 	 * @param params 可选的查询参数，用于筛选要重置的视频（与 /api/videos 参数保持一致的子集）
 	 * @param force 是否强制重置（包括已完成的任务）
 	 */
 	async resetSpecificTasks(
-		taskIndexes: number[],
+		taskIndexes: ResetSpecificTasksOptions,
 		params?: VideosRequest,
 		force: boolean = false
 	): Promise<ApiResponse<ResetAllVideosResponse>> {
+		const taskPayload = Array.isArray(taskIndexes)
+			? { task_indexes: taskIndexes }
+			: {
+					task_indexes: taskIndexes.taskIndexes ?? [],
+					video_task_indexes: taskIndexes.videoTaskIndexes ?? [],
+					page_task_indexes: taskIndexes.pageTaskIndexes ?? []
+				};
 		const requestBody = {
-			task_indexes: taskIndexes,
+			...taskPayload,
 			force,
 			...params
 		};
@@ -1083,7 +1098,7 @@ export const api = {
 	 * 选择性重置特定任务
 	 */
 	resetSpecificTasks: (
-		taskIndexes: number[],
+		taskIndexes: ResetSpecificTasksOptions,
 		params?: {
 			collection?: number;
 			favorite?: number;

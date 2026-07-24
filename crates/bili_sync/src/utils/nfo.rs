@@ -326,6 +326,10 @@ impl NFO<'_> {
                     .write_cdata_content_async(BytesCData::new(movie.intro))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
+                writer
+                    .create_element("lockdata")
+                    .write_text_content_async(BytesText::new("true"))
+                    .await?;
 
                 // 分级信息
                 if let Some(mpaa) = movie.mpaa {
@@ -698,6 +702,10 @@ impl NFO<'_> {
                     .write_cdata_content_async(BytesCData::new(tvshow.intro))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
+                writer
+                    .create_element("lockdata")
+                    .write_text_content_async(BytesText::new("true"))
+                    .await?;
 
                 // 评分信息
                 if let Some(rating) = tvshow.user_rating {
@@ -1058,6 +1066,10 @@ impl NFO<'_> {
                     writer.create_element("plot").write_empty_async().await?;
                 }
                 writer.create_element("outline").write_empty_async().await?;
+                writer
+                    .create_element("lockdata")
+                    .write_text_content_async(BytesText::new("true"))
+                    .await?;
 
                 // 季集信息
                 writer
@@ -1424,6 +1436,10 @@ impl NFO<'_> {
                     .write_cdata_content_async(BytesCData::new(season_plot))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
+                writer
+                    .create_element("lockdata")
+                    .write_text_content_async(BytesText::new("true"))
+                    .await?;
 
                 // 评分信息
                 if let Some(rating) = season.user_rating {
@@ -2408,8 +2424,10 @@ impl<'a> Episode<'a> {
             name: episode_title,
             original_title: episode_original_title,
             pid: page.pid.to_string(),
-            plot: Some(&video.intro),                                 // 使用视频简介
-            season: season_number,                                    // 根据配置使用统一season或原始season_number
+            // 真实番剧的 video.intro 是季度简介；不要重复写进每个单集 plot。
+            // UGC 多P/合集仍保留视频简介，方便媒体库在分集页展示上下文。
+            plot: (!is_bangumi).then_some(video.intro.as_str()),
+            season: season_number, // 根据配置使用统一season或原始season_number
             episode_number: video.episode_number.unwrap_or(page.pid), // 使用video的episode_number
             aired: Some(aired_time),
             duration: Some(page.duration as i32 / 60), // 分页时长转换为分钟
@@ -2752,6 +2770,9 @@ mod tests {
 </person>"#,
         );
 
+        assert!(generated_movie.contains("<lockdata>true</lockdata>"));
+        assert!(generated_tvshow.contains("<lockdata>true</lockdata>"));
+
         let page = page::Model {
             name: "name".to_string(),
             pid: 3,
@@ -2765,6 +2786,10 @@ mod tests {
         assert!(generated_episode.contains("<season>1</season>"));
         assert!(generated_episode.contains("<episode>3</episode>"));
         assert!(generated_episode.contains(r#"<uniqueid type="bilibili" default="true">3</uniqueid>"#));
+        assert!(generated_episode.contains("<lockdata>true</lockdata>"));
+
+        let generated_season = NFO::Season((&video).into()).generate_nfo().await.unwrap();
+        assert!(generated_season.contains("<lockdata>true</lockdata>"));
     }
 
     #[tokio::test]
@@ -2970,6 +2995,45 @@ mod tests {
         assert!(!generated_episode.contains('\u{000b}'));
         assert!(generated_episode.contains("<title>标题异常 - 分页标题</title>"));
         assert!(generated_episode.contains("简介里有非法字符这里"));
+    }
+
+    #[tokio::test]
+    async fn test_bangumi_episode_nfo_omits_season_plot() {
+        let video = video::Model {
+            intro: "整季简介不应重复到每集".to_string(),
+            name: "测试番剧".to_string(),
+            upper_id: 0,
+            upper_name: "".to_string(),
+            category: 1,
+            source_type: Some(1),
+            season_number: Some(1),
+            episode_number: Some(2),
+            favtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 7, 21).unwrap(),
+                chrono::NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
+            ),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 7, 21).unwrap(),
+                chrono::NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
+            ),
+            bvid: "BV1BangumiPlot".to_string(),
+            ..Default::default()
+        };
+        let page = page::Model {
+            name: "第2话".to_string(),
+            pid: 2,
+            duration: 1200,
+            ..Default::default()
+        };
+
+        let generated_episode = NFO::Episode(Episode::from_video_and_page(&video, &page))
+            .generate_nfo()
+            .await
+            .unwrap();
+
+        assert!(generated_episode.contains("<plot/>"));
+        assert!(!generated_episode.contains("整季简介不应重复到每集"));
+        assert!(generated_episode.contains("<lockdata>true</lockdata>"));
     }
 
     #[tokio::test]

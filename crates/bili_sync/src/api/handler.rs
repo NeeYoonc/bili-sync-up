@@ -4229,13 +4229,28 @@ pub async fn reset_specific_tasks(
 ) -> Result<ApiResponse<ResetAllVideosResponse>, ApiError> {
     use std::collections::HashSet;
 
-    let task_indexes = &request.task_indexes;
-    if task_indexes.is_empty() {
+    let mut video_task_indexes = if request.video_task_indexes.is_empty() {
+        request.task_indexes.clone()
+    } else {
+        request.video_task_indexes.clone()
+    };
+    let mut page_task_indexes = if request.page_task_indexes.is_empty() {
+        request.task_indexes.clone()
+    } else {
+        request.page_task_indexes.clone()
+    };
+
+    video_task_indexes.sort_unstable();
+    video_task_indexes.dedup();
+    page_task_indexes.sort_unstable();
+    page_task_indexes.dedup();
+
+    if video_task_indexes.is_empty() && page_task_indexes.is_empty() {
         return Err(crate::api::error::InnerApiError::BadRequest("至少需要选择一个任务".to_string()).into());
     }
 
     // 验证任务索引范围
-    for &index in task_indexes {
+    for &index in video_task_indexes.iter().chain(page_task_indexes.iter()) {
         if index > 4 {
             return Err(crate::api::error::InnerApiError::BadRequest(format!("无效的任务索引: {}", index)).into());
         }
@@ -4398,7 +4413,7 @@ pub async fn reset_specific_tasks(
             let mut page_resetted = false;
 
             // 重置指定的任务索引：默认仅重置失败任务；force=true 时重置所有非 0 状态
-            for &task_index in task_indexes {
+            for &task_index in &page_task_indexes {
                 if task_index < 5 {
                     let current_status = page_status.get(task_index);
                     let should_reset = if force_reset {
@@ -4457,7 +4472,7 @@ pub async fn reset_specific_tasks(
             let mut video_resetted = false;
 
             // 重置指定任务：默认仅重置失败任务；force=true 时重置所有非 0 状态
-            for &task_index in task_indexes {
+            for &task_index in &video_task_indexes {
                 if task_index < 5 {
                     let current_status = video_status.get(task_index);
                     let should_reset = if force_reset {
@@ -4525,7 +4540,7 @@ pub async fn reset_specific_tasks(
 
     // 重置视频封面时，同步删除根目录 poster.jpg / folder.jpg，
     // 以便下次执行封面任务时可以重新下载（否则会被“存在即跳过”优化拦截）。
-    if task_indexes.contains(&0) {
+    if video_task_indexes.contains(&0) || page_task_indexes.contains(&0) {
         use tokio::fs;
 
         let config = crate::config::reload_config();
