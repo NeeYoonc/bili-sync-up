@@ -19446,9 +19446,9 @@ pub async fn update_notification_config(
 
     if let Some(ref webhook_format) = request.webhook_format {
         let format = webhook_format.trim().to_ascii_lowercase();
-        if !["auto", "generic", "opensend", "custom"].contains(&format.as_str()) {
+        if !["auto", "generic", "opensend", "custom", "synology_chat"].contains(&format.as_str()) {
             return Err(ApiError::from(anyhow!(
-                "Webhook格式必须是 auto / generic / opensend / custom"
+                "Webhook格式必须是 auto / generic / opensend / custom / synology_chat"
             )));
         }
         notification_config.webhook_format = format;

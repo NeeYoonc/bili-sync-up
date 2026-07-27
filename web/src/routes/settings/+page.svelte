@@ -374,7 +374,7 @@
 	let webhookUrl = '';
 	let webhookBearerToken = '';
 	let webhookCustomHeaders = '';
-	let webhookFormat: 'auto' | 'generic' | 'opensend' | 'custom' = 'auto';
+	let webhookFormat: 'auto' | 'generic' | 'opensend' | 'custom' | 'synology_chat' = 'auto';
 	let webhookCustomBody = '';
 	let notificationMinVideos = 1;
 	let notificationSaving = false;
@@ -1539,7 +1539,13 @@
 		webhookBearerToken = response.data.webhook_bearer_token || '';
 		webhookCustomHeaders = response.data.webhook_custom_headers || '';
 		webhookFormat =
-			(response.data.webhook_format as 'auto' | 'generic' | 'opensend' | 'custom' | undefined) ||
+			(response.data.webhook_format as
+				| 'auto'
+				| 'generic'
+				| 'opensend'
+				| 'custom'
+				| 'synology_chat'
+				| undefined) ||
 			'auto';
 		webhookCustomBody = response.data.webhook_custom_body || '';
 	}
@@ -4097,7 +4103,8 @@
 								{ value: 'auto', label: '自动识别（推荐）' },
 								{ value: 'generic', label: '通用 JSON' },
 								{ value: 'opensend', label: 'openSend' },
-								{ value: 'custom', label: '自定义 JSON' }
+								{ value: 'custom', label: '自定义 JSON' },
+								{ value: 'synology_chat', label: 'Synology Chat（群晖）' }
 							]}
 							onChange={(nextValue) =>
 								(webhookFormat = String(nextValue ?? 'auto') as typeof webhookFormat)}
@@ -4105,7 +4112,8 @@
 						/>
 						<p class="text-muted-foreground text-sm">
 							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头；自定义 JSON
-							可自行定义 POST Body 结构
+							可自行定义 POST Body 结构；Synology Chat 会按群晖要求发送 <code>payload=</code>
+							表单。
 						</p>
 					</div>
 
@@ -4118,7 +4126,9 @@
 							placeholder="https://example.com/notify/webhook"
 						/>
 						<p class="text-muted-foreground text-sm">
-							将发送JSON POST请求到该地址，支持按响应内容判定成功
+							{webhookFormat === 'synology_chat'
+								? '将以 application/x-www-form-urlencoded 发送 payload=JSON，适用于 Synology Chat Incoming Webhook'
+								: '将发送 JSON POST 请求到该地址，支持按响应内容判定成功'}
 						</p>
 					</div>
 

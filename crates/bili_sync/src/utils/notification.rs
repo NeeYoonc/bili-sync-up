@@ -406,7 +406,8 @@ impl NotificationClient {
 
         let webhook_format = Self::resolve_webhook_format(self.config.webhook_format.as_str(), url);
         let is_open_send = webhook_format == "opensend";
-        let headers = self.build_webhook_headers(is_open_send)?;
+        let is_synology_chat = webhook_format == "synology_chat";
+        let headers = self.build_webhook_headers(is_open_send, is_synology_chat)?;
         let req = self.client.post(url).headers(headers);
 
         let resp = if is_open_send {
@@ -428,6 +429,16 @@ impl NotificationClient {
                 .ok_or_else(|| anyhow!("未配置自定义 POST Body"))?;
             let rendered = Self::render_custom_webhook_body(custom_body, &payload)?;
             req.json(&rendered).send().await?
+        } else if is_synology_chat {
+            // Synology Chat 的 Incoming Webhook 不是 JSON API：它要求
+            // application/x-www-form-urlencoded，且 JSON 必须作为 payload 字段的值。
+            // 这里先序列化内层对象，再让 reqwest 对整个表单字段做一次 URL 编码，
+            // 不能把 JSON 字符串再包进一个 JSON 对象，否则群晖会静默丢弃消息。
+            let synology_payload = serde_json::to_string(&serde_json::json!({
+                "text": format!("{}\n\n{}", title, content),
+                "username": "bili-sync"
+            }))?;
+            req.form(&[("payload", synology_payload)]).send().await?
         } else {
             req.json(&payload).send().await?
         };
@@ -456,6 +467,7 @@ impl NotificationClient {
             "generic" => "generic",
             "opensend" => "opensend",
             "custom" => "custom",
+            "synology_chat" => "synology_chat",
             _ => {
                 if Self::is_open_send_webhook(url) {
                     "opensend"
@@ -489,9 +501,14 @@ impl NotificationClient {
         Some(webhook_url)
     }
 
-    fn build_webhook_headers(&self, is_open_send: bool) -> Result<HeaderMap> {
+    fn build_webhook_headers(&self, is_open_send: bool, is_synology_chat: bool) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let content_type = if is_synology_chat {
+            HeaderValue::from_static("application/x-www-form-urlencoded")
+        } else {
+            HeaderValue::from_static("application/json")
+        };
+        headers.insert(CONTENT_TYPE, content_type.clone());
 
         if let Some(token) = self
             .config
@@ -516,6 +533,11 @@ impl NotificationClient {
             for (name, value) in Self::parse_custom_webhook_headers(custom_headers)? {
                 headers.insert(name, value);
             }
+        }
+
+        // Synology Chat 只接受表单；不允许自定义 Headers 把它改回 JSON。
+        if is_synology_chat {
+            headers.insert(CONTENT_TYPE, content_type);
         }
 
         Ok(headers)
@@ -1321,13 +1343,14 @@ pub async fn send_deepseek_token_expired_notification() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::State;
+    use axum::extract::{Form, State};
     use axum::http::HeaderMap as AxumHeaderMap;
     use axum::response::IntoResponse;
     use axum::routing::post;
     use axum::Json;
     use axum::Router;
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
@@ -1468,6 +1491,44 @@ mod tests {
         Ok((format!("http://{}{}", addr, route_path), captured))
     }
 
+    #[derive(Debug, Clone)]
+    struct CapturedSynologyChatRequest {
+        content_type: Option<String>,
+        payload: Option<String>,
+    }
+
+    async fn capture_synology_chat_request(
+        State(captured): State<Arc<Mutex<Option<CapturedSynologyChatRequest>>>>,
+        headers: AxumHeaderMap,
+        Form(form): Form<HashMap<String, String>>,
+    ) -> impl IntoResponse {
+        *captured.lock().await = Some(CapturedSynologyChatRequest {
+            content_type: headers
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            payload: form.get("payload").cloned(),
+        });
+        Json(json!({ "success": true }))
+    }
+
+    async fn spawn_synology_chat_capture_server(
+        route_path: &str,
+    ) -> Result<(String, Arc<Mutex<Option<CapturedSynologyChatRequest>>>)> {
+        let captured = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(route_path, post(capture_synology_chat_request))
+            .with_state(captured.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        Ok((format!("http://{}{}", addr, route_path), captured))
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_send_to_webhook_sends_custom_headers() {
         let (url, captured) = spawn_capture_server("/notify").await.expect("start capture server");
@@ -1542,6 +1603,52 @@ mod tests {
         );
         assert_eq!(request.body.get("proxy").and_then(|v| v.as_bool()), Some(false));
         assert!(request.body.get("imageUrl").is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_send_to_synology_chat_uses_form_payload() {
+        let (url, captured) = spawn_synology_chat_capture_server("/webhook")
+            .await
+            .expect("start Synology Chat capture server");
+
+        let mut config = NotificationConfig::default();
+        config.active_channel = "webhook".to_string();
+        config.webhook_url = Some(url);
+        config.webhook_format = "synology_chat".to_string();
+        config.webhook_custom_headers = Some(r#"{"Content-Type":"application/json"}"#.to_string());
+
+        let client = NotificationClient::new(config);
+        client
+            .send_to_webhook(
+                client.config.webhook_url.as_deref().unwrap(),
+                "群晖标题",
+                "群晖正文",
+                "test_notification",
+            )
+            .await
+            .expect("send Synology Chat webhook");
+
+        let request = captured
+            .lock()
+            .await
+            .clone()
+            .expect("captured Synology Chat webhook request");
+        assert_eq!(
+            request.content_type.as_deref(),
+            Some("application/x-www-form-urlencoded")
+        );
+
+        let payload: serde_json::Value =
+            serde_json::from_str(request.payload.as_deref().expect("form must contain payload"))
+                .expect("payload must be a JSON object, not an escaped JSON string");
+        assert_eq!(
+            payload.get("username").and_then(|value| value.as_str()),
+            Some("bili-sync")
+        );
+        assert_eq!(
+            payload.get("text").and_then(|value| value.as_str()),
+            Some("群晖标题\n\n群晖正文")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

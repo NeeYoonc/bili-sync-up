@@ -321,7 +321,7 @@ pub struct NotificationConfig {
     #[serde(default)]
     pub webhook_custom_headers: Option<String>,
     #[serde(default = "default_webhook_format")]
-    pub webhook_format: String, // "auto", "generic", "opensend"
+    pub webhook_format: String, // "auto", "generic", "opensend", "custom", "synology_chat"
     #[serde(default)]
     pub webhook_custom_body: Option<String>,
 
@@ -494,7 +494,9 @@ impl NotificationConfig {
                     if !(url.starts_with("http://") || url.starts_with("https://")) {
                         return Err("Webhook URL格式不正确".to_string());
                     }
-                    if !["auto", "generic", "opensend", "custom"].contains(&self.webhook_format.as_str()) {
+                    if !["auto", "generic", "opensend", "custom", "synology_chat"]
+                        .contains(&self.webhook_format.as_str())
+                    {
                         return Err(format!("Webhook格式不支持: {}", self.webhook_format));
                     }
                     if self.webhook_format == "custom"
