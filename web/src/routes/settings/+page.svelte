@@ -376,6 +376,7 @@
 	let webhookCustomHeaders = '';
 	let webhookFormat: 'auto' | 'generic' | 'opensend' | 'custom' | 'synology_chat' = 'auto';
 	let webhookCustomBody = '';
+	let webhookSynologyChatTemplate = '';
 	let notificationMinVideos = 1;
 	let notificationSaving = false;
 	let notificationStatus: {
@@ -408,6 +409,9 @@
   "event": "{{event}}",
   "sent_at": "{{sent_at}}"
 }`;
+	const defaultWebhookFormBody = `message={{content_urlencoded}}`;
+	const defaultSynologyChatTemplate = `:loudspeaker: ------{{title}}------ :loudspeaker:
+{{content}}`;
 
 	// 显示帮助信息的状态（在文件命名抽屉中使用）
 	let showHelp = false;
@@ -1395,6 +1399,7 @@
 			config.webhook_custom_headers = webhookCustomHeaders.trim();
 			config.webhook_format = webhookFormat;
 			config.webhook_custom_body = webhookCustomBody.trim();
+			config.webhook_synology_chat_template = webhookSynologyChatTemplate;
 		}
 
 		const response = await runRequest(() => api.updateNotificationConfig(config), {
@@ -1548,6 +1553,9 @@
 				| undefined) ||
 			'auto';
 		webhookCustomBody = response.data.webhook_custom_body || '';
+		webhookSynologyChatTemplate =
+			response.data.webhook_synology_chat_template ||
+			(webhookFormat === 'synology_chat' ? defaultSynologyChatTemplate : '');
 	}
 
 	// 测试推送通知
@@ -1576,6 +1584,7 @@
 			request.webhook_custom_headers = webhookCustomHeaders.trim();
 			request.webhook_format = webhookFormat;
 			request.webhook_custom_body = webhookCustomBody.trim();
+			request.webhook_synology_chat_template = webhookSynologyChatTemplate;
 		}
 
 		const response = await runRequest(() => api.testNotification(request), {
@@ -4103,7 +4112,7 @@
 								{ value: 'auto', label: '自动识别（推荐）' },
 								{ value: 'generic', label: '通用 JSON' },
 								{ value: 'opensend', label: 'openSend' },
-								{ value: 'custom', label: '自定义 JSON' },
+								{ value: 'custom', label: '自定义请求' },
 								{ value: 'synology_chat', label: 'Synology Chat（群晖）' }
 							]}
 							onChange={(nextValue) =>
@@ -4111,8 +4120,8 @@
 							class="bg-background border-input ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
 						/>
 						<p class="text-muted-foreground text-sm">
-							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头；自定义 JSON
-							可自行定义 POST Body 结构；Synology Chat 会按群晖要求发送 <code>payload=</code>
+							自动识别、openSend 与 Synology Chat 均为预设模板；自定义请求可发送任意 POST Body，
+							不限制消息类型。Synology Chat 会按群晖要求发送 <code>payload=</code>
 							表单。
 						</p>
 					</div>
@@ -4169,17 +4178,30 @@
 					{#if webhookFormat === 'custom'}
 						<div class="space-y-2">
 							<div class="flex items-center justify-between gap-3">
-								<Label for="generic-webhook-custom-body">自定义 POST Body</Label>
-								<Button
-									type="button"
-									variant="outline"
-									size="sm"
-									onclick={() => {
-										webhookCustomBody = defaultWebhookCustomBody;
-									}}
-								>
-									填入示例
-								</Button>
+								<Label for="generic-webhook-custom-body">自定义 POST Body（任意文本）</Label>
+								<div class="flex gap-2">
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										onclick={() => {
+											webhookCustomBody = defaultWebhookCustomBody;
+										}}
+									>
+										JSON 模板
+									</Button>
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										onclick={() => {
+											webhookCustomBody = defaultWebhookFormBody;
+											webhookCustomHeaders = '{"Content-Type":"application/x-www-form-urlencoded"}';
+										}}
+									>
+										表单模板
+									</Button>
+								</div>
 							</div>
 							<Textarea
 								id="generic-webhook-custom-body"
@@ -4198,10 +4220,38 @@
 								<p>&#123;&#123;channel&#125;&#125;：当前通知渠道名称，例如 webhook</p>
 								<p>&#123;&#123;event&#125;&#125;：事件类型，例如 test_notification</p>
 								<p>&#123;&#123;sent_at&#125;&#125;：发送时间</p>
-								<p>
-									请直接填写有效
-									JSON。若某个值只写占位符，发送时会按原始类型写入；若嵌在字符串中，则会按文本替换。
-								</p>
+								<p>可填写 JSON、<code>application/x-www-form-urlencoded</code> 或任意原始文本；不会限制消息类型。</p>
+								<p>JSON 模板继续兼容原有安全替换；其他格式按原文本替换占位符。原始模板还支持 <code>&#123;&#123;title_json&#125;&#125;</code> 和 <code>&#123;&#123;title_urlencoded&#125;&#125;</code>（其他字段同理）。</p>
+							</div>
+						</div>
+					{/if}
+
+					{#if webhookFormat === 'synology_chat'}
+						<div class="space-y-2">
+							<div class="flex items-center justify-between gap-3">
+								<Label for="synology-chat-template">群晖 Chat 消息模板</Label>
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onclick={() => {
+										webhookSynologyChatTemplate = defaultSynologyChatTemplate;
+									}}
+								>
+									填入模板
+								</Button>
+							</div>
+							<Textarea
+								id="synology-chat-template"
+								bind:value={webhookSynologyChatTemplate}
+								rows={8}
+								placeholder={defaultSynologyChatTemplate}
+								class="font-mono text-xs"
+							/>
+							<div class="text-muted-foreground space-y-1 text-sm">
+								<p>这是纯文本模板，不会按 Markdown 解析；可直接使用群晖表情短码，例如 <code>:loudspeaker:</code>、<code>:mailbox_closed:</code>。</p>
+								<p>支持占位符：&#123;&#123;title&#125;&#125;、&#123;&#123;content&#125;&#125;、&#123;&#123;source&#125;&#125;、&#123;&#123;channel&#125;&#125;、&#123;&#123;event&#125;&#125;、&#123;&#123;sent_at&#125;&#125;；&#123;&#123;content&#125;&#125; 会自动移除 Markdown 标记。</p>
+								<p>留空时使用默认模板：<code>:loudspeaker: ------&#123;&#123;title&#125;&#125;------ :loudspeaker:</code> 后换行显示正文。</p>
 							</div>
 						</div>
 					{/if}

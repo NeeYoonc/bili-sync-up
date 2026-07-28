@@ -10238,6 +10238,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
             webhook_custom_headers: config.notification.webhook_custom_headers.clone(),
             webhook_format: config.notification.webhook_format.clone(),
             webhook_custom_body: config.notification.webhook_custom_body.clone(),
+            webhook_synology_chat_template: config.notification.webhook_synology_chat_template.clone(),
             enable_scan_notifications: config.notification.enable_scan_notifications,
             notification_min_videos: config.notification.notification_min_videos,
             notification_timeout: config.notification.notification_timeout,
@@ -19198,6 +19199,17 @@ pub async fn test_notification_handler(
             config.webhook_custom_body = Some(v.to_string());
         }
     }
+    if let Some(webhook_synology_chat_template) = request.webhook_synology_chat_template.as_ref() {
+        if webhook_synology_chat_template.trim().is_empty() {
+            config.webhook_synology_chat_template = None;
+        } else {
+            crate::utils::notification::NotificationClient::validate_synology_chat_template(
+                webhook_synology_chat_template,
+            )
+            .map_err(ApiError::from)?;
+            config.webhook_synology_chat_template = Some(webhook_synology_chat_template.to_string());
+        }
+    }
 
     // 测试推送允许在未启用通知开关时执行，但仍需要可用渠道配置
     config.enable_scan_notifications = true;
@@ -19319,6 +19331,7 @@ pub async fn get_notification_config() -> Result<ApiResponse<crate::api::respons
         webhook_custom_headers: config.webhook_custom_headers,
         webhook_format: config.webhook_format,
         webhook_custom_body: config.webhook_custom_body,
+        webhook_synology_chat_template: config.webhook_synology_chat_template,
         enable_scan_notifications: config.enable_scan_notifications,
         notification_min_videos: config.notification_min_videos,
         notification_timeout: config.notification_timeout,
@@ -19464,6 +19477,20 @@ pub async fn update_notification_config(
             )
             .map_err(ApiError::from)?;
             notification_config.webhook_custom_body = Some(webhook_custom_body.trim().to_string());
+        }
+        updated = true;
+    }
+
+    if let Some(ref webhook_synology_chat_template) = request.webhook_synology_chat_template {
+        if webhook_synology_chat_template.trim().is_empty() {
+            notification_config.webhook_synology_chat_template = None;
+        } else {
+            crate::utils::notification::NotificationClient::validate_synology_chat_template(
+                webhook_synology_chat_template,
+            )
+            .map_err(ApiError::from)?;
+            notification_config.webhook_synology_chat_template =
+                Some(webhook_synology_chat_template.to_string());
         }
         updated = true;
     }

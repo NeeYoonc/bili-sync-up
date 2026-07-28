@@ -966,6 +966,7 @@ class ApiClient {
 			webhook_custom_headers?: string;
 			webhook_format?: string;
 			webhook_custom_body?: string;
+			webhook_synology_chat_template?: string;
 			notification_min_videos: number;
 			notification_timeout: number;
 			notification_retry_count: number;
@@ -986,6 +987,7 @@ class ApiClient {
 			webhook_custom_headers?: string;
 			webhook_format?: string;
 			webhook_custom_body?: string;
+			webhook_synology_chat_template?: string;
 			notification_min_videos: number;
 			notification_timeout: number;
 			notification_retry_count: number;
@@ -1010,6 +1012,7 @@ class ApiClient {
 		webhook_custom_headers?: string;
 		webhook_format?: string;
 		webhook_custom_body?: string;
+			webhook_synology_chat_template?: string;
 		notification_min_videos?: number;
 	}): Promise<ApiResponse<string>> {
 		return this.post<string>('/config/notification', config);
@@ -1033,6 +1036,7 @@ class ApiClient {
 		webhook_custom_headers?: string;
 		webhook_format?: string;
 		webhook_custom_body?: string;
+			webhook_synology_chat_template?: string;
 	}): Promise<
 		ApiResponse<{
 			success: boolean;
@@ -1446,6 +1450,7 @@ export const api = {
 		webhook_custom_headers?: string;
 		webhook_format?: string;
 		webhook_custom_body?: string;
+			webhook_synology_chat_template?: string;
 		notification_min_videos?: number;
 	}) => apiClient.updateNotificationConfig(config),
 
@@ -1467,6 +1472,7 @@ export const api = {
 		webhook_custom_headers?: string;
 		webhook_format?: string;
 		webhook_custom_body?: string;
+			webhook_synology_chat_template?: string;
 	}) => apiClient.testNotification(params),
 
 	/**

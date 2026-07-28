@@ -416,6 +416,7 @@ pub struct UpdateNotificationConfigRequest {
     pub webhook_custom_headers: Option<String>,
     pub webhook_format: Option<String>,
     pub webhook_custom_body: Option<String>,
+    pub webhook_synology_chat_template: Option<String>,
     pub enable_scan_notifications: Option<bool>,
     pub notification_min_videos: Option<usize>,
     pub notification_timeout: Option<u64>,
@@ -440,6 +441,7 @@ pub struct TestNotificationRequest {
     pub webhook_custom_headers: Option<String>,
     pub webhook_format: Option<String>,
     pub webhook_custom_body: Option<String>,
+    pub webhook_synology_chat_template: Option<String>,
 }
 
 // 分页状态更新结构

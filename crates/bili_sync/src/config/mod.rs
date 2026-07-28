@@ -324,6 +324,9 @@ pub struct NotificationConfig {
     pub webhook_format: String, // "auto", "generic", "opensend", "custom", "synology_chat"
     #[serde(default)]
     pub webhook_custom_body: Option<String>,
+    /// 仅用于 Synology Chat：消息文本模板，不是 JSON。
+    #[serde(default)]
+    pub webhook_synology_chat_template: Option<String>,
 
     // === 通用配置 ===
     #[serde(default)]
@@ -376,6 +379,7 @@ impl Default for NotificationConfig {
             webhook_custom_headers: None,
             webhook_format: default_webhook_format(),
             webhook_custom_body: None,
+            webhook_synology_chat_template: None,
             enable_scan_notifications: false,
             notification_min_videos: default_notification_min_videos(),
             notification_timeout: default_notification_timeout(),
@@ -502,7 +506,7 @@ impl NotificationConfig {
                     if self.webhook_format == "custom"
                         && self.webhook_custom_body.as_ref().is_none_or(|v| v.trim().is_empty())
                     {
-                        return Err("已选择自定义 JSON 但未配置 POST Body".to_string());
+                        return Err("已选择自定义请求 但未配置 POST Body".to_string());
                     }
                     if let Some(custom_headers) = self
                         .webhook_custom_headers
