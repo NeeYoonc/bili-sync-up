@@ -1051,6 +1051,7 @@ pub struct NotificationConfigResponse {
     pub webhook_custom_headers: Option<String>,
     pub webhook_format: String,
     pub webhook_custom_body: Option<String>,
+    pub webhook_synology_chat_template: Option<String>,
     pub enable_scan_notifications: bool,
     pub notification_min_videos: usize,
     pub notification_timeout: u64,
