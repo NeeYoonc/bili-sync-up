@@ -3388,13 +3388,7 @@ fn ytdlp_js_runtime() -> Option<(&'static str, PathBuf)> {
     if let Ok(configured) = std::env::var("BILI_SYNC_YTDLP_JS_RUNTIME") {
         let path = PathBuf::from(configured);
         if path.is_file() {
-            let name = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .filter(|value| value.eq_ignore_ascii_case("bun"))
-                .map(|_| "bun")
-                .unwrap_or("node");
-            return Some((name, path));
+            return Some((ytdlp_js_runtime_name(&path), path));
         }
     }
     #[cfg(windows)]
@@ -3415,6 +3409,19 @@ fn ytdlp_js_runtime() -> Option<(&'static str, PathBuf)> {
         }
     }
     None
+}
+fn ytdlp_js_runtime_name(path: &Path) -> &'static str {
+    match path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("bun") => "bun",
+        Some("deno") => "deno",
+        Some("qjs" | "quickjs") => "quickjs",
+        _ => "node",
+    }
 }
 fn is_container_runtime() -> bool {
     std::env::var("BILI_SYNC_CONTAINER")
@@ -3529,8 +3536,9 @@ mod tests {
     use super::{
         canonical_channel_url, checksum_for_release_asset, current_ytdlp_package, generate_youtube_person_nfo,
         is_netscape_youtube_cookie_file, is_youtube_url, normalize_source_type, resolve_source_url, youtube_search_url,
-        ytdlp_package_for, ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
+        ytdlp_js_runtime_name, ytdlp_package_for, ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
     };
+    use std::path::Path;
     #[test]
     fn validates_types_and_urls() {
         assert_eq!(normalize_source_type("playlist").unwrap(), "playlist");
@@ -3647,5 +3655,14 @@ mod tests {
         assert_eq!(ytdlp_runtime_target_env(None, true), "musl");
         assert_eq!(ytdlp_runtime_target_env(None, false), "");
         assert_eq!(ytdlp_runtime_target_env(Some("invalid"), true), "musl");
+    }
+
+    #[test]
+    fn detects_supported_ytdlp_js_runtime_names() {
+        assert_eq!(ytdlp_js_runtime_name(Path::new("/usr/bin/qjs")), "quickjs");
+        assert_eq!(ytdlp_js_runtime_name(Path::new("/usr/bin/quickjs")), "quickjs");
+        assert_eq!(ytdlp_js_runtime_name(Path::new("/usr/bin/deno")), "deno");
+        assert_eq!(ytdlp_js_runtime_name(Path::new("/usr/bin/bun")), "bun");
+        assert_eq!(ytdlp_js_runtime_name(Path::new("/usr/bin/node")), "node");
     }
 }

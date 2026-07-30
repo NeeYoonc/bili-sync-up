@@ -9,7 +9,7 @@ RUN apk update && apk add --no-cache \
     ca-certificates \
     tzdata \
     ffmpeg \
-    nodejs
+    quickjs
 
 # 复制所有Linux二进制文件
 COPY ./bili-sync-rs-Linux-*.tar.gz ./
@@ -39,7 +39,7 @@ ENV LANG=zh_CN.UTF-8 \
     TZ=Asia/Shanghai \
     HOME=/app \
     BILI_SYNC_CONTAINER=1 \
-    BILI_SYNC_YTDLP_JS_RUNTIME=/usr/bin/node \
+    BILI_SYNC_YTDLP_JS_RUNTIME=/usr/bin/qjs \
     RUST_BACKTRACE=1 \
     RUST_LOG=None,bili_sync=info
 
