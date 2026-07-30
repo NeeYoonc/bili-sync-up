@@ -13,7 +13,7 @@ use html_escape::decode_html_entities;
 
 use crate::http::headers::{create_api_headers, create_image_headers};
 use crate::utils::time_format::{now_standard_string, to_standard_string};
-use bili_sync_entity::{collection, favorite, page, submission, video, video_source, watch_later};
+use bili_sync_entity::{collection, favorite, page, submission, video, video_source, watch_later, youtube_source};
 use bili_sync_migration::Expr;
 use reqwest;
 use sea_orm::{
@@ -19082,7 +19082,8 @@ pub async fn get_dashboard_data(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<crate::api::response::DashBoardResponse>, ApiError> {
     let (enabled_favorites, enabled_collections, enabled_submissions, enabled_watch_later, enabled_bangumi,
-         total_favorites, total_collections, total_submissions, total_watch_later, total_bangumi, videos_by_day) = tokio::try_join!(
+         total_favorites, total_collections, total_submissions, total_watch_later, total_bangumi,
+         youtube_sources, videos_by_day) = tokio::try_join!(
         favorite::Entity::find()
             .filter(favorite::Column::Enabled.eq(true))
             .count(db.as_ref()),
@@ -19111,6 +19112,8 @@ pub async fn get_dashboard_data(
         video_source::Entity::find()
             .filter(video_source::Column::Type.eq(1))
             .count(db.as_ref()),
+        youtube_source::Entity::find()
+            .all(db.as_ref()),
         crate::api::response::DayCountPair::find_by_statement(sea_orm::Statement::from_string(
             db.get_database_backend(),
             // 用 SeaORM 太复杂了，直接写个裸 SQL
@@ -19139,17 +19142,35 @@ ORDER BY
         .all(db.as_ref()),
     )?;
 
+    let youtube_type_count = |source_type: &str| {
+        let matching = youtube_sources
+            .iter()
+            .filter(|source| source.source_type == source_type);
+        let total = matching.clone().count() as u64;
+        let enabled = matching.filter(|source| source.enabled).count() as u64;
+        (enabled, total)
+    };
+    let (enabled_youtube_subscriptions, total_youtube_subscriptions) = youtube_type_count("subscriptions");
+    let (enabled_youtube_channels, total_youtube_channels) = youtube_type_count("channel");
+    let (enabled_youtube_playlists, total_youtube_playlists) = youtube_type_count("playlist");
+    let (enabled_youtube_liked, total_youtube_liked) = youtube_type_count("liked");
+    let (enabled_youtube_watch_later, total_youtube_watch_later) = youtube_type_count("watch_later");
+    let enabled_youtube_sources = youtube_sources.iter().filter(|source| source.enabled).count() as u64;
+    let total_youtube_sources = youtube_sources.len() as u64;
+
     // 获取监听状态信息
     let active_sources = enabled_favorites
         + enabled_collections
         + enabled_submissions
         + enabled_bangumi
-        + if enabled_watch_later > 0 { 1 } else { 0 };
+        + if enabled_watch_later > 0 { 1 } else { 0 }
+        + enabled_youtube_sources;
     let total_all_sources = total_favorites
         + total_collections
         + total_submissions
         + total_bangumi
-        + if total_watch_later > 0 { 1 } else { 0 };
+        + if total_watch_later > 0 { 1 } else { 0 }
+        + total_youtube_sources;
     let inactive_sources = total_all_sources - active_sources;
 
     // 从任务状态获取扫描时间信息
@@ -19179,6 +19200,18 @@ ORDER BY
         total_submissions,
         total_bangumi,
         total_watch_later,
+        enabled_youtube_sources,
+        total_youtube_sources,
+        enabled_youtube_subscriptions,
+        total_youtube_subscriptions,
+        enabled_youtube_channels,
+        total_youtube_channels,
+        enabled_youtube_playlists,
+        total_youtube_playlists,
+        enabled_youtube_liked,
+        total_youtube_liked,
+        enabled_youtube_watch_later,
+        total_youtube_watch_later,
         videos_by_day,
         monitoring_status,
     }))

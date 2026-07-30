@@ -47,6 +47,9 @@
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import XCircleIcon from '@lucide/svelte/icons/x-circle';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
+	import YoutubeIcon from '@lucide/svelte/icons/youtube';
+	import BellIcon from '@lucide/svelte/icons/bell';
+	import ListVideoIcon from '@lucide/svelte/icons/list-video';
 
 	// 认证状态
 	let isAuthenticated = false;
@@ -434,7 +437,7 @@
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
 						<CardTitle
 							class="text-sm font-medium"
-							title="显示当前监听的视频源状态、下次扫描时间和监听统计"
+							title="显示当前监听的 B站和 YouTube 视频源状态、下次扫描时间和监听统计"
 						>
 							当前监听
 						</CardTitle>
@@ -498,54 +501,118 @@
 									</div>
 								</div>
 
-								<!-- 具体监听项统计 -->
-								<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<HeartIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">收藏夹</span>
+								<!-- B站及 YouTube 具体监听项统计 -->
+								<div class="space-y-4">
+									<div class="space-y-3">
+										<div class="text-muted-foreground text-xs font-medium">B站视频源</div>
+										<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<HeartIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">收藏夹</span>
+												</div>
+												<Badge variant="outline"
+													>{dashboardData.enabled_favorites} / {dashboardData.total_favorites}</Badge
+												>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<FolderIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">合集 / 列表</span>
+												</div>
+												<Badge variant="outline"
+													>{dashboardData.enabled_collections} / {dashboardData.total_collections}</Badge
+												>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<UserIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">投稿</span>
+												</div>
+												<Badge variant="outline"
+													>{dashboardData.enabled_submissions} / {dashboardData.total_submissions}</Badge
+												>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<ClockIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">稍后再看</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enable_watch_later
+														? `启用 (${dashboardData.total_watch_later})`
+														: `禁用 (${dashboardData.total_watch_later})`}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<TvIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">番剧</span>
+												</div>
+												<Badge variant="outline"
+													>{dashboardData.enabled_bangumi} / {dashboardData.total_bangumi}</Badge
+												>
+											</div>
 										</div>
-										<Badge variant="outline"
-											>{dashboardData.enabled_favorites} / {dashboardData.total_favorites}</Badge
-										>
 									</div>
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<FolderIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">合集 / 列表</span>
+
+									<div class="space-y-3 border-t pt-4">
+										<div class="flex items-center justify-between">
+											<div class="flex items-center gap-2 text-xs font-medium">
+												<YoutubeIcon class="h-4 w-4 text-red-600" />
+												<span>YouTube 视频源</span>
+											</div>
+											<Badge variant="outline">
+												{dashboardData.enabled_youtube_sources} / {dashboardData.total_youtube_sources}
+											</Badge>
 										</div>
-										<Badge variant="outline"
-											>{dashboardData.enabled_collections} / {dashboardData.total_collections}</Badge
-										>
-									</div>
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<UserIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">投稿</span>
+										<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<BellIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">订阅动态</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_youtube_subscriptions} / {dashboardData.total_youtube_subscriptions}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<UserIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">频道</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_youtube_channels} / {dashboardData.total_youtube_channels}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<ListVideoIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">播放列表</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_youtube_playlists} / {dashboardData.total_youtube_playlists}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<HeartIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">喜欢的视频</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_youtube_liked} / {dashboardData.total_youtube_liked}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<ClockIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">稍后观看</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_youtube_watch_later} / {dashboardData.total_youtube_watch_later}
+												</Badge>
+											</div>
 										</div>
-										<Badge variant="outline"
-											>{dashboardData.enabled_submissions} / {dashboardData.total_submissions}</Badge
-										>
-									</div>
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<ClockIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">稍后再看</span>
-										</div>
-										<Badge variant="outline">
-											{dashboardData.enable_watch_later
-												? `启用 (${dashboardData.total_watch_later})`
-												: `禁用 (${dashboardData.total_watch_later})`}
-										</Badge>
-									</div>
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<TvIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">番剧</span>
-										</div>
-										<Badge variant="outline"
-											>{dashboardData.enabled_bangumi} / {dashboardData.total_bangumi}</Badge
-										>
 									</div>
 								</div>
 							</div>

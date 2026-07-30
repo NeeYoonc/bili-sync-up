@@ -1264,6 +1264,18 @@ export interface DashBoardResponse {
 	total_submissions: number;
 	total_bangumi: number;
 	total_watch_later: number;
+	enabled_youtube_sources: number;
+	total_youtube_sources: number;
+	enabled_youtube_subscriptions: number;
+	total_youtube_subscriptions: number;
+	enabled_youtube_channels: number;
+	total_youtube_channels: number;
+	enabled_youtube_playlists: number;
+	total_youtube_playlists: number;
+	enabled_youtube_liked: number;
+	total_youtube_liked: number;
+	enabled_youtube_watch_later: number;
+	total_youtube_watch_later: number;
 	videos_by_day: DayCountPair[];
 	monitoring_status: MonitoringStatus;
 }

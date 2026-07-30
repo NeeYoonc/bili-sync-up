@@ -46,7 +46,6 @@ const YTDLP_RELEASE_BASE_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(90);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const MAX_DOWNLOAD_RETRIES: i32 = 4;
-const YTDLP_TEST_VIDEO: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 const SUBSCRIPTIONS_URL: &str = "https://www.youtube.com/feed/subscriptions";
 const LIKED_URL: &str = "https://www.youtube.com/playlist?list=LL";
 const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
@@ -3360,23 +3359,9 @@ async fn validate_youtube_login_cookie(path: &Path) -> Result<()> {
         bail!("Cookie 文件可以访问 YouTube，但 yt-dlp 未识别到有效账号登录状态");
     }
 
-    let format_output = tokio::time::timeout(LOGIN_TIMEOUT, async {
-        let mut command = Command::new(ytdlp_executable());
-        command.arg("--cookies").arg(path).args([
-            "--skip-download",
-            "--no-playlist",
-            "--no-warnings",
-            "--format",
-            "bv*+ba/b",
-        ]);
-        append_ytdlp_runtime(&mut command);
-        command.arg(YTDLP_TEST_VIDEO).output().await
-    })
-    .await
-    .map_err(|_| anyhow!("验证 YouTube 登录下载格式超时"))??;
-    if !format_output.status.success() {
-        bail!("{}", command_error(&format_output));
-    }
+    // 登录导入只验证账号会话本身。公开视频能否返回指定音视频格式会受到
+    // Docker 出口 IP、YouTube 播放器客户端和 PO Token 等因素影响，不能用于
+    // 判断 Cookie 是否有效，否则会把已经识别到的账号 Cookie 错误拒绝。
     Ok(())
 }
 
