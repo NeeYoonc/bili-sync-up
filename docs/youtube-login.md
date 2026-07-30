@@ -1,66 +1,50 @@
-# YouTube 登录
+# YouTube 登录状态
 
-YouTube 下载、订阅动态、喜欢的视频和稍后再看使用经过 `yt-dlp` 验证的网页
-Cookie。Docker 镜像已经内置 Chromium 登录运行时，`bili-sync` 和登录浏览器位于
-**同一个容器**，不需要再启动 sidecar 或第二个 Compose 服务。
+YouTube 的订阅动态、喜欢的视频、稍后再看和需要账号权限的下载使用经过
+`yt-dlp` 验证的网页 Cookie。`bili-sync` 不再内嵌 Chromium，也不会在 Docker
+容器或服务端启动登录浏览器。
 
-## Docker 单容器直接登录
+推荐在日常使用的电脑浏览器中登录 YouTube，再通过项目提供的电脑端登录助手把
+登录状态传输到现有 Web 接口。
 
-更新代码或镜像后，重新构建并启动原有服务：
+## 电脑端登录助手
 
-```bash
-docker compose up -d --build --force-recreate
-```
+1. 打开 **设置 → YouTube 登录状态**。
+2. 下载并解压 `youtube-login-helper.zip`。
+3. Chrome 打开 `chrome://extensions`，Edge 打开 `edge://extensions`。
+4. 开启开发者模式，选择“加载已解压的扩展程序”，加载
+   `youtube-login-extension` 文件夹。
+5. 回到 Bili Sync 设置页，打开扩展并点击“连接当前页面”。
+6. 点击“打开 YouTube”，在这个电脑浏览器中正常登录 YouTube。
+7. 再次打开扩展，点击“传输登录状态”。
+8. 回到设置页刷新，状态显示“已导入”即完成。
 
-进入设置页的 **YouTube 登录**：
-
-1. 等待状态显示“Docker 直接登录已就绪”。
-2. 点击“直接登录 YouTube”。
-3. 在 Chromium 页面中登录 YouTube，并确认首页右上角显示账号头像。
-4. 回到设置页点击“完成登录”。
-5. 主程序通过容器内部 CDP 读取 `youtube.com` Cookie，用当前 `yt-dlp` 验证后
-   保存到原有配置卷。
-
-Chromium 登录资料保存在：
-
-```text
-./config/youtube-login-browser
-```
-
-程序 Cookie 仍保存在原有配置卷：
+助手从当前 Bili Sync 页面读取服务地址和 API Token，只读取
+`youtube.com` Cookie，并调用现有的：
 
 ```text
-./config/youtube-cookies.txt
+POST /api/youtube/cookies
 ```
 
-## 登录页面
+它不会读取或传输 Google 密码。首次连接 Bili Sync 地址时，浏览器会要求授权
+扩展访问该地址。
 
-Compose 默认发布：
+## 手动导入
+
+如果不安装助手，也可以：
+
+1. 在电脑浏览器中正常登录 YouTube。
+2. 使用 Cookie 导出扩展导出 **Netscape** 格式的 `cookies.txt`。
+3. 在 **设置 → YouTube 登录状态** 点击“手动导入 cookies.txt”。
+
+服务端会先使用当前 `yt-dlp` 验证文件。验证成功后才替换旧文件，验证失败会保留
+原有登录状态。
+
+Cookie 保存在 Bili Sync 配置目录：
 
 ```text
-http://Docker主机地址:3001
+youtube-cookies.txt
 ```
 
-登录页面默认直接打开。需要额外启用 HTTP Basic Auth 时，在 Compose 文件旁
-创建 `.env` 并同时填写账号和密码：
-
-```dotenv
-YOUTUBE_LOGIN_BIND=0.0.0.0
-YOUTUBE_LOGIN_PORT=3001
-# YOUTUBE_LOGIN_USER=your-user
-# YOUTUBE_LOGIN_PASSWORD=change-to-a-strong-password
-# 使用反向代理或不同外部地址时填写完整访问地址
-# YOUTUBE_LOGIN_PUBLIC_URL=https://nas.example.com:3001
-```
-
-默认登录入口使用 HTTP，避免自签名证书导致 Chromium 阻止访问。需要 HTTPS 时，
-通过反向代理配置有效证书，并将完整地址写入 `YOUTUBE_LOGIN_PUBLIC_URL`。
-
-## 为什么不复刻 Google 密码登录请求
-
-Google 登录不是稳定的用户名/密码 HTTP 接口。网页流程包含动态流程令牌、设备
-指纹、风控、验证码、两步验证和 WebAuthn，并会按账号与地区变化。抓取一次网络
-请求后重放无法形成可靠登录功能，也无法覆盖验证码和二次验证。
-
-项目因此保留真实 Chromium 登录，但把它与主程序整合进同一个 Docker 容器。
-`cookies.txt` 导入只作为备用方式。
+Docker 部署时只需保持原有 `/app/.config/bili-sync` 配置目录卷映射，不需要
+额外端口、浏览器卷或第二个容器。

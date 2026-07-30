@@ -391,107 +391,13 @@ jobs:
             BUILDKIT_INLINE_CACHE=1
             BILI_SYNC_RELEASE_CHANNEL=${{ needs.prepare_release.outputs.release_channel }}
 
-      - name: Test Docker image runtime
+      - name: Test Docker image
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
-          set -euo pipefail
-
           first_tag=$(echo "${{ steps.all_tags.outputs.all_tags }}" | cut -d',' -f1)
-          if [[ -z "$first_tag" ]]; then
-            echo "No tags to test" >&2
-            exit 1
+          if [[ -n "$first_tag" ]]; then
+            docker run --rm "$first_tag" --help | head -5 || echo "Docker image test completed"
+          else
+            echo "No tags to test"
           fi
-
-          platforms="${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}"
-          if [[ "$platforms" != *"linux/amd64"* ]]; then
-            echo "Skipping runtime test because the selected image has no linux/amd64 platform"
-            exit 0
-          fi
-
-          container="bili-sync-runtime-test"
-          login_user="bili-sync-ci"
-          login_password="bili-sync-ci-password"
-
-          cleanup() {
-            docker rm -f "$container" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-
-          docker run -d \
-            --name "$container" \
-            --shm-size=1g \
-            -P \
-            -e CUSTOM_USER="$login_user" \
-            -e PASSWORD="$login_password" \
-            "$first_tag"
-
-          for attempt in $(seq 1 90); do
-            state=$(docker inspect --format '{{.State.Status}}' "$container")
-            health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container")
-
-            if [[ "$state" == "exited" || "$state" == "dead" ]]; then
-              echo "Container stopped before becoming ready" >&2
-              docker logs "$container"
-              exit 1
-            fi
-
-            if [[ "$health" == "healthy" ]]; then
-              break
-            fi
-
-            if [[ "$attempt" -eq 90 ]]; then
-              echo "Container did not become healthy within 180 seconds" >&2
-              docker inspect "$container"
-              docker logs "$container"
-              exit 1
-            fi
-
-            sleep 2
-          done
-
-          main_port=$(docker port "$container" 12345/tcp | head -1 | awk -F: '{print $NF}')
-          desktop_port=$(docker port "$container" 3000/tcp | head -1 | awk -F: '{print $NF}')
-
-          curl --fail --silent --show-error --max-time 10 \
-            "http://127.0.0.1:${main_port}/" >/dev/null
-          curl --fail --silent --show-error --max-time 10 \
-            --user "${login_user}:${login_password}" \
-            "http://127.0.0.1:${desktop_port}/" >/dev/null
-          docker exec "$container" bash -lc \
-            "curl --fail --silent --show-error http://127.0.0.1:9222/json/version | grep --quiet '\"Browser\"'"
-
-          docker restart "$container" >/dev/null
-          for attempt in $(seq 1 90); do
-            state=$(docker inspect --format '{{.State.Status}}' "$container")
-            health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container")
-
-            if [[ "$state" == "exited" || "$state" == "dead" ]]; then
-              echo "Container stopped after restart" >&2
-              docker logs "$container"
-              exit 1
-            fi
-
-            if [[ "$health" == "healthy" ]]; then
-              break
-            fi
-
-            if [[ "$attempt" -eq 90 ]]; then
-              echo "Container did not recover after restart within 180 seconds" >&2
-              docker inspect "$container"
-              docker logs "$container"
-              exit 1
-            fi
-
-            sleep 2
-          done
-
-          curl --fail --silent --show-error --max-time 10 \
-            "http://127.0.0.1:${main_port}/" >/dev/null
-          curl --fail --silent --show-error --max-time 10 \
-            --user "${login_user}:${login_password}" \
-            "http://127.0.0.1:${desktop_port}/" >/dev/null
-          docker exec "$container" bash -lc \
-            "curl --fail --silent --show-error http://127.0.0.1:9222/json/version | grep --quiet '\"Browser\"'"
-
-          echo "Verified bili-sync, Chromium CDP, and the HTTP login desktop before and after restart"

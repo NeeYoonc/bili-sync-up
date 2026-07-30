@@ -1,4 +1,1 @@
 Dockerfile text eol=lf
-docker/entrypoint text eol=lf
-docker/bili-sync-service text eol=lf
-docker/healthcheck text eol=lf

@@ -108,11 +108,10 @@ use crate::api::ws;
 use crate::bilibili::{get_captcha_info, serve_captcha_page, submit_captcha_result};
 use crate::utils::model::queue_missing_video_file_size_backfill;
 use crate::youtube::{
-    complete_interactive_youtube_login, create_youtube_source, delete_youtube_source, get_youtube_queue_status,
-    get_youtube_source_videos, get_youtube_sources, get_youtube_videos, import_youtube_cookie_file,
-    import_youtube_login, reset_youtube_source_path, retry_youtube_source, retry_youtube_video, scan_youtube_source,
-    search_youtube, start_interactive_youtube_login, update_youtube_source, update_youtube_source_enabled,
-    youtube_status,
+    create_youtube_source, delete_youtube_source, get_youtube_queue_status, get_youtube_source_videos,
+    get_youtube_sources, get_youtube_videos, import_youtube_cookie_file, reset_youtube_source_path,
+    retry_youtube_source, retry_youtube_video, scan_youtube_source, search_youtube, update_youtube_source,
+    update_youtube_source_enabled, youtube_status,
 };
 // CONFIG导入已移除 - 现在使用动态配置
 
@@ -271,11 +270,8 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/auth/qr/poll", get(poll_qr_status))
         .route("/api/auth/current-user", get(get_current_user))
         .route("/api/auth/clear-credential", post(clear_credential))
-        // YouTube 登录与来源适配（yt-dlp 只解析来源/直链，媒体走项目统一下载器）
+        // YouTube 登录状态导入与来源适配（yt-dlp 只解析来源/直链，媒体走项目统一下载器）
         .route("/api/youtube/status", get(youtube_status))
-        .route("/api/youtube/login", post(import_youtube_login))
-        .route("/api/youtube/login/start", post(start_interactive_youtube_login))
-        .route("/api/youtube/login/complete", post(complete_interactive_youtube_login))
         .route("/api/youtube/cookies", post(import_youtube_cookie_file))
         .route("/api/youtube/search", get(search_youtube))
         .route("/api/youtube/source-videos", get(get_youtube_source_videos))

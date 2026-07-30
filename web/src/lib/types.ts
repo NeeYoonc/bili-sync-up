@@ -5,8 +5,6 @@ export interface ApiResponse<T> {
 	data: T;
 }
 
-export type YouTubeBrowser = 'chrome' | 'edge' | 'firefox' | 'brave' | 'chromium';
-
 export type YouTubeSourceType = 'subscriptions' | 'channel' | 'playlist' | 'liked' | 'watch_later';
 
 export interface YouTubeSource {
@@ -83,13 +81,6 @@ export interface YouTubeStatusResponse {
 	logged_in: boolean;
 	default_output_path: string;
 	container_runtime: boolean;
-	browser_login_available: boolean;
-	available_browsers: YouTubeBrowser[];
-	browser_login_message: string;
-	container_browser_configured: boolean;
-	container_browser_available: boolean;
-	container_browser_url?: string | null;
-	container_browser_port?: number | null;
 	cookie_path: string;
 }
 

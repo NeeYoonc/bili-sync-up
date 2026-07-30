@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Bili Sync YouTube 登录助手",
+  "version": "1.0.0",
+  "description": "从电脑浏览器读取已登录的 YouTube 状态并传输到 Bili Sync。",
+  "permissions": ["activeTab", "cookies", "scripting", "storage"],
+  "host_permissions": ["https://youtube.com/*", "https://*.youtube.com/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "action": {
+    "default_title": "Bili Sync YouTube 登录助手",
+    "default_popup": "popup.html"
+  }
+}

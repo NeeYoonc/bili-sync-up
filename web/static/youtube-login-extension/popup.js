@@ -1,0 +1,109 @@
+import {
+  buildNetscapeCookies,
+  normalizeServerUrl,
+  permissionPattern,
+  responseMessage
+} from './helper.js';
+
+const serverInput = document.querySelector('#server-url');
+const tokenInput = document.querySelector('#auth-token');
+const connectButton = document.querySelector('#connect-page');
+const openButton = document.querySelector('#open-youtube');
+const transferButton = document.querySelector('#transfer');
+const statusBox = document.querySelector('#status');
+
+function showStatus(message, kind = '') {
+  statusBox.textContent = message;
+  statusBox.className = kind;
+}
+
+function setBusy(busy) {
+  connectButton.disabled = busy;
+  openButton.disabled = busy;
+  transferButton.disabled = busy;
+}
+
+async function saveConfig() {
+  await chrome.storage.local.set({
+    serverUrl: serverInput.value.trim(),
+    authToken: tokenInput.value
+  });
+}
+
+async function loadConfig() {
+  const config = await chrome.storage.local.get(['serverUrl', 'authToken']);
+  serverInput.value = config.serverUrl || '';
+  tokenInput.value = config.authToken || '';
+}
+
+connectButton.addEventListener('click', async () => {
+  setBusy(true);
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error('没有找到当前 Bili Sync 页面');
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => ({
+        serverUrl: window.location.origin,
+        authToken: window.localStorage.getItem('auth_token') || ''
+      })
+    });
+    if (!result?.authToken) {
+      throw new Error('当前页面没有 Bili Sync API Token，请先在 Web 页面登录');
+    }
+    serverInput.value = normalizeServerUrl(result.serverUrl);
+    tokenInput.value = result.authToken;
+    await saveConfig();
+    showStatus('已连接当前 Bili Sync 页面，可以打开 YouTube 登录。', 'success');
+  } catch (error) {
+    showStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    setBusy(false);
+  }
+});
+
+openButton.addEventListener('click', async () => {
+  await chrome.tabs.create({ url: 'https://www.youtube.com/' });
+});
+
+transferButton.addEventListener('click', async () => {
+  setBusy(true);
+  showStatus('正在读取并验证 YouTube 登录状态…');
+  try {
+    const serverUrl = normalizeServerUrl(serverInput.value);
+    const authToken = tokenInput.value.trim();
+    if (!authToken) throw new Error('请先连接 Bili Sync 设置页或填写 API Token');
+
+    const granted = await chrome.permissions.request({
+      origins: [permissionPattern(serverUrl)]
+    });
+    if (!granted) throw new Error('未授权连接 Bili Sync 地址，无法传输登录状态');
+
+    const cookies = await chrome.cookies.getAll({ domain: 'youtube.com' });
+    const contents = buildNetscapeCookies(cookies);
+    const response = await fetch(`${serverUrl}/api/youtube/cookies`, {
+      method: 'POST',
+      headers: {
+        Authorization: authToken,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ cookies: contents })
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(responseMessage(payload, `Bili Sync 返回 HTTP ${response.status}`));
+    }
+
+    serverInput.value = serverUrl;
+    await saveConfig();
+    showStatus(responseMessage(payload, '登录状态已传输到 Bili Sync'), 'success');
+  } catch (error) {
+    showStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    setBusy(false);
+  }
+});
+
+loadConfig().catch((error) => {
+  showStatus(error instanceof Error ? error.message : String(error), 'error');
+});

@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{Extension, Json, Path as AxumPath, Query};
 use chrono::{Local, NaiveDate, TimeZone};
-use futures::{stream, SinkExt, StreamExt};
+use futures::{stream, StreamExt};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, Set,
@@ -44,7 +44,6 @@ const YTDLP_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const YTDLP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const YTDLP_RELEASE_BASE_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(90);
-const YOUTUBE_LOGIN_DEBUG_PORT: u16 = 38491;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const MAX_DOWNLOAD_RETRIES: i32 = 4;
 const YTDLP_TEST_VIDEO: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
@@ -60,11 +59,6 @@ struct YtDlpPackage {
     asset_name: &'static str,
     binary_name: &'static str,
     archive_binary_name: Option<&'static str>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct YouTubeLoginRequest {
-    pub browser: String,
 }
 
 /// 由浏览器扩展导出的 Netscape `cookies.txt` 内容。主流 yt-dlp 前端以该格式
@@ -244,13 +238,6 @@ pub struct YouTubeStatusResponse {
     pub logged_in: bool,
     pub default_output_path: String,
     pub container_runtime: bool,
-    pub browser_login_available: bool,
-    pub available_browsers: Vec<String>,
-    pub browser_login_message: String,
-    pub container_browser_configured: bool,
-    pub container_browser_available: bool,
-    pub container_browser_url: Option<String>,
-    pub container_browser_port: Option<u16>,
     pub cookie_path: String,
 }
 
@@ -267,43 +254,12 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         warn!(%error, "yt-dlp 自动安装失败");
     }
     let version = ytdlp_version().await;
-    let container_runtime = is_container_runtime();
-    let available_browsers = available_login_browsers();
-    let graphical_session = graphical_session_available();
-    let local_browser_login_available = !container_runtime && graphical_session && !available_browsers.is_empty();
-    let container_browser_debug_url = youtube_login_container_browser_debug_url();
-    let container_browser_configured = container_browser_debug_url.is_some();
-    let container_browser_available = match container_browser_debug_url.as_deref() {
-        Some(debug_url) => fetch_cdp_version(debug_url).await.is_ok(),
-        None => false,
-    };
-    let browser_login_available = local_browser_login_available || container_browser_available;
-    let browser_login_message = if container_browser_available {
-        "同一 Docker 容器内的 YouTube 登录浏览器已就绪；登录完成后主程序会直接读取并验证 YouTube Cookie。"
-    } else if container_browser_configured {
-        "Docker 内置 YouTube 登录浏览器尚未就绪。请稍候刷新；若持续不可用，请重新构建并启动当前单容器镜像。"
-    } else if container_runtime {
-        "当前运行的是旧版 Docker 镜像，不包含内置登录浏览器。请重新构建当前镜像；cookies.txt 仅作为备用方式。"
-    } else if !graphical_session {
-        "当前服务端没有图形桌面，无法打开登录窗口。请从客户端浏览器导出 Netscape cookies.txt 后上传。"
-    } else if available_browsers.is_empty() {
-        "服务端未检测到可用浏览器。请安装浏览器，或导入 Netscape cookies.txt。"
-    } else {
-        "可打开服务端本机浏览器完成 YouTube 登录。"
-    };
     Ok(ApiResponse::ok(YouTubeStatusResponse {
         ytdlp_available: version.is_some(),
         ytdlp_version: version,
         logged_in: has_youtube_session(&cookie_path()),
         default_output_path: default_output_path().display().to_string(),
-        container_runtime,
-        browser_login_available,
-        available_browsers: available_browsers.into_iter().map(str::to_string).collect(),
-        browser_login_message: browser_login_message.to_string(),
-        container_browser_configured,
-        container_browser_available,
-        container_browser_url: container_browser_configured.then(youtube_login_container_browser_public_url),
-        container_browser_port: container_browser_configured.then(youtube_login_container_browser_public_port),
+        container_runtime: is_container_runtime(),
         cookie_path: cookie_path().display().to_string(),
     }))
 }
@@ -589,175 +545,14 @@ pub async fn get_youtube_source_videos(
     }))
 }
 
-pub async fn import_youtube_login(
-    Json(request): Json<YouTubeLoginRequest>,
-) -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
-    ensure_local_browser_login_runtime()?;
-    let browser = normalize_browser(&request.browser)?;
-    ensure_ytdlp_available().await?;
-    let cookie_file = cookie_path();
-    prepare_parent(&cookie_file).await?;
-    let output = tokio::time::timeout(LOGIN_TIMEOUT, async {
-        Command::new(ytdlp_executable())
-            .args(["--cookies-from-browser", browser])
-            .arg("--cookies")
-            .arg(&cookie_file)
-            .args(["--skip-download", "--no-playlist", "--no-warnings", YTDLP_TEST_VIDEO])
-            .output()
-            .await
-    })
-    .await
-    .map_err(|_| ApiError::from(anyhow!("导入浏览器登录状态超时")))??;
-    if !output.status.success() {
-        let error = command_error(&output);
-        if error.contains("Failed to decrypt with DPAPI") || error.contains("App-Bound Encryption") {
-            return Err(ApiError::from(anyhow!(
-                "浏览器默认资料目录受 Chromium App-Bound Encryption 保护，无法直接读取。请点击“打开登录窗口”，在专用窗口登录后点击“完成登录”；也可导入 cookies.txt。"
-            )));
-        }
-        return Err(ApiError::from(anyhow!("导入浏览器 Cookie 失败：{}", error)));
-    }
-    if !has_youtube_session(&cookie_file) {
-        return Err(ApiError::from(anyhow!(
-            "未找到 YouTube 登录会话；请先在 {} 登录 YouTube 后重试",
-            browser
-        )));
-    }
-    Ok(ApiResponse::ok(YouTubeLoginResponse {
-        logged_in: true,
-        message: format!("已从 {} 导入 YouTube 登录状态", browser),
-    }))
-}
-
-/// 启动一个由本应用管理的干净浏览器资料目录，并开启 CDP 端口。
-/// 这是 Chromium 的 App-Bound Encryption 出现后，开源下载器常用的稳定替代：
-/// 不尝试解密用户默认资料目录，而是让用户在该专用窗口完成一次 Google 登录，
-/// 再经浏览器的官方调试协议导出本机 Cookie。
-pub async fn start_interactive_youtube_login(
-    Json(request): Json<YouTubeLoginRequest>,
-) -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
-    if let Some(debug_url) = youtube_login_container_browser_debug_url() {
-        fetch_cdp_version(&debug_url)
-            .await
-            .context("Docker 内置 YouTube 登录浏览器尚未就绪；请稍候刷新或重启当前容器")?;
-        return Ok(ApiResponse::ok(YouTubeLoginResponse {
-            logged_in: false,
-            message: "Docker 内置 YouTube 登录浏览器已就绪。请在打开的 Chromium 页面完成登录，再回到这里点击“完成登录”"
-                .to_string(),
-        }));
-    }
-    ensure_local_browser_login_runtime()?;
-    let browser = normalize_browser(&request.browser)?;
-    if browser == "firefox" {
-        return Err(ApiError::bad_request(
-            "专用登录窗口需要 Chromium 调试协议，请改用 Edge、Chrome、Brave、Chromium，或导入 cookies.txt",
-        ));
-    }
-    let executable = browser_executable(browser)?;
-    let profile = interactive_login_profile(browser);
-    tokio::fs::create_dir_all(&profile).await?;
-    Command::new(executable)
-        .arg(format!("--remote-debugging-port={YOUTUBE_LOGIN_DEBUG_PORT}"))
-        .arg(format!("--user-data-dir={}", profile.display()))
-        .args([
-            "--no-first-run",
-            "--no-default-browser-check",
-            "https://accounts.google.com/ServiceLogin?service=youtube",
-        ])
-        .spawn()
-        .context("启动 YouTube 登录浏览器失败")?;
-    Ok(ApiResponse::ok(YouTubeLoginResponse {
-        logged_in: false,
-        message: "已打开专用浏览器窗口。请在窗口中登录 YouTube，完成后回到这里点击“完成登录”".to_string(),
-    }))
-}
-
-pub async fn complete_interactive_youtube_login() -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
-    ensure_ytdlp_available().await?;
-    let (debug_url, connection_hint) = if let Some(debug_url) = youtube_login_container_browser_debug_url() {
-        (
-            debug_url,
-            "无法连接 Docker 内置 YouTube 登录浏览器；请确认当前容器中的 Chromium 已启动",
-        )
-    } else {
-        ensure_local_browser_login_runtime()?;
-        (
-            format!("http://127.0.0.1:{YOUTUBE_LOGIN_DEBUG_PORT}"),
-            "未找到专用登录窗口；请先点击“打开登录窗口”",
-        )
-    };
-    let version = fetch_cdp_version(&debug_url).await.context(connection_hint)?;
-    let ws_url = version
-        .get("webSocketDebuggerUrl")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow!("登录窗口未启用 Cookie 导出接口；请关闭后重新打开登录窗口"))?;
-    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(ws_url))
-        .await
-        .map_err(|_| anyhow!("连接登录窗口超时"))?
-        .context("连接登录窗口失败")?;
-    socket
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::json!({"id": 1, "method": "Storage.getCookies"})
-                .to_string()
-                .into(),
-        ))
-        .await
-        .context("请求浏览器 Cookie 失败")?;
-    let cookies = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let Some(message) = socket.next().await else {
-                bail!("登录窗口意外关闭");
-            };
-            let message = message.context("读取浏览器 Cookie 失败")?;
-            if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
-                let payload: serde_json::Value = serde_json::from_str(&text).context("解析浏览器 Cookie 响应失败")?;
-                if payload.get("id").and_then(|value| value.as_i64()) == Some(1) {
-                    break Ok(payload
-                        .get("result")
-                        .and_then(|result| result.get("cookies"))
-                        .and_then(|value| value.as_array())
-                        .ok_or_else(|| anyhow!("登录窗口没有返回 Cookie"))?
-                        .clone());
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| anyhow!("读取登录窗口 Cookie 超时"))??;
-    let contents = cdp_cookies_to_netscape(&cookies);
-    if !is_netscape_youtube_cookie_file(&contents) {
-        return Err(ApiError::from(anyhow!(
-            "未检测到 youtube.com 域的登录会话。请在专用窗口打开 YouTube 首页，确认右上角已显示账号头像，保持窗口不要关闭后再点击完成登录"
-        )));
-    }
-    let path = cookie_path();
-    prepare_parent(&path).await?;
-    let temporary = path.with_extension("txt.validating");
-    tokio::fs::write(&temporary, contents)
-        .await
-        .context("写入 YouTube 登录 Cookie 失败")?;
-    if let Err(error) = validate_youtube_login_cookie(&temporary).await {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(ApiError::from(anyhow!(
-            "YouTube 登录会话验证失败：{}。请在专用窗口确认已登录 YouTube 首页后重试",
-            error
-        )));
-    }
-    replace_cookie_file(&temporary, &path).await?;
-    Ok(ApiResponse::ok(YouTubeLoginResponse {
-        logged_in: true,
-        message: "YouTube 登录状态已验证并导入".to_string(),
-    }))
-}
-
 pub async fn import_youtube_cookie_file(
     Json(request): Json<YouTubeCookieImportRequest>,
 ) -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
     ensure_ytdlp_available().await?;
     if !is_netscape_youtube_cookie_file(&request.cookies) {
-        return Err(ApiError::from(anyhow!(
-            "文件不是包含 YouTube 会话的 Netscape cookies.txt；请在已登录 YouTube 的浏览器中导出 cookies.txt"
-        )));
+        return Err(ApiError::bad_request(
+            "文件不是包含 YouTube 会话的 Netscape cookies.txt；请在已登录 YouTube 的浏览器中导出 cookies.txt",
+        ));
     }
     let path = cookie_path();
     prepare_parent(&path).await?;
@@ -767,7 +562,10 @@ pub async fn import_youtube_cookie_file(
         .context("写入 YouTube cookies.txt 失败")?;
     if let Err(error) = validate_youtube_login_cookie(&temporary).await {
         let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(ApiError::from(anyhow!("YouTube cookies.txt 验证失败：{}", error)));
+        return Err(ApiError::bad_request(format!(
+            "YouTube cookies.txt 验证失败：{}",
+            error
+        )));
     }
     replace_cookie_file(&temporary, &path).await?;
 
@@ -3208,9 +3006,8 @@ fn ytdlp_install_lock() -> &'static Mutex<()> {
 }
 
 fn current_ytdlp_package() -> Option<YtDlpPackage> {
-    // Docker 镜像的 bili-sync 主程序使用 musl 静态编译，但运行层是
-    // LinuxServer Chromium（glibc）。允许镜像明确指定运行层 libc，
-    // 避免错误下载需要 musl 动态加载器及其依赖的 yt-dlp 构建。
+    // 自定义镜像可能让 musl 编译的主程序运行在 glibc 层中；允许显式指定
+    // 运行层 libc，避免下载与实际系统加载器不兼容的 yt-dlp 构建。
     let configured_libc = std::env::var("BILI_SYNC_YTDLP_RUNTIME_LIBC").ok();
     let target_env = ytdlp_runtime_target_env(configured_libc.as_deref(), cfg!(target_env = "musl"));
     ytdlp_package_for(std::env::consts::OS, std::env::consts::ARCH, target_env)
@@ -3634,78 +3431,11 @@ fn ytdlp_js_runtime() -> Option<(&'static str, PathBuf)> {
     }
     None
 }
-fn interactive_login_profile(browser: &str) -> PathBuf {
-    CONFIG_DIR.join("youtube-login-browser").join(browser)
-}
-
 fn is_container_runtime() -> bool {
     std::env::var("BILI_SYNC_CONTAINER")
         .ok()
         .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         || Path::new("/.dockerenv").exists()
-}
-
-fn graphical_session_available() -> bool {
-    if cfg!(target_os = "linux") {
-        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
-    } else {
-        true
-    }
-}
-
-fn ensure_local_browser_login_runtime() -> std::result::Result<(), ApiError> {
-    if is_container_runtime() {
-        return Err(ApiError::bad_request(
-            "当前 Docker 镜像未启用内置登录浏览器；请重新构建当前单容器镜像，cookies.txt 仅作为备用方式",
-        ));
-    }
-    if !graphical_session_available() {
-        return Err(ApiError::bad_request(
-            "当前服务端没有图形桌面，不能打开登录窗口；请导出 Netscape cookies.txt 后上传",
-        ));
-    }
-    Ok(())
-}
-
-fn youtube_login_container_browser_debug_url() -> Option<String> {
-    std::env::var("BILI_SYNC_YOUTUBE_LOGIN_BROWSER_URL")
-        .or_else(|_| std::env::var("BILI_SYNC_YOUTUBE_LOGIN_SIDECAR_URL"))
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn youtube_login_container_browser_public_url() -> String {
-    std::env::var("BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_URL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "auto".to_string())
-}
-
-fn youtube_login_container_browser_public_port() -> u16 {
-    std::env::var("BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_PORT")
-        .ok()
-        .and_then(|value| value.trim().parse::<u16>().ok())
-        .unwrap_or(3001)
-}
-
-async fn fetch_cdp_version(debug_url: &str) -> Result<serde_json::Value> {
-    let endpoint = format!("{}/json/version", debug_url.trim_end_matches('/'));
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .context("创建登录容器连接失败")?
-        .get(endpoint)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .context("连接 Chromium 调试接口失败")?
-        .error_for_status()
-        .context("Chromium 调试接口返回失败状态")?
-        .json()
-        .await
-        .context("读取 Chromium 调试状态失败")
 }
 
 async fn replace_cookie_file(temporary: &Path, target: &Path) -> Result<()> {
@@ -3735,134 +3465,6 @@ async fn replace_cookie_file(temporary: &Path, target: &Path) -> Result<()> {
     }
 }
 
-fn executable_on_path(names: &[&str]) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for directory in std::env::split_paths(&path) {
-        for name in names {
-            let candidate = directory.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn available_login_browsers() -> Vec<&'static str> {
-    ["edge", "chrome", "brave", "chromium"]
-        .into_iter()
-        .filter(|browser| browser_executable(browser).is_ok())
-        .collect()
-}
-
-fn browser_executable(browser: &str) -> Result<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if cfg!(target_os = "windows") {
-        candidates = match browser {
-            "edge" => vec![
-                PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-                PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|root| PathBuf::from(root).join(r"Microsoft\Edge\Application\msedge.exe"))
-                    .unwrap_or_default(),
-            ],
-            "chrome" => vec![
-                PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-                PathBuf::from(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|root| PathBuf::from(root).join(r"Google\Chrome\Application\chrome.exe"))
-                    .unwrap_or_default(),
-            ],
-            "brave" => vec![
-                PathBuf::from(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|root| PathBuf::from(root).join(r"BraveSoftware\Brave-Browser\Application\brave.exe"))
-                    .unwrap_or_default(),
-            ],
-            "firefox" => vec![PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe")],
-            "chromium" => Vec::new(),
-            _ => Vec::new(),
-        };
-    } else if cfg!(target_os = "macos") {
-        candidates = match browser {
-            "edge" => vec![PathBuf::from(
-                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-            )],
-            "chrome" => vec![PathBuf::from(
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            )],
-            "brave" => vec![PathBuf::from(
-                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            )],
-            "firefox" => vec![PathBuf::from("/Applications/Firefox.app/Contents/MacOS/firefox")],
-            "chromium" => vec![PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium")],
-            _ => Vec::new(),
-        };
-    }
-    if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
-        return Ok(path);
-    }
-    let executable_names: &[&str] = match browser {
-        "edge" => &["microsoft-edge", "microsoft-edge-stable"],
-        "chrome" => &["google-chrome", "google-chrome-stable"],
-        "brave" => &["brave-browser", "brave"],
-        "firefox" => &["firefox"],
-        "chromium" => &["chromium", "chromium-browser"],
-        _ => &[],
-    };
-    executable_on_path(executable_names)
-        .ok_or_else(|| anyhow!("未找到 {} 浏览器，请改用 Edge、Chrome 或导入 cookies.txt", browser))
-}
-
-fn cdp_cookies_to_netscape(cookies: &[serde_json::Value]) -> String {
-    let mut lines = vec![
-        "# Netscape HTTP Cookie File".to_string(),
-        "# Generated from the Bili Sync YouTube login window".to_string(),
-    ];
-    for cookie in cookies {
-        let domain = cookie.get("domain").and_then(|value| value.as_str()).unwrap_or("");
-        if !is_youtube_cookie_domain(domain) {
-            continue;
-        }
-        let name = cookie.get("name").and_then(|value| value.as_str()).unwrap_or("");
-        let value = cookie.get("value").and_then(|value| value.as_str()).unwrap_or("");
-        if domain.is_empty() || name.is_empty() {
-            continue;
-        }
-        let include_subdomains = if domain.starts_with('.') { "TRUE" } else { "FALSE" };
-        let path = cookie.get("path").and_then(|value| value.as_str()).unwrap_or("/");
-        let secure = if cookie.get("secure").and_then(|value| value.as_bool()).unwrap_or(false) {
-            "TRUE"
-        } else {
-            "FALSE"
-        };
-        let expiry = cookie
-            .get("expires")
-            .and_then(|value| value.as_f64())
-            .filter(|value| *value > 0.0)
-            .unwrap_or(0.0) as i64;
-        lines.push(format!(
-            "{domain}\t{include_subdomains}\t{path}\t{secure}\t{expiry}\t{name}\t{value}"
-        ));
-    }
-    format!("{}\n", lines.join("\n"))
-}
-
-fn is_youtube_cookie_domain(domain: &str) -> bool {
-    let domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
-    domain == "youtube.com" || domain.ends_with(".youtube.com")
-}
-
-fn normalize_browser(browser: &str) -> Result<&'static str> {
-    match browser.trim().to_ascii_lowercase().as_str() {
-        "chrome" => Ok("chrome"),
-        "edge" => Ok("edge"),
-        "firefox" => Ok("firefox"),
-        "brave" => Ok("brave"),
-        "chromium" => Ok("chromium"),
-        _ => bail!("不支持的浏览器；请选择 Chrome、Edge、Firefox、Brave 或 Chromium"),
-    }
-}
 fn has_youtube_session(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|contents| {
         contents.lines().any(|line| {
@@ -3940,9 +3542,9 @@ fn trim_output(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_channel_url, cdp_cookies_to_netscape, checksum_for_release_asset, current_ytdlp_package,
-        generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url, normalize_source_type,
-        resolve_source_url, youtube_search_url, ytdlp_package_for, ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
+        canonical_channel_url, checksum_for_release_asset, current_ytdlp_package, generate_youtube_person_nfo,
+        is_netscape_youtube_cookie_file, is_youtube_url, normalize_source_type, resolve_source_url, youtube_search_url,
+        ytdlp_package_for, ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
     };
     #[test]
     fn validates_types_and_urls() {
@@ -3994,32 +3596,6 @@ mod tests {
         let youtube_session = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tvalue\n";
         assert!(!is_netscape_youtube_cookie_file(google_only));
         assert!(is_netscape_youtube_cookie_file(youtube_session));
-    }
-
-    #[test]
-    fn cdp_export_only_keeps_youtube_cookies() {
-        let cookies = vec![
-            serde_json::json!({
-                "domain": ".youtube.com",
-                "path": "/",
-                "secure": true,
-                "expires": 1234.0,
-                "name": "__Secure-3PSID",
-                "value": "youtube-session"
-            }),
-            serde_json::json!({
-                "domain": ".accounts.google.com",
-                "path": "/",
-                "secure": true,
-                "expires": 1234.0,
-                "name": "SID",
-                "value": "google-session"
-            }),
-        ];
-        let exported = cdp_cookies_to_netscape(&cookies);
-        assert!(exported.contains("youtube-session"));
-        assert!(!exported.contains("google-session"));
-        assert!(!exported.contains("accounts.google.com"));
     }
 
     #[test]
@@ -4079,7 +3655,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_can_override_compiled_musl_with_glibc_runtime() {
+    fn runtime_can_override_compiled_musl_with_glibc() {
         assert_eq!(ytdlp_runtime_target_env(Some("glibc"), true), "");
         assert_eq!(ytdlp_runtime_target_env(Some("GNU"), true), "");
         assert_eq!(ytdlp_runtime_target_env(Some("musl"), false), "musl");

@@ -253,19 +253,7 @@ class ApiClient {
 		return this.get<SubmissionVideosResponse>('/youtube/source-videos', { ...params });
 	}
 
-	/** 从已登录浏览器导入 YouTube Cookie，不会传输 Google 密码。 */
-	async importYouTubeLogin(browser: string): Promise<ApiResponse<YouTubeLoginResponse>> {
-		return this.post<YouTubeLoginResponse>('/youtube/login', { browser });
-	}
-
-	async startYouTubeLogin(browser: string): Promise<ApiResponse<YouTubeLoginResponse>> {
-		return this.post<YouTubeLoginResponse>('/youtube/login/start', { browser });
-	}
-
-	async completeYouTubeLogin(): Promise<ApiResponse<YouTubeLoginResponse>> {
-		return this.post<YouTubeLoginResponse>('/youtube/login/complete');
-	}
-
+	/** 接收电脑端登录助手或手动选择的 Netscape cookies.txt。 */
 	async importYouTubeCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
 		return this.post<YouTubeLoginResponse>('/youtube/cookies', { cookies });
 	}
@@ -1271,10 +1259,7 @@ export const api = {
 	/** 获取本地 YouTube 下载器、登录和任务状态。 */
 	getYouTubeStatus: () => apiClient.getYouTubeStatus(),
 
-	/** 从当前用户已登录的浏览器导入 YouTube Cookie。 */
-	importYouTubeLogin: (browser: string) => apiClient.importYouTubeLogin(browser),
-	startYouTubeLogin: (browser: string) => apiClient.startYouTubeLogin(browser),
-	completeYouTubeLogin: () => apiClient.completeYouTubeLogin(),
+	/** 从电脑端登录助手或 cookies.txt 导入 YouTube 登录状态。 */
 	importYouTubeCookies: (cookies: string) => apiClient.importYouTubeCookies(cookies),
 
 	getYouTubeSources: () => apiClient.getYouTubeSources(),

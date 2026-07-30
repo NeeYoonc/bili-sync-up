@@ -5,85 +5,34 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
-	import type { YouTubeBrowser, YouTubeStatusResponse } from '$lib/types';
+	import type { YouTubeStatusResponse } from '$lib/types';
 	import {
 		CheckCircle2,
 		ChevronDown,
 		ChevronRight,
 		CircleAlert,
+		Download,
 		LoaderCircle,
-		LogIn,
 		RefreshCw,
 		Upload,
 		Youtube
 	} from 'lucide-svelte';
 
 	let status: YouTubeStatusResponse | null = null;
-	let browser: YouTubeBrowser = 'edge';
 	let loading = true;
 	let importing = false;
 	let loginCollapsed = false;
-	const browserLabels: Record<YouTubeBrowser, string> = {
-		edge: 'Edge',
-		chrome: 'Chrome',
-		firefox: 'Firefox',
-		brave: 'Brave',
-		chromium: 'Chromium'
-	};
-	$: availableBrowsers = status?.available_browsers ?? [];
 
 	async function refresh() {
 		loading = true;
 		try {
 			status = (await api.getYouTubeStatus()).data;
-			if (status.available_browsers.length > 0 && !status.available_browsers.includes(browser)) {
-				browser = status.available_browsers[0];
-			}
 		} catch (error) {
 			toast.error('加载 YouTube 登录状态失败', {
 				description: error instanceof Error ? error.message : String(error)
 			});
 		} finally {
 			loading = false;
-		}
-	}
-
-	async function startLogin() {
-		importing = true;
-		try {
-			if (status?.container_browser_available) {
-				window.open(resolveContainerBrowserUrl(), '_blank', 'noopener,noreferrer');
-			}
-			toast.info((await api.startYouTubeLogin(browser)).data.message);
-		} catch (error) {
-			toast.error('打开登录窗口失败', {
-				description: error instanceof Error ? error.message : String(error)
-			});
-		} finally {
-			importing = false;
-		}
-	}
-
-	function resolveContainerBrowserUrl() {
-		const configured = status?.container_browser_url?.trim();
-		if (configured && configured !== 'auto') {
-			return configured;
-		}
-		const port = status?.container_browser_port ?? 3001;
-		return `http://${window.location.hostname}:${port}`;
-	}
-
-	async function completeLogin() {
-		importing = true;
-		try {
-			toast.success((await api.completeYouTubeLogin()).data.message);
-			await refresh();
-		} catch (error) {
-			toast.error('完成登录失败', {
-				description: error instanceof Error ? error.message : String(error)
-			});
-		} finally {
-			importing = false;
 		}
 	}
 
@@ -110,152 +59,94 @@
 
 <Card>
 	<CardHeader class="cursor-pointer" onclick={() => (loginCollapsed = !loginCollapsed)}>
-		<CardTitle class="flex items-center gap-2" title="展开或收起 YouTube 登录管理">
+		<CardTitle class="flex items-center gap-2" title="展开或收起 YouTube 登录状态管理">
 			{#if loginCollapsed}
 				<ChevronRight class="text-muted-foreground h-4 w-4" />
 			{:else}
 				<ChevronDown class="text-muted-foreground h-4 w-4" />
 			{/if}
 			<Youtube class="h-5 w-5 text-red-600" />
-			YouTube 登录
+			YouTube 登录状态
 			<Badge variant={status?.logged_in ? 'default' : 'secondary'} class="ml-auto">
-				{status?.logged_in ? '已登录' : '未登录'}
+				{status?.logged_in ? '已导入' : '未导入'}
 			</Badge>
 		</CardTitle>
 	</CardHeader>
 	{#if !loginCollapsed}
 		<CardContent>
-			<div class="space-y-3 rounded-lg border p-3">
+			<div class="space-y-4 rounded-lg border p-3">
 				<div class="flex flex-wrap items-center gap-3">
-				{#if status?.ytdlp_available}
-					<Badge class="gap-1">
-						<CheckCircle2 class="h-3.5 w-3.5" />yt-dlp {status.ytdlp_version}
-					</Badge>
-				{:else}
-					<Badge variant="destructive" class="gap-1">
-						<CircleAlert class="h-3.5 w-3.5" />{loading ? '检测中' : '未检测到 yt-dlp'}
-					</Badge>
-					{/if}
-					{#if status?.container_browser_available}
-						<Badge variant="outline" class="gap-1 border-green-500 text-green-700">
-							<CheckCircle2 class="h-3.5 w-3.5" />Docker 直接登录已就绪
+					{#if status?.ytdlp_available}
+						<Badge class="gap-1">
+							<CheckCircle2 class="h-3.5 w-3.5" />yt-dlp {status.ytdlp_version}
 						</Badge>
-						<Button size="sm" onclick={startLogin} disabled={importing || !status?.ytdlp_available}>
-							{#if importing}<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />{:else}<LogIn
-									class="mr-1 h-4 w-4"
-								/>{/if}
-							直接登录 YouTube
-						</Button>
-						<Button
-							size="sm"
-							variant="outline"
-							onclick={completeLogin}
-							disabled={importing || !status?.ytdlp_available}
-						>
-							完成登录
-						</Button>
-					{:else if status?.browser_login_available}
-						<select
-							class="border-input bg-background h-9 rounded-md border px-2 text-sm"
-							bind:value={browser}
-						>
-							{#each availableBrowsers as browserValue (browserValue)}
-								<option value={browserValue}>{browserLabels[browserValue]}</option>
-							{/each}
-						</select>
-						<Button size="sm" onclick={startLogin} disabled={importing || !status?.ytdlp_available}>
-							{#if importing}<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />{:else}<LogIn
-									class="mr-1 h-4 w-4"
-								/>{/if}
-							打开登录窗口
-						</Button>
-						<Button
-							size="sm"
-							variant="outline"
-							onclick={completeLogin}
-							disabled={importing || !status?.ytdlp_available}
-						>
-							完成登录
-						</Button>
+					{:else}
+						<Badge variant="destructive" class="gap-1">
+							<CircleAlert class="h-3.5 w-3.5" />{loading ? '检测中' : '未检测到 yt-dlp'}
+						</Badge>
 					{/if}
-				<label class="inline-flex">
-					<input
-						class="hidden"
-						type="file"
-						accept=".txt,text/plain"
-						onchange={importCookieFile}
-						disabled={importing || !status?.ytdlp_available}
-					/>
-					<span
-						class="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-9 cursor-pointer items-center rounded-md px-3 text-sm font-medium {importing ||
-						!status?.ytdlp_available
-							? 'pointer-events-none opacity-50'
-							: ''}"
+
+					<a
+						class="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-9 items-center rounded-md px-3 text-sm font-medium"
+						href="/youtube-login-helper.zip"
+						download="youtube-login-helper.zip"
 					>
-						{#if importing}
-							<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />
-						{:else}
-							<Upload class="mr-1 h-4 w-4" />
-						{/if}
-						从当前电脑导入 cookies.txt
-					</span>
-				</label>
-				<Button variant="ghost" size="sm" class="ml-auto" onclick={refresh}>
-					<RefreshCw class="mr-1 h-4 w-4" />刷新
-				</Button>
+						<Download class="mr-1 h-4 w-4" />
+						下载电脑端登录助手
+					</a>
+
+					<label class="inline-flex">
+						<input
+							class="hidden"
+							type="file"
+							accept=".txt,text/plain"
+							onchange={importCookieFile}
+							disabled={importing || !status?.ytdlp_available}
+						/>
+						<span
+							class="border-input bg-background hover:bg-accent hover:text-accent-foreground inline-flex h-9 cursor-pointer items-center rounded-md border px-3 text-sm font-medium {importing ||
+							!status?.ytdlp_available
+								? 'pointer-events-none opacity-50'
+								: ''}"
+						>
+							{#if importing}
+								<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />
+							{:else}
+								<Upload class="mr-1 h-4 w-4" />
+							{/if}
+							手动导入 cookies.txt
+						</span>
+					</label>
+
+					<Button variant="ghost" size="sm" class="ml-auto" onclick={refresh}>
+						<RefreshCw class="mr-1 h-4 w-4" />刷新状态
+					</Button>
 				</div>
 
-				{#if status?.container_browser_available}
-					<div
-						class="rounded-md border border-green-300 bg-green-50 p-3 text-sm text-green-900 dark:border-green-800 dark:bg-green-950/30 dark:text-green-100"
-					>
-						<p class="font-medium">Docker 单容器直接登录</p>
-						<ol class="mt-2 list-decimal space-y-1 pl-5">
-							<li>点击“直接登录 YouTube”，打开同一容器内的 Chromium 页面。</li>
-							<li>在 Chromium 中登录 YouTube，并确认首页右上角显示账号头像。</li>
-							<li>回到本页点击“完成登录”，主程序会读取、验证并保存 YouTube Cookie。</li>
-						</ol>
-						<p class="mt-2 text-xs opacity-80">
-							Chromium 与 bili-sync 位于同一个 Docker 容器，不需要启动或管理第二个容器。
-						</p>
-					</div>
-				{:else if status && !status.browser_login_available}
-					<div
-						class="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"
-					>
-						<div class="flex items-start gap-2">
-							<CircleAlert class="mt-0.5 h-4 w-4 shrink-0" />
-							<div class="space-y-2">
-								<p class="font-medium">
-									{status.container_runtime ? 'Docker 登录方式' : '当前环境无法打开浏览器'}
-								</p>
-								<p>{status.browser_login_message}</p>
-								{#if status.container_browser_configured}
-									<div class="space-y-1">
-										<p>内置浏览器未就绪，请重新构建并启动当前单容器镜像：</p>
-										<code class="block overflow-x-auto rounded bg-black/5 p-2 text-xs dark:bg-white/10"
-											>docker compose up -d --build --force-recreate</code
-										>
-										<p>启动后稍候点击“刷新”，状态变为“Docker 直接登录已就绪”即可。</p>
-									</div>
-								{:else}
-									<ol class="list-decimal space-y-1 pl-5">
-										<li>当前是旧版 Docker 镜像，请重新构建或更新为包含内置浏览器的镜像。</li>
-										<li>更新前仍可临时使用 Netscape cookies.txt 导入。</li>
-									</ol>
-								{/if}
-								<p class="text-xs opacity-80">
-									保存位置：<code class="break-all">{status.cookie_path}</code>
-									{#if status.container_runtime}（请保持 Docker 配置目录卷映射）{/if}
-								</p>
-							</div>
-						</div>
-					</div>
-				{:else if status?.browser_login_available}
-					<p class="text-muted-foreground text-xs">
-						本机浏览器登录和 cookies.txt 导入任选一种。
+				<div
+					class="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-100"
+				>
+					<p class="font-medium">电脑端登录并传输到 Bili Sync</p>
+					<ol class="mt-2 list-decimal space-y-1 pl-5">
+						<li>下载并解压登录助手，在电脑端 Chrome 或 Edge 中加载该扩展。</li>
+						<li>保持本设置页打开，点击助手的“连接当前页面”。</li>
+						<li>点击助手的“打开 YouTube”，在电脑浏览器中正常登录。</li>
+						<li>再次打开助手，点击“传输登录状态”；本页刷新后会显示“已导入”。</li>
+					</ol>
+					<p class="mt-2 text-xs opacity-80">
+						助手只读取 youtube.com Cookie，并调用现有导入接口传输到当前 Bili Sync；不会传输 Google
+						密码，也不需要 Docker 内嵌浏览器。
 					</p>
-				{/if}
+				</div>
+
+				<div class="text-muted-foreground flex items-start gap-2 text-xs">
+					<CircleAlert class="mt-0.5 h-4 w-4 shrink-0" />
+					<p>
+						手动备用方式：使用浏览器 Cookie 导出工具导出 Netscape 格式 cookies.txt，再点击“手动导入
+						cookies.txt”。服务端保存位置：<code class="break-all">{status?.cookie_path ?? '加载中…'}</code>
+						{#if status?.container_runtime}（位于 Docker 配置目录卷中）{/if}
+					</p>
+				</div>
 			</div>
 		</CardContent>
 	{/if}

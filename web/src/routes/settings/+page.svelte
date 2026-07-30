@@ -94,8 +94,8 @@
 		},
 		{
 			id: 'youtube_login',
-			title: 'YouTube 登录',
-			description: '配置 YouTube 登录和 cookies.txt',
+			title: 'YouTube 登录状态',
+			description: '从电脑端助手或 cookies.txt 导入',
 			icon: YoutubeIcon
 		},
 		{
@@ -148,7 +148,7 @@
 		download: '控制下载并发、速率限制、任务执行方式和下载器行为。',
 		danmaku: '配置弹幕文件的显示样式、布局参数和同步策略。',
 		credential: '填写 B 站登录凭证，影响会员画质、互动内容和受限接口访问。',
-		youtube_login: '管理 YouTube 登录窗口、cookies.txt 和 yt-dlp 登录状态。',
+		youtube_login: '通过电脑端登录助手或 cookies.txt 管理 yt-dlp 使用的 YouTube 登录状态。',
 		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
 		captcha: '设置遇到验证码风控时的处理模式、超时和自动识别参数。',
 		aria2: '配置外部 Aria2 的健康检查、自动重启和监控策略。',
@@ -3081,14 +3081,14 @@
 	</div>
 </ResponsiveSheet>
 
-<!-- YouTube 登录设置抽屉 -->
+<!-- YouTube 登录状态设置抽屉 -->
 <ResponsiveSheet
 	open={openSheet === 'youtube_login'}
 	onOpenChange={(open) => {
 		if (!open) openSheet = null;
 	}}
-	title="YouTube 登录"
-	description="配置 YouTube 登录窗口、cookies.txt 和 yt-dlp 登录状态"
+	title="YouTube 登录状态"
+	description="从电脑端登录助手或 cookies.txt 导入 yt-dlp 登录状态"
 	titleTooltip={getSettingTooltip('youtube_login')}
 	{isMobile}
 >

@@ -9,35 +9,23 @@ services:
     network_mode: bridge
     # 该选项请仅在日志终端支持彩色输出时启用，否则日志中可能会出现乱码
     tty: false
-    # 内置浏览器需要容器 init 以 Root 启动，不要设置 Docker 的 user 字段。
-    # 如需指定下载文件所有者，请在 environment 中设置 PUID/PGID。
+    # 非必需设置项，推荐设置为宿主机用户的 uid 及 gid (`$uid:$gid`)
+    # 可以执行 `id ${user}` 获取 `user` 用户的 uid 及 gid
+    # 程序下载的所有文件权限将与此处的用户保持一致，不设置默认为 Root
+    # user: 1000:1000
     hostname: bili-sync
     container_name: bili-sync
-    # 12345 为 bili-sync；外部 3001 映射到容器内 HTTP 登录桌面 3000。
+    # 程序默认绑定 0.0.0.0:12345 运行 http 服务
     ports:
       - 12345:12345
-      - "${YOUTUBE_LOGIN_BIND:-0.0.0.0}:${YOUTUBE_LOGIN_PORT:-3001}:3000"
-    shm_size: "1gb"
     volumes:
       - ./config:/app/.config/bili-sync
-      - ./config/youtube-login-browser:/config
       - ./Downloads:/Downloads
     logging:
       driver: "local"
     environment:
       - TZ=Asia/Shanghai
       - RUST_LOG=None,bili_sync=info
-      # - PUID=1000
-      # - PGID=1000
-      # 默认直接打开登录桌面；如需 HTTP Basic Auth，请在 .env 中填写两项。
-      - CUSTOM_USER=${YOUTUBE_LOGIN_USER:-}
-      - PASSWORD=${YOUTUBE_LOGIN_PASSWORD:-}
-      - BILI_SYNC_YOUTUBE_LOGIN_BROWSER_URL=http://127.0.0.1:9222
-      - BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_URL=${YOUTUBE_LOGIN_PUBLIC_URL:-auto}
-      - BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_PORT=${YOUTUBE_LOGIN_PORT:-3001}
-      - HARDEN_DESKTOP=true
-      - SELKIES_COMMAND_ENABLED=false
-      - SELKIES_FILE_TRANSFERS=none
       # 可选：设置执行周期，默认为每天凌晨3点执行
       # - BILI_SYNC_SCHEDULE=0 3 * * *
     # 资源限制（可选）
