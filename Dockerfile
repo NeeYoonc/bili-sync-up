@@ -8,7 +8,13 @@ WORKDIR /app
 RUN apk update && apk add --no-cache \
     ca-certificates \
     tzdata \
-    ffmpeg
+    ffmpeg \
+    chromium \
+    xvfb \
+    x11vnc \
+    fluxbox \
+    font-noto-cjk \
+    font-dejavu
 
 # 复制所有Linux二进制文件
 COPY ./bili-sync-rs-Linux-*.tar.gz ./
@@ -30,6 +36,9 @@ RUN echo -n "$BILI_SYNC_RELEASE_CHANNEL" > /app/release-channel.txt
 RUN rm -f ./bili-sync-rs-Linux-*.tar.gz && \
     chmod +x ./bili-sync-rs
 
+COPY ./scripts/docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 FROM scratch
 
 WORKDIR /app
@@ -38,11 +47,14 @@ ENV LANG=zh_CN.UTF-8 \
     TZ=Asia/Shanghai \
     HOME=/app \
     BILI_SYNC_CONTAINER=1 \
+    BILI_SYNC_CONTAINER_BROWSER=1 \
+    BILI_SYNC_VNC_ADDRESS=127.0.0.1:5900 \
+    DISPLAY=:99 \
     RUST_BACKTRACE=1 \
     RUST_LOG=None,bili_sync=info
 
 COPY --from=base / /
 
-ENTRYPOINT [ "/app/bili-sync-rs" ]
+ENTRYPOINT [ "/app/docker-entrypoint.sh" ]
 
 VOLUME [ "/app/.config/bili-sync" ]

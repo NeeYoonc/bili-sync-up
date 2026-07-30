@@ -112,7 +112,7 @@ use crate::youtube::{
     get_youtube_source_videos, get_youtube_sources, get_youtube_videos, import_youtube_cookie_file,
     import_youtube_login, reset_youtube_source_path, retry_youtube_source, retry_youtube_video, scan_youtube_source,
     search_youtube, start_interactive_youtube_login, update_youtube_source, update_youtube_source_enabled,
-    youtube_status,
+    youtube_container_browser_ws, youtube_status,
 };
 // CONFIG导入已移除 - 现在使用动态配置
 
@@ -276,6 +276,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/youtube/login", post(import_youtube_login))
         .route("/api/youtube/login/start", post(start_interactive_youtube_login))
         .route("/api/youtube/login/complete", post(complete_interactive_youtube_login))
+        .route("/api/youtube/container-browser/ws", get(youtube_container_browser_ws))
         .route("/api/youtube/cookies", post(import_youtube_cookie_file))
         .route("/api/youtube/search", get(search_youtube))
         .route("/api/youtube/source-videos", get(get_youtube_source_videos))

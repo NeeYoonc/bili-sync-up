@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
+	import type RFB from '@novnc/novnc/lib/rfb.js';
 	import { toast } from 'svelte-sonner';
 	import api from '$lib/api';
 	import { Button } from '$lib/components/ui/button';
@@ -11,10 +12,13 @@
 		ChevronDown,
 		ChevronRight,
 		CircleAlert,
+		Expand,
 		LoaderCircle,
 		LogIn,
+		Monitor,
 		RefreshCw,
 		Upload,
+		X,
 		Youtube
 	} from 'lucide-svelte';
 
@@ -22,6 +26,11 @@
 	let browser: YouTubeBrowser = 'edge';
 	let loading = true;
 	let importing = false;
+	let containerBrowserOpen = false;
+	let containerBrowserConnecting = false;
+	let containerBrowserMessage = '';
+	let containerBrowserElement: HTMLDivElement | undefined;
+	let containerRfb: RFB | null = null;
 	let loginCollapsed = false;
 	const browserLabels: Record<YouTubeBrowser, string> = {
 		edge: 'Edge',
@@ -52,6 +61,9 @@
 		importing = true;
 		try {
 			toast.info((await api.startYouTubeLogin(browser)).data.message);
+			if (status?.container_browser_available) {
+				await openContainerBrowser();
+			}
 		} catch (error) {
 			toast.error('打开登录窗口失败', {
 				description: error instanceof Error ? error.message : String(error)
@@ -61,10 +73,60 @@
 		}
 	}
 
+	async function openContainerBrowser() {
+		containerBrowserOpen = true;
+		await tick();
+		if (containerRfb || !containerBrowserElement) return;
+		containerBrowserConnecting = true;
+		containerBrowserMessage = '正在连接 Docker 内置浏览器…';
+		try {
+			const { default: RFBClient } = await import('@novnc/novnc/lib/rfb.js');
+			const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+			const token = localStorage.getItem('auth_token') ?? '';
+			const socketUrl = `${protocol}//${window.location.host}/api/youtube/container-browser/ws?token=${encodeURIComponent(token)}`;
+			const rfb = new RFBClient(containerBrowserElement, socketUrl, { shared: true });
+			rfb.scaleViewport = true;
+			rfb.resizeSession = true;
+			rfb.background = '#111827';
+			rfb.addEventListener('connect', () => {
+				containerBrowserConnecting = false;
+				containerBrowserMessage = '已连接 Docker 内置 Chromium，请直接在下方完成 Google 登录';
+				rfb.focus();
+			});
+			rfb.addEventListener('disconnect', (event: Event) => {
+				containerRfb = null;
+				containerBrowserConnecting = false;
+				const clean = (event as Event & { detail?: { clean?: boolean } }).detail?.clean;
+				containerBrowserMessage = clean
+					? '容器浏览器连接已关闭'
+					: '容器浏览器连接中断，请确认 Docker 镜像已更新后重试';
+			});
+			rfb.addEventListener('securityfailure', (event: Event) => {
+				const reason = (event as Event & { detail?: { reason?: string } }).detail?.reason;
+				containerBrowserMessage = reason || '容器浏览器安全握手失败';
+			});
+			containerRfb = rfb;
+		} catch (error) {
+			containerBrowserConnecting = false;
+			containerBrowserMessage = error instanceof Error ? error.message : String(error);
+			toast.error('连接 Docker 内置浏览器失败', { description: containerBrowserMessage });
+		}
+	}
+
+	function closeContainerBrowser() {
+		containerRfb?.disconnect();
+		containerRfb = null;
+		containerBrowserOpen = false;
+		containerBrowserConnecting = false;
+	}
+
 	async function completeLogin() {
 		importing = true;
 		try {
 			toast.success((await api.completeYouTubeLogin()).data.message);
+			if (status?.container_browser_available) {
+				closeContainerBrowser();
+			}
 			await refresh();
 		} catch (error) {
 			toast.error('完成登录失败', {
@@ -94,6 +156,7 @@
 	}
 
 	onMount(refresh);
+	onDestroy(closeContainerBrowser);
 </script>
 
 <Card>
@@ -125,19 +188,25 @@
 					</Badge>
 				{/if}
 					{#if status?.browser_login_available}
-						<select
-							class="border-input bg-background h-9 rounded-md border px-2 text-sm"
-							bind:value={browser}
-						>
-							{#each availableBrowsers as browserValue (browserValue)}
-								<option value={browserValue}>{browserLabels[browserValue]}</option>
-							{/each}
-						</select>
+						{#if status.container_browser_available}
+							<Badge variant="outline" class="gap-1">
+								<Monitor class="h-3.5 w-3.5" />Docker Chromium
+							</Badge>
+						{:else}
+							<select
+								class="border-input bg-background h-9 rounded-md border px-2 text-sm"
+								bind:value={browser}
+							>
+								{#each availableBrowsers as browserValue (browserValue)}
+									<option value={browserValue}>{browserLabels[browserValue]}</option>
+								{/each}
+							</select>
+						{/if}
 						<Button size="sm" onclick={startLogin} disabled={importing || !status?.ytdlp_available}>
 							{#if importing}<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />{:else}<LogIn
 									class="mr-1 h-4 w-4"
 								/>{/if}
-							打开登录窗口
+							{status.container_browser_available ? '打开 Docker 登录浏览器' : '打开登录窗口'}
 						</Button>
 						<Button
 							size="sm"
@@ -200,8 +269,41 @@
 					</div>
 				{:else if status?.browser_login_available}
 					<p class="text-muted-foreground text-xs">
-						本机浏览器登录和 cookies.txt 导入任选一种；Docker 或远程部署请使用 cookies.txt。
+						{status.browser_login_message}
 					</p>
+				{/if}
+
+				{#if status?.container_browser_available && containerBrowserOpen}
+					<div class="overflow-hidden rounded-lg border bg-slate-950">
+						<div
+							class="flex items-center gap-2 border-b border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100"
+						>
+							{#if containerBrowserConnecting}
+								<LoaderCircle class="h-4 w-4 animate-spin" />
+							{:else}
+								<Expand class="h-4 w-4" />
+							{/if}
+							<span class="flex-1">{containerBrowserMessage}</span>
+							<Button
+								size="icon"
+								variant="ghost"
+								class="h-7 w-7 text-slate-100 hover:bg-slate-700 hover:text-white"
+								onclick={closeContainerBrowser}
+								title="关闭浏览器画面"
+							>
+								<X class="h-4 w-4" />
+							</Button>
+						</div>
+						<div
+							bind:this={containerBrowserElement}
+							class="h-[min(62vh,620px)] min-h-[420px] w-full bg-slate-950"
+							aria-label="Docker 内置 Chromium 登录画面"
+						></div>
+					</div>
+					<div class="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-900">
+						直接在上方登录 Google/YouTube。确认 YouTube 右上角显示账号头像后，点击“完成登录”；
+						登录资料会保存在 Docker 配置卷中，容器重建后仍可使用。
+					</div>
 				{/if}
 			</div>
 		</CardContent>

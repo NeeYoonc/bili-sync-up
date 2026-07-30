@@ -26,6 +26,8 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - RUST_LOG=None,bili_sync=info
+      # Docker 内置 Chromium 登录（通过现有 12345 页面显示，不额外开放 VNC 端口）
+      - BILI_SYNC_CONTAINER_BROWSER=1
       # 可选：设置执行周期，默认为每天凌晨3点执行
       # - BILI_SYNC_SCHEDULE=0 3 * * *
     # 资源限制（可选）
@@ -36,4 +38,4 @@ services:
     #       memory: 2G
     #     reservations:
     #       cpus: '0.5'
-    #       memory: 500M 
+    #       memory: 500M

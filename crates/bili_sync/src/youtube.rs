@@ -10,7 +10,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use axum::extract::ws::{Message as AxumWebSocketMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, Json, Path as AxumPath, Query};
+use axum::response::IntoResponse;
 use chrono::{Local, NaiveDate, TimeZone};
 use futures::{stream, SinkExt, StreamExt};
 use sea_orm::{
@@ -19,6 +21,8 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -244,6 +248,7 @@ pub struct YouTubeStatusResponse {
     pub logged_in: bool,
     pub default_output_path: String,
     pub container_runtime: bool,
+    pub container_browser_available: bool,
     pub browser_login_available: bool,
     pub available_browsers: Vec<String>,
     pub browser_login_message: String,
@@ -264,9 +269,17 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
     let container_runtime = is_container_runtime();
     let available_browsers = available_login_browsers();
     let graphical_session = graphical_session_available();
-    let browser_login_available = !container_runtime && graphical_session && !available_browsers.is_empty();
-    let browser_login_message = if container_runtime {
-        "Docker 容器无法打开宿主机浏览器。请在当前电脑已登录 YouTube 的浏览器中导出 Netscape cookies.txt，再在此页面上传。"
+    let container_browser_available =
+        container_runtime && container_browser_enabled() && graphical_session && !available_browsers.is_empty();
+    let browser_login_available = if container_runtime {
+        container_browser_available
+    } else {
+        graphical_session && !available_browsers.is_empty()
+    };
+    let browser_login_message = if container_browser_available {
+        "Docker 内置 Chromium 已就绪，可直接在当前页面打开容器浏览器并登录 YouTube。"
+    } else if container_runtime {
+        "当前镜像未启用 Docker 内置浏览器。请更新镜像，或设置 BILI_SYNC_CONTAINER_BROWSER=1 后重建容器。"
     } else if !graphical_session {
         "当前服务端没有图形桌面，无法打开登录窗口。请从客户端浏览器导出 Netscape cookies.txt 后上传。"
     } else if available_browsers.is_empty() {
@@ -280,6 +293,7 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         logged_in: has_youtube_session(&cookie_path()),
         default_output_path: default_output_path().display().to_string(),
         container_runtime,
+        container_browser_available,
         browser_login_available,
         available_browsers: available_browsers.into_iter().map(str::to_string).collect(),
         browser_login_message: browser_login_message.to_string(),
@@ -625,20 +639,83 @@ pub async fn start_interactive_youtube_login(
     let executable = browser_executable(browser)?;
     let profile = interactive_login_profile(browser);
     tokio::fs::create_dir_all(&profile).await?;
-    Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg(format!("--remote-debugging-port={YOUTUBE_LOGIN_DEBUG_PORT}"))
         .arg(format!("--user-data-dir={}", profile.display()))
-        .args([
-            "--no-first-run",
-            "--no-default-browser-check",
-            "https://accounts.google.com/ServiceLogin?service=youtube",
-        ])
+        .args(["--no-first-run", "--no-default-browser-check"]);
+    if is_container_runtime() {
+        command.args([
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--password-store=basic",
+            "--window-size=1280,900",
+            "--start-maximized",
+        ]);
+    }
+    command
+        .arg("https://accounts.google.com/ServiceLogin?service=youtube")
         .spawn()
         .context("启动 YouTube 登录浏览器失败")?;
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: false,
-        message: "已打开专用浏览器窗口。请在窗口中登录 YouTube，完成后回到这里点击“完成登录”".to_string(),
+        message: if is_container_runtime() {
+            "Docker 登录浏览器已启动。请直接在当前页面的浏览器画面中登录，完成后点击“完成登录”".to_string()
+        } else {
+            "已打开专用浏览器窗口。请在窗口中登录 YouTube，完成后回到这里点击“完成登录”".to_string()
+        },
     }))
+}
+
+/// 将 noVNC 的 WebSocket 二进制流直接转发到容器内仅监听回环地址的 x11vnc。
+/// 对外仍复用 bili-sync 的 12345 端口和认证令牌，不额外暴露 VNC 端口。
+pub async fn youtube_container_browser_ws(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.protocols(["binary"]).on_upgrade(|socket| async move {
+        if let Err(error) = proxy_container_vnc(socket).await {
+            warn!("Docker YouTube 登录浏览器连接结束: {error}");
+        }
+    })
+}
+
+async fn proxy_container_vnc(socket: WebSocket) -> Result<()> {
+    if !is_container_runtime() || !container_browser_enabled() {
+        bail!("Docker 内置浏览器未启用");
+    }
+    let address = std::env::var("BILI_SYNC_VNC_ADDRESS").unwrap_or_else(|_| "127.0.0.1:5900".to_string());
+    let tcp = TcpStream::connect(&address)
+        .await
+        .with_context(|| format!("无法连接容器内浏览器画面 {address}"))?;
+    let (mut socket_sender, mut socket_receiver) = socket.split();
+    let (mut vnc_reader, mut vnc_writer) = tcp.into_split();
+
+    let browser_to_vnc = async {
+        while let Some(message) = socket_receiver.next().await {
+            match message? {
+                AxumWebSocketMessage::Binary(data) => vnc_writer.write_all(&data).await?,
+                AxumWebSocketMessage::Close(_) => break,
+                AxumWebSocketMessage::Text(_) | AxumWebSocketMessage::Ping(_) | AxumWebSocketMessage::Pong(_) => {}
+            }
+        }
+        Result::<()>::Ok(())
+    };
+    let vnc_to_browser = async {
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            let count = vnc_reader.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            socket_sender
+                .send(AxumWebSocketMessage::Binary(buffer[..count].to_vec().into()))
+                .await?;
+        }
+        Result::<()>::Ok(())
+    };
+    tokio::select! {
+        result = browser_to_vnc => result?,
+        result = vnc_to_browser => result?,
+    }
+    Ok(())
 }
 
 pub async fn complete_interactive_youtube_login() -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
@@ -3576,6 +3653,12 @@ fn is_container_runtime() -> bool {
         || Path::new("/.dockerenv").exists()
 }
 
+fn container_browser_enabled() -> bool {
+    std::env::var("BILI_SYNC_CONTAINER_BROWSER")
+        .ok()
+        .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
 fn graphical_session_available() -> bool {
     if cfg!(target_os = "linux") {
         std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -3585,9 +3668,9 @@ fn graphical_session_available() -> bool {
 }
 
 fn ensure_browser_login_runtime() -> std::result::Result<(), ApiError> {
-    if is_container_runtime() {
+    if is_container_runtime() && !container_browser_enabled() {
         return Err(ApiError::bad_request(
-            "Docker 容器不能打开宿主机浏览器；请在当前电脑浏览器中导出 Netscape cookies.txt，然后使用“导入 cookies.txt”上传"
+            "当前 Docker 镜像没有启用内置登录浏览器；请更新镜像或设置 BILI_SYNC_CONTAINER_BROWSER=1",
         ));
     }
     if !graphical_session_available() {
@@ -3612,8 +3695,14 @@ fn executable_on_path(names: &[&str]) -> Option<PathBuf> {
 }
 
 fn available_login_browsers() -> Vec<&'static str> {
-    ["edge", "chrome", "brave", "chromium"]
+    let candidates: &[&str] = if is_container_runtime() && cfg!(target_os = "linux") {
+        &["chromium"]
+    } else {
+        &["edge", "chrome", "brave", "chromium"]
+    };
+    candidates
         .into_iter()
+        .copied()
         .filter(|browser| browser_executable(browser).is_ok())
         .collect()
 }

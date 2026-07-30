@@ -83,6 +83,7 @@ export interface YouTubeStatusResponse {
 	logged_in: boolean;
 	default_output_path: string;
 	container_runtime: boolean;
+	container_browser_available: boolean;
 	browser_login_available: boolean;
 	available_browsers: YouTubeBrowser[];
 	browser_login_message: string;
