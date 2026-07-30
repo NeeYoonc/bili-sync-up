@@ -21,7 +21,7 @@
 		X
 	} from '@lucide/svelte';
 	import api from '$lib/api';
-	import type { QueueStatusResponse } from '$lib/types';
+	import type { QueueStatusResponse, YouTubeQueueStatusResponse, YouTubeVideo } from '$lib/types';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import { runRequest } from '$lib/utils/request.js';
 	import { formatTimestampOrFallback } from '$lib/utils/timezone';
@@ -29,8 +29,11 @@
 	import { createManagedEventSource } from '$lib/utils/live-event-source';
 	import SectionHeader from '$lib/components/section-header.svelte';
 	import { toast } from 'svelte-sonner';
+	import YoutubeIcon from '@lucide/svelte/icons/youtube';
 
 	let queueStatus: QueueStatusResponse | null = null;
+	let youtubeQueue: YouTubeQueueStatusResponse | null = null;
+	let retryingYoutubeVideo: number | null = null;
 	let loading = true;
 	let error: string | null = null;
 	const queueStream = createManagedEventSource();
@@ -56,6 +59,7 @@
 		if (!response) return;
 
 		queueStatus = response.data;
+		try { youtubeQueue = (await api.getYouTubeQueueStatus()).data; } catch (youtubeError) { console.warn('加载 YouTube 下载队列失败:', youtubeError); }
 		error = null;
 	}
 
@@ -163,6 +167,9 @@
 		return '空闲';
 	}
 
+	function youtubeStatusLabel(video: YouTubeVideo) { return video.download_status === 'pending' ? (video.retry_count > 0 ? `等待重试 ${video.retry_count}/4` : '等待下载') : video.download_status === 'downloading' ? '下载中' : video.download_status === 'completed' ? (video.error_message ? '媒体完成/附属项异常' : '已完成') : `失败 ${video.retry_count}/4`; }
+	async function retryYoutubeVideo(video: YouTubeVideo) { retryingYoutubeVideo = video.id; try { await api.retryYouTubeVideo(video.id); toast.success('YouTube 任务已重新加入下载队列'); await fetchQueueStatus(); } catch (retryError) { toast.error('重试失败', { description: retryError instanceof Error ? retryError.message : String(retryError) }); } finally { retryingYoutubeVideo = null; } }
+
 	onMount(() => {
 		fetchQueueStatus().finally(() => {
 			loading = false;
@@ -228,6 +235,14 @@
 						{queueStatus.is_scanning ? '正在扫描视频源' : '等待下次扫描'}
 					</p>
 				</CardContent>
+			</Card>
+
+			<Card>
+				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
+					<CardTitle class="text-sm font-medium">YouTube 下载队列</CardTitle>
+					<YoutubeIcon class="h-4 w-4 text-red-600" />
+				</CardHeader>
+				<CardContent><div class="text-2xl font-bold">{(youtubeQueue?.pending ?? 0) + (youtubeQueue?.downloading ?? 0) + (youtubeQueue?.failed ?? 0)}</div><p class="text-muted-foreground text-xs">等待 {youtubeQueue?.pending ?? 0} · 下载中 {youtubeQueue?.downloading ?? 0} · 失败 {youtubeQueue?.failed ?? 0}</p></CardContent>
 			</Card>
 
 			<Card>
@@ -347,6 +362,11 @@
 				</CardContent>
 			</Card>
 		</div>
+
+		<Card class="mb-6">
+			<CardHeader><CardTitle class="flex items-center gap-2"><YoutubeIcon class="h-5 w-5 text-red-600" />YouTube 下载任务</CardTitle><CardDescription>与现有下载器共用调度；失败任务可直接重试。</CardDescription></CardHeader>
+			<CardContent>{#if !youtubeQueue || youtubeQueue.tasks.length === 0}<p class="text-muted-foreground text-sm">暂无等待、下载中或失败的 YouTube 任务。</p>{:else}<div class="space-y-2">{#each youtubeQueue.tasks as task (task.id)}<div class="flex flex-col gap-2 rounded-lg border p-3 sm:flex-row sm:items-center"><div class="min-w-0 flex-1"><p class="truncate text-sm font-medium">{task.title}</p><p class="text-muted-foreground truncate text-xs">{task.uploader || task.youtube_id}{#if task.error_message} · {task.error_message}{/if}</p></div><Badge variant={task.download_status === 'failed' ? 'destructive' : task.download_status === 'downloading' ? 'secondary' : 'outline'}>{youtubeStatusLabel(task)}</Badge>{#if task.download_status === 'failed'}<Button size="sm" variant="outline" disabled={retryingYoutubeVideo === task.id} onclick={() => retryYoutubeVideo(task)}><RefreshCw class="mr-1 h-3.5 w-3.5" />重试</Button>{/if}</div>{/each}</div>{/if}</CardContent>
+		</Card>
 
 		<!-- 队列详情 -->
 		<div class="grid gap-6 lg:grid-cols-3">

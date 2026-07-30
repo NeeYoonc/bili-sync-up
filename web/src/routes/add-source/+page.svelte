@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import api from '$lib/api';
 	import BatchCheckbox from '$lib/components/batch-checkbox.svelte';
 	import BiliImage from '$lib/components/bili-image.svelte';
@@ -35,7 +36,9 @@
 		FilterOption,
 		VideoQuality,
 		AudioQuality,
-		VideoCodec
+		VideoCodec,
+		YouTubeSourceType,
+		YouTubeStatusResponse
 	} from '$lib/types';
 	import {
 		Search,
@@ -96,6 +99,10 @@
 	};
 
 	let sourceType: VideoCategory = 'collection';
+	let sourcePlatform: 'bilibili' | 'youtube' = 'bilibili';
+	let youtubeSourceType: YouTubeSourceType = 'subscriptions';
+	let youtubeUrl = '';
+	let youtubeStatus: YouTubeStatusResponse | null = null;
 	let lastSourceType: VideoCategory = sourceType; // 记录上一次的源类型，用于检测切换
 	let sourceId = '';
 	let upId = '';
@@ -298,6 +305,21 @@
 		{ value: 'watch_later', label: '稍后观看', description: '同步稍后观看列表' },
 		{ value: 'bangumi', label: '番剧', description: '番剧season_id可在番剧页面URL中获取' }
 	];
+	const youtubeSourceTypeOptions = [
+		{
+			value: 'subscriptions',
+			label: '订阅动态',
+			description: '同步当前 YouTube 登录账号订阅频道发布的视频'
+		},
+		{ value: 'channel', label: '频道投稿', description: '同步指定 YouTube 频道的视频' },
+		{
+			value: 'playlist',
+			label: '播放列表 / 收藏',
+			description: '同步指定 YouTube 播放列表中的视频'
+		},
+		{ value: 'liked', label: '喜欢的视频', description: '同步当前登录账号喜欢的视频' },
+		{ value: 'watch_later', label: '稍后再看', description: '同步当前登录账号的稍后再看列表' }
+	];
 	const sourceTypeLabelMap: Record<string, string> = {
 		collection: '合集',
 		favorite: '收藏夹',
@@ -316,6 +338,37 @@
 		return sourceTypeLabelMap[type] ?? type;
 	}
 
+	function handleYouTubeSourceTypeChange(nextValue: unknown) {
+		youtubeSourceType = String(nextValue ?? 'subscriptions') as YouTubeSourceType;
+		youtubeUrl = '';
+		showSubmissionSelection = false;
+		resetSubmissionState();
+		clearSearchPanel({ clearKeyword: true });
+		name =
+			youtubeSourceType === 'subscriptions'
+				? '我的订阅'
+				: youtubeSourceType === 'liked'
+					? '喜欢的视频'
+					: youtubeSourceType === 'watch_later'
+						? '稍后再看'
+						: '';
+		applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
+	}
+
+	function getYouTubeQuickSubscriptionType(type: YouTubeSourceType): VideoCategory {
+		switch (type) {
+			case 'playlist':
+				return 'collection';
+			case 'liked':
+			case 'watch_later':
+				return 'favorite';
+			case 'subscriptions':
+			case 'channel':
+			default:
+				return 'submission';
+		}
+	}
+
 	function getQuickSubscriptionTemplate(type: VideoCategory): string {
 		switch (type) {
 			case 'favorite':
@@ -331,14 +384,18 @@
 		}
 	}
 
+	$: currentQuickSubscriptionType =
+		sourcePlatform === 'youtube'
+			? getYouTubeQuickSubscriptionType(youtubeSourceType)
+			: sourceType;
 	$: currentQuickSubscriptionTemplate =
-		sourceType === 'favorite'
+		currentQuickSubscriptionType === 'favorite'
 			? favoriteQuickSubscribePathTemplate.trim()
-			: sourceType === 'collection'
+			: currentQuickSubscriptionType === 'collection'
 				? collectionQuickSubscribePathTemplate.trim()
-				: sourceType === 'submission'
+				: currentQuickSubscriptionType === 'submission'
 					? submissionQuickSubscribePathTemplate.trim()
-					: sourceType === 'bangumi'
+					: currentQuickSubscriptionType === 'bangumi'
 						? bangumiQuickSubscribePathTemplate.trim()
 						: '';
 
@@ -371,7 +428,7 @@
 	}
 
 	function handleNameInput() {
-		applyQuickSubscriptionPath(sourceType, name, false);
+		applyQuickSubscriptionPath(currentQuickSubscriptionType, name, false);
 	}
 
 	async function loadQuickSubscriptionTemplates() {
@@ -389,6 +446,9 @@
 		globalFilterOptionDefault = filterOptionFromConfig(config);
 		if (filterOptionInheritGlobal) {
 			filterOptionDraft = cloneFilterOption(globalFilterOptionDefault);
+		}
+		if (sourcePlatform === 'youtube') {
+			applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
 		}
 	}
 
@@ -475,12 +535,29 @@
 	// 滚动容器引用
 	let submissionScrollContainer: HTMLElement;
 
+	async function loadYouTubeDefaults() {
+		const response = await runRequest(() => api.getYouTubeStatus(), {
+			showErrorToast: false,
+			context: '加载 YouTube 下载器状态失败'
+		});
+		if (!response) return;
+		youtubeStatus = response.data;
+		if (!path.trim()) path = response.data.default_output_path;
+	}
+
 	onMount(async () => {
+		sourcePlatform = $page.url.searchParams.get('platform') === 'youtube' ? 'youtube' : 'bilibili';
+		if (sourcePlatform === 'youtube') {
+			handleYouTubeSourceTypeChange('subscriptions');
+		}
 		setBreadcrumb([
 			{ label: '主页', href: '/' },
-			{ label: '添加视频源', isActive: true }
+			{ label: sourcePlatform === 'youtube' ? '添加 YouTube 视频源' : '添加视频源', isActive: true }
 		]);
 		await Promise.all([loadExistingVideoSources(), loadQuickSubscriptionTemplates()]);
+		if (sourcePlatform === 'youtube') {
+			await loadYouTubeDefaults();
+		}
 	});
 
 	onDestroy(() => {
@@ -489,6 +566,7 @@
 		if (upIdTimeout) clearTimeout(upIdTimeout);
 		if (seasonIdTimeout) clearTimeout(seasonIdTimeout);
 		if (favoriteValidationTimeout) clearTimeout(favoriteValidationTimeout);
+		if (youtubePreviewTimeout) clearTimeout(youtubePreviewTimeout);
 	});
 
 	$: isMergingBangumi = sourceType === 'bangumi' && mergeToSourceId !== null;
@@ -516,6 +594,35 @@
 	async function handleSearch(overrideSearchType?: string) {
 		if (!searchKeyword.trim()) {
 			toast.error('请输入搜索关键词');
+			return;
+		}
+
+		if (sourcePlatform === 'youtube') {
+			if (youtubeSourceType !== 'channel' && youtubeSourceType !== 'playlist') {
+				toast.error('当前 YouTube 来源类型不需要搜索');
+				return;
+			}
+			const youtubeSearchSourceType: 'channel' | 'playlist' = youtubeSourceType;
+			const response = await runRequest(
+				() =>
+					api.searchYouTube({
+						keyword: searchKeyword.trim(),
+						source_type: youtubeSearchSourceType
+					}),
+				{
+					setLoading: (value) => (searchLoading = value),
+					context: '搜索 YouTube 来源失败'
+				}
+			);
+			if (!response) return;
+			searchResults = response.data.results;
+			searchTotalResults = response.data.total;
+			showSearchResults = true;
+			if (response.data.results.length > 0) {
+				toast.success(`搜索完成，共找到 ${response.data.results.length} 个结果`);
+			} else {
+				toast.info('未找到匹配的 YouTube 来源');
+			}
 			return;
 		}
 
@@ -638,6 +745,20 @@
 	// 选择搜索结果
 	function selectSearchResult(result: SearchResultItem) {
 		clearFollowingsPanel();
+
+		if (sourcePlatform === 'youtube') {
+			if (!result.youtube_url) {
+				toast.error('搜索结果缺少 YouTube 来源链接');
+				return;
+			}
+			youtubeUrl = result.youtube_url;
+			name = cleanTitle(result.title);
+			applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
+			clearSearchPanel({ clearKeyword: true });
+			openYouTubeHistorySelection();
+			toast.success('已选择 YouTube 来源', { description: '正在加载历史视频…' });
+			return;
+		}
 
 		switch (sourceType) {
 			case 'collection':
@@ -894,6 +1015,74 @@
 			return;
 		}
 
+		if (sourcePlatform === 'youtube') {
+			if (
+				(youtubeSourceType === 'channel' || youtubeSourceType === 'playlist') &&
+				!youtubeUrl.trim()
+			) {
+				toast.error('请输入 YouTube 链接', {
+					description:
+						youtubeSourceType === 'channel'
+							? '频道投稿需要提供频道链接'
+							: '播放列表来源需要提供播放列表链接'
+				});
+				return;
+			}
+			if (!name.trim()) {
+				toast.error('请输入名称', { description: '视频源名称不能为空' });
+				return;
+			}
+			if (!path.trim()) {
+				toast.error('请输入保存路径', { description: '保存路径不能为空' });
+				return;
+			}
+			if (!filterOptionInheritGlobal && filterOptionDraft.codecs.length === 0) {
+				toast.error('码率设置无效', { description: '至少保留一个编解码器' });
+				return;
+			}
+			if (youtubeStatus && !youtubeStatus.ytdlp_available) {
+				toast.error('未检测到 yt-dlp', { description: '请先在设置页检查 YouTube 登录状态' });
+				return;
+			}
+
+			const result = await runRequest(
+				() =>
+					api.createYouTubeSource({
+						source_type: youtubeSourceType,
+						name: name.trim(),
+						url: youtubeUrl.trim() || undefined,
+						path: path.trim(),
+						audio_only: audioOnly,
+						audio_only_m4a_only: audioOnlyM4aOnly,
+						flat_folder: flatFolder,
+						download_danmaku: downloadDanmaku,
+						download_subtitle: downloadSubtitle,
+						ai_subtitle_language:
+							aiSubtitleLanguage.trim() || DEFAULT_AI_SUBTITLE_LANGUAGE,
+						filter_option: filterOptionInheritGlobal
+							? undefined
+							: cloneFilterOption(filterOptionDraft),
+						blacklist_keywords: blacklistKeywords,
+						whitelist_keywords: whitelistKeywords,
+						case_sensitive: keywordCaseSensitive,
+						min_duration_seconds: parsedMinDuration,
+						max_duration_seconds: parsedMaxDuration,
+						published_after: publishedAfter || undefined,
+						published_before: publishedBefore || undefined,
+						selected_videos: selectedVideos
+					}),
+				{
+					setLoading: (value) => (loading = value),
+					context: '添加 YouTube 视频源失败'
+				}
+			);
+			if (!result) return;
+
+			toast.success('添加成功', { description: `YouTube 视频源“${result.data.name}”已创建` });
+			goto('/video-sources?platform=youtube');
+			return;
+		}
+
 		// 验证表单
 		if (sourceType !== 'watch_later' && !sourceId) {
 			toast.error('请输入ID', { description: '视频源ID不能为空' });
@@ -1128,7 +1317,9 @@
 
 	// 根据类型显示不同的描述
 	$: currentTypeDescription =
-		sourceTypeOptions.find((opt) => opt.value === sourceType)?.description || '';
+		sourcePlatform === 'youtube'
+			? youtubeSourceTypeOptions.find((opt) => opt.value === youtubeSourceType)?.description || ''
+			: sourceTypeOptions.find((opt) => opt.value === sourceType)?.description || '';
 
 	// 获取收藏夹列表
 	async function fetchUserFavorites() {
@@ -1910,7 +2101,7 @@
 	// 重置投稿选择状态
 	function resetSubmissionState() {
 		submissionVideos = [];
-		selectedSubmissionVideos = new Set();
+		selectedSubmissionVideos = new Set(selectedVideos);
 		submissionLoading = false;
 		submissionError = null;
 		submissionTotalCount = 0;
@@ -1920,7 +2111,27 @@
 
 	// 搜索相关状态
 	let searchTimeout: NodeJS.Timeout;
+	let youtubePreviewTimeout: NodeJS.Timeout;
 	let isSearching = false;
+
+	function isYouTubeHistorySource(): boolean {
+		return (
+			sourcePlatform === 'youtube' &&
+			(youtubeSourceType === 'channel' || youtubeSourceType === 'playlist')
+		);
+	}
+
+	function openYouTubeHistorySelection() {
+		if (!isYouTubeHistorySource() || !youtubeUrl.trim()) return;
+		showSubmissionSelection = true;
+	}
+
+	function scheduleYouTubeHistorySelection() {
+		showSubmissionSelection = false;
+		if (youtubePreviewTimeout) clearTimeout(youtubePreviewTimeout);
+		if (!youtubeUrl.trim()) return;
+		youtubePreviewTimeout = setTimeout(openYouTubeHistorySelection, 500);
+	}
 
 	// 搜索过滤投稿 - 使用后端API搜索
 	// eslint-disable-next-line svelte/infinite-reactive-loop
@@ -1944,19 +2155,27 @@
 	// 执行搜索
 	/* eslint-disable svelte/infinite-reactive-loop */
 	async function performSearch() {
-		if (!sourceId || !submissionSearchQuery.trim()) {
+		if ((!sourceId && !isYouTubeHistorySource()) || !submissionSearchQuery.trim()) {
 			filteredSubmissionVideos = submissionVideos;
 			return;
 		}
 
 		const response = await runRequest(
 			() =>
-				api.getSubmissionVideos({
-					up_id: sourceId,
-					page: 1,
-					page_size: 30, // 获取更多结果
-					keyword: submissionSearchQuery.trim()
-				}),
+				isYouTubeHistorySource()
+					? api.getYouTubeSourceVideos({
+							url: youtubeUrl.trim(),
+							source_type: youtubeSourceType as 'channel' | 'playlist',
+							page: 1,
+							page_size: 100,
+							keyword: submissionSearchQuery.trim()
+						})
+					: api.getSubmissionVideos({
+							up_id: sourceId,
+							page: 1,
+							page_size: 30, // 获取更多结果
+							keyword: submissionSearchQuery.trim()
+						}),
 			{
 				setLoading: (value) => (isSearching = value),
 				context: '搜索失败',
@@ -1984,7 +2203,8 @@
 
 	// 加载UP主投稿列表（分页加载，初始100个）
 	async function loadSubmissionVideos() {
-		if (!sourceId) return;
+		if ((!sourceId && !isYouTubeHistorySource()) || (isYouTubeHistorySource() && !youtubeUrl.trim()))
+			return;
 
 		submissionError = null;
 		submissionVideos = [];
@@ -2016,11 +2236,12 @@
 	// 批量加载视频（串行请求，带延迟）
 	async function loadVideosInBatch(loadCount: number) {
 		const startPage = currentLoadedPage + 1;
+		const pageSize = isYouTubeHistorySource() ? 100 : SUBMISSION_PAGE_SIZE;
 		const targetVideos = Math.min(
 			submissionVideos.length + loadCount,
 			submissionTotalCount || Infinity
 		);
-		const neededPages = Math.ceil(targetVideos / SUBMISSION_PAGE_SIZE);
+		const neededPages = Math.ceil(targetVideos / pageSize);
 
 		for (let page = startPage; page <= neededPages; page++) {
 			// 更新进度
@@ -2031,20 +2252,25 @@
 				await new Promise((resolve) => setTimeout(resolve, PAGE_DELAY));
 			}
 
-			const response = await api.getSubmissionVideos({
-				up_id: sourceId,
-				page: page,
-				page_size: SUBMISSION_PAGE_SIZE
-			});
+			const response = isYouTubeHistorySource()
+				? await api.getYouTubeSourceVideos({
+						url: youtubeUrl.trim(),
+						source_type: youtubeSourceType as 'channel' | 'playlist',
+						page,
+						page_size: pageSize
+					})
+				: await api.getSubmissionVideos({
+						up_id: sourceId,
+						page,
+						page_size: pageSize
+					});
 
 			if (!response.data) {
 				throw new Error('获取投稿列表失败');
 			}
 
 			// 第一次请求时获取总数
-			if (page === 1 && submissionTotalCount === 0) {
-				submissionTotalCount = response.data.total;
-			}
+			submissionTotalCount = Math.max(submissionTotalCount, response.data.total);
 
 			// 添加新视频（去重）
 			const newVideos = response.data.videos || [];
@@ -2163,7 +2389,11 @@
 	}
 
 	// 当显示投稿选择且有sourceId时加载数据
-	$: if (showSubmissionSelection && sourceId && sourceType === 'submission') {
+	$: if (
+		showSubmissionSelection &&
+		((sourcePlatform === 'bilibili' && sourceId && sourceType === 'submission') ||
+			(isYouTubeHistorySource() && youtubeUrl.trim()))
+	) {
 		resetSubmissionState();
 		loadSubmissionVideos();
 	}
@@ -2611,7 +2841,7 @@
 </script>
 
 <svelte:head>
-	<title>添加视频源 - Bili Sync</title>
+	<title>{sourcePlatform === 'youtube' ? '添加 YouTube 视频源' : '添加视频源'} - Bili Sync</title>
 </svelte:head>
 
 <div class="py-2">
@@ -2620,13 +2850,15 @@
 			<div class="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
 				<SectionHeader
 					as="h1"
-					title="添加新视频源"
-					description="搜索并配置收藏夹、合集、投稿、番剧或稍后再看等视频源。"
+					title={sourcePlatform === 'youtube' ? '添加 YouTube 视频源' : '添加新视频源'}
+					description={sourcePlatform === 'youtube'
+						? '使用与 B 站添加源相同的完整表单配置频道、播放列表、订阅动态、喜欢的视频或稍后再看。'
+						: '搜索并配置收藏夹、合集、投稿、番剧或稍后再看等视频源。'}
 					titleClass="text-2xl font-bold"
 					descriptionClass="text-muted-foreground mt-1 text-sm"
 					class="flex-1"
 				/>
-				{#if sourceType !== 'bangumi' && sourceType !== 'watch_later'}
+				{#if sourcePlatform === 'bilibili' && sourceType !== 'bangumi' && sourceType !== 'watch_later'}
 					<Button
 						variant={batchMode ? 'default' : 'outline'}
 						size="sm"
@@ -2665,14 +2897,97 @@
 							<Label for="source-type">视频源类型</Label>
 							<CustomSelect
 								id="source-type"
-								value={sourceType}
-								options={sourceTypeOptions}
-								onChange={(nextValue) => (sourceType = nextValue as VideoCategory)}
+								value={sourcePlatform === 'youtube' ? youtubeSourceType : sourceType}
+								options={sourcePlatform === 'youtube'
+									? youtubeSourceTypeOptions
+									: sourceTypeOptions}
+								onChange={(nextValue) => {
+									if (sourcePlatform === 'youtube') {
+										handleYouTubeSourceTypeChange(nextValue);
+									} else {
+										sourceType = nextValue as VideoCategory;
+									}
+								}}
 								class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
 							/>
 							<p class="text-muted-foreground text-sm">{currentTypeDescription}</p>
 						</div>
 
+						{#if sourcePlatform === 'youtube'}
+							{#if youtubeSourceType === 'channel' || youtubeSourceType === 'playlist'}
+								<div
+									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
+								>
+									<div class="space-y-2">
+										<Label for="youtube-search">
+											{youtubeSourceType === 'channel'
+												? '搜索 YouTube 频道'
+												: '搜索 YouTube 播放列表'}
+										</Label>
+										<div class="mt-2 flex {isMobile ? 'flex-col gap-2' : 'gap-2'}">
+											<Input
+												id="youtube-search"
+												bind:value={searchKeyword}
+												placeholder={youtubeSourceType === 'channel'
+													? '输入频道名称或 @用户名...'
+													: '输入播放列表名称...'}
+												onkeydown={(event) => {
+													if (event.key === 'Enter') {
+														event.preventDefault();
+														handleSearch();
+													}
+												}}
+											/>
+											<Button
+												type="button"
+												onclick={() => handleSearch()}
+												disabled={searchLoading || !searchKeyword.trim()}
+												size="sm"
+												class={isMobile ? 'w-full' : ''}
+											>
+												{#if searchLoading}
+													搜索中...
+												{:else}
+													<Search class="h-4 w-4" />
+													搜索
+												{/if}
+											</Button>
+										</div>
+										<p class="text-muted-foreground text-xs">
+											搜索并选择结果后，将自动填充名称、链接和当前来源类型的快捷路径模板。
+										</p>
+									</div>
+								</div>
+
+								<div class="space-y-2">
+									<Label for="youtube-url">
+										{youtubeSourceType === 'channel' ? 'YouTube 频道链接' : 'YouTube 播放列表链接'}
+									</Label>
+									<Input
+										id="youtube-url"
+										bind:value={youtubeUrl}
+										oninput={scheduleYouTubeHistorySelection}
+										placeholder={youtubeSourceType === 'channel'
+											? 'https://www.youtube.com/@channel/videos'
+											: 'https://www.youtube.com/playlist?list=...'}
+										required
+									/>
+									<p class="text-muted-foreground text-xs">
+										{youtubeSourceType === 'channel'
+											? '支持频道主页、@用户名、/videos 等 YouTube 频道链接。'
+											: '请填写包含 list= 的 YouTube 播放列表链接。'}
+									</p>
+								</div>
+							{:else}
+								<div
+									class="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
+								>
+									此来源使用“设置 → YouTube 登录”中保存的账号登录状态，不需要另外填写链接。
+								</div>
+							{/if}
+						{/if}
+
+						{#if sourcePlatform === 'bilibili'}
 						<!-- 搜索功能 -->
 						{#if sourceType !== 'favorite' && sourceType !== 'watch_later'}
 							<div
@@ -3053,6 +3368,7 @@
 								{/if}
 							</div>
 						{/if}
+						{/if}
 
 						<!-- 名称 -->
 						<div class="space-y-2">
@@ -3103,7 +3419,8 @@
 										size="sm"
 										variant="outline"
 										disabled={!name.trim() || isMergingBangumi}
-										onclick={() => applyQuickSubscriptionPath(sourceType, name, true)}
+										onclick={() =>
+											applyQuickSubscriptionPath(currentQuickSubscriptionType, name, true)}
 									>
 										套用快捷模板
 									</Button>
@@ -3112,7 +3429,9 @@
 							<Input
 								id="path"
 								bind:value={path}
-								placeholder="例如：D:/Videos/Bilibili"
+								placeholder={sourcePlatform === 'youtube'
+									? youtubeStatus?.default_output_path || '例如：D:/Videos/YouTube'
+									: '例如：D:/Videos/Bilibili'}
 								oninput={() => {
 									if (path !== lastAutoAppliedPath) {
 										lastAutoAppliedPath = '';
@@ -3248,6 +3567,7 @@
 									</label>
 								</div>
 
+								{#if sourcePlatform === 'bilibili'}
 								<!-- 分章下载 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
@@ -3359,8 +3679,9 @@
 										</label>
 									</div>
 								{/if}
+								{/if}
 
-								<!-- 下载弹幕 -->
+								<!-- 下载弹幕 / YouTube 直播聊天 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
 								>
@@ -3380,10 +3701,12 @@
 										</svg>
 										<div>
 											<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
-												>下载弹幕</span
+												>{sourcePlatform === 'youtube' ? '下载直播聊天' : '下载弹幕'}</span
 											>
 											<p class="text-[10px] text-gray-500 dark:text-gray-400">
-												下载弹幕文件（ASS格式）
+												{sourcePlatform === 'youtube'
+													? '直播和首播存在聊天回放时保存 live_chat JSON'
+													: '下载弹幕文件（ASS格式）'}
 											</p>
 										</div>
 									</div>
@@ -3418,7 +3741,9 @@
 												>下载字幕</span
 											>
 											<p class="text-[10px] text-gray-500 dark:text-gray-400">
-												下载CC字幕文件（SRT格式）
+												{sourcePlatform === 'youtube'
+													? '下载 YouTube 原生字幕文件（VTT格式）'
+													: '下载CC字幕文件（SRT格式）'}
 											</p>
 										</div>
 									</div>
@@ -3439,14 +3764,17 @@
 												<LanguagesIcon class="h-4 w-4 text-blue-600 dark:text-blue-400" />
 												<div>
 													<span class="text-xs font-medium text-gray-700 dark:text-gray-300">
-														下载 AI 字幕
+														{sourcePlatform === 'youtube' ? '字幕优先语言' : '下载 AI 字幕'}
 													</span>
 													<p class="text-[10px] text-gray-500 dark:text-gray-400">
-														目标语言缺失时回退中文
+														{sourcePlatform === 'youtube'
+															? '目标语言缺失时按来源语言回退'
+															: '目标语言缺失时回退中文'}
 													</p>
 												</div>
 											</div>
 											<div class="flex flex-wrap items-center gap-2">
+												{#if sourcePlatform === 'bilibili'}
 												<label class="relative inline-flex cursor-pointer items-center">
 													<input
 														type="checkbox"
@@ -3457,11 +3785,14 @@
 														class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
 													></div>
 												</label>
+												{/if}
 												<CustomSelect
 													value={aiSubtitleLanguage}
 													options={AI_SUBTITLE_LANGUAGE_OPTIONS}
-													disabled={!downloadAiSubtitle}
-													title="AI 字幕优先语言"
+													disabled={sourcePlatform === 'bilibili' && !downloadAiSubtitle}
+													title={sourcePlatform === 'youtube'
+														? 'YouTube 字幕优先语言'
+														: 'AI 字幕优先语言'}
 													onChange={(nextValue) =>
 														(aiSubtitleLanguage = String(nextValue ?? DEFAULT_AI_SUBTITLE_LANGUAGE))}
 													size="sm"
@@ -3472,6 +3803,7 @@
 									</div>
 								{/if}
 
+								{#if sourcePlatform === 'bilibili'}
 								<!-- AI重命名 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
@@ -3645,6 +3977,7 @@
 										</div>
 									</div>
 								{/if}
+								{/if}
 							</div>
 						</div>
 
@@ -3660,7 +3993,9 @@
 											源级码率/流过滤
 										</span>
 										<p class="text-[10px] text-blue-600 dark:text-blue-300">
-											可为本次添加的专集、UP、收藏夹、稍后观看或番剧单独设置质量筛选规则
+											{sourcePlatform === 'youtube'
+												? '可为本次添加的 YouTube 来源单独设置质量筛选规则'
+												: '可为本次添加的专集、UP、收藏夹、稍后观看或番剧单独设置质量筛选规则'}
 										</p>
 									</div>
 								</div>
@@ -4080,12 +4415,21 @@
 								disabled={loading || batchMode}
 								class={isMobile ? 'w-full' : ''}
 							>
-								{loading ? '添加中...' : '添加'}
+								{loading
+									? '添加中...'
+									: sourcePlatform === 'youtube'
+										? '添加 YouTube 视频源'
+										: '添加'}
 							</Button>
 							<Button
 								type="button"
 								variant="outline"
-								onclick={() => goto('/')}
+								onclick={() =>
+									goto(
+										sourcePlatform === 'youtube'
+											? '/video-sources?platform=youtube'
+											: '/video-sources'
+									)}
 								class={isMobile ? 'w-full' : ''}
 							>
 								取消
@@ -4132,12 +4476,12 @@
 										? ''
 										: 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}
 								>
-									{#each filteredSearchResults as result, i (result.bvid || result.season_id || result.mid || i)}
+									{#each filteredSearchResults as result, i (result.youtube_url || result.bvid || result.season_id || result.mid || i)}
 										{@const isBangumiExisting =
 											sourceType === 'bangumi' &&
 											!!result.season_id &&
 											isBangumiSeasonExists(result.season_id)}
-										{@const itemKey = `search_${result.bvid || result.season_id || result.mid || i}`}
+										{@const itemKey = `search_${result.youtube_url || result.bvid || result.season_id || result.mid || i}`}
 										<button
 											onclick={() => {
 												if (batchMode && sourceType === 'submission') {
@@ -4175,7 +4519,9 @@
 											<BiliImage
 												src={result.cover}
 												alt={result.title}
-												class="{sourceType === 'bangumi'
+												class="{result.result_type === 'youtube_channel'
+													? 'h-14 w-14 rounded-full'
+													: sourceType === 'bangumi'
 													? 'h-20 w-14'
 													: 'h-14 w-20'} flex-shrink-0 rounded object-cover"
 												placeholder="无图片"
@@ -4193,9 +4539,11 @@
 																? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300'
 																: result.result_type === 'media_ft'
 																	? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
-																	: result.result_type === 'bili_user'
+																	: result.result_type === 'bili_user' ||
+																		  result.result_type === 'youtube_channel'
 																		? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
-																		: result.result_type === 'video'
+																		: result.result_type === 'video' ||
+																			  result.result_type === 'youtube_playlist'
 																			? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
 																			: 'text-foreground bg-gray-100 dark:bg-gray-800'}"
 														>
@@ -4205,6 +4553,10 @@
 																	? '影视'
 																	: result.result_type === 'bili_user'
 																		? 'UP主'
+																		: result.result_type === 'youtube_channel'
+																			? 'YouTube 频道'
+																			: result.result_type === 'youtube_playlist'
+																				? 'YouTube 播放列表'
 																		: result.result_type === 'video'
 																			? '视频'
 																			: result.result_type}
@@ -4227,9 +4579,13 @@
 													{/if}
 												</div>
 												<p class="text-muted-foreground truncate text-xs">
-													{result.author}{#if result.result_type === 'bili_user' && result.follower !== undefined && result.follower !== null}
+													{result.author}{#if (result.result_type === 'bili_user' ||
+														result.result_type === 'youtube_channel') &&
+													result.follower !== undefined &&
+													result.follower !== null}
 														<span class="ml-2"
-															>· 粉丝: {formatSubmissionMetricLabel(result.follower)}</span
+															>· {result.result_type === 'youtube_channel' ? '订阅数' : '粉丝'}:
+															{formatSubmissionMetricLabel(result.follower)}</span
 														>
 													{/if}
 												</p>
@@ -4914,8 +5270,8 @@
 					</div>
 				{/if}
 
-				<!-- UP主投稿选择面板（仅投稿类型时显示） -->
-				{#if sourceType === 'submission' && showSubmissionSelection}
+				<!-- B站投稿与 YouTube 频道/播放列表共用同一套历史视频选择面板 -->
+				{#if ((sourcePlatform === 'bilibili' && sourceType === 'submission') || isYouTubeHistorySource()) && showSubmissionSelection}
 					<div
 						class={isCompactLayout ? 'w-full' : 'flex-1'}
 						transition:fly={{ x: 300, duration: 300 }}
@@ -4930,10 +5286,12 @@
 								<div>
 									<div class="flex items-center gap-2">
 										<span class="text-base font-medium text-blue-800 dark:text-blue-200"
-											>📹 选择历史投稿</span
+											>📹 {isYouTubeHistorySource() ? '选择历史视频' : '选择历史投稿'}</span
 										>
 										<span class="text-xs text-blue-600 dark:text-blue-400"
-											>选择您希望下载的历史投稿。未选择的视频不会下载和显示。新发布的投稿会自动下载。</span
+											>选择您希望下载的历史{isYouTubeHistorySource()
+												? '视频'
+												: '投稿'}。未选择的视频不会下载和显示。新发布的视频会自动下载。</span
 										>
 									</div>
 									<span
@@ -4944,9 +5302,9 @@
 										{#if submissionLoading && submissionVideos.length === 0}
 											正在加载...
 										{:else if submissionTotalCount > 0}
-											共 {submissionTotalCount} 个投稿
+											共 {submissionTotalCount} 个{isYouTubeHistorySource() ? '视频' : '投稿'}
 										{:else}
-											暂无投稿
+											暂无{isYouTubeHistorySource() ? '视频' : '投稿'}
 										{/if}
 									</span>
 								</div>
@@ -4991,11 +5349,13 @@
 								<!-- 搜索和操作栏 -->
 								<SubmissionSelectionToolbar
 									bind:query={submissionSearchQuery}
-									placeholder="搜索视频标题（支持关键词搜索UP主所有视频）..."
+									placeholder={isYouTubeHistorySource()
+										? '搜索当前 YouTube 来源的视频标题...'
+										: '搜索视频标题（支持关键词搜索UP主所有视频）...'}
 									{isSearching}
 									statusText={isSearching
 										? '搜索中...'
-										: `搜索模式：在UP主所有视频中搜索 \"${submissionSearchQuery}\"`}
+										: `搜索模式：在${isYouTubeHistorySource() ? '当前 YouTube 来源' : 'UP主所有视频'}中搜索 \"${submissionSearchQuery}\"`}
 									selectedCount={selectedSubmissionCount}
 									totalCount={filteredSubmissionVideos.length}
 									onSelectAll={selectAllSubmissions}
@@ -5023,10 +5383,16 @@
 										<EmptyState
 											icon={Search}
 											iconClass="h-12 w-12"
-											title={submissionSearchQuery.trim() ? '没有找到视频' : '暂无投稿'}
+											title={submissionSearchQuery.trim()
+												? '没有找到视频'
+												: isYouTubeHistorySource()
+													? '暂无视频'
+													: '暂无投稿'}
 											description={submissionSearchQuery.trim()
 												? `没有找到包含 "${submissionSearchQuery}" 的视频`
-												: '该UP主暂无投稿'}
+												: isYouTubeHistorySource()
+													? '该 YouTube 来源暂无视频'
+													: '该UP主暂无投稿'}
 											class="border-0 bg-transparent p-0 py-8"
 										>
 											{#snippet actions()}
@@ -5093,7 +5459,9 @@
 															<div class="text-muted-foreground mt-auto text-xs">
 																<div class="flex flex-wrap items-center gap-2">
 																	<span>🎬 {formatSubmissionMetricLabel(video.view)}</span>
-																	<span>💬 {formatSubmissionMetricLabel(video.danmaku)}</span>
+																	{#if !isYouTubeHistorySource()}
+																		<span>💬 {formatSubmissionMetricLabel(video.danmaku)}</span>
+																	{/if}
 																	<span>📅 {formatSubmissionDateLabel(video.pubtime)}</span>
 																	<span class="font-mono text-xs">{video.bvid}</span>
 																</div>
@@ -5128,7 +5496,7 @@
 												</div>
 											{:else if submissionTotalCount > 0}
 												<div class="text-muted-foreground py-4 text-center text-sm">
-													已加载全部 {submissionTotalCount} 个视频
+													已加载全部 {submissionVideos.length} 个视频
 												</div>
 											{/if}
 										{/if}

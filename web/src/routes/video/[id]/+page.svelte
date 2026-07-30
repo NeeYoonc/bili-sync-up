@@ -13,6 +13,7 @@
 		setCurrentPage,
 		setVideoListInfo,
 		setTotalCount,
+		setPlatform,
 		ToQuery
 	} from '$lib/stores/filter';
 	import { buildVideosRequest } from '$lib/utils/videos.js';
@@ -48,6 +49,12 @@
 	let videoDetailLoadToken = 0;
 	let lastPlaybackNoticeKey: string | null = null;
 	let chargeLockedDisplayMode: 'local' | null = null;
+	$: routeResourceId = $page.params.id ?? '';
+	$: isYouTube = routeResourceId.startsWith('youtube-');
+
+	function videoDetailHref(videoId: number) {
+		return isYouTube ? `/video/youtube-${videoId}` : `/video/${videoId}`;
+	}
 
 	function showChargeLockedToast(mode: 'local') {
 		const noticeKey = `${currentVideoId}-${safePlayingPageIndex}-${mode}-charge-locked`;
@@ -61,9 +68,12 @@
 		return videoData.pages[safePlayingPageIndex] ?? null;
 	}
 
-	function getEmbeddedBilibiliPlayerUrl() {
+	function getEmbeddedPlayerUrl() {
 		const bvid = videoData?.video.bvid;
 		if (!bvid) return null;
+		if (isYouTube) {
+			return `https://www.youtube.com/embed/${encodeURIComponent(bvid)}?autoplay=1`;
+		}
 		const currentPage = getCurrentPageInfo();
 		const pageNumber = currentPage?.pid && currentPage.pid > 0 ? currentPage.pid : 1;
 		const params = new URLSearchParams({
@@ -77,9 +87,11 @@
 	function getEmbeddedPlayerTitle() {
 		const currentPage = getCurrentPageInfo();
 		if (!currentPage) {
-			return videoData?.video.name ? `B站内嵌播放器 - ${videoData.video.name}` : 'B站内嵌播放器';
+			return videoData?.video.name
+				? `${isYouTube ? 'YouTube' : 'B站'}内嵌播放器 - ${videoData.video.name}`
+				: `${isYouTube ? 'YouTube' : 'B站'}内嵌播放器`;
 		}
-		return `B站内嵌播放器 - P${currentPage.pid} ${currentPage.name}`;
+		return `${isYouTube ? 'YouTube' : 'B站'}内嵌播放器 - P${currentPage.pid} ${currentPage.name}`;
 	}
 
 	function resetPlaybackState(options?: { keepPlayerVisible?: boolean; keepPlayMode?: boolean }) {
@@ -286,7 +298,7 @@
 			if (currentIndexInPage > 0) {
 				// 当前页内有上一个视频
 				const prevVideoId = videoIds[currentIndexInPage - 1];
-				goto(`/video/${prevVideoId}`);
+				goto(videoDetailHref(prevVideoId));
 			} else if (currentPage > 0) {
 				// 需要加载上一页
 				const prevPage = currentPage - 1;
@@ -295,7 +307,7 @@
 				const state = get(appStateStore);
 				if (state.videoIds.length > 0) {
 					const lastVideoId = state.videoIds[state.videoIds.length - 1];
-					goto(`/video/${lastVideoId}`);
+					goto(videoDetailHref(lastVideoId));
 				}
 			}
 		} finally {
@@ -311,7 +323,7 @@
 			if (currentIndexInPage < videoIds.length - 1) {
 				// 当前页内有下一个视频
 				const nextVideoId = videoIds[currentIndexInPage + 1];
-				goto(`/video/${nextVideoId}`);
+				goto(videoDetailHref(nextVideoId));
 			} else if (currentPage < totalPages - 1) {
 				// 需要加载下一页
 				const nextPage = currentPage + 1;
@@ -320,7 +332,7 @@
 				const state = get(appStateStore);
 				if (state.videoIds.length > 0) {
 					const firstVideoId = state.videoIds[0];
-					goto(`/video/${firstVideoId}`);
+					goto(videoDetailHref(firstVideoId));
 				}
 			}
 		} finally {
@@ -331,6 +343,7 @@
 	async function loadPageVideos(pageNum: number) {
 		const state = get(appStateStore);
 		const params = buildVideosRequest({
+			platform: isYouTube ? 'youtube' : 'bilibili',
 			page: pageNum,
 			pageSize: state.pageSize,
 			query: state.query,
@@ -352,6 +365,7 @@
 	// 根据视频类型动态生成任务名称
 	$: videoTaskNames = (() => {
 		if (!videoData?.video) return ['视频封面', '视频信息', 'UP主头像', 'UP主信息', '分P下载'];
+		if (isYouTube) return ['视频封面', '视频 NFO', 'UP主头像', 'UP主 person.nfo', '视频下载'];
 
 		const isBangumi = videoData.video.bangumi_title !== undefined;
 		if (isBangumi) {
@@ -398,7 +412,11 @@
 	}
 
 	async function loadVideoDetail() {
-		const videoId = Number.parseInt($page.params.id ?? '', 10);
+		const resourceId = $page.params.id ?? '';
+		const videoId = Number.parseInt(
+			resourceId.startsWith('youtube-') ? resourceId.slice('youtube-'.length) : resourceId,
+			10
+		);
 		if (isNaN(videoId)) {
 			error = '无效的视频ID';
 			toast.error('无效的视频ID');
@@ -411,7 +429,13 @@
 		resetPlaybackState({ keepPlayerVisible: showVideoPlayer, keepPlayMode: showVideoPlayer });
 
 		try {
-			const result = await api.getVideo(videoId);
+			const previousState = get(appStateStore);
+			const targetPlatform = isYouTube ? 'youtube' : 'bilibili';
+			if (previousState.platform !== targetPlatform) {
+				setVideoIds([]);
+			}
+			setPlatform(targetPlatform);
+			const result = await api.getVideo(resourceId);
 			if (loadToken !== videoDetailLoadToken) return;
 			videoData = result.data;
 
@@ -445,6 +469,7 @@
 
 		while (currentPage < maxPages) {
 			const params = buildVideosRequest({
+				platform: isYouTube ? 'youtube' : 'bilibili',
 				page: currentPage,
 				pageSize,
 				query: state.query,
@@ -503,14 +528,15 @@
 
 		statusEditorLoading = true;
 		try {
-			const result = await api.updateVideoStatus(videoData.video.id, request);
+			const result = await api.updateVideoStatus(routeResourceId, request);
 			const data = result.data;
 
 			if (data.success) {
 				// 更新本地数据
 				videoData = {
 					video: data.video,
-					pages: data.pages
+					pages: data.pages,
+					source: videoData.source
 				};
 				statusEditorOpen = false;
 				toast.success('状态更新成功');
@@ -527,9 +553,15 @@
 		}
 	}
 
-	// 打开B站页面
-	async function openBilibiliPage() {
+	// 打开平台原始页面
+	async function openExternalPage() {
 		try {
+			if (isYouTube) {
+				const youtubeId = videoData?.video.bvid;
+				if (!youtubeId) throw new Error('无法获取 YouTube 视频标识');
+				window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(youtubeId)}`, '_blank');
+				return;
+			}
 			const videoId = getPlayVideoId();
 			const result = await api.getVideoBvid(videoId);
 			const bilibiliUrl = result.data.bilibili_url;
@@ -547,9 +579,9 @@
 				throw new Error('无法获取视频的B站标识信息');
 			}
 		} catch (error) {
-			console.error('获取B站链接失败:', error);
-			toast.error('无法获取B站链接', {
-				description: '该视频可能没有有效的B站链接信息'
+			console.error('获取平台链接失败:', error);
+			toast.error(`无法获取${isYouTube ? ' YouTube' : 'B站'}链接`, {
+				description: `该视频可能没有有效的${isYouTube ? ' YouTube' : 'B站'}链接信息`
 			});
 		}
 	}
@@ -563,7 +595,7 @@
 	// 获取视频播放源
 	function getVideoSource() {
 		const videoId = getPlayVideoId();
-		return videoId ? `/api/videos/stream/${videoId}` : undefined;
+		return videoId ? `/api/videos/stream/${isYouTube ? `youtube-${videoId}` : videoId}` : undefined;
 	}
 
 	// 删除视频
@@ -573,7 +605,7 @@
 		deleting = true;
 		try {
 			const currentVideoId = videoData.video.id;
-			const result = await api.deleteVideo(currentVideoId);
+			const result = await api.deleteVideo(routeResourceId);
 			const data = result.data;
 			const queuedDelete = data.message?.includes('加入队列');
 
@@ -642,7 +674,7 @@
 					}
 
 					// 跳转到目标视频
-					goto(`/video/${targetVideoId}`);
+					goto(videoDetailHref(targetVideoId));
 				} else {
 					// 列表为空或没有更多视频，返回视频管理页面
 					const query = ToQuery(state);
@@ -721,15 +753,15 @@
 					size="sm"
 					variant="outline"
 					class="{isMobile ? 'w-full' : 'shrink-0'} cursor-pointer"
-					onclick={openBilibiliPage}
-					title="在B站打开此视频"
+					onclick={openExternalPage}
+					title="在{isYouTube ? 'YouTube' : 'B站'}打开此视频"
 				>
 					<svg class="mr-2 h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
 						<path
 							d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36c-.5-.23-1.05-.36-1.64-.36-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l2.36 2.36c-.23.5-.36 1.05-.36 1.64 0 2.21 1.79 4 4 4s4-1.79 4-4-1.79-4-4-4c-.59 0-1.14.13-1.64.36L14 12l2.36-2.36c.5.23 1.05.36 1.64.36 2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4c0 .59.13 1.14.36 1.64L12 10 9.64 7.64z"
 						/>
 					</svg>
-					访问B站
+					访问{isYouTube ? ' YouTube' : 'B站'}
 				</Button>
 				<Button
 					size="sm"
@@ -772,12 +804,17 @@
 					bangumi_title: videoData.video.bangumi_title
 				}}
 				mode="detail"
+				resourceId={routeResourceId}
 				showActions={true}
 				customSubtitle=""
 				customMetaBadges={getVideoMetaBadges(videoData.video.upper_name, videoData.source)}
 				progressHeight="h-3"
 				gap="gap-2"
 				taskNames={videoTaskNames}
+				onReset={async (force) => {
+					await api.resetVideo(routeResourceId, force);
+					await loadVideoDetail();
+				}}
 			/>
 		</div>
 
@@ -823,6 +860,7 @@
 					<div class="text-muted-foreground text-sm">
 						共 {videoData.pages.length} 个分页
 					</div>
+					{#if !isYouTube}
 					<Button
 						size="sm"
 						variant="outline"
@@ -834,6 +872,11 @@
 						<RefreshCwIcon class="mr-2 h-4 w-4 {refreshingVideoDanmaku ? 'animate-spin' : ''}" />
 						{refreshingVideoDanmaku ? '刷新中...' : '刷新全部弹幕'}
 					</Button>
+					{:else}
+						<div class="text-muted-foreground text-sm">
+							字幕和直播聊天随下载任务同步；源站未提供时按跳过完成
+						</div>
+					{/if}
 				</div>
 			</div>
 
@@ -866,10 +909,13 @@
 									showActions={false}
 									customTitle="P{pageInfo.pid}: {pageInfo.name}"
 									customSubtitle=""
-									taskNames={['视频封面', '视频内容', '视频信息', '视频弹幕', '视频字幕']}
+									taskNames={isYouTube
+										? ['视频封面', '视频内容', '视频 NFO', '直播聊天', '视频字幕']
+										: ['视频封面', '视频内容', '视频信息', '视频弹幕', '视频字幕']}
 									showProgress={true}
 								/>
 
+								{#if !isYouTube}
 								<div
 									class="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-3 py-2"
 								>
@@ -928,6 +974,14 @@
 										{isRefreshingPage(pageInfo.id) ? '刷新中...' : '刷新弹幕'}
 									</Button>
 								</div>
+								{:else}
+									<div class="bg-muted/40 rounded-lg border px-3 py-2 text-sm">
+										<div class="font-medium">YouTube 字幕 / 直播聊天</div>
+										<div class="text-muted-foreground text-xs">
+											源站提供字幕或直播聊天时使用项目统一下载器保存；普通视频无直播聊天、无字幕时显示为已跳过。
+										</div>
+									</div>
+								{/if}
 
 								<!-- 播放按钮区域 -->
 								<div class="flex justify-center gap-2">
@@ -952,7 +1006,7 @@
 										size="sm"
 										variant="outline"
 										class="flex-1"
-										title="B站内嵌播放（清晰度由B站控制）"
+										title="{isYouTube ? 'YouTube' : 'B站'}内嵌播放（清晰度由平台控制）"
 										onclick={() => {
 											currentPlayingPageIndex = index;
 											onlinePlayMode = true;
@@ -961,7 +1015,7 @@
 										}}
 									>
 										<PlayIcon class="mr-2 h-4 w-4" />
-										B站内嵌
+										{isYouTube ? 'YouTube' : 'B站'}内嵌
 									</Button>
 								</div>
 							</div>
@@ -981,12 +1035,12 @@
 											? 'bg-blue-100 text-blue-700'
 											: 'bg-gray-100 text-gray-700'}"
 									>
-										{onlinePlayMode ? 'B站内嵌播放' : '本地播放'}
+										{onlinePlayMode ? `${isYouTube ? 'YouTube' : 'B站'}内嵌播放` : '本地播放'}
 									</span>
 								</div>
 								<div class="flex items-center gap-2">
 									<Button size="sm" variant="ghost" onclick={togglePlayMode}>
-										{onlinePlayMode ? '切换到本地' : '切换到B站内嵌'}
+										{onlinePlayMode ? '切换到本地' : `切换到${isYouTube ? 'YouTube' : 'B站'}内嵌`}
 									</Button>
 									<Button size="sm" variant="outline" onclick={() => (showVideoPlayer = false)}>
 										<XIcon class="mr-2 h-4 w-4" />
@@ -1005,7 +1059,7 @@
 							{/if}
 							{#if onlinePlayMode}
 								<div class="mb-3 text-sm text-gray-500">
-									当前为 B 站内嵌播放，清晰度和码率由 B 站播放器控制，不继承 bili-sync
+									当前为 {isYouTube ? 'YouTube' : 'B 站'}内嵌播放，清晰度和码率由平台播放器控制，不继承 bili-sync
 									的清晰度设置。
 								</div>
 							{/if}
@@ -1016,12 +1070,12 @@
 										<div>充电视频未充电</div>
 									</div>
 								{:else if onlinePlayMode}
-									{#if getEmbeddedBilibiliPlayerUrl()}
+									{#if getEmbeddedPlayerUrl()}
 										{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
 											<iframe
 												class="embedded-player-frame block h-auto w-full border-0"
 												style="aspect-ratio: 16/9; max-height: 70vh;"
-												src={getEmbeddedBilibiliPlayerUrl() ?? undefined}
+												src={getEmbeddedPlayerUrl() ?? undefined}
 												title={getEmbeddedPlayerTitle()}
 												allow="autoplay; fullscreen"
 												referrerpolicy="strict-origin-when-cross-origin"
@@ -1029,7 +1083,7 @@
 										{/key}
 									{:else}
 										<div class="flex h-64 items-center justify-center text-white">
-											<div>当前视频缺少B站标识，无法内嵌播放</div>
+											<div>当前视频缺少{isYouTube ? ' YouTube' : 'B站'}标识，无法内嵌播放</div>
 										</div>
 									{/if}
 								{:else}

@@ -35,8 +35,7 @@ pub fn now_naive() -> NaiveDateTime {
 }
 
 pub fn beijing_epoch_naive() -> NaiveDateTime {
-    NaiveDateTime::parse_from_str("1970-01-01 00:00:00", STANDARD_TIME_FORMAT)
-        .expect("固定北京时间初始值应可解析")
+    NaiveDateTime::parse_from_str("1970-01-01 00:00:00", STANDARD_TIME_FORMAT).expect("固定北京时间初始值应可解析")
 }
 
 /// 将任意时间转换为标准格式字符串

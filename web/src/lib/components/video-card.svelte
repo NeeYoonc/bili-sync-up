@@ -34,6 +34,8 @@
 	export let selectionMode: boolean = false; // 是否为选择模式
 	export let selected: boolean = false; // 是否被选中
 	export let onSelectionChange: ((videoId: number, selected: boolean) => void) | null = null; // 选择状态变化回调
+	export let resourceId: string | number | null = null; // 统一 API 资源 ID（YouTube 使用 youtube-{id}）
+	export let detailHref: string = ''; // 详情页地址；不传时沿用 B 站地址
 	let coverFailed = false;
 	let lastVideoId: number | null = null;
 
@@ -115,6 +117,9 @@
 		if (taskNames.length > 0) {
 			return taskNames[index] || `任务${index + 1}`;
 		}
+		if (String(resourceId ?? '').startsWith('youtube-')) {
+			return ['视频封面', '视频信息', 'UP主头像', 'UP主信息', '视频下载'][index] || `任务${index + 1}`;
+		}
 
 		// 根据视频类型返回不同的任务名称
 		const isBangumi = video.bangumi_title !== undefined;
@@ -139,7 +144,7 @@
 			if (onReset) {
 				await onReset(force);
 			} else {
-				const response = await api.resetVideo(video.id, force);
+				const response = await api.resetVideo(resourceId ?? video.id, force);
 				// 根据返回结果显示不同的提示
 				if (response.data.resetted) {
 					toast.success('重置成功', {
@@ -173,7 +178,7 @@
 	}
 
 	function handleViewDetail() {
-		goto(`/video/${video.id}`);
+		goto(detailHref || `/video/${video.id}`);
 	}
 
 	function handleSelectionChange(event: Event) {
@@ -264,10 +269,13 @@
 	}
 
 	function getLocalCoverUrl(videoId: number): string {
-		return `/api/videos/${videoId}/cover`;
+		return `/api/videos/${resourceId ?? videoId}/cover`;
 	}
 
 	function getInitialCoverUrl(video: VideoInfo): string {
+		if (String(resourceId ?? '').startsWith('youtube-')) {
+			return getLocalCoverUrl(video.id);
+		}
 		if (video.valid === false) {
 			return getLocalCoverUrl(video.id);
 		}
@@ -276,6 +284,15 @@
 
 	function handleCoverImageError(event: Event) {
 		const target = event.currentTarget as HTMLImageElement;
+		if (
+			String(resourceId ?? '').startsWith('youtube-') &&
+			video.cover &&
+			target.dataset.coverFallback !== 'remote'
+		) {
+			target.dataset.coverFallback = 'remote';
+			target.src = getProxiedImageUrl(video.cover);
+			return;
+		}
 		if (video.valid !== false && video.cover && target.dataset.coverFallback !== 'local') {
 			target.dataset.coverFallback = 'local';
 			target.src = getLocalCoverUrl(video.id);

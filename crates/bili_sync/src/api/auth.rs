@@ -19,7 +19,10 @@ fn is_public_video_cover_path(path: &str) -> bool {
     let Some(video_id) = rest.strip_suffix("/cover") else {
         return false;
     };
-    !video_id.is_empty() && video_id.chars().all(|ch| ch.is_ascii_digit())
+    (!video_id.is_empty() && video_id.chars().all(|ch| ch.is_ascii_digit()))
+        || video_id
+            .strip_prefix("youtube-")
+            .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 pub async fn auth(headers: HeaderMap, request: Request, next: Next) -> Result<Response, StatusCode> {

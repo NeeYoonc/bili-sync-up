@@ -6,6 +6,10 @@ use crate::bilibili::FilterOption;
 
 #[derive(Clone, Deserialize, IntoParams, Default)]
 pub struct VideosRequest {
+    /// 视频平台：bilibili（默认）或 youtube
+    pub platform: Option<String>,
+    /// YouTube 视频源 ID
+    pub youtube: Option<i32>,
     pub collection: Option<i32>,
     pub favorite: Option<i32>,
     pub submission: Option<i32>,
@@ -474,6 +478,8 @@ pub struct ResetSpecificTasksRequest {
     pub submission: Option<i32>,
     pub watch_later: Option<i32>,
     pub bangumi: Option<i32>,
+    pub platform: Option<String>,
+    pub youtube: Option<i32>,
     // 与 /api/videos 的过滤参数保持一致，便于“按当前筛选批量重置”
     pub query: Option<String>,
     pub show_failed_only: Option<bool>,

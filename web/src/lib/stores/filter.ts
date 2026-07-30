@@ -2,6 +2,7 @@ import { writable } from 'svelte/store';
 import type { SortBy, SortOrder } from '$lib/types';
 
 export interface AppState {
+	platform: 'bilibili' | 'youtube';
 	query: string;
 	currentPage: number;
 	videoSource: {
@@ -19,6 +20,7 @@ export interface AppState {
 }
 
 export const appStateStore = writable<AppState>({
+	platform: 'bilibili',
 	query: '',
 	currentPage: 0,
 	videoSource: null,
@@ -35,6 +37,9 @@ export const appStateStore = writable<AppState>({
 export const ToQuery = (state: AppState): string => {
 	const { query, videoSource, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight } = state;
 	const params = new URLSearchParams();
+	if (state.platform === 'youtube') {
+		params.set('platform', 'youtube');
+	}
 	if (state.currentPage > 0) {
 		params.set('page', String(state.currentPage));
 	}
@@ -141,9 +146,17 @@ export const clearAll = () => {
 	}));
 };
 
+export const setPlatform = (platform: 'bilibili' | 'youtube') => {
+	appStateStore.update((state) => ({
+		...state,
+		platform
+	}));
+};
+
 export const setSort = (sortBy: SortBy, sortOrder: SortOrder) => {
 	appStateStore.update((state) => ({
 		...state,
+		platform: 'bilibili',
 		sortBy,
 		sortOrder
 	}));

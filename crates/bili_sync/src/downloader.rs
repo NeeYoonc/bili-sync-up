@@ -5,11 +5,10 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use futures::TryStreamExt;
+use futures::StreamExt;
 use reqwest::{header, Method, StatusCode, Url};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio_util::io::StreamReader;
 use tracing::{debug, error, info, warn};
 
 use crate::bilibili::Client;
@@ -18,6 +17,14 @@ pub struct Downloader {
 }
 
 const BAD_CDN_HOST_TTL: Duration = Duration::from_secs(10 * 60);
+const MIN_PARALLEL_SIZE: u64 = 4 * 1024 * 1024;
+const MIN_SEGMENT_SIZE: u64 = 1024 * 1024;
+// GoogleVideo 的长连接通常在传输数 MiB 后开始明显限速。保持较小 Range
+// 分片并复用有限数量的连接槽，可以继续走项目原生下载器，同时避免一个
+// 50~500MiB 大分片在限速连接上持续数十分钟。
+const GOOGLEVIDEO_SEGMENT_SIZE: u64 = 4 * 1024 * 1024;
+const GOOGLEVIDEO_MAX_CONNECTIONS: usize = 4;
+const RANGE_DOWNLOAD_ATTEMPTS: usize = 3;
 
 static BAD_CDN_HOSTS: LazyLock<Mutex<HashMap<String, Instant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -67,6 +74,19 @@ fn contains_certificate_name_mismatch(message: &str) -> bool {
     (message.contains("invalid peer certificate") && message.contains("certificate not valid for name"))
         || message.contains("remotecertificatenamemismatch")
         || message.contains("sec_e_wrong_principal")
+}
+
+fn contains_tls_close_notify_eof(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("peer closed connection without sending tls close_notify") || message.contains("unexpected eof")
+}
+
+fn is_expected_single_connection_fallback(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}");
+    message.contains("文件过小")
+        || message.contains("无法获取文件大小")
+        || message.contains("服务器不支持Range分片下载")
+        || message.contains("分片数不足")
 }
 
 pub(crate) fn is_certificate_name_mismatch_error(err: &anyhow::Error) -> bool {
@@ -164,7 +184,22 @@ impl Downloader {
                 Ok(()) => return Ok(()),
                 Err(e) if is_certificate_name_mismatch_error(&e) => return Err(e),
                 Err(e) => {
-                    debug!("原生多线程下载不可用，回退到单线程下载: {:#}", e);
+                    let host = url_host(url).unwrap_or_else(|| "unknown".to_string());
+                    if is_expected_single_connection_fallback(&e) {
+                        debug!(
+                            host,
+                            path = %path.display(),
+                            reason = %format!("{e:#}"),
+                            "资源无需或无法进行 Range 分片，改用原生单连接下载"
+                        );
+                    } else {
+                        debug!(
+                            host,
+                            path = %path.display(),
+                            error = %format!("{e:#}"),
+                            "原生多线程下载失败，改用原生单连接下载"
+                        );
+                    }
                 }
             }
         }
@@ -188,7 +223,7 @@ impl Downloader {
             }
         };
 
-        let resp = match self.client.request(Method::GET, url, None).send().await {
+        let resp = match self.client.media_request(Method::GET, url).send().await {
             Ok(r) => match r.error_for_status() {
                 Ok(r) => r,
                 Err(e) => {
@@ -204,14 +239,31 @@ impl Downloader {
 
         let expected = resp.header_content_length().unwrap_or_default();
 
-        let mut stream_reader = StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other));
-        let received = match tokio::io::copy(&mut stream_reader, &mut file).await {
-            Ok(size) => size,
-            Err(e) => {
-                error!("下载过程中出错: {:#}", e);
-                return Err(e.into());
+        let mut received = 0u64;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => {
+                    file.write_all(&chunk).await?;
+                    received += chunk.len() as u64;
+                }
+                Err(error)
+                    if expected > 0 && received >= expected && contains_tls_close_notify_eof(&error.to_string()) =>
+                {
+                    // 部分 GoogleVideo CDN 在完整发送 Content-Length 后直接断开 TLS，
+                    // 不发送 close_notify。字节数完整时应视为成功，而不是反复重下。
+                    warn!(
+                        "CDN 未发送 TLS close_notify，但文件已完整接收: received={} expected={}",
+                        received, expected
+                    );
+                    break;
+                }
+                Err(error) => {
+                    error!("下载过程中出错: {:#}", error);
+                    return Err(error.into());
+                }
             }
-        };
+        }
 
         file.flush().await?;
 
@@ -226,8 +278,14 @@ impl Downloader {
     }
 
     async fn fetch_parallel(&self, url: &str, path: &Path, threads: usize) -> Result<()> {
-        const MIN_PARALLEL_SIZE: u64 = 4 * 1024 * 1024; // 4MB 以下不分片，避免小文件开销
-        const MIN_SEGMENT_SIZE: u64 = 1 * 1024 * 1024; // 每片至少 1MB，避免过多分片
+        let is_googlevideo = url_host(url).is_some_and(|host| host.ends_with(".googlevideo.com"));
+        // 小型 GoogleVideo 单连接也可能在完整传输前直接关闭 TLS；从 1MiB 起走
+        // Range 分片可让失败只影响一个小分片。
+        let min_parallel_size = if is_googlevideo {
+            MIN_SEGMENT_SIZE
+        } else {
+            MIN_PARALLEL_SIZE
+        };
 
         // 创建父目录
         if let Some(parent) = path.parent() {
@@ -239,21 +297,21 @@ impl Downloader {
         let (total_size, range_supported) = self.get_size_and_range_support(url).await?;
         ensure!(total_size > 0, "无法获取文件大小");
         ensure!(
-            total_size >= MIN_PARALLEL_SIZE,
+            total_size >= min_parallel_size,
             "文件过小({} bytes)，不启用分片下载",
             total_size
         );
         ensure!(range_supported, "服务器不支持Range分片下载");
 
-        // 计算分片数（按最小分片大小限制）
-        let max_segments = ((total_size + MIN_SEGMENT_SIZE - 1) / MIN_SEGMENT_SIZE) as usize;
-        let segment_count = threads.min(max_segments).max(1);
-        ensure!(segment_count > 1, "分片数不足，跳过多线程下载");
+        let (concurrency, ranges) = build_parallel_ranges(total_size, threads, is_googlevideo);
+        ensure!(ranges.len() > 1, "分片数不足，跳过多线程下载");
 
         let total_mb = total_size as f64 / 1024.0 / 1024.0;
         info!(
-            "原生多线程下载启用: 大小={:.2}MB, 分片数={}, 线程数={}",
-            total_mb, segment_count, threads
+            "原生多线程下载启用: 大小={:.2}MB, 分片数={}, 并发连接={}",
+            total_mb,
+            ranges.len(),
+            concurrency
         );
 
         // 预创建并设置目标文件大小，便于随机写入
@@ -264,30 +322,22 @@ impl Downloader {
 
         let url_owned = url.to_string();
         let path_owned = path.to_path_buf();
-        let mut tasks = Vec::with_capacity(segment_count);
-
-        let base = total_size / segment_count as u64;
-        let mut start = 0u64;
-        for i in 0..segment_count {
-            let end = if i == segment_count - 1 {
-                total_size - 1
-            } else {
-                start + base - 1
-            };
-
+        let tasks = futures::stream::iter(ranges.into_iter().map(|(part_start, part_end)| {
             let client = self.client.clone();
             let url = url_owned.clone();
             let path = path_owned.clone();
-            let part_start = start;
-            let part_end = end;
-
-            tasks.push(async move { download_range_to_file(client, &url, &path, part_start, part_end).await });
-
-            start = end + 1;
+            async move {
+                download_range_to_file_with_retry(client, &url, &path, part_start, part_end, RANGE_DOWNLOAD_ATTEMPTS)
+                    .await
+            }
+        }))
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+        let mut downloaded = 0u64;
+        for result in tasks {
+            downloaded = downloaded.saturating_add(result?);
         }
-
-        let results = futures::future::try_join_all(tasks).await?;
-        let downloaded: u64 = results.into_iter().sum();
         ensure!(
             downloaded == total_size,
             "分片下载大小不一致: {} != {}",
@@ -304,7 +354,7 @@ impl Downloader {
 
         let head_resp = self
             .client
-            .request(Method::HEAD, url, None)
+            .media_request(Method::HEAD, url)
             .header(header::ACCEPT_ENCODING, "identity")
             .send()
             .await;
@@ -336,7 +386,7 @@ impl Downloader {
     async fn probe_range_support_and_size(&self, url: &str) -> Result<(bool, Option<u64>)> {
         let resp = self
             .client
-            .request(Method::GET, url, None)
+            .media_request(Method::GET, url)
             .header(header::RANGE, "bytes=0-0")
             .header(header::ACCEPT_ENCODING, "identity")
             .send()
@@ -511,6 +561,79 @@ impl Downloader {
     }
 }
 
+fn build_parallel_ranges(total_size: u64, threads: usize, is_googlevideo: bool) -> (usize, Vec<(u64, u64)>) {
+    if total_size == 0 {
+        return (1, Vec::new());
+    }
+
+    let concurrency = if is_googlevideo {
+        threads.min(GOOGLEVIDEO_MAX_CONNECTIONS)
+    } else {
+        threads
+    }
+    .max(1);
+
+    if is_googlevideo {
+        let mut ranges = Vec::new();
+        let mut start = 0u64;
+        while start < total_size {
+            let end = start.saturating_add(GOOGLEVIDEO_SEGMENT_SIZE - 1).min(total_size - 1);
+            ranges.push((start, end));
+            start = end.saturating_add(1);
+        }
+        return (concurrency, ranges);
+    }
+
+    let max_segments = ((total_size + MIN_SEGMENT_SIZE - 1) / MIN_SEGMENT_SIZE) as usize;
+    let segment_count = concurrency.min(max_segments).max(1);
+    let base = total_size / segment_count as u64;
+    let mut ranges = Vec::with_capacity(segment_count);
+    let mut start = 0u64;
+    for index in 0..segment_count {
+        let end = if index == segment_count - 1 {
+            total_size - 1
+        } else {
+            start + base - 1
+        };
+        ranges.push((start, end));
+        start = end + 1;
+    }
+    (concurrency, ranges)
+}
+
+async fn download_range_to_file_with_retry(
+    client: Client,
+    url: &str,
+    path: &Path,
+    start: u64,
+    end: u64,
+    attempts: usize,
+) -> Result<u64> {
+    let mut last_error = None;
+    for attempt in 1..=attempts.max(1) {
+        match download_range_to_file(client.clone(), url, path, start, end).await {
+            Ok(downloaded) => return Ok(downloaded),
+            Err(error) if is_certificate_name_mismatch_error(&error) => return Err(error),
+            Err(error) => {
+                warn!(
+                    start,
+                    end,
+                    attempt,
+                    attempts,
+                    error = %error,
+                    "Range 分片下载失败，准备重试当前分片"
+                );
+                last_error = Some(error);
+                if attempt < attempts {
+                    tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("Range 分片下载失败")))
+        .with_context(|| format!("Range 分片在重试后仍失败: bytes={start}-{end}"))
+}
+
 async fn download_range_to_file(client: Client, url: &str, path: &Path, start: u64, end: u64) -> Result<u64> {
     let expected = end.saturating_sub(start) + 1;
 
@@ -519,7 +642,7 @@ async fn download_range_to_file(client: Client, url: &str, path: &Path, start: u
 
     let range_value = format!("bytes={}-{}", start, end);
     let resp = client
-        .request(Method::GET, url, None)
+        .media_request(Method::GET, url)
         .header(header::RANGE, range_value)
         .header(header::ACCEPT_ENCODING, "identity")
         .send()
@@ -534,8 +657,24 @@ async fn download_range_to_file(client: Client, url: &str, path: &Path, start: u
 
     let resp = resp.error_for_status().context("Range状态码错误")?;
 
-    let mut stream_reader = StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other));
-    let received = tokio::io::copy(&mut stream_reader, &mut file).await?;
+    let mut received = 0u64;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(chunk) => {
+                file.write_all(&chunk).await?;
+                received += chunk.len() as u64;
+            }
+            Err(error) if received >= expected && contains_tls_close_notify_eof(&error.to_string()) => {
+                warn!(
+                    "Range CDN 未发送 TLS close_notify，但分片已完整接收: received={} expected={}",
+                    received, expected
+                );
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     file.flush().await?;
 
     ensure!(
@@ -939,6 +1078,40 @@ mod tests {
         let err = anyhow!("failed to download from [\"https://cdn.example/video.m4s\"]: 所有URL尝试失败");
 
         assert!(should_refresh_playurl_after_download_error(&err));
+    }
+
+    #[test]
+    fn small_or_unbounded_sidecar_uses_expected_single_connection_fallback() {
+        assert!(is_expected_single_connection_fallback(&anyhow!(
+            "文件过小(109814 bytes)，不启用分片下载"
+        )));
+        assert!(is_expected_single_connection_fallback(&anyhow!("无法获取文件大小")));
+        assert!(!is_expected_single_connection_fallback(&anyhow!(
+            "Range 分片下载不完整"
+        )));
+    }
+
+    #[test]
+    fn googlevideo_uses_small_ranges_with_bounded_native_concurrency() {
+        let total_size = 18 * 1024 * 1024;
+        let (concurrency, ranges) = build_parallel_ranges(total_size, 16, true);
+
+        assert_eq!(concurrency, GOOGLEVIDEO_MAX_CONNECTIONS);
+        assert_eq!(ranges.len(), 5);
+        assert_eq!(ranges[0], (0, GOOGLEVIDEO_SEGMENT_SIZE - 1));
+        assert_eq!(ranges[3], (12 * 1024 * 1024, 16 * 1024 * 1024 - 1));
+        assert_eq!(ranges[4], (16 * 1024 * 1024, total_size - 1));
+    }
+
+    #[test]
+    fn regular_cdn_keeps_configured_parallel_range_count() {
+        let total_size = 64 * 1024 * 1024;
+        let (concurrency, ranges) = build_parallel_ranges(total_size, 8, false);
+
+        assert_eq!(concurrency, 8);
+        assert_eq!(ranges.len(), 8);
+        assert_eq!(ranges[0], (0, 8 * 1024 * 1024 - 1));
+        assert_eq!(ranges[7], (56 * 1024 * 1024, total_size - 1));
     }
 
     #[test]

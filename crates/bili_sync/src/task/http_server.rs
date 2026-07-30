@@ -107,6 +107,13 @@ use crate::api::wrapper::ApiResponse;
 use crate::api::ws;
 use crate::bilibili::{get_captcha_info, serve_captcha_page, submit_captcha_result};
 use crate::utils::model::queue_missing_video_file_size_backfill;
+use crate::youtube::{
+    complete_interactive_youtube_login, create_youtube_source, delete_youtube_source, get_youtube_queue_status,
+    get_youtube_source_videos, get_youtube_sources, get_youtube_videos, import_youtube_cookie_file,
+    import_youtube_login, reset_youtube_source_path, retry_youtube_source, retry_youtube_video, scan_youtube_source,
+    search_youtube, start_interactive_youtube_login, update_youtube_source, update_youtube_source_enabled,
+    youtube_status,
+};
 // CONFIG导入已移除 - 现在使用动态配置
 
 #[derive(Embed)]
@@ -264,6 +271,23 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/auth/qr/poll", get(poll_qr_status))
         .route("/api/auth/current-user", get(get_current_user))
         .route("/api/auth/clear-credential", post(clear_credential))
+        // YouTube 登录与来源适配（yt-dlp 只解析来源/直链，媒体走项目统一下载器）
+        .route("/api/youtube/status", get(youtube_status))
+        .route("/api/youtube/login", post(import_youtube_login))
+        .route("/api/youtube/login/start", post(start_interactive_youtube_login))
+        .route("/api/youtube/login/complete", post(complete_interactive_youtube_login))
+        .route("/api/youtube/cookies", post(import_youtube_cookie_file))
+        .route("/api/youtube/search", get(search_youtube))
+        .route("/api/youtube/source-videos", get(get_youtube_source_videos))
+        .route("/api/youtube/sources", get(get_youtube_sources).post(create_youtube_source))
+        .route("/api/youtube/sources/{id}", put(update_youtube_source).delete(delete_youtube_source))
+        .route("/api/youtube/sources/{id}/enabled", put(update_youtube_source_enabled))
+        .route("/api/youtube/sources/{id}/scan", post(scan_youtube_source))
+        .route("/api/youtube/sources/{id}/reset-path", post(reset_youtube_source_path))
+        .route("/api/youtube/sources/{id}/retry", post(retry_youtube_source))
+        .route("/api/youtube/videos", get(get_youtube_videos))
+        .route("/api/youtube/videos/{id}/retry", post(retry_youtube_video))
+        .route("/api/youtube/queue-status", get(get_youtube_queue_status))
         .route("/api/bangumi/seasons/{season_id}", get(get_bangumi_seasons))
         .route("/api/search", get(search_bilibili))
         .route("/api/user/favorites", get(get_user_favorites))

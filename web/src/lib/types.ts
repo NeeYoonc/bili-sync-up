@@ -5,6 +5,135 @@ export interface ApiResponse<T> {
 	data: T;
 }
 
+export type YouTubeBrowser = 'chrome' | 'edge' | 'firefox' | 'brave' | 'chromium';
+
+export type YouTubeSourceType = 'subscriptions' | 'channel' | 'playlist' | 'liked' | 'watch_later';
+
+export interface YouTubeSource {
+	id: number;
+	source_type: YouTubeSourceType;
+	name: string;
+	url: string;
+	path: string;
+	enabled: boolean;
+	audio_only: boolean;
+	audio_only_m4a_only: boolean;
+	flat_folder: boolean;
+	download_danmaku: boolean;
+	download_subtitle: boolean;
+	ai_subtitle_language: string;
+	filter_option?: FilterOption | null;
+	blacklist_keywords: string[];
+	whitelist_keywords: string[];
+	case_sensitive: boolean;
+	min_duration_seconds?: number | null;
+	max_duration_seconds?: number | null;
+	published_after?: string | null;
+	published_before?: string | null;
+	selected_videos: string[];
+	last_scan_at?: string | null;
+	pending_count: number;
+	completed_count: number;
+	failed_count: number;
+}
+
+export interface CreateYouTubeSourceRequest {
+	source_type: YouTubeSourceType;
+	name: string;
+	url?: string;
+	path: string;
+	audio_only: boolean;
+	audio_only_m4a_only?: boolean;
+	flat_folder?: boolean;
+	download_danmaku?: boolean;
+	download_subtitle: boolean;
+	ai_subtitle_language?: string;
+	filter_option?: FilterOption;
+	blacklist_keywords?: string[];
+	whitelist_keywords?: string[];
+	case_sensitive?: boolean;
+	min_duration_seconds?: number | null;
+	max_duration_seconds?: number | null;
+	published_after?: string;
+	published_before?: string;
+	selected_videos?: string[];
+}
+
+export interface YouTubeVideo {
+	id: number;
+	source_id: number;
+	youtube_id: string;
+	url: string;
+	title: string;
+	uploader: string;
+	thumbnail?: string | null;
+	published_at?: string | null;
+	duration_seconds?: number | null;
+	download_status: 'pending' | 'downloading' | 'completed' | 'failed';
+	retry_count: number;
+	output_path?: string | null;
+	error_message?: string | null;
+}
+
+export interface YouTubeStatusResponse {
+	ytdlp_available: boolean;
+	ytdlp_version?: string | null;
+	logged_in: boolean;
+	default_output_path: string;
+}
+
+export interface YouTubeSearchRequest {
+	keyword: string;
+	source_type: 'channel' | 'playlist';
+}
+
+export interface YouTubeSearchResponse {
+	success: boolean;
+	results: SearchResultItem[];
+	total: number;
+}
+
+export interface YouTubeSourceVideosRequest {
+	url: string;
+	source_type: 'channel' | 'playlist';
+	page?: number;
+	page_size?: number;
+	keyword?: string;
+}
+
+export interface YouTubeLoginResponse {
+	logged_in: boolean;
+	message: string;
+}
+
+export interface UpdateYouTubeSourceRequest {
+	name?: string;
+	path?: string;
+	audio_only?: boolean;
+	audio_only_m4a_only?: boolean;
+	flat_folder?: boolean;
+	download_danmaku?: boolean;
+	download_subtitle?: boolean;
+	ai_subtitle_language?: string;
+	filter_option?: FilterOption | null;
+	inherit_filter_option?: boolean;
+	blacklist_keywords?: string[];
+	whitelist_keywords?: string[];
+	case_sensitive?: boolean;
+	min_duration_seconds?: number | null;
+	max_duration_seconds?: number | null;
+	published_after?: string | null;
+	published_before?: string | null;
+}
+
+export interface YouTubeQueueStatusResponse {
+	pending: number;
+	downloading: number;
+	completed: number;
+	failed: number;
+	tasks: YouTubeVideo[];
+}
+
 // 排序字段枚举
 export type SortBy =
 	'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime' | 'is_charge_video' | 'file_size';
@@ -14,6 +143,8 @@ export type SortOrder = 'asc' | 'desc';
 
 // 请求参数类型
 export interface VideosRequest {
+	platform?: 'bilibili' | 'youtube';
+	youtube?: number;
 	collection?: number;
 	favorite?: number;
 	submission?: number;
@@ -73,6 +204,12 @@ export interface VideoSource {
 	name: string;
 	enabled: boolean;
 	path: string;
+	url?: string;
+	source_type?: YouTubeSourceType;
+	last_scan_at?: string | null;
+	pending_count?: number;
+	completed_count?: number;
+	failed_count?: number;
 	latest_row_at?: string | null; // 最近一条视频的发布时间（北京时间）
 	scan_deleted_videos: boolean;
 	scan_deleted_videos_once: boolean;
@@ -127,6 +264,7 @@ export interface VideoSourcesResponse {
 	submission: VideoSource[];
 	watch_later: VideoSource[];
 	bangumi: VideoSource[];
+	youtube: VideoSource[];
 }
 
 // 视频信息类型
@@ -675,6 +813,8 @@ export interface SearchResultItem {
 	play?: number;
 	danmaku?: number;
 	follower?: number; // 粉丝数（UP主搜索结果）
+	youtube_url?: string;
+	channel_id?: string;
 }
 
 // 搜索响应类型

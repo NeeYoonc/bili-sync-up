@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tracing::{debug, error, info, warn};
 
-use bili_sync_entity::entities::{page, video};
+use bili_sync_entity::entities::{page, video, youtube_video};
 
 /// Range请求参数
 #[derive(Debug)]
@@ -192,6 +192,26 @@ async fn maybe_remux_flv_in_mp4(video_path: &PathBuf) -> Result<()> {
 /// 查找视频文件路径
 async fn find_video_file(video_id: &str, db: &DatabaseConnection) -> Result<PathBuf> {
     debug!("查找视频文件: {}", video_id);
+
+    if let Some(id) = video_id
+        .strip_prefix("youtube-")
+        .and_then(|value| value.parse::<i32>().ok())
+    {
+        let record = youtube_video::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .context("查询 YouTube 视频记录失败")?
+            .ok_or_else(|| anyhow::anyhow!("YouTube 视频记录不存在: {}", id))?;
+        let output_path = record
+            .output_path
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("YouTube 视频尚无本地文件: {}", id))?;
+        if !output_path.is_file() {
+            bail!("YouTube 视频文件不存在: {:?}", output_path);
+        }
+        return Ok(output_path);
+    }
 
     // 首先尝试作为分页ID查找
     if let Ok(page_id) = video_id.parse::<i32>() {

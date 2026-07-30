@@ -7,3 +7,5 @@ pub use super::page::Entity as Page;
 pub use super::task_queue::Entity as TaskQueue;
 pub use super::video::Entity as Video;
 pub use super::video_source::Entity as VideoSource;
+pub use super::youtube_source::Entity as YouTubeSource;
+pub use super::youtube_video::Entity as YouTubeVideo;

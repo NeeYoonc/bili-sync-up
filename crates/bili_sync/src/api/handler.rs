@@ -2073,6 +2073,8 @@ mod queue_sse_tests {
         let response = get_videos(
             Extension(db.clone()),
             Query(VideosRequest {
+                platform: None,
+                youtube: None,
                 collection: None,
                 favorite: None,
                 submission: Some(1),
@@ -2932,6 +2934,11 @@ pub async fn get_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<VideosRequest>,
 ) -> Result<ApiResponse<VideosResponse>, ApiError> {
+    if params.platform.as_deref() == Some("youtube") {
+        return Ok(ApiResponse::ok(
+            crate::youtube::get_unified_youtube_videos(db.as_ref(), &params).await?,
+        ));
+    }
     let mut query = video::Entity::find();
     let (min_height, max_height) = resolve_height_filters(&params);
 
@@ -3624,9 +3631,17 @@ async fn video_has_generated_chapter_pages(db: &DatabaseConnection, video_id: i3
     )
 )]
 pub async fn get_video(
-    Path(id): Path<i32>,
+    Path(resource_id): Path<String>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<VideoResponse>, ApiError> {
+    if let Some(id) = crate::youtube::unified_youtube_id(&resource_id) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::get_unified_youtube_video(db.as_ref(), id).await?,
+        ));
+    }
+    let id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
     let Some(raw_video) = video::Entity::find_by_id(id).one(db.as_ref()).await? else {
         return Err(InnerApiError::NotFound(id).into());
     };
@@ -3808,7 +3823,7 @@ pub async fn refresh_page_danmaku(
     )
 )]
 pub async fn reset_video(
-    Path(id): Path<i32>,
+    Path(resource_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<ResetVideoResponse>, ApiError> {
@@ -3817,6 +3832,14 @@ pub async fn reset_video(
         .get("force")
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
+    if let Some(id) = crate::youtube::unified_youtube_id(&resource_id) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::reset_unified_youtube_video(db.as_ref(), id, force_reset).await?,
+        ));
+    }
+    let id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
 
     // 获取视频和分页信息
     let (video_info, pages_info) = tokio::try_join!(
@@ -3963,6 +3986,11 @@ pub async fn reset_all_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<crate::api::request::VideosRequest>,
 ) -> Result<ApiResponse<ResetAllVideosResponse>, ApiError> {
+    if params.platform.as_deref() == Some("youtube") {
+        return Ok(ApiResponse::ok(
+            crate::youtube::reset_all_unified_youtube_videos(db.as_ref(), &params).await?,
+        ));
+    }
     use std::collections::HashSet;
 
     // 构建查询条件，与get_videos保持一致（但不使用分页）
@@ -4227,6 +4255,11 @@ pub async fn reset_specific_tasks(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     axum::Json(request): axum::Json<crate::api::request::ResetSpecificTasksRequest>,
 ) -> Result<ApiResponse<ResetAllVideosResponse>, ApiError> {
+    if request.platform.as_deref() == Some("youtube") {
+        return Ok(ApiResponse::ok(
+            crate::youtube::reset_specific_unified_youtube_tasks(db.as_ref(), &request).await?,
+        ));
+    }
     use std::collections::HashSet;
 
     let mut video_task_indexes = if request.video_task_indexes.is_empty() {
@@ -4705,10 +4738,18 @@ pub async fn test_risk_control_handler() -> Result<ApiResponse<crate::api::respo
     )
 )]
 pub async fn update_video_status(
-    Path(id): Path<i32>,
+    Path(resource_id): Path<String>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
     axum::Json(request): axum::Json<UpdateVideoStatusRequest>,
 ) -> Result<ApiResponse<UpdateVideoStatusResponse>, ApiError> {
+    if let Some(id) = crate::youtube::unified_youtube_id(&resource_id) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::update_unified_youtube_status(db.as_ref(), id, &request).await?,
+        ));
+    }
+    let id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
     let (video_info, pages_info) = tokio::try_join!(
         video::Entity::find_by_id(id)
             .select_only()
@@ -6145,8 +6186,16 @@ pub async fn delete_video_source(
 )]
 pub async fn delete_video(
     Extension(db): Extension<Arc<DatabaseConnection>>,
-    Path(id): Path<i32>,
+    Path(resource_id): Path<String>,
 ) -> Result<ApiResponse<crate::api::response::DeleteVideoResponse>, ApiError> {
+    if let Some(id) = crate::youtube::unified_youtube_id(&resource_id) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::delete_unified_youtube_video(db.as_ref(), id).await?,
+        ));
+    }
+    let id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
     let video_delete_queue_busy = crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing();
     let has_pending_video_delete_tasks = crate::task::VIDEO_DELETE_TASK_QUEUE.queue_length().await > 0;
     let scanning = crate::task::is_scanning();
@@ -7145,6 +7194,19 @@ pub async fn delete_video_source_internal(
     id: i32,
     delete_local_files: bool,
 ) -> Result<crate::api::response::DeleteVideoSourceResponse, ApiError> {
+    if source_type == "youtube" {
+        crate::youtube::delete_youtube_source_internal(db.as_ref(), id, delete_local_files).await?;
+        return Ok(crate::api::response::DeleteVideoSourceResponse {
+            success: true,
+            source_id: id,
+            source_type,
+            message: if delete_local_files {
+                "YouTube 视频源、下载记录及已记录本地文件已删除".to_string()
+            } else {
+                "YouTube 视频源和下载记录已删除，本地文件已保留".to_string()
+            },
+        });
+    }
     // 用于保存需要清除断点的UP主ID（仅submission类型使用）
     let mut upper_id_to_clear: Option<i64> = None;
     let mut cleanup_plan: Option<LocalSourceCleanupPlan> = None;
@@ -15144,8 +15206,28 @@ fn local_cover_not_found_response() -> axum::response::Response {
 )]
 pub async fn get_video_local_cover(
     Extension(db): Extension<Arc<DatabaseConnection>>,
-    Path(video_id): Path<i32>,
+    Path(resource_id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
+    if let Some(video_id) = crate::youtube::unified_youtube_id(&resource_id) {
+        let Some(cover_path) = crate::youtube::unified_youtube_cover_path(db.as_ref(), video_id).await? else {
+            return Ok(local_cover_not_found_response());
+        };
+        let image_data = tokio::fs::read(&cover_path).await?;
+        let content_type = mime_guess::from_path(&cover_path)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string();
+        return Ok(axum::response::Response::builder()
+            .status(200)
+            .header("Content-Type", content_type)
+            .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+            .header("X-Image-Cache", "LOCAL")
+            .body(axum::body::Body::from(image_data))
+            .unwrap());
+    }
+    let video_id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
     let Some(video_model) = video::Entity::find_by_id(video_id).one(db.as_ref()).await? else {
         debug!("本地封面兜底未命中：视频不存在 video_id={}", video_id);
         return Ok(local_cover_not_found_response());
@@ -19489,8 +19571,7 @@ pub async fn update_notification_config(
                 webhook_synology_chat_template,
             )
             .map_err(ApiError::from)?;
-            notification_config.webhook_synology_chat_template =
-                Some(webhook_synology_chat_template.to_string());
+            notification_config.webhook_synology_chat_template = Some(webhook_synology_chat_template.to_string());
         }
         updated = true;
     }

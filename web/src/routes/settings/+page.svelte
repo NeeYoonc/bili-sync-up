@@ -33,7 +33,8 @@
 		BellIcon,
 		SparklesIcon,
 		RefreshCwIcon,
-		EyeIcon
+		EyeIcon,
+		YoutubeIcon
 	} from 'lucide-svelte';
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -43,6 +44,7 @@
 	// import type { Theme } from '$lib/stores/theme'; // 未使用，已注释
 	import ThemeToggle from '$lib/components/theme-toggle.svelte';
 	import Loading from '$lib/components/ui/Loading.svelte';
+	import YouTubeLoginPanel from '$lib/components/youtube-login-panel.svelte';
 
 	let config: ConfigResponse | null = null;
 	let loading = false;
@@ -89,6 +91,12 @@
 			title: 'B站凭证',
 			description: '配置B站登录凭证信息',
 			icon: KeyIcon
+		},
+		{
+			id: 'youtube_login',
+			title: 'YouTube 登录',
+			description: '配置 YouTube 登录和 cookies.txt',
+			icon: YoutubeIcon
 		},
 		{
 			id: 'risk',
@@ -140,6 +148,7 @@
 		download: '控制下载并发、速率限制、任务执行方式和下载器行为。',
 		danmaku: '配置弹幕文件的显示样式、布局参数和同步策略。',
 		credential: '填写 B 站登录凭证，影响会员画质、互动内容和受限接口访问。',
+		youtube_login: '管理 YouTube 登录窗口、cookies.txt 和 yt-dlp 登录状态。',
 		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
 		captcha: '设置遇到验证码风控时的处理模式、超时和自动识别参数。',
 		aria2: '配置外部 Aria2 的健康检查、自动重启和监控策略。',
@@ -3069,6 +3078,28 @@
 				</div>
 			</Tabs.Content>
 		</Tabs.Root>
+	</div>
+</ResponsiveSheet>
+
+<!-- YouTube 登录设置抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'youtube_login'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="YouTube 登录"
+	description="配置 YouTube 登录窗口、cookies.txt 和 yt-dlp 登录状态"
+	titleTooltip={getSettingTooltip('youtube_login')}
+	{isMobile}
+>
+	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+		<YouTubeLoginPanel />
+		<div
+			class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
+		>
+			登录成功后，订阅动态、喜欢的视频和稍后再看等账号来源会直接使用这里保存的登录状态。
+			添加视频源请前往“视频源管理 → YouTube 视频源 → 添加 YouTube 视频源”。
+		</div>
 	</div>
 </ResponsiveSheet>
 

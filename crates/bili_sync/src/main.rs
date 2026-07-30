@@ -19,6 +19,7 @@ mod unified_downloader;
 mod utils;
 mod workflow;
 mod workflow_danmaku;
+mod youtube;
 
 use std::fmt::Debug;
 use std::future::Future;

@@ -1,0 +1,172 @@
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(YouTubeSource::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(YouTubeSource::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(YouTubeSource::SourceType).string_len(32).not_null())
+                    .col(ColumnDef::new(YouTubeSource::Name).string().not_null())
+                    .col(ColumnDef::new(YouTubeSource::Url).text().not_null())
+                    .col(ColumnDef::new(YouTubeSource::Path).text().not_null())
+                    .col(
+                        ColumnDef::new(YouTubeSource::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(YouTubeSource::AudioOnly)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(YouTubeSource::DownloadSubtitle)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(ColumnDef::new(YouTubeSource::LastScanAt).string().null())
+                    .col(ColumnDef::new(YouTubeSource::CreatedAt).string().not_null())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_youtube_source_enabled")
+                    .table(YouTubeSource::Table)
+                    .col(YouTubeSource::Enabled)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(YouTubeVideo::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(YouTubeVideo::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(YouTubeVideo::SourceId).integer().not_null())
+                    .col(ColumnDef::new(YouTubeVideo::YouTubeId).string_len(32).not_null())
+                    .col(ColumnDef::new(YouTubeVideo::Url).text().not_null())
+                    .col(ColumnDef::new(YouTubeVideo::Title).text().not_null())
+                    .col(ColumnDef::new(YouTubeVideo::Uploader).string().not_null().default(""))
+                    .col(ColumnDef::new(YouTubeVideo::Thumbnail).text().null())
+                    .col(ColumnDef::new(YouTubeVideo::PublishedAt).string().null())
+                    .col(ColumnDef::new(YouTubeVideo::DurationSeconds).integer().null())
+                    .col(
+                        ColumnDef::new(YouTubeVideo::DownloadStatus)
+                            .string_len(20)
+                            .not_null()
+                            .default("pending"),
+                    )
+                    .col(ColumnDef::new(YouTubeVideo::OutputPath).text().null())
+                    .col(ColumnDef::new(YouTubeVideo::ErrorMessage).text().null())
+                    .col(ColumnDef::new(YouTubeVideo::CreatedAt).string().not_null())
+                    .col(ColumnDef::new(YouTubeVideo::UpdatedAt).string().not_null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_youtube_video_source")
+                            .from(YouTubeVideo::Table, YouTubeVideo::SourceId)
+                            .to(YouTubeSource::Table, YouTubeSource::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_youtube_video_source_id")
+                    .table(YouTubeVideo::Table)
+                    .col(YouTubeVideo::SourceId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_youtube_video_status")
+                    .table(YouTubeVideo::Table)
+                    .col(YouTubeVideo::DownloadStatus)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_youtube_video_source_video")
+                    .table(YouTubeVideo::Table)
+                    .col(YouTubeVideo::SourceId)
+                    .col(YouTubeVideo::YouTubeId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(YouTubeVideo::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(YouTubeSource::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum YouTubeSource {
+    Table,
+    Id,
+    SourceType,
+    Name,
+    Url,
+    Path,
+    Enabled,
+    AudioOnly,
+    DownloadSubtitle,
+    LastScanAt,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum YouTubeVideo {
+    Table,
+    Id,
+    SourceId,
+    YouTubeId,
+    Url,
+    Title,
+    Uploader,
+    Thumbnail,
+    PublishedAt,
+    DurationSeconds,
+    DownloadStatus,
+    OutputPath,
+    ErrorMessage,
+    CreatedAt,
+    UpdatedAt,
+}

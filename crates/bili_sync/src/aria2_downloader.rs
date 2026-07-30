@@ -397,7 +397,7 @@ impl Aria2Downloader {
             }
 
             self.client
-                .request(Method::GET, url, None)
+                .media_request(Method::GET, url)
                 .headers(headers)
                 .send()
                 .await

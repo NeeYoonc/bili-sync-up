@@ -759,6 +759,30 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
         // 使用直接连接
         let optimized_connection = connection.clone();
 
+        // B 站和 YouTube 共用同一个 UnifiedDownloader 实例。YouTube 仅使用
+        // yt-dlp 解析媒体直链，文件下载、分片、aria2 选择和 ffmpeg 合并均走原链路。
+        let shared_downloader = if let Some(existing) = TASK_CONTROLLER.get_downloader().await {
+            existing
+        } else {
+            let downloader = UnifiedDownloader::new_smart(bili_client.client.clone()).await;
+            let arc = std::sync::Arc::new(downloader);
+            TASK_CONTROLLER.set_downloader(Some(arc.clone())).await;
+            arc
+        };
+        TASK_CONTROLLER.set_scanning(true);
+        crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_running();
+        let youtube_result = crate::youtube::process_scheduled_sources(
+            optimized_connection.as_ref(),
+            shared_downloader,
+            config.concurrent_limit.video,
+        )
+        .await;
+        TASK_CONTROLLER.set_scanning(false);
+        crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
+        if let Err(error) = youtube_result {
+            warn!(error = %error, "执行 YouTube 视频源扫描/下载失败");
+        }
+
         // 重新初始化所有视频源（确保源初始化是幂等的）
         if let Err(e) = init_all_sources(&config, &optimized_connection).await {
             error!("重新初始化视频源失败: {}", e);

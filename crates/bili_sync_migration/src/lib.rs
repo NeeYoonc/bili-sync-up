@@ -69,6 +69,10 @@ mod m20260415_000001_add_split_chapters_to_sources;
 mod m20260704_000001_add_ai_subtitle_settings;
 mod m20260718_000001_add_source_filter_option;
 mod m20260719_000001_add_source_download_charge_videos;
+mod m20260729_000001_create_youtube_sources;
+mod m20260729_000002_align_youtube_download_lifecycle;
+mod m20260729_000003_integrate_youtube_source_options;
+mod m20260730_000001_add_youtube_selected_videos;
 
 pub struct Migrator;
 
@@ -145,6 +149,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260704_000001_add_ai_subtitle_settings::Migration),
             Box::new(m20260718_000001_add_source_filter_option::Migration),
             Box::new(m20260719_000001_add_source_download_charge_videos::Migration),
+            Box::new(m20260729_000001_create_youtube_sources::Migration),
+            Box::new(m20260729_000002_align_youtube_download_lifecycle::Migration),
+            Box::new(m20260729_000003_integrate_youtube_source_options::Migration),
+            Box::new(m20260730_000001_add_youtube_selected_videos::Migration),
         ]
     }
 }

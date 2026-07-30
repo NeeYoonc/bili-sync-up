@@ -11,6 +11,7 @@
 	import EmptyState from '$lib/components/empty-state.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { CustomSelect } from '$lib/components/ui/select';
+	import * as Tabs from '$lib/components/ui/tabs';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import FilterIcon from '@lucide/svelte/icons/filter';
@@ -20,7 +21,7 @@
 	import { toast } from 'svelte-sonner';
 	import api from '$lib/api';
 	import type { VideoInfo } from '$lib/types';
-	import type { VideosResponse, VideoSourcesResponse, ApiError } from '$lib/types';
+	import type { VideosResponse, VideoSourcesResponse, ApiError, YouTubeSource } from '$lib/types';
 	import { VIDEO_SOURCES, type VideoSourceType } from '$lib/consts';
 	import { runRequest } from '$lib/utils/request.js';
 	import { buildVideosRequest } from '$lib/utils/videos.js';
@@ -33,6 +34,7 @@
 		setCurrentPage,
 		setQuery,
 		setShowFailedOnly,
+		setPlatform,
 		setSort,
 		setVideoListInfo,
 		ToQuery
@@ -50,11 +52,13 @@
 
 	let videosData: VideosResponse | null = null;
 	let videoSources: VideoSourcesResponse | null = null;
+	let youtubeSources: YouTubeSource[] = [];
 	let loading = false;
 	let lastSearch: string | null = null;
 	const videosStream = createManagedEventSource();
 	let liveUpdateStatus: 'idle' | 'connecting' | 'connected' | 'error' = 'idle';
 	let pendingInsertedCount = 0;
+	let platformTab: 'bilibili' | 'youtube' = 'bilibili';
 
 	// 重置对话框
 	let resetAllDialogOpen = false;
@@ -71,7 +75,7 @@
 
 	// 筛选状态
 	let showFilters = false;
-	let selectedSourceType: VideoSourceType | '' = '';
+	let selectedSourceType: VideoSourceType | 'youtube' | '' = '';
 	let selectedSourceId = '';
 	let showFailedOnly = false;
 	let currentSortBy: SortBy = 'id';
@@ -290,11 +294,20 @@
 	}
 
 	function getApiParams(searchParams: URLSearchParams) {
-		let videoSource: { type: VideoSourceType; id: string } | null = null;
-		for (const source of Object.values(VIDEO_SOURCES)) {
-			const value = searchParams.get(source.type);
+		const platform: 'bilibili' | 'youtube' =
+			searchParams.get('platform') === 'youtube' ? 'youtube' : 'bilibili';
+		let videoSource: { type: VideoSourceType | 'youtube'; id: string } | null = null;
+		if (platform === 'youtube') {
+			const value = searchParams.get('youtube');
 			if (value) {
-				videoSource = { type: source.type, id: value };
+				videoSource = { type: 'youtube', id: value };
+			}
+		} else {
+			for (const source of Object.values(VIDEO_SOURCES)) {
+				const value = searchParams.get(source.type);
+				if (value) {
+					videoSource = { type: source.type, id: value };
+				}
 			}
 		}
 		const minHeightRaw = searchParams.get('min_height');
@@ -314,6 +327,7 @@
 		);
 
 		return {
+			platform,
 			query: searchParams.get('query') || '',
 			videoSource,
 			pageNum: parseInt(searchParams.get('page') || '0'),
@@ -336,6 +350,7 @@
 		maxHeight: number | null = null
 	): string | null {
 		const params = buildVideosRequest({
+			platform: platformTab,
 			page: pageNum,
 			pageSize,
 			query,
@@ -483,6 +498,7 @@
 		maxHeight: number | null = null
 	) {
 		const params = buildVideosRequest({
+			platform: platformTab,
 			page: pageNum,
 			pageSize,
 			query,
@@ -521,12 +537,18 @@
 	}
 
 	async function loadVideoSources() {
-		const result = await runRequest(() => api.getVideoSources(), {
+		const [result, youtubeResult] = await Promise.all([
+			runRequest(() => api.getVideoSources(), {
 			showErrorToast: false,
 			onError: (error) => console.error('加载视频源失败:', error)
-		});
-		if (!result) return;
-		videoSources = result.data;
+			}),
+			runRequest(() => api.getYouTubeSources(), {
+				showErrorToast: false,
+				onError: (error) => console.error('加载 YouTube 视频源失败:', error)
+			})
+		]);
+		if (result) videoSources = result.data;
+		if (youtubeResult) youtubeSources = youtubeResult.data;
 	}
 
 	async function handlePageChange(pageNum: number) {
@@ -536,6 +558,7 @@
 
 	async function handleSearchParamsChange(searchParams: URLSearchParams) {
 		const {
+			platform,
 			query,
 			videoSource,
 			pageNum,
@@ -545,6 +568,8 @@
 			minHeight,
 			maxHeight
 		} = getApiParams(searchParams);
+		platformTab = platform;
+		setPlatform(platform);
 		setAll(
 			query,
 			pageNum,
@@ -581,9 +606,24 @@
 		);
 	}
 
+	function switchPlatform(platform: 'bilibili' | 'youtube') {
+		if (platform === platformTab && $appStateStore.platform === platform) return;
+		platformTab = platform;
+		setPlatform(platform);
+		setAll('', 0, null, false, 'id', 'desc', null, null);
+		setPlatform(platform);
+		selectedSourceType = '';
+		selectedSourceId = '';
+		selectedResolution = '';
+		showFailedOnly = false;
+		selectionMode = false;
+		clearSelection();
+		goto(platform === 'youtube' ? '/videos?platform=youtube' : '/videos');
+	}
+
 	async function handleResetVideo(video: VideoInfo, forceReset: boolean) {
 		try {
-			const result = await api.resetVideo(video.id, forceReset);
+			const result = await api.resetVideo(platformTab === 'youtube' ? `youtube-${video.id}` : video.id, forceReset);
 			const data = result.data;
 			if (data.resetted) {
 				toast.success('重置成功', {
@@ -636,6 +676,7 @@
 
 			// 让“批量重置”遵循当前筛选（视频源 / 搜索关键词 / 失败筛选 / 分辨率筛选）
 			const filterParams = buildVideosRequest({
+				platform: platformTab,
 				page: 0,
 				pageSize: 1,
 				query: queryWord,
@@ -742,7 +783,7 @@
 		}
 	}
 
-	function handleSourceFilter(sourceType: VideoSourceType, sourceId: string) {
+	function handleSourceFilter(sourceType: VideoSourceType | 'youtube', sourceId: string) {
 		selectedSourceType = sourceType;
 		selectedSourceId = sourceId;
 		const range = getResolutionRange(selectedResolution);
@@ -767,7 +808,8 @@
 		currentSortBy = 'id';
 		currentSortOrder = 'desc';
 		setAll('', 0, null, false, 'id', 'desc', null, null);
-		goto('/videos');
+		const query = ToQuery($appStateStore);
+		goto(query ? `/videos?${query}` : '/videos');
 	}
 
 	function handleSortChange(sortBy: SortBy, sortOrder: SortOrder) {
@@ -878,7 +920,7 @@
 			for (let i = 0; i < selectedVideoIds.length; i++) {
 				const videoId = selectedVideoIds[i];
 				try {
-					const result = await api.deleteVideo(videoId);
+					const result = await api.deleteVideo(platformTab === 'youtube' ? `youtube-${videoId}` : videoId);
 					if (result.data.success) {
 						if (isQueuedDeleteMessage(result.data.message)) {
 							queuedCount++;
@@ -972,13 +1014,20 @@
 	<SectionHeader
 		as="h1"
 		title="视频管理"
-		description="搜索、筛选并批量管理已同步的视频列表。"
+		description="统一查看 B 站和 YouTube 已同步视频；YouTube 媒体同样使用项目统一下载器。"
 		titleClass="text-2xl font-bold"
 		descriptionClass="text-muted-foreground mt-1 text-sm"
 	/>
 
-	<!-- 搜索和筛选栏 -->
-	<div class="flex flex-col gap-4">
+	<Tabs.Root bind:value={platformTab}>
+		<Tabs.List class="grid w-full max-w-md grid-cols-2">
+				<Tabs.Trigger value="bilibili" onclick={() => switchPlatform('bilibili')}>B 站视频</Tabs.Trigger>
+			<Tabs.Trigger value="youtube" onclick={() => switchPlatform('youtube')}>YouTube 视频</Tabs.Trigger>
+		</Tabs.List>
+
+		<div class="mt-6 space-y-6">
+			<!-- 搜索和筛选栏 -->
+			<div class="flex flex-col gap-4">
 		<!-- 搜索栏 -->
 		<div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
 			<div class="w-full sm:max-w-md sm:flex-1">
@@ -1112,10 +1161,10 @@
 				</div>
 			</div>
 		</div>
-	</div>
+			</div>
 
-	<!-- 批量操作工具栏 -->
-	{#if selectionMode}
+			<!-- 批量操作工具栏 -->
+			{#if selectionMode}
 		<div
 			class="space-y-3 rounded-lg border border-blue-200 bg-blue-50/50 p-3 dark:border-blue-800 dark:bg-blue-950/20"
 		>
@@ -1141,10 +1190,10 @@
 				</div>
 			</div>
 		</div>
-	{/if}
+			{/if}
 
-	<!-- 筛选面板 -->
-	{#if showFilters && videoSources}
+			<!-- 筛选面板 -->
+			{#if showFilters && (platformTab === 'youtube' || videoSources)}
 		<div class="space-y-3 rounded-lg border p-3">
 			<div class="flex items-center justify-between">
 				<h3 class="text-sm font-medium">按视频源筛选</h3>
@@ -1154,38 +1203,62 @@
 			</div>
 
 			<div class="space-y-3">
-				{#each Object.entries(VIDEO_SOURCES) as [sourceKey, sourceConfig] (sourceKey)}
-					{@const sources = videoSources[sourceConfig.type as VideoSourceType]}
-					{#if sources && sources.length > 0}
-						<div class="space-y-2">
-							<div class="flex items-center gap-2">
-								<sourceConfig.icon class="text-muted-foreground h-4 w-4" />
-								<span class="text-sm font-medium">{sourceConfig.title}</span>
-								<Badge variant="outline" class="text-xs">{sources.length}</Badge>
-							</div>
-							<div class="flex flex-wrap gap-1">
-								{#each sources as source (source.id)}
-									<Button
-										variant={selectedSourceType === sourceConfig.type &&
-										selectedSourceId === source.id.toString()
-											? 'default'
-											: 'outline'}
-										size="sm"
-										class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
-										onclick={() => handleSourceFilter(sourceConfig.type, source.id.toString())}
-									>
-										{source.name}
-										{#if !source.enabled}
-											<span class="ml-1 text-xs opacity-70">(禁用)</span>
-										{/if}
-									</Button>
-								{/each}
-							</div>
+				{#if platformTab === 'youtube'}
+					<div class="space-y-2">
+						<div class="flex items-center gap-2">
+							<span class="text-sm font-medium">YouTube 视频源</span>
+							<Badge variant="outline" class="text-xs">{youtubeSources.length}</Badge>
 						</div>
-					{/if}
-				{/each}
+						<div class="flex flex-wrap gap-1">
+							{#each youtubeSources as source (source.id)}
+								<Button
+									variant={selectedSourceType === 'youtube' &&
+									selectedSourceId === source.id.toString()
+										? 'default'
+										: 'outline'}
+									size="sm"
+									class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
+									onclick={() => handleSourceFilter('youtube', source.id.toString())}
+								>
+									{source.name}
+									{#if !source.enabled}<span class="ml-1 text-xs opacity-70">(禁用)</span>{/if}
+								</Button>
+							{/each}
+						</div>
+					</div>
+				{:else if videoSources}
+					{#each Object.entries(VIDEO_SOURCES) as [sourceKey, sourceConfig] (sourceKey)}
+						{@const sources = videoSources[sourceConfig.type as VideoSourceType]}
+						{#if sources && sources.length > 0}
+							<div class="space-y-2">
+								<div class="flex items-center gap-2">
+									<sourceConfig.icon class="text-muted-foreground h-4 w-4" />
+									<span class="text-sm font-medium">{sourceConfig.title}</span>
+									<Badge variant="outline" class="text-xs">{sources.length}</Badge>
+								</div>
+								<div class="flex flex-wrap gap-1">
+									{#each sources as source (source.id)}
+										<Button
+											variant={selectedSourceType === sourceConfig.type &&
+											selectedSourceId === source.id.toString()
+												? 'default'
+												: 'outline'}
+											size="sm"
+											class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
+											onclick={() => handleSourceFilter(sourceConfig.type, source.id.toString())}
+										>
+											{source.name}
+											{#if !source.enabled}<span class="ml-1 text-xs opacity-70">(禁用)</span>{/if}
+										</Button>
+									{/each}
+								</div>
+							</div>
+						{/if}
+					{/each}
+				{/if}
 			</div>
 
+			{#if platformTab === 'bilibili'}
 			<div class="border-t pt-3">
 				<div class="flex items-center gap-2">
 					<span class="text-sm font-medium">按分辨率筛选</span>
@@ -1199,15 +1272,26 @@
 					/>
 				</div>
 			</div>
+			{/if}
 		</div>
-	{/if}
+			{/if}
 
-	<!-- 当前筛选状态 -->
-	{#if (selectedSourceType && selectedSourceId && videoSources) || showFailedOnly || selectedResolution}
+			<!-- 当前筛选状态 -->
+			{#if (selectedSourceType && selectedSourceId) || showFailedOnly || selectedResolution}
 		<div class="flex flex-wrap items-center gap-2">
 			<span class="text-muted-foreground text-sm">当前筛选:</span>
 
-			{#if selectedSourceType && selectedSourceId && videoSources}
+			{#if selectedSourceType === 'youtube' && selectedSourceId}
+				{@const currentSource = youtubeSources.find((s) => s.id.toString() === selectedSourceId)}
+				{#if currentSource}
+					<Badge variant="secondary" class="flex items-center gap-1">
+						YouTube · {currentSource.name}
+						<button onclick={clearFilters} class="hover:bg-muted-foreground/20 ml-1 rounded">
+							<span class="sr-only">清除筛选</span>×
+						</button>
+					</Badge>
+				{/if}
+			{:else if selectedSourceType && selectedSourceId && videoSources}
 				{@const sourceConfig = Object.values(VIDEO_SOURCES).find(
 					(config) => config.type === selectedSourceType
 				)}
@@ -1260,10 +1344,10 @@
 				<Button variant="ghost" size="sm" onclick={clearFilters}>清除所有筛选</Button>
 			{/if}
 		</div>
-	{/if}
+			{/if}
 
-	<!-- 视频列表统计 -->
-	{#if videosData}
+			<!-- 视频列表统计 -->
+			{#if videosData}
 		<div class="text-muted-foreground flex items-center justify-between text-sm">
 			<span title="显示当前筛选结果总数和所在分页">
 				共 {videosData.total_count} 个视频，当前第 {$appStateStore.currentPage + 1} / {totalPages} 页
@@ -1313,10 +1397,10 @@
 				</Button>
 			</div>
 		{/if}
-	{/if}
+			{/if}
 
-	<!-- 视频卡片网格 -->
-	{#if loading}
+			<!-- 视频卡片网格 -->
+			{#if loading}
 		<Loading size="lg" />
 	{:else if videosData?.videos.length}
 		<div
@@ -1326,6 +1410,8 @@
 			{#each videosData.videos as video (video.id)}
 				<VideoCard
 					{video}
+					resourceId={platformTab === 'youtube' ? `youtube-${video.id}` : video.id}
+					detailHref={platformTab === 'youtube' ? `/video/youtube-${video.id}` : `/video/${video.id}`}
 					{selectionMode}
 					selected={selectedVideos.has(video.id)}
 					onSelectionChange={handleVideoSelection}
@@ -1346,7 +1432,9 @@
 		{/if}
 	{:else}
 		<EmptyState title="暂无视频数据" description="尝试调整搜索条件或添加视频源" class="py-16" />
-	{/if}
+			{/if}
+		</div>
+	</Tabs.Root>
 </div>
 
 <!-- 批量重置确认对话框 -->
