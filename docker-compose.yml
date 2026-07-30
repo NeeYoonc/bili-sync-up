@@ -13,10 +13,10 @@ services:
     # 如需指定下载文件所有者，请在 environment 中设置 PUID/PGID。
     hostname: bili-sync
     container_name: bili-sync
-    # 12345 为 bili-sync；3001 为同容器内的 YouTube Chromium 登录桌面。
+    # 12345 为 bili-sync；外部 3001 映射到容器内 HTTP 登录桌面 3000。
     ports:
       - 12345:12345
-      - "${YOUTUBE_LOGIN_BIND:-0.0.0.0}:${YOUTUBE_LOGIN_PORT:-3001}:3001"
+      - "${YOUTUBE_LOGIN_BIND:-0.0.0.0}:${YOUTUBE_LOGIN_PORT:-3001}:3000"
     shm_size: "1gb"
     volumes:
       - ./config:/app/.config/bili-sync
@@ -29,7 +29,7 @@ services:
       - RUST_LOG=None,bili_sync=info
       # - PUID=1000
       # - PGID=1000
-      # 登录桌面使用 HTTPS Basic Auth；NAS 部署请在 .env 中修改密码。
+      # 登录桌面使用 HTTP Basic Auth；NAS 部署请在 .env 中修改密码。
       - CUSTOM_USER=${YOUTUBE_LOGIN_USER:-bili-sync}
       - PASSWORD=${YOUTUBE_LOGIN_PASSWORD:-bili-sync}
       - BILI_SYNC_YOUTUBE_LOGIN_BROWSER_URL=http://127.0.0.1:9222

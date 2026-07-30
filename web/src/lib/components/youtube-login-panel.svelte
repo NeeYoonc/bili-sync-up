@@ -70,7 +70,7 @@
 			return configured;
 		}
 		const port = status?.container_browser_port ?? 3001;
-		return `https://${window.location.hostname}:${port}`;
+		return `http://${window.location.hostname}:${port}`;
 	}
 
 	async function completeLogin() {

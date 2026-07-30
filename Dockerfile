@@ -18,7 +18,7 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
     echo -n "$BILI_SYNC_RELEASE_CHANNEL" > /app/release-channel.txt && \
     chmod +x /app/bili-sync-rs
 
-# Chromium、图形桌面和 HTTPS 登录入口与 bili-sync 放在同一个容器中。
+# Chromium、图形桌面和登录入口与 bili-sync 放在同一个容器中。
 # 用户只需要启动一个容器；Chromium 资料与 bili-sync 配置分别持久化。
 FROM lscr.io/linuxserver/chromium:latest
 
@@ -60,6 +60,6 @@ ENTRYPOINT [ "/entrypoint" ]
 
 HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 CMD [ "/healthcheck" ]
 
-EXPOSE 12345 3001
+EXPOSE 12345 3000
 
 VOLUME [ "/app/.config/bili-sync", "/config" ]

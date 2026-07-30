@@ -10,12 +10,12 @@ curl --fail --silent --show-error --max-time 5 \
     http://127.0.0.1:9222/json/version |
     grep --quiet '"Browser"'
 
-# 登录桌面启用了 HTTPS 和 Basic Auth。这里允许 401，只检查 TLS 服务确实
+# 登录桌面启用了 Basic Auth。这里允许 401，只检查 HTTP 服务确实
 # 已经开始响应；实际凭据访问由 Docker 构建工作流另行验证。
 status="$(
-    curl --insecure --silent --show-error --max-time 5 \
+    curl --silent --show-error --max-time 5 \
         --output /dev/null --write-out '%{http_code}' \
-        https://127.0.0.1:3001/
+        http://127.0.0.1:3000/
 )"
 
 [[ "$status" != "000" ]]

@@ -13,7 +13,7 @@
 docker run -d \
   --name bili-sync \
   -p 12345:12345 \
-  -p 3001:3001 \
+  -p 3001:3000 \
   -v /path/to/data:/app/.config/bili-sync \
   -v /path/to/youtube-browser:/config \
   -v /path/to/videos:/app/videos \
@@ -39,10 +39,10 @@ services:
     # 需要指定下载文件所有者时在 environment 中设置 PUID/PGID。
     hostname: bili-sync
     container_name: bili-sync
-    # 12345 为主程序；3001 为同一容器内的 YouTube 登录页面。
+    # 12345 为主程序；外部 3001 映射到容器内 HTTP 登录页面 3000。
     ports:
       - 12345:12345
-      - 3001:3001
+      - 3001:3000
     shm_size: "1gb"
     volumes:
       - /volume1/Cloudreve/OD/20/config:/app/.config/bili-sync

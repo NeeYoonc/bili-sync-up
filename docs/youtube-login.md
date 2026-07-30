@@ -38,7 +38,7 @@ Chromium 登录资料保存在：
 Compose 默认发布：
 
 ```text
-https://Docker主机地址:3001
+http://Docker主机地址:3001
 ```
 
 登录页面使用 HTTP Basic Auth，默认账号和密码均为 `bili-sync`。在 Compose 文件
@@ -53,7 +53,8 @@ YOUTUBE_LOGIN_PASSWORD=change-to-a-strong-password
 # YOUTUBE_LOGIN_PUBLIC_URL=https://nas.example.com:3001
 ```
 
-Chromium 使用自签名 HTTPS 时，首次打开需要在浏览器中确认继续访问。
+默认登录入口使用 HTTP，避免自签名证书导致 Chromium 阻止访问。需要 HTTPS 时，
+通过反向代理配置有效证书，并将完整地址写入 `YOUTUBE_LOGIN_PUBLIC_URL`。
 
 ## 为什么不复刻 Google 密码登录请求
 
