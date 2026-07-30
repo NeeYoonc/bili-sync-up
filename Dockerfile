@@ -37,6 +37,7 @@ WORKDIR /app
 ENV LANG=zh_CN.UTF-8 \
     TZ=Asia/Shanghai \
     HOME=/app \
+    BILI_SYNC_CONTAINER=1 \
     RUST_BACKTRACE=1 \
     RUST_LOG=None,bili_sync=info
 

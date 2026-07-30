@@ -52,6 +52,12 @@ impl<T: Serialize> IntoResponse for ApiResponse<T> {
 #[derive(Debug)]
 pub struct ApiError(Error);
 
+impl ApiError {
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self(InnerApiError::BadRequest(message.into()).into())
+    }
+}
+
 impl<E> From<E> for ApiError
 where
     E: Into<anyhow::Error>,

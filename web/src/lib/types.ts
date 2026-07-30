@@ -82,6 +82,11 @@ export interface YouTubeStatusResponse {
 	ytdlp_version?: string | null;
 	logged_in: boolean;
 	default_output_path: string;
+	container_runtime: boolean;
+	browser_login_available: boolean;
+	available_browsers: YouTubeBrowser[];
+	browser_login_message: string;
+	cookie_path: string;
 }
 
 export interface YouTubeSearchRequest {

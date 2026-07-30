@@ -243,6 +243,11 @@ pub struct YouTubeStatusResponse {
     pub ytdlp_version: Option<String>,
     pub logged_in: bool,
     pub default_output_path: String,
+    pub container_runtime: bool,
+    pub browser_login_available: bool,
+    pub available_browsers: Vec<String>,
+    pub browser_login_message: String,
+    pub cookie_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -256,11 +261,29 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
     // 自动下载当前系统对应的官方可执行文件。
     let _ = ensure_ytdlp_available().await;
     let version = ytdlp_version().await;
+    let container_runtime = is_container_runtime();
+    let available_browsers = available_login_browsers();
+    let graphical_session = graphical_session_available();
+    let browser_login_available = !container_runtime && graphical_session && !available_browsers.is_empty();
+    let browser_login_message = if container_runtime {
+        "Docker 容器无法打开宿主机浏览器。请在当前电脑已登录 YouTube 的浏览器中导出 Netscape cookies.txt，再在此页面上传。"
+    } else if !graphical_session {
+        "当前服务端没有图形桌面，无法打开登录窗口。请从客户端浏览器导出 Netscape cookies.txt 后上传。"
+    } else if available_browsers.is_empty() {
+        "服务端未检测到可用浏览器。请安装浏览器，或导入 Netscape cookies.txt。"
+    } else {
+        "可打开服务端本机浏览器完成 YouTube 登录。"
+    };
     Ok(ApiResponse::ok(YouTubeStatusResponse {
         ytdlp_available: version.is_some(),
         ytdlp_version: version,
         logged_in: has_youtube_session(&cookie_path()),
         default_output_path: default_output_path().display().to_string(),
+        container_runtime,
+        browser_login_available,
+        available_browsers: available_browsers.into_iter().map(str::to_string).collect(),
+        browser_login_message: browser_login_message.to_string(),
+        cookie_path: cookie_path().display().to_string(),
     }))
 }
 
@@ -548,6 +571,7 @@ pub async fn get_youtube_source_videos(
 pub async fn import_youtube_login(
     Json(request): Json<YouTubeLoginRequest>,
 ) -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
+    ensure_browser_login_runtime()?;
     let browser = normalize_browser(&request.browser)?;
     ensure_ytdlp_available().await?;
     let cookie_file = cookie_path();
@@ -591,7 +615,13 @@ pub async fn import_youtube_login(
 pub async fn start_interactive_youtube_login(
     Json(request): Json<YouTubeLoginRequest>,
 ) -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
+    ensure_browser_login_runtime()?;
     let browser = normalize_browser(&request.browser)?;
+    if browser == "firefox" {
+        return Err(ApiError::bad_request(
+            "专用登录窗口需要 Chromium 调试协议，请改用 Edge、Chrome、Brave、Chromium，或导入 cookies.txt",
+        ));
+    }
     let executable = browser_executable(browser)?;
     let profile = interactive_login_profile(browser);
     tokio::fs::create_dir_all(&profile).await?;
@@ -612,6 +642,7 @@ pub async fn start_interactive_youtube_login(
 }
 
 pub async fn complete_interactive_youtube_login() -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
+    ensure_browser_login_runtime()?;
     ensure_ytdlp_available().await?;
     let endpoint = format!("http://127.0.0.1:{YOUTUBE_LOGIN_DEBUG_PORT}/json/version");
     let version: serde_json::Value = reqwest::Client::new()
@@ -3538,35 +3569,111 @@ fn interactive_login_profile(browser: &str) -> PathBuf {
     CONFIG_DIR.join("youtube-login-browser").join(browser)
 }
 
-fn browser_executable(browser: &str) -> Result<PathBuf> {
-    let candidates: Vec<PathBuf> = match browser {
-        "edge" => vec![
-            PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-            PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-            std::env::var_os("LOCALAPPDATA")
-                .map(|root| PathBuf::from(root).join(r"Microsoft\Edge\Application\msedge.exe"))
-                .unwrap_or_default(),
-        ],
-        "chrome" => vec![
-            PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-            PathBuf::from(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-            std::env::var_os("LOCALAPPDATA")
-                .map(|root| PathBuf::from(root).join(r"Google\Chrome\Application\chrome.exe"))
-                .unwrap_or_default(),
-        ],
-        "brave" => vec![
-            PathBuf::from(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
-            std::env::var_os("LOCALAPPDATA")
-                .map(|root| PathBuf::from(root).join(r"BraveSoftware\Brave-Browser\Application\brave.exe"))
-                .unwrap_or_default(),
-        ],
-        "firefox" => vec![PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe")],
-        "chromium" => vec![PathBuf::from("chromium")],
-        _ => Vec::new(),
-    };
-    candidates
+fn is_container_runtime() -> bool {
+    std::env::var("BILI_SYNC_CONTAINER")
+        .ok()
+        .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        || Path::new("/.dockerenv").exists()
+}
+
+fn graphical_session_available() -> bool {
+    if cfg!(target_os = "linux") {
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    } else {
+        true
+    }
+}
+
+fn ensure_browser_login_runtime() -> std::result::Result<(), ApiError> {
+    if is_container_runtime() {
+        return Err(ApiError::bad_request(
+            "Docker 容器不能打开宿主机浏览器；请在当前电脑浏览器中导出 Netscape cookies.txt，然后使用“导入 cookies.txt”上传"
+        ));
+    }
+    if !graphical_session_available() {
+        return Err(ApiError::bad_request(
+            "当前服务端没有图形桌面，不能打开登录窗口；请导出 Netscape cookies.txt 后上传",
+        ));
+    }
+    Ok(())
+}
+
+fn executable_on_path(names: &[&str]) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        for name in names {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn available_login_browsers() -> Vec<&'static str> {
+    ["edge", "chrome", "brave", "chromium"]
         .into_iter()
-        .find(|path| path.is_file() || path == &PathBuf::from("chromium"))
+        .filter(|browser| browser_executable(browser).is_ok())
+        .collect()
+}
+
+fn browser_executable(browser: &str) -> Result<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if cfg!(target_os = "windows") {
+        candidates = match browser {
+            "edge" => vec![
+                PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+                PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|root| PathBuf::from(root).join(r"Microsoft\Edge\Application\msedge.exe"))
+                    .unwrap_or_default(),
+            ],
+            "chrome" => vec![
+                PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+                PathBuf::from(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|root| PathBuf::from(root).join(r"Google\Chrome\Application\chrome.exe"))
+                    .unwrap_or_default(),
+            ],
+            "brave" => vec![
+                PathBuf::from(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|root| PathBuf::from(root).join(r"BraveSoftware\Brave-Browser\Application\brave.exe"))
+                    .unwrap_or_default(),
+            ],
+            "firefox" => vec![PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe")],
+            "chromium" => Vec::new(),
+            _ => Vec::new(),
+        };
+    } else if cfg!(target_os = "macos") {
+        candidates = match browser {
+            "edge" => vec![PathBuf::from(
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            )],
+            "chrome" => vec![PathBuf::from(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            )],
+            "brave" => vec![PathBuf::from(
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            )],
+            "firefox" => vec![PathBuf::from("/Applications/Firefox.app/Contents/MacOS/firefox")],
+            "chromium" => vec![PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium")],
+            _ => Vec::new(),
+        };
+    }
+    if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+        return Ok(path);
+    }
+    let executable_names: &[&str] = match browser {
+        "edge" => &["microsoft-edge", "microsoft-edge-stable"],
+        "chrome" => &["google-chrome", "google-chrome-stable"],
+        "brave" => &["brave-browser", "brave"],
+        "firefox" => &["firefox"],
+        "chromium" => &["chromium", "chromium-browser"],
+        _ => &[],
+    };
+    executable_on_path(executable_names)
         .ok_or_else(|| anyhow!("未找到 {} 浏览器，请改用 Edge、Chrome 或导入 cookies.txt", browser))
 }
 
