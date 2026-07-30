@@ -561,12 +561,7 @@
 											</div>
 										</div>
 									{:else}
-										<div class="mt-4 space-y-3">
-											<div class="flex items-center justify-end">
-												<Badge variant="outline">
-													{dashboardData.enabled_youtube_sources} / {dashboardData.total_youtube_sources}
-												</Badge>
-											</div>
+										<div class="mt-4">
 											<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
 												<div class="flex items-center justify-between">
 													<div class="flex items-center gap-2">
