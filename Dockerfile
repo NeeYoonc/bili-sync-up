@@ -25,6 +25,7 @@ FROM lscr.io/linuxserver/chromium:latest
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         ffmpeg \
         tzdata && \
     apt-get autoclean && \
@@ -50,10 +51,13 @@ COPY --from=unpack /app/image-built-at.txt /app/image-built-at.txt
 COPY --from=unpack /app/release-channel.txt /app/release-channel.txt
 COPY docker/bili-sync-service /custom-services.d/bili-sync
 COPY docker/entrypoint /entrypoint
+COPY docker/healthcheck /healthcheck
 
-RUN chmod +x /app/bili-sync-rs /custom-services.d/bili-sync /entrypoint
+RUN chmod +x /app/bili-sync-rs /custom-services.d/bili-sync /entrypoint /healthcheck
 
 ENTRYPOINT [ "/entrypoint" ]
+
+HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 CMD [ "/healthcheck" ]
 
 EXPOSE 12345 3001
 
