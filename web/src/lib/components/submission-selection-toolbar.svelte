@@ -10,6 +10,7 @@
 	export let compact = false;
 	export let selectedCount = 0;
 	export let totalCount = 0;
+	export let itemLabel = '视频';
 	export let onSelectAll: (() => void) | undefined = undefined;
 	export let onSelectNone: (() => void) | undefined = undefined;
 	export let onInvert: (() => void) | undefined = undefined;
@@ -89,6 +90,6 @@
 			>
 		</div>
 
-		<div class={summaryClass}>已选择 {selectedCount} / {totalCount} 个视频</div>
+		<div class={summaryClass}>已选择 {selectedCount} / {totalCount} 个{itemLabel}</div>
 	</div>
 </div>

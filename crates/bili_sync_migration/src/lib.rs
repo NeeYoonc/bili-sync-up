@@ -73,6 +73,7 @@ mod m20260729_000001_create_youtube_sources;
 mod m20260729_000002_align_youtube_download_lifecycle;
 mod m20260729_000003_integrate_youtube_source_options;
 mod m20260730_000001_add_youtube_selected_videos;
+mod m20260730_000002_add_youtube_source_selection_state;
 
 pub struct Migrator;
 
@@ -153,6 +154,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260729_000002_align_youtube_download_lifecycle::Migration),
             Box::new(m20260729_000003_integrate_youtube_source_options::Migration),
             Box::new(m20260730_000001_add_youtube_selected_videos::Migration),
+            Box::new(m20260730_000002_add_youtube_source_selection_state::Migration),
         ]
     }
 }

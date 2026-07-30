@@ -101,7 +101,8 @@ pub struct YouTubeSearchResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct YouTubeSourceVideosRequest {
-    pub url: String,
+    #[serde(default)]
+    pub url: Option<String>,
     pub source_type: String,
     pub page: Option<i32>,
     pub page_size: Option<i32>,
@@ -137,6 +138,8 @@ pub struct CreateYouTubeSourceRequest {
     pub published_before: Option<String>,
     #[serde(default)]
     pub selected_videos: Vec<String>,
+    #[serde(default)]
+    pub selected_channels: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +213,7 @@ pub struct YouTubeSourceResponse {
     pub published_after: Option<String>,
     pub published_before: Option<String>,
     pub selected_videos: Vec<String>,
+    pub selected_channels: Vec<String>,
     pub last_scan_at: Option<String>,
     pub pending_count: u64,
     pub completed_count: u64,
@@ -391,20 +395,19 @@ pub async fn search_youtube(
     }))
 }
 
-/// 枚举频道/播放列表中的视频。响应直接复用 B 站投稿选择面板的数据结构，
-/// 让添加 YouTube 来源与现有“投稿”流程共用同一套列表、搜索和选择 UI。
+/// 枚举频道、播放列表、喜欢视频或已订阅频道。响应直接复用 B 站投稿
+/// 选择面板的数据结构，让添加 YouTube 来源继续共用项目原有选择 UI。
 pub async fn get_youtube_source_videos(
     Query(request): Query<YouTubeSourceVideosRequest>,
 ) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
     ensure_ytdlp_available().await?;
     let source_type = request.source_type.trim().to_ascii_lowercase();
-    if !matches!(source_type.as_str(), "channel" | "playlist") {
-        return Err(ApiError::from(anyhow!("仅频道和播放列表支持历史视频选择")));
+    if !matches!(source_type.as_str(), "subscriptions" | "channel" | "playlist" | "liked") {
+        return Err(ApiError::from(anyhow!(
+            "仅订阅动态、频道、播放列表和喜欢的视频支持内容选择"
+        )));
     }
-    let raw_url = request.url.trim();
-    if raw_url.is_empty() || !is_youtube_url(raw_url) {
-        return Err(ApiError::from(anyhow!("请输入有效的 YouTube 频道或播放列表链接")));
-    }
+    let raw_url = request.url.as_deref().unwrap_or("").trim();
     let page = request.page.unwrap_or(1).max(1);
     let page_size = request.page_size.unwrap_or(100).clamp(1, 200);
     let keyword = request
@@ -413,10 +416,20 @@ pub async fn get_youtube_source_videos(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
-    let source_url = if source_type == "channel" {
-        canonical_channel_url(raw_url)
-    } else {
-        raw_url.to_string()
+    let source_url = match source_type.as_str() {
+        "subscriptions" => "https://www.youtube.com/feed/channels".to_string(),
+        "liked" => LIKED_URL.to_string(),
+        "channel" | "playlist" => {
+            if raw_url.is_empty() || !is_youtube_url(raw_url) {
+                return Err(ApiError::from(anyhow!("请输入有效的 YouTube 频道或播放列表链接")));
+            }
+            if source_type == "channel" {
+                canonical_channel_url(raw_url)
+            } else {
+                raw_url.to_string()
+            }
+        }
+        _ => unreachable!(),
     };
 
     // 多取一条用于判断是否还有下一页。普通频道通常一次即可返回完整列表；
@@ -484,8 +497,12 @@ pub async fn get_youtube_source_videos(
                     .and_then(|thumbnail| thumbnail.get("url"))
                     .and_then(|value| value.as_str())
             })
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or("");
+        let cover = if cover.starts_with("//") {
+            format!("https:{cover}")
+        } else {
+            cover.to_string()
+        };
         let duration = item
             .get("duration")
             .and_then(|value| value.as_f64())
@@ -493,6 +510,8 @@ pub async fn get_youtube_source_videos(
             .unwrap_or_default();
         let view = item
             .get("view_count")
+            .or_else(|| item.get("channel_follower_count"))
+            .or_else(|| item.get("playlist_count"))
             .and_then(|value| value.as_i64())
             .and_then(|value| i32::try_from(value).ok())
             .unwrap_or_default();
@@ -759,6 +778,10 @@ pub async fn create_youtube_source(
         selected_videos: Set((!request.selected_videos.is_empty())
             .then(|| serde_json::to_string(&request.selected_videos))
             .transpose()?),
+        selected_channels: Set((!request.selected_channels.is_empty())
+            .then(|| serde_json::to_string(&request.selected_channels))
+            .transpose()?),
+        known_video_ids: Set(None),
         last_scan_at: Set(None),
         created_at: Set(now_standard_string()),
         ..Default::default()
@@ -1497,6 +1520,17 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         .as_deref()
         .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
         .unwrap_or_default();
+    let selected_channels = source
+        .selected_channels
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
+        .unwrap_or_default();
+    let known_video_ids = source
+        .known_video_ids
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
+        .unwrap_or_default();
+    let mut scanned_video_ids = HashSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(item) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -1504,11 +1538,24 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         let Some(youtube_id) = item.get("id").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) else {
             continue;
         };
+        scanned_video_ids.insert(youtube_id.to_string());
+        if source.source_type == "subscriptions"
+            && !selected_channels.is_empty()
+            && item
+                .get("channel_id")
+                .or_else(|| item.get("uploader_id"))
+                .and_then(|value| value.as_str())
+                .is_none_or(|channel_id| !selected_channels.contains(channel_id))
+        {
+            continue;
+        }
         // 与 B 站投稿源一致：创建来源时只回补勾选的历史视频；以后仅自动加入
-        // 来源创建后发布的新视频，未勾选的旧视频不会在下一轮扫描中“补回来”。
+        // 来源创建后新发布或新加入列表的视频。known_video_ids 用来识别“刚刚
+        // 点赞了一个旧视频”这类发布时间早、但列表成员关系刚发生变化的情况。
         if !selected_history.is_empty()
             && !selected_history.contains(youtube_id)
-            && !youtube_item_is_newer_than_source(&item, &source.created_at)
+            && (known_video_ids.contains(youtube_id)
+                || (known_video_ids.is_empty() && !youtube_item_is_newer_than_source(&item, &source.created_at)))
         {
             continue;
         }
@@ -1599,6 +1646,12 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         added += 1;
     }
     let mut active: youtube_source::ActiveModel = source.clone().into();
+    known_video_ids.into_iter().for_each(|youtube_id| {
+        scanned_video_ids.insert(youtube_id);
+    });
+    active.known_video_ids = Set((!scanned_video_ids.is_empty())
+        .then(|| serde_json::to_string(&scanned_video_ids))
+        .transpose()?);
     active.last_scan_at = Set(Some(now_standard_string()));
     active.update(db).await?;
     notify_video_sources_changed();
@@ -2925,6 +2978,11 @@ async fn source_response(db: &DatabaseConnection, source: youtube_source::Model)
         published_before: source.published_before,
         selected_videos: source
             .selected_videos
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok())
+            .unwrap_or_default(),
+        selected_channels: source
+            .selected_channels
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok())
             .unwrap_or_default(),

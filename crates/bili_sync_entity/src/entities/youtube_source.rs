@@ -27,6 +27,8 @@ pub struct Model {
     pub published_after: Option<String>,
     pub published_before: Option<String>,
     pub selected_videos: Option<String>,
+    pub selected_channels: Option<String>,
+    pub known_video_ids: Option<String>,
     pub last_scan_at: Option<String>,
     pub created_at: String,
 }

@@ -341,7 +341,7 @@
 	function handleYouTubeSourceTypeChange(nextValue: unknown) {
 		youtubeSourceType = String(nextValue ?? 'subscriptions') as YouTubeSourceType;
 		youtubeUrl = '';
-		showSubmissionSelection = false;
+		selectedVideos = [];
 		resetSubmissionState();
 		clearSearchPanel({ clearKeyword: true });
 		name =
@@ -353,6 +353,8 @@
 						? '稍后再看'
 						: '';
 		applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
+		showSubmissionSelection =
+			youtubeSourceType === 'subscriptions' || youtubeSourceType === 'liked';
 	}
 
 	function getYouTubeQuickSubscriptionType(type: YouTubeSourceType): VideoCategory {
@@ -1044,6 +1046,13 @@
 				toast.error('未检测到 yt-dlp', { description: '请先在设置页检查 YouTube 登录状态' });
 				return;
 			}
+			if (youtubeSourceType === 'subscriptions' && selectedVideos.length === 0) {
+				toast.error('请选择订阅频道', {
+					description: '请在右侧勾选至少一个要同步的已订阅频道'
+				});
+				showSubmissionSelection = true;
+				return;
+			}
 
 			const result = await runRequest(
 				() =>
@@ -1069,7 +1078,10 @@
 						max_duration_seconds: parsedMaxDuration,
 						published_after: publishedAfter || undefined,
 						published_before: publishedBefore || undefined,
-						selected_videos: selectedVideos
+						selected_videos:
+							youtubeSourceType === 'subscriptions' ? [] : selectedVideos,
+						selected_channels:
+							youtubeSourceType === 'subscriptions' ? selectedVideos : []
 					}),
 				{
 					setLoading: (value) => (loading = value),
@@ -2117,12 +2129,38 @@
 	function isYouTubeHistorySource(): boolean {
 		return (
 			sourcePlatform === 'youtube' &&
-			(youtubeSourceType === 'channel' || youtubeSourceType === 'playlist')
+			(youtubeSourceType === 'subscriptions' ||
+				youtubeSourceType === 'channel' ||
+				youtubeSourceType === 'playlist' ||
+				youtubeSourceType === 'liked')
 		);
 	}
 
+	function isYouTubeChannelSelection(): boolean {
+		return sourcePlatform === 'youtube' && youtubeSourceType === 'subscriptions';
+	}
+
+	$: youtubeChannelSelection =
+		sourcePlatform === 'youtube' && youtubeSourceType === 'subscriptions';
+	$: youtubeSelectionNounLabel = youtubeChannelSelection ? '频道' : '视频';
+	$: youtubeSelectionTitleLabel = youtubeChannelSelection
+		? '选择订阅频道'
+		: youtubeSourceType === 'liked'
+			? '选择喜欢的视频'
+			: '选择历史视频';
+	$: youtubeSelectionDescriptionText = youtubeChannelSelection
+		? '仅同步勾选频道以后发布的视频。'
+		: youtubeSourceType === 'liked'
+			? '首次仅下载勾选的历史视频，之后新加入“喜欢”的视频会自动同步。'
+			: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。';
+
 	function openYouTubeHistorySelection() {
-		if (!isYouTubeHistorySource() || !youtubeUrl.trim()) return;
+		if (
+			!isYouTubeHistorySource() ||
+			((youtubeSourceType === 'channel' || youtubeSourceType === 'playlist') &&
+				!youtubeUrl.trim())
+		)
+			return;
 		showSubmissionSelection = true;
 	}
 
@@ -2164,8 +2202,12 @@
 			() =>
 				isYouTubeHistorySource()
 					? api.getYouTubeSourceVideos({
-							url: youtubeUrl.trim(),
-							source_type: youtubeSourceType as 'channel' | 'playlist',
+							url: youtubeUrl.trim() || undefined,
+							source_type: youtubeSourceType as
+								| 'subscriptions'
+								| 'channel'
+								| 'playlist'
+								| 'liked',
 							page: 1,
 							page_size: 100,
 							keyword: submissionSearchQuery.trim()
@@ -2203,7 +2245,12 @@
 
 	// 加载UP主投稿列表（分页加载，初始100个）
 	async function loadSubmissionVideos() {
-		if ((!sourceId && !isYouTubeHistorySource()) || (isYouTubeHistorySource() && !youtubeUrl.trim()))
+		if (
+			(!sourceId && !isYouTubeHistorySource()) ||
+			(isYouTubeHistorySource() &&
+				(youtubeSourceType === 'channel' || youtubeSourceType === 'playlist') &&
+				!youtubeUrl.trim())
+		)
 			return;
 
 		submissionError = null;
@@ -2254,8 +2301,12 @@
 
 			const response = isYouTubeHistorySource()
 				? await api.getYouTubeSourceVideos({
-						url: youtubeUrl.trim(),
-						source_type: youtubeSourceType as 'channel' | 'playlist',
+						url: youtubeUrl.trim() || undefined,
+						source_type: youtubeSourceType as
+							| 'subscriptions'
+							| 'channel'
+							| 'playlist'
+							| 'liked',
 						page,
 						page_size: pageSize
 					})
@@ -2371,13 +2422,29 @@
 	function confirmSubmissionSelection() {
 		selectedVideos = Array.from(selectedSubmissionVideos);
 		showSubmissionSelection = false;
+		if (sourcePlatform === 'bilibili') {
+			if (selectedVideos.length > 0) {
+				toast.success('已选择投稿', {
+					description: `选择了 ${selectedVideos.length} 个历史投稿，新投稿将自动下载`
+				});
+			} else {
+				toast.info('未选择投稿', {
+					description: '将下载所有历史投稿和新投稿'
+				});
+			}
+			return;
+		}
 		if (selectedVideos.length > 0) {
-			toast.success('已选择投稿', {
-				description: `选择了 ${selectedVideos.length} 个历史投稿，新投稿将自动下载`
+			toast.success(isYouTubeChannelSelection() ? '已选择频道' : '已选择视频', {
+				description: isYouTubeChannelSelection()
+					? `选择了 ${selectedVideos.length} 个订阅频道`
+					: `选择了 ${selectedVideos.length} 个历史视频，新增视频将自动下载`
 			});
 		} else {
-			toast.info('未选择投稿', {
-				description: '将下载所有历史投稿和新投稿'
+			toast.info(isYouTubeChannelSelection() ? '未选择频道' : '未选择视频', {
+				description: isYouTubeChannelSelection()
+					? '订阅动态源至少需要选择一个频道'
+					: '将下载所有历史视频和新增视频'
 			});
 		}
 	}
@@ -2392,7 +2459,10 @@
 	$: if (
 		showSubmissionSelection &&
 		((sourcePlatform === 'bilibili' && sourceId && sourceType === 'submission') ||
-			(isYouTubeHistorySource() && youtubeUrl.trim()))
+			(isYouTubeHistorySource() &&
+				(youtubeSourceType === 'subscriptions' ||
+					youtubeSourceType === 'liked' ||
+					youtubeUrl.trim())))
 	) {
 		resetSubmissionState();
 		loadSubmissionVideos();
@@ -5270,7 +5340,7 @@
 					</div>
 				{/if}
 
-				<!-- B站投稿与 YouTube 频道/播放列表共用同一套历史视频选择面板 -->
+				<!-- B站投稿与 YouTube 内容选择共用同一套选择面板 -->
 				{#if ((sourcePlatform === 'bilibili' && sourceType === 'submission') || isYouTubeHistorySource()) && showSubmissionSelection}
 					<div
 						class={isCompactLayout ? 'w-full' : 'flex-1'}
@@ -5286,12 +5356,14 @@
 								<div>
 									<div class="flex items-center gap-2">
 										<span class="text-base font-medium text-blue-800 dark:text-blue-200"
-											>📹 {isYouTubeHistorySource() ? '选择历史视频' : '选择历史投稿'}</span
+											>📹 {isYouTubeHistorySource()
+												? youtubeSelectionTitleLabel
+												: '选择历史投稿'}</span
 										>
 										<span class="text-xs text-blue-600 dark:text-blue-400"
-											>选择您希望下载的历史{isYouTubeHistorySource()
-												? '视频'
-												: '投稿'}。未选择的视频不会下载和显示。新发布的视频会自动下载。</span
+											>{isYouTubeHistorySource()
+												? youtubeSelectionDescriptionText
+												: '选择您希望下载的历史投稿。未选择的视频不会下载和显示。新发布的视频会自动下载。'}</span
 										>
 									</div>
 									<span
@@ -5302,9 +5374,11 @@
 										{#if submissionLoading && submissionVideos.length === 0}
 											正在加载...
 										{:else if submissionTotalCount > 0}
-											共 {submissionTotalCount} 个{isYouTubeHistorySource() ? '视频' : '投稿'}
+											共 {submissionTotalCount} 个{isYouTubeHistorySource()
+												? youtubeSelectionNounLabel
+												: '投稿'}
 										{:else}
-											暂无{isYouTubeHistorySource() ? '视频' : '投稿'}
+											暂无{isYouTubeHistorySource() ? youtubeSelectionNounLabel : '投稿'}
 										{/if}
 									</span>
 								</div>
@@ -5350,14 +5424,19 @@
 								<SubmissionSelectionToolbar
 									bind:query={submissionSearchQuery}
 									placeholder={isYouTubeHistorySource()
-										? '搜索当前 YouTube 来源的视频标题...'
+										? youtubeChannelSelection
+											? '搜索已订阅频道...'
+											: youtubeSourceType === 'liked'
+												? '搜索喜欢的视频...'
+												: '搜索当前 YouTube 来源的视频标题...'
 										: '搜索视频标题（支持关键词搜索UP主所有视频）...'}
 									{isSearching}
 									statusText={isSearching
 										? '搜索中...'
-										: `搜索模式：在${isYouTubeHistorySource() ? '当前 YouTube 来源' : 'UP主所有视频'}中搜索 \"${submissionSearchQuery}\"`}
+										: `搜索模式：在${youtubeChannelSelection ? '已订阅频道' : isYouTubeHistorySource() ? '当前 YouTube 来源' : 'UP主所有视频'}中搜索 \"${submissionSearchQuery}\"`}
 									selectedCount={selectedSubmissionCount}
 									totalCount={filteredSubmissionVideos.length}
+									itemLabel={isYouTubeHistorySource() ? youtubeSelectionNounLabel : '视频'}
 									onSelectAll={selectAllSubmissions}
 									onSelectNone={selectNoneSubmissions}
 									onInvert={invertSubmissionSelection}
@@ -5384,14 +5463,16 @@
 											icon={Search}
 											iconClass="h-12 w-12"
 											title={submissionSearchQuery.trim()
-												? '没有找到视频'
+												? `没有找到${youtubeChannelSelection ? '频道' : '视频'}`
 												: isYouTubeHistorySource()
-													? '暂无视频'
+													? `暂无${youtubeSelectionNounLabel}`
 													: '暂无投稿'}
 											description={submissionSearchQuery.trim()
-												? `没有找到包含 "${submissionSearchQuery}" 的视频`
+												? `没有找到包含 "${submissionSearchQuery}" 的${youtubeChannelSelection ? '频道' : '视频'}`
 												: isYouTubeHistorySource()
-													? '该 YouTube 来源暂无视频'
+													? youtubeChannelSelection
+														? '当前登录账号没有已订阅频道'
+														: '该 YouTube 来源暂无视频'
 													: '该UP主暂无投稿'}
 											class="border-0 bg-transparent p-0 py-8"
 										>
@@ -5458,11 +5539,15 @@
 															</p>
 															<div class="text-muted-foreground mt-auto text-xs">
 																<div class="flex flex-wrap items-center gap-2">
-																	<span>🎬 {formatSubmissionMetricLabel(video.view)}</span>
-																	{#if !isYouTubeHistorySource()}
-																		<span>💬 {formatSubmissionMetricLabel(video.danmaku)}</span>
+																	{#if youtubeChannelSelection}
+																		<span>👥 {formatSubmissionMetricLabel(video.view)}</span>
+																	{:else}
+																		<span>🎬 {formatSubmissionMetricLabel(video.view)}</span>
+																		{#if !isYouTubeHistorySource()}
+																			<span>💬 {formatSubmissionMetricLabel(video.danmaku)}</span>
+																		{/if}
+																		<span>📅 {formatSubmissionDateLabel(video.pubtime)}</span>
 																	{/if}
-																	<span>📅 {formatSubmissionDateLabel(video.pubtime)}</span>
 																	<span class="font-mono text-xs">{video.bvid}</span>
 																</div>
 															</div>
@@ -5496,7 +5581,9 @@
 												</div>
 											{:else if submissionTotalCount > 0}
 												<div class="text-muted-foreground py-4 text-center text-sm">
-													已加载全部 {submissionVideos.length} 个视频
+													已加载全部 {submissionVideos.length} 个{isYouTubeHistorySource()
+														? youtubeSelectionNounLabel
+														: '视频'}
 												</div>
 											{/if}
 										{/if}
@@ -5517,7 +5604,9 @@
 										class="rounded-md border border-transparent bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:outline-none"
 										onclick={confirmSubmissionSelection}
 									>
-										确认选择 ({selectedSubmissionVideos.size} 个视频)
+										确认选择 ({selectedSubmissionVideos.size} 个{isYouTubeHistorySource()
+											? youtubeSelectionNounLabel
+											: '视频'})
 									</button>
 								</div>
 							{/if}

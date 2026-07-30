@@ -31,6 +31,7 @@ export interface YouTubeSource {
 	published_after?: string | null;
 	published_before?: string | null;
 	selected_videos: string[];
+	selected_channels: string[];
 	last_scan_at?: string | null;
 	pending_count: number;
 	completed_count: number;
@@ -57,6 +58,7 @@ export interface CreateYouTubeSourceRequest {
 	published_after?: string;
 	published_before?: string;
 	selected_videos?: string[];
+	selected_channels?: string[];
 }
 
 export interface YouTubeVideo {
@@ -94,8 +96,8 @@ export interface YouTubeSearchResponse {
 }
 
 export interface YouTubeSourceVideosRequest {
-	url: string;
-	source_type: 'channel' | 'playlist';
+	url?: string;
+	source_type: 'subscriptions' | 'channel' | 'playlist' | 'liked';
 	page?: number;
 	page_size?: number;
 	keyword?: string;

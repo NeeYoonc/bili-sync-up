@@ -62,6 +62,8 @@
 	import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import ScanSearchIcon from '@lucide/svelte/icons/scan-search';
+	import HeartIcon from '@lucide/svelte/icons/heart';
+	import UserIcon from '@lucide/svelte/icons/user';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { resolve } from '$app/paths';
@@ -109,6 +111,38 @@
 		no_hdr: false,
 		no_hires: false
 	};
+	const YOUTUBE_SOURCE_SECTIONS = {
+		YOUTUBE_SUBSCRIPTIONS: {
+			type: 'youtube',
+			youtubeSourceType: 'subscriptions',
+			title: '订阅动态',
+			icon: ActivityIcon
+		},
+		YOUTUBE_CHANNEL: {
+			type: 'youtube',
+			youtubeSourceType: 'channel',
+			title: '频道投稿',
+			icon: UserIcon
+		},
+		YOUTUBE_PLAYLIST: {
+			type: 'youtube',
+			youtubeSourceType: 'playlist',
+			title: '播放列表 / 收藏',
+			icon: ListTreeIcon
+		},
+		YOUTUBE_LIKED: {
+			type: 'youtube',
+			youtubeSourceType: 'liked',
+			title: '喜欢的视频',
+			icon: HeartIcon
+		},
+		YOUTUBE_WATCH_LATER: {
+			type: 'youtube',
+			youtubeSourceType: 'watch_later',
+			title: '稍后再看',
+			icon: HistoryIcon
+		}
+	} as const;
 
 	let loading = false;
 	let platformTab: 'youtube' | 'bilibili' = 'bilibili';
@@ -1453,9 +1487,18 @@
 	}
 
 	function sourceEntriesForPlatform() {
-		return Object.entries(VIDEO_SOURCES).filter(([, source]) =>
-			platformTab === 'youtube' ? source.type === 'youtube' : source.type !== 'youtube'
-		);
+		return platformTab === 'youtube'
+			? Object.entries(YOUTUBE_SOURCE_SECTIONS)
+			: Object.entries(VIDEO_SOURCES).filter(([, source]) => source.type !== 'youtube');
+	}
+
+	function getSourcesForSection(sourceConfig: {
+		type: VideoSourceType;
+		youtubeSourceType?: YouTubeSource['source_type'];
+	}): VideoSource[] {
+		const sources = $videoSourceStore?.[sourceConfig.type] ?? [];
+		if (sourceConfig.type !== 'youtube' || !sourceConfig.youtubeSourceType) return sources;
+		return sources.filter((source) => source.source_type === sourceConfig.youtubeSourceType);
 	}
 
 	onMount(() => {
@@ -1524,9 +1567,7 @@
 			{:else}
 				<div class="grid gap-6">
 			{#each sourceEntriesForPlatform() as [sourceKey, sourceConfig] (sourceKey)}
-				{@const sources = $videoSourceStore
-					? $videoSourceStore[sourceConfig.type as VideoSourceType]
-					: []}
+				{@const sources = getSourcesForSection(sourceConfig)}
 				<Card>
 					<CardHeader class="cursor-pointer" onclick={() => toggleCollapse(sourceKey)}>
 						<CardTitle
