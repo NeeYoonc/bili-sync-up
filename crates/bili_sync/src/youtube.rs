@@ -263,7 +263,9 @@ pub struct YouTubeLoginResponse {
 pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiError> {
     // 与 aria2 一致：第一次进入设置页/添加源页时若本机没有 yt-dlp，
     // 自动下载当前系统对应的官方可执行文件。
-    let _ = ensure_ytdlp_available().await;
+    if let Err(error) = ensure_ytdlp_available().await {
+        warn!(%error, "yt-dlp 自动安装失败");
+    }
     let version = ytdlp_version().await;
     let container_runtime = is_container_runtime();
     let available_browsers = available_login_browsers();
@@ -3206,11 +3208,21 @@ fn ytdlp_install_lock() -> &'static Mutex<()> {
 }
 
 fn current_ytdlp_package() -> Option<YtDlpPackage> {
-    ytdlp_package_for(
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-        if cfg!(target_env = "musl") { "musl" } else { "" },
-    )
+    // Docker 镜像的 bili-sync 主程序使用 musl 静态编译，但运行层是
+    // LinuxServer Chromium（glibc）。允许镜像明确指定运行层 libc，
+    // 避免错误下载需要 musl 动态加载器及其依赖的 yt-dlp 构建。
+    let configured_libc = std::env::var("BILI_SYNC_YTDLP_RUNTIME_LIBC").ok();
+    let target_env = ytdlp_runtime_target_env(configured_libc.as_deref(), cfg!(target_env = "musl"));
+    ytdlp_package_for(std::env::consts::OS, std::env::consts::ARCH, target_env)
+}
+
+fn ytdlp_runtime_target_env(configured_libc: Option<&str>, compiled_with_musl: bool) -> &'static str {
+    match configured_libc.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("glibc" | "gnu") => "",
+        Some("musl") => "musl",
+        _ if compiled_with_musl => "musl",
+        _ => "",
+    }
 }
 
 fn ytdlp_package_for(os: &str, arch: &str, target_env: &str) -> Option<YtDlpPackage> {
@@ -3930,7 +3942,7 @@ mod tests {
     use super::{
         canonical_channel_url, cdp_cookies_to_netscape, checksum_for_release_asset, current_ytdlp_package,
         generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url, normalize_source_type,
-        resolve_source_url, youtube_search_url, ytdlp_package_for, SUBSCRIPTIONS_URL,
+        resolve_source_url, youtube_search_url, ytdlp_package_for, ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
     };
     #[test]
     fn validates_types_and_urls() {
@@ -4064,5 +4076,15 @@ mod tests {
         let macos = ytdlp_package_for("macos", "aarch64", "").unwrap();
         assert_eq!(macos.asset_name, "yt-dlp_macos");
         assert!(ytdlp_package_for("freebsd", "x86_64", "").is_none());
+    }
+
+    #[test]
+    fn docker_can_override_compiled_musl_with_glibc_runtime() {
+        assert_eq!(ytdlp_runtime_target_env(Some("glibc"), true), "");
+        assert_eq!(ytdlp_runtime_target_env(Some("GNU"), true), "");
+        assert_eq!(ytdlp_runtime_target_env(Some("musl"), false), "musl");
+        assert_eq!(ytdlp_runtime_target_env(None, true), "musl");
+        assert_eq!(ytdlp_runtime_target_env(None, false), "");
+        assert_eq!(ytdlp_runtime_target_env(Some("invalid"), true), "musl");
     }
 }
