@@ -1,0 +1,54 @@
+# 可选的 YouTube 登录容器。
+#
+# 主 bili-sync 镜像不包含浏览器。只有使用本文件启动时，Docker 才会拉取独立的
+# LinuxServer Chromium 多架构镜像，并通过与 bili-sync 共享的网络命名空间提供：
+# - https://宿主机:3001：Chromium 网页桌面
+# - http://127.0.0.1:9222：仅容器内部可访问的 CDP Cookie 导出接口
+#
+# 启动：
+# docker compose -f docker-compose.yml -f docker-compose.youtube-login.yml up -d
+#
+# 停止登录容器（已保存的 YouTube Cookie 不受影响）：
+# docker compose -f docker-compose.yml -f docker-compose.youtube-login.yml stop youtube-login
+
+services:
+  bili-sync:
+    ports:
+      # 默认只允许从 Docker 宿主机访问登录桌面。
+      # NAS/远程访问时在 .env 设置 YOUTUBE_LOGIN_BIND=0.0.0.0，
+      # 并务必修改下方登录桌面的用户名和密码。
+      - "${YOUTUBE_LOGIN_BIND:-127.0.0.1}:${YOUTUBE_LOGIN_PORT:-3001}:3001"
+    environment:
+      - BILI_SYNC_YOUTUBE_LOGIN_SIDECAR_URL=http://127.0.0.1:9222
+      - BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_URL=${YOUTUBE_LOGIN_PUBLIC_URL:-auto}
+      - BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_PORT=${YOUTUBE_LOGIN_PORT:-3001}
+
+  youtube-login:
+    image: lscr.io/linuxserver/chromium:latest
+    container_name: bili-sync-youtube-login
+    restart: unless-stopped
+    depends_on:
+      - bili-sync
+    # 与主程序共享网络命名空间：CDP 端口不需要也不会发布到宿主机。
+    network_mode: "service:bili-sync"
+    shm_size: "1gb"
+    volumes:
+      - ./config/youtube-login:/config
+    environment:
+      - TZ=Asia/Shanghai
+      - CUSTOM_USER=${YOUTUBE_LOGIN_USER:-bili-sync}
+      - PASSWORD=${YOUTUBE_LOGIN_PASSWORD:-bili-sync}
+      - TITLE=Bili Sync YouTube Login
+      - DISABLE_TERMINALS=true
+      - DISABLE_SUDO=true
+      - DISABLE_OPEN_TOOLS=true
+      - SELKIES_COMMAND_ENABLED=false
+      - SELKIES_FILE_TRANSFERS=none
+      - >-
+        CHROME_CLI=--remote-debugging-address=127.0.0.1
+        --remote-debugging-port=9222
+        --remote-allow-origins=*
+        --user-data-dir=/config/.config/chromium
+        --no-first-run
+        --no-default-browser-check
+        https://accounts.google.com/ServiceLogin?service=youtube
