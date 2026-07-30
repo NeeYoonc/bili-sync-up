@@ -6,6 +6,7 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Chart from '$lib/components/ui/chart/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
+	import * as Tabs from '$lib/components/ui/tabs/index.js';
 	import MyChartTooltip from '$lib/components/custom/my-chart-tooltip.svelte';
 	import { curveMonotoneX } from 'd3-shape';
 	import { BarChart, AreaChart } from 'layerchart';
@@ -47,7 +48,6 @@
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import XCircleIcon from '@lucide/svelte/icons/x-circle';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
-	import YoutubeIcon from '@lucide/svelte/icons/youtube';
 	import BellIcon from '@lucide/svelte/icons/bell';
 	import ListVideoIcon from '@lucide/svelte/icons/list-video';
 
@@ -68,6 +68,8 @@
 	let showIngestSheet = false;
 	type IngestView = 'latest' | 'recent';
 	let ingestView: IngestView = 'latest';
+	type MonitoringPlatform = 'bilibili' | 'youtube';
+	let monitoringPlatform: MonitoringPlatform = 'bilibili';
 	let unsubscribeSysInfo: (() => void) | null = null;
 	let unsubscribeTasks: (() => void) | null = null;
 
@@ -501,11 +503,15 @@
 									</div>
 								</div>
 
-								<!-- B站及 YouTube 具体监听项统计 -->
-								<div class="space-y-4">
-									<div class="space-y-3">
-										<div class="text-muted-foreground text-xs font-medium">B站视频源</div>
-										<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
+								<!-- 按平台切换具体监听项统计 -->
+								<Tabs.Root bind:value={monitoringPlatform}>
+									<Tabs.List class="grid w-full max-w-sm grid-cols-2">
+										<Tabs.Trigger value="bilibili">B 站视频源</Tabs.Trigger>
+										<Tabs.Trigger value="youtube">YouTube 视频源</Tabs.Trigger>
+									</Tabs.List>
+
+									{#if monitoringPlatform === 'bilibili'}
+										<div class="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
 											<div class="flex items-center justify-between">
 												<div class="flex items-center gap-2">
 													<HeartIcon class="text-muted-foreground h-4 w-4" />
@@ -554,67 +560,63 @@
 												>
 											</div>
 										</div>
-									</div>
-
-									<div class="space-y-3 border-t pt-4">
-										<div class="flex items-center justify-between">
-											<div class="flex items-center gap-2 text-xs font-medium">
-												<YoutubeIcon class="h-4 w-4 text-red-600" />
-												<span>YouTube 视频源</span>
-											</div>
-											<Badge variant="outline">
-												{dashboardData.enabled_youtube_sources} / {dashboardData.total_youtube_sources}
-											</Badge>
-										</div>
-										<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
-											<div class="flex items-center justify-between">
-												<div class="flex items-center gap-2">
-													<BellIcon class="text-muted-foreground h-4 w-4" />
-													<span class="text-sm">订阅动态</span>
-												</div>
+									{:else}
+										<div class="mt-4 space-y-3">
+											<div class="flex items-center justify-end">
 												<Badge variant="outline">
-													{dashboardData.enabled_youtube_subscriptions} / {dashboardData.total_youtube_subscriptions}
+													{dashboardData.enabled_youtube_sources} / {dashboardData.total_youtube_sources}
 												</Badge>
 											</div>
-											<div class="flex items-center justify-between">
-												<div class="flex items-center gap-2">
-													<UserIcon class="text-muted-foreground h-4 w-4" />
-													<span class="text-sm">频道</span>
+											<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<BellIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">订阅动态</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_subscriptions} / {dashboardData.total_youtube_subscriptions}
+													</Badge>
 												</div>
-												<Badge variant="outline">
-													{dashboardData.enabled_youtube_channels} / {dashboardData.total_youtube_channels}
-												</Badge>
-											</div>
-											<div class="flex items-center justify-between">
-												<div class="flex items-center gap-2">
-													<ListVideoIcon class="text-muted-foreground h-4 w-4" />
-													<span class="text-sm">播放列表</span>
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<UserIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">频道</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_channels} / {dashboardData.total_youtube_channels}
+													</Badge>
 												</div>
-												<Badge variant="outline">
-													{dashboardData.enabled_youtube_playlists} / {dashboardData.total_youtube_playlists}
-												</Badge>
-											</div>
-											<div class="flex items-center justify-between">
-												<div class="flex items-center gap-2">
-													<HeartIcon class="text-muted-foreground h-4 w-4" />
-													<span class="text-sm">喜欢的视频</span>
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<ListVideoIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">播放列表</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_playlists} / {dashboardData.total_youtube_playlists}
+													</Badge>
 												</div>
-												<Badge variant="outline">
-													{dashboardData.enabled_youtube_liked} / {dashboardData.total_youtube_liked}
-												</Badge>
-											</div>
-											<div class="flex items-center justify-between">
-												<div class="flex items-center gap-2">
-													<ClockIcon class="text-muted-foreground h-4 w-4" />
-													<span class="text-sm">稍后观看</span>
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<HeartIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">喜欢的视频</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_liked} / {dashboardData.total_youtube_liked}
+													</Badge>
 												</div>
-												<Badge variant="outline">
-													{dashboardData.enabled_youtube_watch_later} / {dashboardData.total_youtube_watch_later}
-												</Badge>
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<ClockIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">稍后观看</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_watch_later} / {dashboardData.total_youtube_watch_later}
+													</Badge>
+												</div>
 											</div>
 										</div>
-									</div>
-								</div>
+									{/if}
+								</Tabs.Root>
 							</div>
 						{:else}
 							<Loading size="sm" align="start" textClass="text-sm" />
