@@ -461,4 +461,37 @@ jobs:
           docker exec "$container" bash -lc \
             "curl --fail --silent --show-error http://127.0.0.1:9222/json/version | grep --quiet '\"Browser\"'"
 
-          echo "Verified bili-sync, Chromium CDP, and the HTTP login desktop in one running container"
+          docker restart "$container" >/dev/null
+          for attempt in $(seq 1 90); do
+            state=$(docker inspect --format '{{.State.Status}}' "$container")
+            health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container")
+
+            if [[ "$state" == "exited" || "$state" == "dead" ]]; then
+              echo "Container stopped after restart" >&2
+              docker logs "$container"
+              exit 1
+            fi
+
+            if [[ "$health" == "healthy" ]]; then
+              break
+            fi
+
+            if [[ "$attempt" -eq 90 ]]; then
+              echo "Container did not recover after restart within 180 seconds" >&2
+              docker inspect "$container"
+              docker logs "$container"
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          curl --fail --silent --show-error --max-time 10 \
+            "http://127.0.0.1:${main_port}/" >/dev/null
+          curl --fail --silent --show-error --max-time 10 \
+            --user "${login_user}:${login_password}" \
+            "http://127.0.0.1:${desktop_port}/" >/dev/null
+          docker exec "$container" bash -lc \
+            "curl --fail --silent --show-error http://127.0.0.1:9222/json/version | grep --quiet '\"Browser\"'"
+
+          echo "Verified bili-sync, Chromium CDP, and the HTTP login desktop before and after restart"

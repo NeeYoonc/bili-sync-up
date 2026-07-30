@@ -12,10 +12,11 @@ docker run -d \
   -v /path/to/data:/app/.config/bili-sync \
   -v /path/to/youtube-browser:/config \
   -v /path/to/videos:/app/videos \
-  -e CUSTOM_USER=bili-sync \
-  -e PASSWORD=change-me \
   qq1582185982/bili-sync:latest
 ```
+
+登录桌面默认直接打开；需要额外认证时可增加
+`-e CUSTOM_USER=用户名 -e PASSWORD=密码`。
 
 ### 方式二：下载二进制文件
 

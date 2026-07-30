@@ -211,7 +211,7 @@
 					>
 						<p class="font-medium">Docker 单容器直接登录</p>
 						<ol class="mt-2 list-decimal space-y-1 pl-5">
-							<li>点击“直接登录 YouTube”，通过登录页面的 HTTP Basic Auth。</li>
+							<li>点击“直接登录 YouTube”，打开同一容器内的 Chromium 页面。</li>
 							<li>在 Chromium 中登录 YouTube，并确认首页右上角显示账号头像。</li>
 							<li>回到本页点击“完成登录”，主程序会读取、验证并保存 YouTube Cookie。</li>
 						</ol>

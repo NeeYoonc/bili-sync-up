@@ -41,14 +41,14 @@ Compose 默认发布：
 http://Docker主机地址:3001
 ```
 
-登录页面使用 HTTP Basic Auth，默认账号和密码均为 `bili-sync`。在 Compose 文件
-旁创建 `.env` 可以修改：
+登录页面默认直接打开。需要额外启用 HTTP Basic Auth 时，在 Compose 文件旁
+创建 `.env` 并同时填写账号和密码：
 
 ```dotenv
 YOUTUBE_LOGIN_BIND=0.0.0.0
 YOUTUBE_LOGIN_PORT=3001
-YOUTUBE_LOGIN_USER=your-user
-YOUTUBE_LOGIN_PASSWORD=change-to-a-strong-password
+# YOUTUBE_LOGIN_USER=your-user
+# YOUTUBE_LOGIN_PASSWORD=change-to-a-strong-password
 # 使用反向代理或不同外部地址时填写完整访问地址
 # YOUTUBE_LOGIN_PUBLIC_URL=https://nas.example.com:3001
 ```

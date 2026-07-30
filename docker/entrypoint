@@ -5,4 +5,11 @@ if [[ "$#" -gt 0 ]]; then
     exec /app/bili-sync-rs "$@"
 fi
 
+# Chromium 异常退出或容器重建后会遗留指向旧容器 PID/临时目录的锁。
+# s6 启动桌面前清理瞬态锁，保留 Cookie、账号会话和其余浏览器资料。
+rm -f \
+    /config/youtube-profile/SingletonCookie \
+    /config/youtube-profile/SingletonLock \
+    /config/youtube-profile/SingletonSocket
+
 exec /init

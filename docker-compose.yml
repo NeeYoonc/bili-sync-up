@@ -29,9 +29,9 @@ services:
       - RUST_LOG=None,bili_sync=info
       # - PUID=1000
       # - PGID=1000
-      # 登录桌面使用 HTTP Basic Auth；NAS 部署请在 .env 中修改密码。
-      - CUSTOM_USER=${YOUTUBE_LOGIN_USER:-bili-sync}
-      - PASSWORD=${YOUTUBE_LOGIN_PASSWORD:-bili-sync}
+      # 默认直接打开登录桌面；如需 HTTP Basic Auth，请在 .env 中填写两项。
+      - CUSTOM_USER=${YOUTUBE_LOGIN_USER:-}
+      - PASSWORD=${YOUTUBE_LOGIN_PASSWORD:-}
       - BILI_SYNC_YOUTUBE_LOGIN_BROWSER_URL=http://127.0.0.1:9222
       - BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_URL=${YOUTUBE_LOGIN_PUBLIC_URL:-auto}
       - BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_PORT=${YOUTUBE_LOGIN_PORT:-3001}

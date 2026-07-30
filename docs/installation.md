@@ -17,8 +17,6 @@ docker run -d \
   -v /path/to/data:/app/.config/bili-sync \
   -v /path/to/youtube-browser:/config \
   -v /path/to/videos:/app/videos \
-  -e CUSTOM_USER=bili-sync \
-  -e PASSWORD=change-me \
   qq1582185982/bili-sync
 ```
 
@@ -52,8 +50,9 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - RUST_LOG=None,bili_sync=info
-      - CUSTOM_USER=bili-sync
-      - PASSWORD=change-me
+      # 可选：同时设置后启用登录桌面 HTTP Basic Auth
+      # - CUSTOM_USER=bili-sync
+      # - PASSWORD=change-me
       # - PUID=1000
       # - PGID=1000
       # 可选：设置执行周期，默认为每天凌晨3点执行
@@ -75,7 +74,7 @@ services:
 2. 搜索 `qq1582185982/bili-sync`
 3. 下载并创建容器
 4. 设置 `12345`、`3001` 端口和 `/app/.config/bili-sync`、`/config` 文件夹映射
-5. 在环境变量中设置登录页面的 `CUSTOM_USER` 和 `PASSWORD`
+5. 登录页面默认直接打开；需要额外认证时再同时设置 `CUSTOM_USER` 和 `PASSWORD`
 
 ## 升级方法
 

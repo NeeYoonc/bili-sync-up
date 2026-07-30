@@ -42,8 +42,6 @@ ENV TZ=Asia/Shanghai \
     RUST_BACKTRACE=1 \
     RUST_LOG=None,bili_sync=info \
     TITLE="Bili Sync YouTube Login" \
-    CUSTOM_USER=bili-sync \
-    PASSWORD=bili-sync \
     HARDEN_DESKTOP=true \
     CHROME_CLI="--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir=/config/youtube-profile --no-first-run --no-default-browser-check https://accounts.google.com/ServiceLogin?service=youtube"
 
