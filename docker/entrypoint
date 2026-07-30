@@ -1,0 +1,8 @@
+#!/bin/bash
+
+if [[ "$#" -gt 0 ]]; then
+    export HOME=/app
+    exec /app/bili-sync-rs "$@"
+fi
+
+exec /init

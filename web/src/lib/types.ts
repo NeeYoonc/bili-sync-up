@@ -86,10 +86,10 @@ export interface YouTubeStatusResponse {
 	browser_login_available: boolean;
 	available_browsers: YouTubeBrowser[];
 	browser_login_message: string;
-	sidecar_login_configured: boolean;
-	sidecar_login_available: boolean;
-	sidecar_login_url?: string | null;
-	sidecar_login_port?: number | null;
+	container_browser_configured: boolean;
+	container_browser_available: boolean;
+	container_browser_url?: string | null;
+	container_browser_port?: number | null;
 	cookie_path: string;
 }
 

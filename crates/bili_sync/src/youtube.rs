@@ -247,10 +247,10 @@ pub struct YouTubeStatusResponse {
     pub browser_login_available: bool,
     pub available_browsers: Vec<String>,
     pub browser_login_message: String,
-    pub sidecar_login_configured: bool,
-    pub sidecar_login_available: bool,
-    pub sidecar_login_url: Option<String>,
-    pub sidecar_login_port: Option<u16>,
+    pub container_browser_configured: bool,
+    pub container_browser_available: bool,
+    pub container_browser_url: Option<String>,
+    pub container_browser_port: Option<u16>,
     pub cookie_path: String,
 }
 
@@ -269,19 +269,19 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
     let available_browsers = available_login_browsers();
     let graphical_session = graphical_session_available();
     let local_browser_login_available = !container_runtime && graphical_session && !available_browsers.is_empty();
-    let sidecar_debug_url = youtube_login_sidecar_debug_url();
-    let sidecar_login_configured = sidecar_debug_url.is_some();
-    let sidecar_login_available = match sidecar_debug_url.as_deref() {
+    let container_browser_debug_url = youtube_login_container_browser_debug_url();
+    let container_browser_configured = container_browser_debug_url.is_some();
+    let container_browser_available = match container_browser_debug_url.as_deref() {
         Some(debug_url) => fetch_cdp_version(debug_url).await.is_ok(),
         None => false,
     };
-    let browser_login_available = local_browser_login_available || sidecar_login_available;
-    let browser_login_message = if sidecar_login_available {
-        "已连接独立 YouTube 登录容器。主程序镜像不包含浏览器；登录完成后由主程序通过容器内部 CDP 读取并验证 YouTube Cookie。"
-    } else if sidecar_login_configured {
-        "已配置独立 YouTube 登录容器，但当前无法连接。请使用 docker-compose.youtube-login.yml 启动登录容器后刷新状态。"
+    let browser_login_available = local_browser_login_available || container_browser_available;
+    let browser_login_message = if container_browser_available {
+        "同一 Docker 容器内的 YouTube 登录浏览器已就绪；登录完成后主程序会直接读取并验证 YouTube Cookie。"
+    } else if container_browser_configured {
+        "Docker 内置 YouTube 登录浏览器尚未就绪。请稍候刷新；若持续不可用，请重新构建并启动当前单容器镜像。"
     } else if container_runtime {
-        "主程序 Docker 镜像不包含浏览器。可使用 docker-compose.youtube-login.yml 启动独立登录容器，或导入 Netscape cookies.txt。"
+        "当前运行的是旧版 Docker 镜像，不包含内置登录浏览器。请重新构建当前镜像；cookies.txt 仅作为备用方式。"
     } else if !graphical_session {
         "当前服务端没有图形桌面，无法打开登录窗口。请从客户端浏览器导出 Netscape cookies.txt 后上传。"
     } else if available_browsers.is_empty() {
@@ -298,10 +298,10 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         browser_login_available,
         available_browsers: available_browsers.into_iter().map(str::to_string).collect(),
         browser_login_message: browser_login_message.to_string(),
-        sidecar_login_configured,
-        sidecar_login_available,
-        sidecar_login_url: sidecar_login_configured.then(youtube_login_sidecar_public_url),
-        sidecar_login_port: sidecar_login_configured.then(youtube_login_sidecar_public_port),
+        container_browser_configured,
+        container_browser_available,
+        container_browser_url: container_browser_configured.then(youtube_login_container_browser_public_url),
+        container_browser_port: container_browser_configured.then(youtube_login_container_browser_public_port),
         cookie_path: cookie_path().display().to_string(),
     }))
 }
@@ -634,13 +634,13 @@ pub async fn import_youtube_login(
 pub async fn start_interactive_youtube_login(
     Json(request): Json<YouTubeLoginRequest>,
 ) -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
-    if let Some(debug_url) = youtube_login_sidecar_debug_url() {
+    if let Some(debug_url) = youtube_login_container_browser_debug_url() {
         fetch_cdp_version(&debug_url)
             .await
-            .context("无法连接独立 YouTube 登录容器；请先启动 docker-compose.youtube-login.yml")?;
+            .context("Docker 内置 YouTube 登录浏览器尚未就绪；请稍候刷新或重启当前容器")?;
         return Ok(ApiResponse::ok(YouTubeLoginResponse {
             logged_in: false,
-            message: "独立 YouTube 登录容器已就绪。请在打开的 Chromium 页面完成登录，再回到这里点击“完成登录”"
+            message: "Docker 内置 YouTube 登录浏览器已就绪。请在打开的 Chromium 页面完成登录，再回到这里点击“完成登录”"
                 .to_string(),
         }));
     }
@@ -672,10 +672,10 @@ pub async fn start_interactive_youtube_login(
 
 pub async fn complete_interactive_youtube_login() -> Result<ApiResponse<YouTubeLoginResponse>, ApiError> {
     ensure_ytdlp_available().await?;
-    let (debug_url, connection_hint) = if let Some(debug_url) = youtube_login_sidecar_debug_url() {
+    let (debug_url, connection_hint) = if let Some(debug_url) = youtube_login_container_browser_debug_url() {
         (
             debug_url,
-            "无法连接独立 YouTube 登录容器；请确认 sidecar 正在运行并保持 Chromium 页面打开",
+            "无法连接 Docker 内置 YouTube 登录浏览器；请确认当前容器中的 Chromium 已启动",
         )
     } else {
         ensure_local_browser_login_runtime()?;
@@ -3644,7 +3644,7 @@ fn graphical_session_available() -> bool {
 fn ensure_local_browser_login_runtime() -> std::result::Result<(), ApiError> {
     if is_container_runtime() {
         return Err(ApiError::bad_request(
-            "主程序 Docker 镜像不包含浏览器；请启动 docker-compose.youtube-login.yml 独立登录容器，或导入 Netscape cookies.txt"
+            "当前 Docker 镜像未启用内置登录浏览器；请重新构建当前单容器镜像，cookies.txt 仅作为备用方式",
         ));
     }
     if !graphical_session_available() {
@@ -3655,14 +3655,15 @@ fn ensure_local_browser_login_runtime() -> std::result::Result<(), ApiError> {
     Ok(())
 }
 
-fn youtube_login_sidecar_debug_url() -> Option<String> {
-    std::env::var("BILI_SYNC_YOUTUBE_LOGIN_SIDECAR_URL")
+fn youtube_login_container_browser_debug_url() -> Option<String> {
+    std::env::var("BILI_SYNC_YOUTUBE_LOGIN_BROWSER_URL")
+        .or_else(|_| std::env::var("BILI_SYNC_YOUTUBE_LOGIN_SIDECAR_URL"))
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
 }
 
-fn youtube_login_sidecar_public_url() -> String {
+fn youtube_login_container_browser_public_url() -> String {
     std::env::var("BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_URL")
         .ok()
         .map(|value| value.trim().to_string())
@@ -3670,7 +3671,7 @@ fn youtube_login_sidecar_public_url() -> String {
         .unwrap_or_else(|| "auto".to_string())
 }
 
-fn youtube_login_sidecar_public_port() -> u16 {
+fn youtube_login_container_browser_public_port() -> u16 {
     std::env::var("BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_PORT")
         .ok()
         .and_then(|value| value.trim().parse::<u16>().ok())

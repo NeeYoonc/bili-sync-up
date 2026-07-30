@@ -8,8 +8,12 @@
 docker run -d \
   --name bili-sync \
   -p 12345:12345 \
-  -v /path/to/data:/app/data \
+  -p 3001:3001 \
+  -v /path/to/data:/app/.config/bili-sync \
+  -v /path/to/youtube-browser:/config \
   -v /path/to/videos:/app/videos \
+  -e CUSTOM_USER=bili-sync \
+  -e PASSWORD=change-me \
   qq1582185982/bili-sync:latest
 ```
 
@@ -44,6 +48,9 @@ cargo build --release
 - **DedeUserID**：用户ID
 
 > 💡 获取方法：登录 B站后，F12 打开开发者工具，在 Application > Cookies 中查找
+
+YouTube 可在设置页点击“直接登录 YouTube”，通过同一 Docker 容器的
+`https://主机地址:3001` 完成登录，不需要第二个容器。
 
 ### 3. 添加视频源
 

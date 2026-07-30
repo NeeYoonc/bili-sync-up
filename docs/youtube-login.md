@@ -1,58 +1,65 @@
 # YouTube 登录
 
 YouTube 下载、订阅动态、喜欢的视频和稍后再看使用经过 `yt-dlp` 验证的网页
-Cookie。当前 YouTube OAuth 设备码不能为 `yt-dlp` 提供完整鉴权，因此 Docker
-部署使用独立 Chromium 登录容器。
+Cookie。Docker 镜像已经内置 Chromium 登录运行时，`bili-sync` 和登录浏览器位于
+**同一个容器**，不需要再启动 sidecar 或第二个 Compose 服务。
 
-## 独立登录容器
+## Docker 单容器直接登录
 
-主 `bili-sync` 镜像不包含 Chromium、Xvfb、VNC 或 noVNC。登录浏览器来自独立的
-多架构镜像，只在使用登录 Compose 文件时下载和运行。
+更新代码或镜像后，重新构建并启动原有服务：
 
 ```bash
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.youtube-login.yml \
-  up -d
+docker compose up -d --build --force-recreate
 ```
 
 进入设置页的 **YouTube 登录**：
 
-1. 等待状态显示“独立登录容器已连接”。
-2. 点击“打开 Docker 登录浏览器”。
-3. 在 Chromium 网页桌面中登录 YouTube，并确认 YouTube 首页右上角显示账号头像。
+1. 等待状态显示“Docker 直接登录已就绪”。
+2. 点击“直接登录 YouTube”。
+3. 在 Chromium 页面中登录 YouTube，并确认首页右上角显示账号头像。
 4. 回到设置页点击“完成登录”。
-5. 主程序通过仅容器内部可访问的 CDP 接口读取 `youtube.com` Cookie，用当前
-   `yt-dlp` 验证后保存到配置卷。
+5. 主程序通过容器内部 CDP 读取 `youtube.com` Cookie，用当前 `yt-dlp` 验证后
+   保存到原有配置卷。
 
-登录完成后可以停止浏览器容器：
+Chromium 登录资料保存在：
 
-```bash
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.youtube-login.yml \
-  stop youtube-login
+```text
+./config/youtube-login-browser
 ```
 
-已保存到 `./config` 的登录状态不会被删除，主程序会继续使用它下载。
+程序 Cookie 仍保存在原有配置卷：
 
-## NAS 或远程访问
+```text
+./config/youtube-cookies.txt
+```
 
-登录桌面默认只绑定到 Docker 宿主机的 `127.0.0.1:3001`。需要从局域网访问时，
-在 Compose 文件旁创建 `.env`：
+## 登录页面
+
+Compose 默认发布：
+
+```text
+https://Docker主机地址:3001
+```
+
+登录页面使用 HTTP Basic Auth，默认账号和密码均为 `bili-sync`。在 Compose 文件
+旁创建 `.env` 可以修改：
 
 ```dotenv
 YOUTUBE_LOGIN_BIND=0.0.0.0
 YOUTUBE_LOGIN_PORT=3001
 YOUTUBE_LOGIN_USER=your-user
 YOUTUBE_LOGIN_PASSWORD=change-to-a-strong-password
-# 使用反向代理或非默认端口时填写浏览器实际可访问的完整地址
+# 使用反向代理或不同外部地址时填写完整访问地址
 # YOUTUBE_LOGIN_PUBLIC_URL=https://nas.example.com:3001
 ```
 
-登录桌面包含完整浏览器能力。对局域网开放时必须修改默认用户名和密码；不要将其
-直接暴露到公网。Chromium 使用自签名 HTTPS 时，首次打开需要在浏览器中确认继续访问。
+Chromium 使用自签名 HTTPS 时，首次打开需要在浏览器中确认继续访问。
 
-## 备用方式
+## 为什么不复刻 Google 密码登录请求
 
-未启动独立登录容器时，仍可以在设置页上传 Netscape 格式的 `cookies.txt`。
+Google 登录不是稳定的用户名/密码 HTTP 接口。网页流程包含动态流程令牌、设备
+指纹、风控、验证码、两步验证和 WebAuthn，并会按账号与地区变化。抓取一次网络
+请求后重放无法形成可靠登录功能，也无法覆盖验证码和二次验证。
+
+项目因此保留真实 Chromium 登录，但把它与主程序整合进同一个 Docker 容器。
+`cookies.txt` 导入只作为备用方式。

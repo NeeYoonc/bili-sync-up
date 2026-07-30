@@ -51,8 +51,8 @@
 	async function startLogin() {
 		importing = true;
 		try {
-			if (status?.sidecar_login_available) {
-				window.open(resolveSidecarLoginUrl(), '_blank', 'noopener,noreferrer');
+			if (status?.container_browser_available) {
+				window.open(resolveContainerBrowserUrl(), '_blank', 'noopener,noreferrer');
 			}
 			toast.info((await api.startYouTubeLogin(browser)).data.message);
 		} catch (error) {
@@ -64,12 +64,12 @@
 		}
 	}
 
-	function resolveSidecarLoginUrl() {
-		const configured = status?.sidecar_login_url?.trim();
+	function resolveContainerBrowserUrl() {
+		const configured = status?.container_browser_url?.trim();
 		if (configured && configured !== 'auto') {
 			return configured;
 		}
-		const port = status?.sidecar_login_port ?? 3001;
+		const port = status?.container_browser_port ?? 3001;
 		return `https://${window.location.hostname}:${port}`;
 	}
 
@@ -136,15 +136,15 @@
 						<CircleAlert class="h-3.5 w-3.5" />{loading ? '检测中' : '未检测到 yt-dlp'}
 					</Badge>
 					{/if}
-					{#if status?.sidecar_login_available}
+					{#if status?.container_browser_available}
 						<Badge variant="outline" class="gap-1 border-green-500 text-green-700">
-							<CheckCircle2 class="h-3.5 w-3.5" />独立登录容器已连接
+							<CheckCircle2 class="h-3.5 w-3.5" />Docker 直接登录已就绪
 						</Badge>
 						<Button size="sm" onclick={startLogin} disabled={importing || !status?.ytdlp_available}>
 							{#if importing}<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />{:else}<LogIn
 									class="mr-1 h-4 w-4"
 								/>{/if}
-							打开 Docker 登录浏览器
+							直接登录 YouTube
 						</Button>
 						<Button
 							size="sm"
@@ -205,19 +205,18 @@
 				</Button>
 				</div>
 
-				{#if status?.sidecar_login_available}
+				{#if status?.container_browser_available}
 					<div
 						class="rounded-md border border-green-300 bg-green-50 p-3 text-sm text-green-900 dark:border-green-800 dark:bg-green-950/30 dark:text-green-100"
 					>
-						<p class="font-medium">Docker 独立登录容器</p>
+						<p class="font-medium">Docker 单容器直接登录</p>
 						<ol class="mt-2 list-decimal space-y-1 pl-5">
-							<li>点击“打开 Docker 登录浏览器”，通过登录桌面的 HTTP Basic Auth。</li>
+							<li>点击“直接登录 YouTube”，通过登录页面的 HTTP Basic Auth。</li>
 							<li>在 Chromium 中登录 YouTube，并确认首页右上角显示账号头像。</li>
 							<li>回到本页点击“完成登录”，主程序会读取、验证并保存 YouTube Cookie。</li>
-							<li>登录成功后可以停止 <code>youtube-login</code> 容器，不影响继续下载。</li>
 						</ol>
 						<p class="mt-2 text-xs opacity-80">
-							浏览器位于独立容器，主 bili-sync 镜像不包含 Chromium、Xvfb 或 noVNC。
+							Chromium 与 bili-sync 位于同一个 Docker 容器，不需要启动或管理第二个容器。
 						</p>
 					</div>
 				{:else if status && !status.browser_login_available}
@@ -231,22 +230,18 @@
 									{status.container_runtime ? 'Docker 登录方式' : '当前环境无法打开浏览器'}
 								</p>
 								<p>{status.browser_login_message}</p>
-								{#if status.sidecar_login_configured}
+								{#if status.container_browser_configured}
 									<div class="space-y-1">
-										<p>启动或重建登录容器：</p>
+										<p>内置浏览器未就绪，请重新构建并启动当前单容器镜像：</p>
 										<code class="block overflow-x-auto rounded bg-black/5 p-2 text-xs dark:bg-white/10"
-											>docker compose -f docker-compose.yml -f docker-compose.youtube-login.yml up
-											-d</code
+											>docker compose up -d --build --force-recreate</code
 										>
-										<p>启动后点击“刷新”，状态变为已连接即可登录。</p>
+										<p>启动后稍候点击“刷新”，状态变为“Docker 直接登录已就绪”即可。</p>
 									</div>
 								{:else}
 									<ol class="list-decimal space-y-1 pl-5">
-										<li>
-											Docker 部署可添加 <code>docker-compose.youtube-login.yml</code> 独立登录容器。
-										</li>
-										<li>也可以在当前电脑浏览器登录 YouTube 并导出 Netscape cookies.txt。</li>
-										<li>点击上方“从当前电脑导入 cookies.txt”，文件会上传并立即验证。</li>
+										<li>当前是旧版 Docker 镜像，请重新构建或更新为包含内置浏览器的镜像。</li>
+										<li>更新前仍可临时使用 Netscape cookies.txt 导入。</li>
 									</ol>
 								{/if}
 								<p class="text-xs opacity-80">
@@ -258,7 +253,7 @@
 					</div>
 				{:else if status?.browser_login_available}
 					<p class="text-muted-foreground text-xs">
-						本机浏览器登录和 cookies.txt 导入任选一种；不会把浏览器打包进主程序。
+						本机浏览器登录和 cookies.txt 导入任选一种。
 					</p>
 				{/if}
 			</div>

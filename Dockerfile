@@ -1,48 +1,60 @@
-FROM alpine:3.20 AS base
+FROM alpine:3.20 AS unpack
 
 ARG TARGETPLATFORM
 ARG BILI_SYNC_RELEASE_CHANNEL=stable
 
 WORKDIR /app
 
-RUN apk update && apk add --no-cache \
-    ca-certificates \
-    tzdata \
-    ffmpeg
-
-# 复制所有Linux二进制文件
 COPY ./bili-sync-rs-Linux-*.tar.gz ./
 
-# 根据目标平台解压对应的二进制文件
 RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-    tar xzvf ./bili-sync-rs-Linux-x86_64-musl.tar.gz; \
+        tar xzvf ./bili-sync-rs-Linux-x86_64-musl.tar.gz; \
     elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-    tar xzvf ./bili-sync-rs-Linux-aarch64-musl.tar.gz; \
+        tar xzvf ./bili-sync-rs-Linux-aarch64-musl.tar.gz; \
     else \
-    echo "Unsupported platform: $TARGETPLATFORM" && exit 1; \
-    fi
+        echo "Unsupported platform: $TARGETPLATFORM" && exit 1; \
+    fi && \
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > /app/image-built-at.txt && \
+    echo -n "$BILI_SYNC_RELEASE_CHANNEL" > /app/release-channel.txt && \
+    chmod +x /app/bili-sync-rs
 
-# 写入镜像构建时间（用于 /api/updates/beta 的本地时间对比，避免“编译时间 < 推送时间”导致误判）
-RUN date -u +"%Y-%m-%dT%H:%M:%SZ" > /app/image-built-at.txt
-RUN echo -n "$BILI_SYNC_RELEASE_CHANNEL" > /app/release-channel.txt
+# Chromium、图形桌面和 HTTPS 登录入口与 bili-sync 放在同一个容器中。
+# 用户只需要启动一个容器；Chromium 资料与 bili-sync 配置分别持久化。
+FROM lscr.io/linuxserver/chromium:latest
 
-# 清理压缩文件并设置权限
-RUN rm -f ./bili-sync-rs-Linux-*.tar.gz && \
-    chmod +x ./bili-sync-rs
-
-FROM scratch
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        ffmpeg \
+        tzdata && \
+    apt-get autoclean && \
+    rm -rf /var/lib/apt/lists/* /var/tmp/* /tmp/*
 
 WORKDIR /app
 
-ENV LANG=zh_CN.UTF-8 \
-    TZ=Asia/Shanghai \
-    HOME=/app \
+ENV TZ=Asia/Shanghai \
     BILI_SYNC_CONTAINER=1 \
+    BILI_SYNC_YOUTUBE_LOGIN_BROWSER_URL=http://127.0.0.1:9222 \
+    BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_URL=auto \
+    BILI_SYNC_YOUTUBE_LOGIN_PUBLIC_PORT=3001 \
     RUST_BACKTRACE=1 \
-    RUST_LOG=None,bili_sync=info
+    RUST_LOG=None,bili_sync=info \
+    TITLE="Bili Sync YouTube Login" \
+    CUSTOM_USER=bili-sync \
+    PASSWORD=bili-sync \
+    HARDEN_DESKTOP=true \
+    CHROME_CLI="--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir=/config/youtube-profile --no-first-run --no-default-browser-check https://accounts.google.com/ServiceLogin?service=youtube"
 
-COPY --from=base / /
+COPY --from=unpack /app/bili-sync-rs /app/bili-sync-rs
+COPY --from=unpack /app/image-built-at.txt /app/image-built-at.txt
+COPY --from=unpack /app/release-channel.txt /app/release-channel.txt
+COPY docker/bili-sync-service /custom-services.d/bili-sync
+COPY docker/entrypoint /entrypoint
 
-ENTRYPOINT [ "/app/bili-sync-rs" ]
+RUN chmod +x /app/bili-sync-rs /custom-services.d/bili-sync /entrypoint
 
-VOLUME [ "/app/.config/bili-sync" ]
+ENTRYPOINT [ "/entrypoint" ]
+
+EXPOSE 12345 3001
+
+VOLUME [ "/app/.config/bili-sync", "/config" ]
