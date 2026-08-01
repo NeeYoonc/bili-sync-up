@@ -11,8 +11,7 @@ export function buildVideosRequest({
 	minHeight,
 	maxHeight,
 	sortBy = 'id',
-	sortOrder = 'desc'
-	,
+	sortOrder = 'desc',
 	platform = 'bilibili'
 }: {
 	page: number;
@@ -24,7 +23,7 @@ export function buildVideosRequest({
 	maxHeight?: number | null;
 	sortBy?: SortBy;
 	sortOrder?: SortOrder;
-	platform?: 'bilibili' | 'youtube';
+	platform?: 'bilibili' | 'youtube' | 'douyin';
 }): VideosRequest {
 	const params: VideosRequest = {
 		page,
@@ -54,6 +53,7 @@ export function buildVideosRequest({
 		if (Number.isFinite(sourceId)) {
 			switch (videoSource.type) {
 				case 'youtube':
+				case 'douyin':
 					params.youtube = sourceId;
 					break;
 				case 'collection':

@@ -38,7 +38,8 @@
 		AudioQuality,
 		VideoCodec,
 		YouTubeSourceType,
-		YouTubeStatusResponse
+		YouTubeStatusResponse,
+		DouyinStatusResponse
 	} from '$lib/types';
 	import {
 		Search,
@@ -99,10 +100,11 @@
 	};
 
 	let sourceType: VideoCategory = 'collection';
-	let sourcePlatform: 'bilibili' | 'youtube' = 'bilibili';
+	let sourcePlatform: 'bilibili' | 'youtube' | 'douyin' = 'bilibili';
 	let youtubeSourceType: YouTubeSourceType = 'subscriptions';
 	let youtubeUrl = '';
 	let youtubeStatus: YouTubeStatusResponse | null = null;
+	let douyinStatus: DouyinStatusResponse | null = null;
 	let lastSourceType: VideoCategory = sourceType; // 记录上一次的源类型，用于检测切换
 	let sourceId = '';
 	let upId = '';
@@ -320,6 +322,9 @@
 		{ value: 'liked', label: '喜欢的视频', description: '同步当前登录账号喜欢的视频' },
 		{ value: 'watch_later', label: '稍后再看', description: '同步当前登录账号的稍后再看列表' }
 	];
+	const douyinSourceTypeOptions = [
+		{ value: 'douyin', label: '作者投稿', description: '同步指定抖音作者的公开作品' }
+	];
 	const sourceTypeLabelMap: Record<string, string> = {
 		collection: '合集',
 		favorite: '收藏夹',
@@ -366,6 +371,7 @@
 				return 'favorite';
 			case 'subscriptions':
 			case 'channel':
+			case 'douyin':
 			default:
 				return 'submission';
 		}
@@ -387,7 +393,7 @@
 	}
 
 	$: currentQuickSubscriptionType =
-		sourcePlatform === 'youtube'
+		sourcePlatform !== 'bilibili'
 			? getYouTubeQuickSubscriptionType(youtubeSourceType)
 			: sourceType;
 	$: currentQuickSubscriptionTemplate =
@@ -449,7 +455,7 @@
 		if (filterOptionInheritGlobal) {
 			filterOptionDraft = cloneFilterOption(globalFilterOptionDefault);
 		}
-		if (sourcePlatform === 'youtube') {
+		if (sourcePlatform !== 'bilibili') {
 			applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
 		}
 	}
@@ -547,18 +553,45 @@
 		if (!path.trim()) path = response.data.default_output_path;
 	}
 
+	async function loadDouyinDefaults() {
+		const response = await runRequest(() => api.getDouyinStatus(), {
+			showErrorToast: false,
+			context: '加载抖音登录状态失败'
+		});
+		if (!response) return;
+		douyinStatus = response.data;
+	}
+
 	onMount(async () => {
-		sourcePlatform = $page.url.searchParams.get('platform') === 'youtube' ? 'youtube' : 'bilibili';
+		const requestedPlatform = $page.url.searchParams.get('platform');
+		sourcePlatform =
+			requestedPlatform === 'youtube'
+				? 'youtube'
+				: requestedPlatform === 'douyin'
+					? 'douyin'
+					: 'bilibili';
 		if (sourcePlatform === 'youtube') {
 			handleYouTubeSourceTypeChange('subscriptions');
+		} else if (sourcePlatform === 'douyin') {
+			handleYouTubeSourceTypeChange('douyin');
 		}
 		setBreadcrumb([
 			{ label: '主页', href: '/' },
-			{ label: sourcePlatform === 'youtube' ? '添加 YouTube 视频源' : '添加视频源', isActive: true }
+			{
+				label:
+					sourcePlatform === 'youtube'
+						? '添加 YouTube 视频源'
+						: sourcePlatform === 'douyin'
+							? '添加抖音视频源'
+							: '添加视频源',
+				isActive: true
+			}
 		]);
 		await Promise.all([loadExistingVideoSources(), loadQuickSubscriptionTemplates()]);
 		if (sourcePlatform === 'youtube') {
 			await loadYouTubeDefaults();
+		} else if (sourcePlatform === 'douyin') {
+			await loadDouyinDefaults();
 		}
 	});
 
@@ -596,6 +629,22 @@
 	async function handleSearch(overrideSearchType?: string) {
 		if (!searchKeyword.trim()) {
 			toast.error('请输入搜索关键词');
+			return;
+		}
+		if (sourcePlatform === 'douyin') {
+			const response = await runRequest(() => api.searchDouyin(searchKeyword.trim()), {
+				setLoading: (value) => (searchLoading = value),
+				context: '搜索抖音作者失败'
+			});
+			if (!response) return;
+			searchResults = response.data.results;
+			searchTotalResults = response.data.total;
+			showSearchResults = true;
+			if (response.data.results.length > 0) {
+				toast.success(`搜索完成，共找到 ${response.data.results.length} 个抖音作者`);
+			} else {
+				toast.info('未找到匹配的抖音作者');
+			}
 			return;
 		}
 
@@ -748,9 +797,9 @@
 	function selectSearchResult(result: SearchResultItem) {
 		clearFollowingsPanel();
 
-		if (sourcePlatform === 'youtube') {
+		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin') {
 			if (!result.youtube_url) {
-				toast.error('搜索结果缺少 YouTube 来源链接');
+				toast.error('搜索结果缺少来源链接');
 				return;
 			}
 			youtubeUrl = result.youtube_url;
@@ -758,7 +807,9 @@
 			applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
 			clearSearchPanel({ clearKeyword: true });
 			openYouTubeHistorySelection();
-			toast.success('已选择 YouTube 来源', { description: '正在加载历史视频…' });
+			toast.success(`已选择${sourcePlatform === 'douyin' ? '抖音作者' : ' YouTube 来源'}`, {
+				description: '正在加载历史视频…'
+			});
 			return;
 		}
 
@@ -1017,14 +1068,17 @@
 			return;
 		}
 
-		if (sourcePlatform === 'youtube') {
+		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin') {
+			const isDouyin = sourcePlatform === 'douyin';
 			if (
-				(youtubeSourceType === 'channel' || youtubeSourceType === 'playlist') &&
+				(isDouyin || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist') &&
 				!youtubeUrl.trim()
 			) {
-				toast.error('请输入 YouTube 链接', {
+				toast.error(isDouyin ? '请输入抖音作者主页链接' : '请输入 YouTube 链接', {
 					description:
-						youtubeSourceType === 'channel'
+						isDouyin
+							? '作者投稿需要提供抖音作者主页链接'
+							: youtubeSourceType === 'channel'
 							? '频道投稿需要提供频道链接'
 							: '播放列表来源需要提供播放列表链接'
 				});
@@ -1042,8 +1096,12 @@
 				toast.error('码率设置无效', { description: '至少保留一个编解码器' });
 				return;
 			}
-			if (youtubeStatus && !youtubeStatus.ytdlp_available) {
+			if (!isDouyin && youtubeStatus && !youtubeStatus.ytdlp_available) {
 				toast.error('未检测到 yt-dlp', { description: '请先在设置页检查 YouTube 登录状态' });
+				return;
+			}
+			if (isDouyin && !douyinStatus?.logged_in) {
+				toast.error('尚未导入抖音 Cookie', { description: '请先在设置页导入抖音登录状态' });
 				return;
 			}
 			if (youtubeSourceType === 'subscriptions' && selectedVideos.length === 0) {
@@ -1054,9 +1112,10 @@
 				return;
 			}
 
+			const createExternalSource = isDouyin ? api.createDouyinSource : api.createYouTubeSource;
 			const result = await runRequest(
 				() =>
-					api.createYouTubeSource({
+					createExternalSource({
 						source_type: youtubeSourceType,
 						name: name.trim(),
 						url: youtubeUrl.trim() || undefined,
@@ -1064,7 +1123,7 @@
 						audio_only: audioOnly,
 						audio_only_m4a_only: audioOnlyM4aOnly,
 						flat_folder: flatFolder,
-						download_danmaku: downloadDanmaku,
+						download_danmaku: isDouyin ? false : downloadDanmaku,
 						download_subtitle: downloadSubtitle,
 						ai_subtitle_language:
 							aiSubtitleLanguage.trim() || DEFAULT_AI_SUBTITLE_LANGUAGE,
@@ -1085,13 +1144,15 @@
 					}),
 				{
 					setLoading: (value) => (loading = value),
-					context: '添加 YouTube 视频源失败'
+					context: `添加${isDouyin ? '抖音' : ' YouTube'}视频源失败`
 				}
 			);
 			if (!result) return;
 
-			toast.success('添加成功', { description: `YouTube 视频源“${result.data.name}”已创建` });
-			goto('/video-sources?platform=youtube');
+			toast.success('添加成功', {
+				description: `${isDouyin ? '抖音' : 'YouTube'}视频源“${result.data.name}”已创建`
+			});
+			goto(`/video-sources?platform=${sourcePlatform}`);
 			return;
 		}
 
@@ -1329,8 +1390,10 @@
 
 	// 根据类型显示不同的描述
 	$: currentTypeDescription =
-		sourcePlatform === 'youtube'
-			? youtubeSourceTypeOptions.find((opt) => opt.value === youtubeSourceType)?.description || ''
+		sourcePlatform !== 'bilibili'
+			? (sourcePlatform === 'douyin' ? douyinSourceTypeOptions : youtubeSourceTypeOptions).find(
+					(opt) => opt.value === youtubeSourceType
+				)?.description || ''
 			: sourceTypeOptions.find((opt) => opt.value === sourceType)?.description || '';
 
 	// 获取收藏夹列表
@@ -2128,11 +2191,12 @@
 
 	function isYouTubeHistorySource(): boolean {
 		return (
-			sourcePlatform === 'youtube' &&
-			(youtubeSourceType === 'subscriptions' ||
+			(sourcePlatform === 'douyin' ||
+				(sourcePlatform === 'youtube' &&
+					(youtubeSourceType === 'subscriptions' ||
 				youtubeSourceType === 'channel' ||
 				youtubeSourceType === 'playlist' ||
-				youtubeSourceType === 'liked')
+						youtubeSourceType === 'liked')))
 		);
 	}
 
@@ -2145,11 +2209,15 @@
 	$: youtubeSelectionNounLabel = youtubeChannelSelection ? '频道' : '视频';
 	$: youtubeSelectionTitleLabel = youtubeChannelSelection
 		? '选择订阅频道'
+		: sourcePlatform === 'douyin'
+			? '选择历史作品'
 		: youtubeSourceType === 'liked'
 			? '选择喜欢的视频'
 			: '选择历史视频';
 	$: youtubeSelectionDescriptionText = youtubeChannelSelection
 		? '仅同步勾选频道以后发布的视频。'
+		: sourcePlatform === 'douyin'
+			? '首次仅下载勾选的历史作品，之后该作者发布的新作品会自动同步。'
 		: youtubeSourceType === 'liked'
 			? '首次仅下载勾选的历史视频，之后新加入“喜欢”的视频会自动同步。'
 			: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。';
@@ -2157,7 +2225,9 @@
 	function openYouTubeHistorySelection() {
 		if (
 			!isYouTubeHistorySource() ||
-			((youtubeSourceType === 'channel' || youtubeSourceType === 'playlist') &&
+			((sourcePlatform === 'douyin' ||
+				youtubeSourceType === 'channel' ||
+				youtubeSourceType === 'playlist') &&
 				!youtubeUrl.trim())
 		)
 			return;
@@ -2201,7 +2271,14 @@
 		const response = await runRequest(
 			() =>
 				isYouTubeHistorySource()
-					? api.getYouTubeSourceVideos({
+					? sourcePlatform === 'douyin'
+						? api.getDouyinSourceVideos({
+								url: youtubeUrl.trim(),
+								page: 1,
+								page_size: 100,
+								keyword: submissionSearchQuery.trim()
+							})
+						: api.getYouTubeSourceVideos({
 							url: youtubeUrl.trim() || undefined,
 							source_type: youtubeSourceType as
 								| 'subscriptions'
@@ -2248,7 +2325,9 @@
 		if (
 			(!sourceId && !isYouTubeHistorySource()) ||
 			(isYouTubeHistorySource() &&
-				(youtubeSourceType === 'channel' || youtubeSourceType === 'playlist') &&
+				(sourcePlatform === 'douyin' ||
+					youtubeSourceType === 'channel' ||
+					youtubeSourceType === 'playlist') &&
 				!youtubeUrl.trim())
 		)
 			return;
@@ -2300,7 +2379,13 @@
 			}
 
 			const response = isYouTubeHistorySource()
-				? await api.getYouTubeSourceVideos({
+				? sourcePlatform === 'douyin'
+					? await api.getDouyinSourceVideos({
+							url: youtubeUrl.trim(),
+							page,
+							page_size: pageSize
+						})
+					: await api.getYouTubeSourceVideos({
 						url: youtubeUrl.trim() || undefined,
 						source_type: youtubeSourceType as
 							| 'subscriptions'
@@ -2911,7 +2996,11 @@
 </script>
 
 <svelte:head>
-	<title>{sourcePlatform === 'youtube' ? '添加 YouTube 视频源' : '添加视频源'} - Bili Sync</title>
+	<title>{sourcePlatform === 'youtube'
+			? '添加 YouTube 视频源'
+			: sourcePlatform === 'douyin'
+				? '添加抖音视频源'
+				: '添加视频源'} - Bili Sync</title>
 </svelte:head>
 
 <div class="py-2">
@@ -2920,9 +3009,15 @@
 			<div class="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
 				<SectionHeader
 					as="h1"
-					title={sourcePlatform === 'youtube' ? '添加 YouTube 视频源' : '添加新视频源'}
+					title={sourcePlatform === 'youtube'
+						? '添加 YouTube 视频源'
+						: sourcePlatform === 'douyin'
+							? '添加抖音视频源'
+							: '添加新视频源'}
 					description={sourcePlatform === 'youtube'
 						? '使用与 B 站添加源相同的完整表单配置频道、播放列表、订阅动态、喜欢的视频或稍后再看。'
+						: sourcePlatform === 'douyin'
+							? '沿用 B 站添加源表单，搜索作者、选择历史作品，并复用质量、路径和过滤设置。'
 						: '搜索并配置收藏夹、合集、投稿、番剧或稍后再看等视频源。'}
 					titleClass="text-2xl font-bold"
 					descriptionClass="text-muted-foreground mt-1 text-sm"
@@ -2967,12 +3062,14 @@
 							<Label for="source-type">视频源类型</Label>
 							<CustomSelect
 								id="source-type"
-								value={sourcePlatform === 'youtube' ? youtubeSourceType : sourceType}
-								options={sourcePlatform === 'youtube'
-									? youtubeSourceTypeOptions
+								value={sourcePlatform !== 'bilibili' ? youtubeSourceType : sourceType}
+								options={sourcePlatform !== 'bilibili'
+									? sourcePlatform === 'douyin'
+										? douyinSourceTypeOptions
+										: youtubeSourceTypeOptions
 									: sourceTypeOptions}
 								onChange={(nextValue) => {
-									if (sourcePlatform === 'youtube') {
+									if (sourcePlatform !== 'bilibili') {
 										handleYouTubeSourceTypeChange(nextValue);
 									} else {
 										sourceType = nextValue as VideoCategory;
@@ -2983,14 +3080,16 @@
 							<p class="text-muted-foreground text-sm">{currentTypeDescription}</p>
 						</div>
 
-						{#if sourcePlatform === 'youtube'}
-							{#if youtubeSourceType === 'channel' || youtubeSourceType === 'playlist'}
+						{#if sourcePlatform === 'youtube' || sourcePlatform === 'douyin'}
+							{#if sourcePlatform === 'douyin' || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist'}
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
 								>
 									<div class="space-y-2">
 										<Label for="youtube-search">
-											{youtubeSourceType === 'channel'
+											{sourcePlatform === 'douyin'
+												? '搜索抖音作者'
+												: youtubeSourceType === 'channel'
 												? '搜索 YouTube 频道'
 												: '搜索 YouTube 播放列表'}
 										</Label>
@@ -2998,7 +3097,9 @@
 											<Input
 												id="youtube-search"
 												bind:value={searchKeyword}
-												placeholder={youtubeSourceType === 'channel'
+												placeholder={sourcePlatform === 'douyin'
+													? '输入抖音作者昵称或抖音号...'
+													: youtubeSourceType === 'channel'
 													? '输入频道名称或 @用户名...'
 													: '输入播放列表名称...'}
 												onkeydown={(event) => {
@@ -3031,19 +3132,27 @@
 
 								<div class="space-y-2">
 									<Label for="youtube-url">
-										{youtubeSourceType === 'channel' ? 'YouTube 频道链接' : 'YouTube 播放列表链接'}
+										{sourcePlatform === 'douyin'
+											? '抖音作者主页链接'
+											: youtubeSourceType === 'channel'
+												? 'YouTube 频道链接'
+												: 'YouTube 播放列表链接'}
 									</Label>
 									<Input
 										id="youtube-url"
 										bind:value={youtubeUrl}
 										oninput={scheduleYouTubeHistorySelection}
-										placeholder={youtubeSourceType === 'channel'
+										placeholder={sourcePlatform === 'douyin'
+											? 'https://www.douyin.com/user/...'
+											: youtubeSourceType === 'channel'
 											? 'https://www.youtube.com/@channel/videos'
 											: 'https://www.youtube.com/playlist?list=...'}
 										required
 									/>
 									<p class="text-muted-foreground text-xs">
-										{youtubeSourceType === 'channel'
+										{sourcePlatform === 'douyin'
+											? '支持抖音作者主页链接和 v.douyin.com 分享链接；需要在设置中导入新鲜 Cookie。'
+											: youtubeSourceType === 'channel'
 											? '支持频道主页、@用户名、/videos 等 YouTube 频道链接。'
 											: '请填写包含 list= 的 YouTube 播放列表链接。'}
 									</p>
@@ -3501,6 +3610,8 @@
 								bind:value={path}
 								placeholder={sourcePlatform === 'youtube'
 									? youtubeStatus?.default_output_path || '例如：D:/Videos/YouTube'
+									: sourcePlatform === 'douyin'
+										? '例如：D:/Videos/Douyin'
 									: '例如：D:/Videos/Bilibili'}
 								oninput={() => {
 									if (path !== lastAutoAppliedPath) {
@@ -3751,7 +3862,8 @@
 								{/if}
 								{/if}
 
-								<!-- 下载弹幕 / YouTube 直播聊天 -->
+				{#if sourcePlatform !== 'douyin'}
+				<!-- 下载弹幕 / YouTube 直播聊天 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
 								>
@@ -3786,9 +3898,10 @@
 											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
 										></div>
 									</label>
-								</div>
+				</div>
+				{/if}
 
-								<!-- 下载字幕 -->
+				<!-- 下载字幕 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
 								>
@@ -3813,6 +3926,8 @@
 											<p class="text-[10px] text-gray-500 dark:text-gray-400">
 												{sourcePlatform === 'youtube'
 													? '下载 YouTube 原生字幕文件（VTT格式）'
+													: sourcePlatform === 'douyin'
+														? '源站提供字幕时使用现有字幕链路保存'
 													: '下载CC字幕文件（SRT格式）'}
 											</p>
 										</div>
@@ -3834,10 +3949,10 @@
 												<LanguagesIcon class="h-4 w-4 text-blue-600 dark:text-blue-400" />
 												<div>
 													<span class="text-xs font-medium text-gray-700 dark:text-gray-300">
-														{sourcePlatform === 'youtube' ? '字幕优先语言' : '下载 AI 字幕'}
+														{sourcePlatform !== 'bilibili' ? '字幕优先语言' : '下载 AI 字幕'}
 													</span>
 													<p class="text-[10px] text-gray-500 dark:text-gray-400">
-														{sourcePlatform === 'youtube'
+														{sourcePlatform !== 'bilibili'
 															? '目标语言缺失时按来源语言回退'
 															: '目标语言缺失时回退中文'}
 													</p>
@@ -3860,8 +3975,8 @@
 													value={aiSubtitleLanguage}
 													options={AI_SUBTITLE_LANGUAGE_OPTIONS}
 													disabled={sourcePlatform === 'bilibili' && !downloadAiSubtitle}
-													title={sourcePlatform === 'youtube'
-														? 'YouTube 字幕优先语言'
+													title={sourcePlatform !== 'bilibili'
+														? `${sourcePlatform === 'douyin' ? '抖音' : 'YouTube'} 字幕优先语言`
 														: 'AI 字幕优先语言'}
 													onChange={(nextValue) =>
 														(aiSubtitleLanguage = String(nextValue ?? DEFAULT_AI_SUBTITLE_LANGUAGE))}
@@ -4489,6 +4604,8 @@
 									? '添加中...'
 									: sourcePlatform === 'youtube'
 										? '添加 YouTube 视频源'
+										: sourcePlatform === 'douyin'
+											? '添加抖音视频源'
 										: '添加'}
 							</Button>
 							<Button
@@ -4496,8 +4613,8 @@
 								variant="outline"
 								onclick={() =>
 									goto(
-										sourcePlatform === 'youtube'
-											? '/video-sources?platform=youtube'
+										sourcePlatform !== 'bilibili'
+											? `/video-sources?platform=${sourcePlatform}`
 											: '/video-sources'
 									)}
 								class={isMobile ? 'w-full' : ''}
@@ -4589,7 +4706,8 @@
 											<BiliImage
 												src={result.cover}
 												alt={result.title}
-												class="{result.result_type === 'youtube_channel'
+												class="{result.result_type === 'youtube_channel' ||
+												result.result_type === 'douyin_user'
 													? 'h-14 w-14 rounded-full'
 													: sourceType === 'bangumi'
 													? 'h-20 w-14'
@@ -4609,8 +4727,9 @@
 																? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300'
 																: result.result_type === 'media_ft'
 																	? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
-																	: result.result_type === 'bili_user' ||
-																		  result.result_type === 'youtube_channel'
+																: result.result_type === 'bili_user' ||
+																		  result.result_type === 'youtube_channel' ||
+																		  result.result_type === 'douyin_user'
 																		? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
 																		: result.result_type === 'video' ||
 																			  result.result_type === 'youtube_playlist'
@@ -4625,6 +4744,8 @@
 																		? 'UP主'
 																		: result.result_type === 'youtube_channel'
 																			? 'YouTube 频道'
+																			: result.result_type === 'douyin_user'
+																				? '抖音作者'
 																			: result.result_type === 'youtube_playlist'
 																				? 'YouTube 播放列表'
 																		: result.result_type === 'video'

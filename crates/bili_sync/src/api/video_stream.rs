@@ -195,20 +195,21 @@ async fn find_video_file(video_id: &str, db: &DatabaseConnection) -> Result<Path
 
     if let Some(id) = video_id
         .strip_prefix("youtube-")
+        .or_else(|| video_id.strip_prefix("douyin-"))
         .and_then(|value| value.parse::<i32>().ok())
     {
         let record = youtube_video::Entity::find_by_id(id)
             .one(db)
             .await
-            .context("查询 YouTube 视频记录失败")?
-            .ok_or_else(|| anyhow::anyhow!("YouTube 视频记录不存在: {}", id))?;
+            .context("查询外部平台视频记录失败")?
+            .ok_or_else(|| anyhow::anyhow!("外部平台视频记录不存在: {}", id))?;
         let output_path = record
             .output_path
             .filter(|path| !path.trim().is_empty())
             .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("YouTube 视频尚无本地文件: {}", id))?;
+            .ok_or_else(|| anyhow::anyhow!("外部平台视频尚无本地文件: {}", id))?;
         if !output_path.is_file() {
-            bail!("YouTube 视频文件不存在: {:?}", output_path);
+            bail!("外部平台视频文件不存在: {:?}", output_path);
         }
         return Ok(output_path);
     }

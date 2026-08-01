@@ -34,7 +34,8 @@
 		SparklesIcon,
 		RefreshCwIcon,
 		EyeIcon,
-		YoutubeIcon
+		YoutubeIcon,
+		Music2Icon
 	} from 'lucide-svelte';
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -45,6 +46,7 @@
 	import ThemeToggle from '$lib/components/theme-toggle.svelte';
 	import Loading from '$lib/components/ui/Loading.svelte';
 	import YouTubeLoginPanel from '$lib/components/youtube-login-panel.svelte';
+	import DouyinLoginPanel from '$lib/components/douyin-login-panel.svelte';
 
 	let config: ConfigResponse | null = null;
 	let loading = false;
@@ -99,6 +101,12 @@
 			icon: YoutubeIcon
 		},
 		{
+			id: 'douyin_login',
+			title: '抖音登录状态',
+			description: '从电脑端助手或 cookies.txt 导入',
+			icon: Music2Icon
+		},
+		{
 			id: 'risk',
 			title: '风控配置',
 			description: 'UP主投稿获取风控策略',
@@ -149,6 +157,7 @@
 		danmaku: '配置弹幕文件的显示样式、布局参数和同步策略。',
 		credential: '填写 B 站登录凭证，影响会员画质、互动内容和受限接口访问。',
 		youtube_login: '通过电脑端登录助手或 cookies.txt 管理 yt-dlp 使用的 YouTube 登录状态。',
+		douyin_login: '通过同一个电脑端登录助手或 cookies.txt 管理抖音作者作品扫描和下载所需的 Cookie。',
 		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
 		captcha: '设置遇到验证码风控时的处理模式、超时和自动识别参数。',
 		aria2: '配置外部 Aria2 的健康检查、自动重启和监控策略。',
@@ -3099,6 +3108,25 @@
 		>
 			登录成功后，订阅动态、喜欢的视频和稍后再看等账号来源会直接使用这里保存的登录状态。
 			添加视频源请前往“视频源管理 → YouTube 视频源 → 添加 YouTube 视频源”。
+		</div>
+	</div>
+</ResponsiveSheet>
+
+<!-- 抖音登录状态设置抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'douyin_login'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="抖音登录状态"
+	description="从电脑端登录助手或 cookies.txt 导入抖音 Cookie"
+	titleTooltip={getSettingTooltip('douyin_login')}
+	{isMobile}
+>
+	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+		<DouyinLoginPanel />
+		<div class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200">
+			导入后可搜索抖音作者、选择历史作品并持续扫描新作品。媒体仍使用项目现有统一下载器、画质设置、路径模板、封面与 NFO 链路。
 		</div>
 	</div>
 </ResponsiveSheet>

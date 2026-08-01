@@ -1002,6 +1002,8 @@ pub struct DashBoardResponse {
     pub total_watch_later: u64,
     pub enabled_youtube_sources: u64,
     pub total_youtube_sources: u64,
+    pub enabled_douyin_sources: u64,
+    pub total_douyin_sources: u64,
     pub enabled_youtube_subscriptions: u64,
     pub total_youtube_subscriptions: u64,
     pub enabled_youtube_channels: u64,

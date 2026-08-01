@@ -34,7 +34,7 @@
 	export let selectionMode: boolean = false; // 是否为选择模式
 	export let selected: boolean = false; // 是否被选中
 	export let onSelectionChange: ((videoId: number, selected: boolean) => void) | null = null; // 选择状态变化回调
-	export let resourceId: string | number | null = null; // 统一 API 资源 ID（YouTube 使用 youtube-{id}）
+	export let resourceId: string | number | null = null; // 统一 API 资源 ID（外部平台使用 platform-{id}）
 	export let detailHref: string = ''; // 详情页地址；不传时沿用 B 站地址
 	let coverFailed = false;
 	let lastVideoId: number | null = null;
@@ -117,7 +117,7 @@
 		if (taskNames.length > 0) {
 			return taskNames[index] || `任务${index + 1}`;
 		}
-		if (String(resourceId ?? '').startsWith('youtube-')) {
+		if (/^(youtube|douyin)-/.test(String(resourceId ?? ''))) {
 			return ['视频封面', '视频信息', 'UP主头像', 'UP主信息', '视频下载'][index] || `任务${index + 1}`;
 		}
 
@@ -273,7 +273,7 @@
 	}
 
 	function getInitialCoverUrl(video: VideoInfo): string {
-		if (String(resourceId ?? '').startsWith('youtube-')) {
+		if (/^(youtube|douyin)-/.test(String(resourceId ?? ''))) {
 			return getLocalCoverUrl(video.id);
 		}
 		if (video.valid === false) {
@@ -285,7 +285,7 @@
 	function handleCoverImageError(event: Event) {
 		const target = event.currentTarget as HTMLImageElement;
 		if (
-			String(resourceId ?? '').startsWith('youtube-') &&
+			/^(youtube|douyin)-/.test(String(resourceId ?? '')) &&
 			video.cover &&
 			target.dataset.coverFallback !== 'remote'
 		) {

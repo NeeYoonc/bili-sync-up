@@ -53,12 +53,13 @@
 	let videosData: VideosResponse | null = null;
 	let videoSources: VideoSourcesResponse | null = null;
 	let youtubeSources: YouTubeSource[] = [];
+	let douyinSources: YouTubeSource[] = [];
 	let loading = false;
 	let lastSearch: string | null = null;
 	const videosStream = createManagedEventSource();
 	let liveUpdateStatus: 'idle' | 'connecting' | 'connected' | 'error' = 'idle';
 	let pendingInsertedCount = 0;
-	let platformTab: 'bilibili' | 'youtube' = 'bilibili';
+	let platformTab: 'bilibili' | 'youtube' | 'douyin' = 'bilibili';
 
 	// 重置对话框
 	let resetAllDialogOpen = false;
@@ -75,7 +76,7 @@
 
 	// 筛选状态
 	let showFilters = false;
-	let selectedSourceType: VideoSourceType | 'youtube' | '' = '';
+	let selectedSourceType: VideoSourceType | 'youtube' | 'douyin' | '' = '';
 	let selectedSourceId = '';
 	let showFailedOnly = false;
 	let currentSortBy: SortBy = 'id';
@@ -294,13 +295,18 @@
 	}
 
 	function getApiParams(searchParams: URLSearchParams) {
-		const platform: 'bilibili' | 'youtube' =
-			searchParams.get('platform') === 'youtube' ? 'youtube' : 'bilibili';
-		let videoSource: { type: VideoSourceType | 'youtube'; id: string } | null = null;
-		if (platform === 'youtube') {
-			const value = searchParams.get('youtube');
+		const requestedPlatform = searchParams.get('platform');
+		const platform: 'bilibili' | 'youtube' | 'douyin' =
+			requestedPlatform === 'youtube'
+				? 'youtube'
+				: requestedPlatform === 'douyin'
+					? 'douyin'
+					: 'bilibili';
+		let videoSource: { type: VideoSourceType | 'youtube' | 'douyin'; id: string } | null = null;
+		if (platform !== 'bilibili') {
+			const value = searchParams.get(platform);
 			if (value) {
-				videoSource = { type: 'youtube', id: value };
+				videoSource = { type: platform, id: value };
 			}
 		} else {
 			for (const source of Object.values(VIDEO_SOURCES)) {
@@ -537,7 +543,7 @@
 	}
 
 	async function loadVideoSources() {
-		const [result, youtubeResult] = await Promise.all([
+		const [result, youtubeResult, douyinResult] = await Promise.all([
 			runRequest(() => api.getVideoSources(), {
 			showErrorToast: false,
 			onError: (error) => console.error('加载视频源失败:', error)
@@ -545,10 +551,15 @@
 			runRequest(() => api.getYouTubeSources(), {
 				showErrorToast: false,
 				onError: (error) => console.error('加载 YouTube 视频源失败:', error)
+			}),
+			runRequest(() => api.getDouyinSources(), {
+				showErrorToast: false,
+				onError: (error) => console.error('加载抖音视频源失败:', error)
 			})
 		]);
 		if (result) videoSources = result.data;
 		if (youtubeResult) youtubeSources = youtubeResult.data;
+		if (douyinResult) douyinSources = douyinResult.data;
 	}
 
 	async function handlePageChange(pageNum: number) {
@@ -606,7 +617,7 @@
 		);
 	}
 
-	function switchPlatform(platform: 'bilibili' | 'youtube') {
+	function switchPlatform(platform: 'bilibili' | 'youtube' | 'douyin') {
 		if (platform === platformTab && $appStateStore.platform === platform) return;
 		platformTab = platform;
 		setPlatform(platform);
@@ -618,12 +629,15 @@
 		showFailedOnly = false;
 		selectionMode = false;
 		clearSelection();
-		goto(platform === 'youtube' ? '/videos?platform=youtube' : '/videos');
+		goto(platform === 'bilibili' ? '/videos' : `/videos?platform=${platform}`);
 	}
 
 	async function handleResetVideo(video: VideoInfo, forceReset: boolean) {
 		try {
-			const result = await api.resetVideo(platformTab === 'youtube' ? `youtube-${video.id}` : video.id, forceReset);
+			const result = await api.resetVideo(
+				platformTab === 'bilibili' ? video.id : `${platformTab}-${video.id}`,
+				forceReset
+			);
 			const data = result.data;
 			if (data.resetted) {
 				toast.success('重置成功', {
@@ -783,7 +797,7 @@
 		}
 	}
 
-	function handleSourceFilter(sourceType: VideoSourceType | 'youtube', sourceId: string) {
+	function handleSourceFilter(sourceType: VideoSourceType | 'youtube' | 'douyin', sourceId: string) {
 		selectedSourceType = sourceType;
 		selectedSourceId = sourceId;
 		const range = getResolutionRange(selectedResolution);
@@ -920,7 +934,9 @@
 			for (let i = 0; i < selectedVideoIds.length; i++) {
 				const videoId = selectedVideoIds[i];
 				try {
-					const result = await api.deleteVideo(platformTab === 'youtube' ? `youtube-${videoId}` : videoId);
+					const result = await api.deleteVideo(
+						platformTab === 'bilibili' ? videoId : `${platformTab}-${videoId}`
+					);
 					if (result.data.success) {
 						if (isQueuedDeleteMessage(result.data.message)) {
 							queuedCount++;
@@ -1014,15 +1030,16 @@
 	<SectionHeader
 		as="h1"
 		title="视频管理"
-		description="统一查看 B 站和 YouTube 已同步视频；YouTube 媒体同样使用项目统一下载器。"
+		description="统一查看 B 站、YouTube 和抖音已同步视频；外部平台媒体同样使用项目统一下载器。"
 		titleClass="text-2xl font-bold"
 		descriptionClass="text-muted-foreground mt-1 text-sm"
 	/>
 
 	<Tabs.Root bind:value={platformTab}>
-		<Tabs.List class="grid w-full max-w-md grid-cols-2">
+		<Tabs.List class="grid w-full max-w-xl grid-cols-3">
 				<Tabs.Trigger value="bilibili" onclick={() => switchPlatform('bilibili')}>B 站视频</Tabs.Trigger>
 			<Tabs.Trigger value="youtube" onclick={() => switchPlatform('youtube')}>YouTube 视频</Tabs.Trigger>
+			<Tabs.Trigger value="douyin" onclick={() => switchPlatform('douyin')}>抖音视频</Tabs.Trigger>
 		</Tabs.List>
 
 		<div class="mt-6 space-y-6">
@@ -1193,7 +1210,7 @@
 			{/if}
 
 			<!-- 筛选面板 -->
-			{#if showFilters && (platformTab === 'youtube' || videoSources)}
+			{#if showFilters && (platformTab !== 'bilibili' || videoSources)}
 		<div class="space-y-3 rounded-lg border p-3">
 			<div class="flex items-center justify-between">
 				<h3 class="text-sm font-medium">按视频源筛选</h3>
@@ -1203,22 +1220,27 @@
 			</div>
 
 			<div class="space-y-3">
-				{#if platformTab === 'youtube'}
+				{#if platformTab === 'youtube' || platformTab === 'douyin'}
+					{@const externalSources = platformTab === 'douyin' ? douyinSources : youtubeSources}
 					<div class="space-y-2">
 						<div class="flex items-center gap-2">
-							<span class="text-sm font-medium">YouTube 视频源</span>
-							<Badge variant="outline" class="text-xs">{youtubeSources.length}</Badge>
+							<span class="text-sm font-medium">{platformTab === 'douyin' ? '抖音' : 'YouTube'}视频源</span>
+							<Badge variant="outline" class="text-xs">{externalSources.length}</Badge>
 						</div>
 						<div class="flex flex-wrap gap-1">
-							{#each youtubeSources as source (source.id)}
+							{#each externalSources as source (source.id)}
 								<Button
-									variant={selectedSourceType === 'youtube' &&
+									variant={selectedSourceType === platformTab &&
 									selectedSourceId === source.id.toString()
 										? 'default'
 										: 'outline'}
 									size="sm"
 									class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
-									onclick={() => handleSourceFilter('youtube', source.id.toString())}
+									onclick={() =>
+										handleSourceFilter(
+											platformTab as 'youtube' | 'douyin',
+											source.id.toString()
+										)}
 								>
 									{source.name}
 									{#if !source.enabled}<span class="ml-1 text-xs opacity-70">(禁用)</span>{/if}
@@ -1281,11 +1303,13 @@
 		<div class="flex flex-wrap items-center gap-2">
 			<span class="text-muted-foreground text-sm">当前筛选:</span>
 
-			{#if selectedSourceType === 'youtube' && selectedSourceId}
-				{@const currentSource = youtubeSources.find((s) => s.id.toString() === selectedSourceId)}
+			{#if (selectedSourceType === 'youtube' || selectedSourceType === 'douyin') && selectedSourceId}
+				{@const currentSource = (selectedSourceType === 'douyin' ? douyinSources : youtubeSources).find(
+					(s) => s.id.toString() === selectedSourceId
+				)}
 				{#if currentSource}
 					<Badge variant="secondary" class="flex items-center gap-1">
-						YouTube · {currentSource.name}
+						{selectedSourceType === 'douyin' ? '抖音' : 'YouTube'} · {currentSource.name}
 						<button onclick={clearFilters} class="hover:bg-muted-foreground/20 ml-1 rounded">
 							<span class="sr-only">清除筛选</span>×
 						</button>
@@ -1410,8 +1434,8 @@
 			{#each videosData.videos as video (video.id)}
 				<VideoCard
 					{video}
-					resourceId={platformTab === 'youtube' ? `youtube-${video.id}` : video.id}
-					detailHref={platformTab === 'youtube' ? `/video/youtube-${video.id}` : `/video/${video.id}`}
+					resourceId={platformTab === 'bilibili' ? video.id : `${platformTab}-${video.id}`}
+					detailHref={platformTab === 'bilibili' ? `/video/${video.id}` : `/video/${platformTab}-${video.id}`}
 					{selectionMode}
 					selected={selectedVideos.has(video.id)}
 					onSelectionChange={handleVideoSelection}

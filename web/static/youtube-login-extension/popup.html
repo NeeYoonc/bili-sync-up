@@ -1,48 +1,57 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Bili Sync YouTube 登录助手</title>
-    <link rel="stylesheet" href="popup.css" />
-  </head>
-  <body>
-    <main>
-      <header>
-        <span class="youtube">▶</span>
-        <div>
-          <h1>YouTube 登录助手</h1>
-          <p>电脑端登录后传输到 Bili Sync</p>
-        </div>
-      </header>
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Bili Sync 登录助手</title>
+		<link rel="stylesheet" href="popup.css" />
+	</head>
+	<body>
+		<main>
+			<header>
+				<span class="youtube">▶</span>
+				<div>
+					<h1>外部平台登录助手</h1>
+					<p>电脑端登录后传输到 Bili Sync</p>
+				</div>
+			</header>
 
-      <section class="steps">
-        <strong>使用顺序</strong>
-        <ol>
-          <li>在 Bili Sync 设置页点击下面的“连接当前页面”</li>
-          <li>点击“打开 YouTube”，在本浏览器正常登录</li>
-          <li>点击“传输登录状态”</li>
-        </ol>
-      </section>
+			<section class="steps">
+				<strong>使用顺序</strong>
+				<ol>
+					<li>在 Bili Sync 设置页点击下面的“连接当前页面”</li>
+					<li>打开 YouTube 或抖音，在本浏览器正常登录</li>
+					<li>点击对应平台的“传输”按钮</li>
+				</ol>
+			</section>
 
-      <label>
-        Bili Sync 地址
-        <input id="server-url" type="url" placeholder="http://192.168.1.10:12345" />
-      </label>
-      <label>
-        API Token
-        <input id="auth-token" type="password" autocomplete="off" placeholder="从当前设置页自动读取" />
-      </label>
+			<label>
+				Bili Sync 地址
+				<input id="server-url" type="url" placeholder="http://192.168.1.10:12345" />
+			</label>
+			<label>
+				API Token
+				<input
+					id="auth-token"
+					type="password"
+					autocomplete="off"
+					placeholder="从当前设置页自动读取"
+				/>
+			</label>
 
-      <div class="grid">
-        <button id="connect-page" class="secondary">连接当前页面</button>
-        <button id="open-youtube" class="secondary">打开 YouTube</button>
-      </div>
-      <button id="transfer" class="primary">传输登录状态</button>
+			<div class="grid">
+				<button id="connect-page" class="secondary">连接当前页面</button>
+				<button id="open-youtube" class="secondary">打开 YouTube</button>
+			</div>
+			<button id="transfer" class="primary">传输 YouTube 登录状态</button>
+			<div class="grid">
+				<button id="open-douyin" class="secondary">打开抖音</button>
+				<button id="transfer-douyin" class="primary">传输抖音登录状态</button>
+			</div>
 
-      <p id="status" role="status">等待操作</p>
-      <p class="privacy">只传输 youtube.com Cookie，不读取或传输 Google 密码。</p>
-    </main>
-    <script type="module" src="popup.js"></script>
-  </body>
+			<p id="status" role="status">等待操作</p>
+			<p class="privacy">只传输 youtube.com 或 douyin.com Cookie，不读取或传输账号密码。</p>
+		</main>
+		<script type="module" src="popup.js"></script>
+	</body>
 </html>

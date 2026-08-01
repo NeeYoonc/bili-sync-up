@@ -68,7 +68,7 @@
 	let showIngestSheet = false;
 	type IngestView = 'latest' | 'recent';
 	let ingestView: IngestView = 'latest';
-	type MonitoringPlatform = 'bilibili' | 'youtube';
+	type MonitoringPlatform = 'bilibili' | 'youtube' | 'douyin';
 	let monitoringPlatform: MonitoringPlatform = 'bilibili';
 	let unsubscribeSysInfo: (() => void) | null = null;
 	let unsubscribeTasks: (() => void) | null = null;
@@ -439,7 +439,7 @@
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
 						<CardTitle
 							class="text-sm font-medium"
-							title="显示当前监听的 B站和 YouTube 视频源状态、下次扫描时间和监听统计"
+							title="显示当前监听的 B站、YouTube 和抖音视频源状态、下次扫描时间和监听统计"
 						>
 							当前监听
 						</CardTitle>
@@ -505,9 +505,10 @@
 
 								<!-- 按平台切换具体监听项统计 -->
 								<Tabs.Root bind:value={monitoringPlatform}>
-									<Tabs.List class="grid w-full max-w-sm grid-cols-2">
+									<Tabs.List class="grid w-full max-w-lg grid-cols-3">
 										<Tabs.Trigger value="bilibili">B 站视频源</Tabs.Trigger>
 										<Tabs.Trigger value="youtube">YouTube 视频源</Tabs.Trigger>
+										<Tabs.Trigger value="douyin">抖音视频源</Tabs.Trigger>
 									</Tabs.List>
 
 									{#if monitoringPlatform === 'bilibili'}
@@ -560,7 +561,7 @@
 												>
 											</div>
 										</div>
-									{:else}
+									{:else if monitoringPlatform === 'youtube'}
 										<div class="mt-4">
 											<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
 												<div class="flex items-center justify-between">
@@ -608,6 +609,21 @@
 														{dashboardData.enabled_youtube_watch_later} / {dashboardData.total_youtube_watch_later}
 													</Badge>
 												</div>
+											</div>
+										</div>
+									{:else}
+										<div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<UserIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">作者投稿</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_douyin_sources} / {dashboardData.total_douyin_sources}
+												</Badge>
+											</div>
+											<div class="text-muted-foreground text-sm">
+												持续扫描作者新作品，沿用项目统一下载与媒体附属文件链路。
 											</div>
 										</div>
 									{/if}

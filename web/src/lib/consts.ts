@@ -11,7 +11,8 @@ export const VIDEO_SOURCES = {
 	SUBMISSION: { type: 'submission', title: 'UP主投稿', icon: UserIcon },
 	WATCH_LATER: { type: 'watch_later', title: '稍后再看', icon: ClockIcon },
 	BANGUMI: { type: 'bangumi', title: '番剧', icon: TvIcon },
-	YOUTUBE: { type: 'youtube', title: 'YouTube 视频源', icon: YoutubeIcon }
+	YOUTUBE: { type: 'youtube', title: 'YouTube 视频源', icon: YoutubeIcon },
+	DOUYIN: { type: 'douyin', title: '抖音视频源', icon: UserIcon }
 } as const;
 
 export const DANMAKU_SYNC_STAGE_LABELS: Record<number, string> = {

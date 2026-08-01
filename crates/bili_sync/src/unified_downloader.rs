@@ -63,6 +63,18 @@ impl UnifiedDownloader {
         }
     }
 
+    /// 下载文件并覆盖平台 Referer，原生与 aria2 路径保持一致。
+    pub async fn fetch_with_fallback_with_referer(&self, urls: &[&str], path: &Path, referer: &str) -> Result<()> {
+        match self {
+            Self::Native(downloader) => downloader.fetch_with_fallback_with_referer(urls, path, referer).await,
+            Self::Aria2(downloader) => {
+                downloader
+                    .fetch_with_aria2_fallback_with_referer(urls, path, referer)
+                    .await
+            }
+        }
+    }
+
     /// 合并视频和音频文件
     pub async fn merge(&self, video_path: &Path, audio_path: &Path, output_path: &Path) -> Result<()> {
         match self {

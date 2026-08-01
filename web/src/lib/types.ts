@@ -5,7 +5,8 @@ export interface ApiResponse<T> {
 	data: T;
 }
 
-export type YouTubeSourceType = 'subscriptions' | 'channel' | 'playlist' | 'liked' | 'watch_later';
+export type YouTubeSourceType =
+	'subscriptions' | 'channel' | 'playlist' | 'liked' | 'watch_later' | 'douyin';
 
 export interface YouTubeSource {
 	id: number;
@@ -84,6 +85,11 @@ export interface YouTubeStatusResponse {
 	cookie_path: string;
 }
 
+export interface DouyinStatusResponse {
+	logged_in: boolean;
+	cookie_path: string;
+}
+
 export interface YouTubeSearchRequest {
 	keyword: string;
 	source_type: 'channel' | 'playlist';
@@ -145,7 +151,7 @@ export type SortOrder = 'asc' | 'desc';
 
 // 请求参数类型
 export interface VideosRequest {
-	platform?: 'bilibili' | 'youtube';
+	platform?: 'bilibili' | 'youtube' | 'douyin';
 	youtube?: number;
 	collection?: number;
 	favorite?: number;
@@ -267,6 +273,7 @@ export interface VideoSourcesResponse {
 	watch_later: VideoSource[];
 	bangumi: VideoSource[];
 	youtube: VideoSource[];
+	douyin: VideoSource[];
 }
 
 // 视频信息类型
@@ -1266,6 +1273,8 @@ export interface DashBoardResponse {
 	total_watch_later: number;
 	enabled_youtube_sources: number;
 	total_youtube_sources: number;
+	enabled_douyin_sources: number;
+	total_douyin_sources: number;
 	enabled_youtube_subscriptions: number;
 	total_youtube_subscriptions: number;
 	enabled_youtube_channels: number;

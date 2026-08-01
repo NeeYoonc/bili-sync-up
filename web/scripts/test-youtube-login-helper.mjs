@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
 	buildNetscapeCookies,
+	isDouyinCookieDomain,
 	isYouTubeCookieDomain,
 	normalizeServerUrl,
 	permissionPattern,
@@ -8,9 +9,14 @@ import {
 } from '../static/youtube-login-extension/helper.js';
 
 assert.equal(normalizeServerUrl('http://127.0.0.1:12345/settings'), 'http://127.0.0.1:12345');
-assert.equal(permissionPattern('https://nas.example.com:9443/settings'), 'https://nas.example.com/*');
+assert.equal(
+	permissionPattern('https://nas.example.com:9443/settings'),
+	'https://nas.example.com/*'
+);
 assert.equal(isYouTubeCookieDomain('.youtube.com'), true);
 assert.equal(isYouTubeCookieDomain('accounts.google.com'), false);
+assert.equal(isDouyinCookieDomain('.douyin.com'), true);
+assert.equal(isDouyinCookieDomain('.bytedance.com'), true);
 
 const exported = buildNetscapeCookies([
 	{
@@ -37,6 +43,38 @@ assert.match(
 );
 assert.doesNotMatch(exported, /google-session|accounts\.google\.com/);
 assert.throws(() => buildNetscapeCookies([]), /没有检测到 YouTube 登录状态/);
+assert.match(
+	buildNetscapeCookies(
+		[
+			{
+				domain: '.douyin.com',
+				path: '/',
+				secure: true,
+				expirationDate: 2_000_000_000,
+				name: 'ttwid',
+				value: 'douyin-session'
+			}
+		],
+		'douyin'
+	),
+	/\.douyin\.com\tTRUE\t\/\tTRUE\t2000000000\tttwid\tdouyin-session/
+);
+assert.match(
+	buildNetscapeCookies(
+		[
+			{
+				domain: '.bytedance.com',
+				path: '/',
+				secure: true,
+				expirationDate: 2_000_000_000,
+				name: 'ttwid',
+				value: 'shared-douyin-session'
+			}
+		],
+		'douyin'
+	),
+	/\.bytedance\.com\tTRUE\t\/\tTRUE\t2000000000\tttwid\tshared-douyin-session/
+);
 assert.equal(responseMessage({ data: { message: '已导入' } }, 'fallback'), '已导入');
 assert.equal(responseMessage({ data: '验证失败' }, 'fallback'), '验证失败');
 

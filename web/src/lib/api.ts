@@ -57,6 +57,7 @@ import type {
 	BetaImageUpdateStatusResponse,
 	YouTubeLoginResponse,
 	YouTubeStatusResponse,
+	DouyinStatusResponse,
 	YouTubeSearchRequest,
 	YouTubeSearchResponse,
 	YouTubeSourceVideosRequest,
@@ -297,6 +298,53 @@ class ApiClient {
 		return this.get<YouTubeQueueStatusResponse>('/youtube/queue-status');
 	}
 
+	async getDouyinStatus(): Promise<ApiResponse<DouyinStatusResponse>> {
+		return this.get<DouyinStatusResponse>('/douyin/status');
+	}
+	async importDouyinCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
+		return this.post<YouTubeLoginResponse>('/douyin/cookies', { cookies });
+	}
+	async searchDouyin(keyword: string): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/douyin/search', { keyword });
+	}
+	async getDouyinSourceVideos(params: {
+		url: string;
+		page?: number;
+		page_size?: number;
+		keyword?: string;
+	}): Promise<ApiResponse<SubmissionVideosResponse>> {
+		return this.get<SubmissionVideosResponse>('/douyin/source-videos', { ...params });
+	}
+	async getDouyinSources(): Promise<ApiResponse<YouTubeSource[]>> {
+		return this.get<YouTubeSource[]>('/douyin/sources');
+	}
+	async createDouyinSource(
+		request: CreateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.post<YouTubeSource>('/douyin/sources', { ...request, source_type: 'douyin' });
+	}
+	async setDouyinSourceEnabled(id: number, enabled: boolean): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/douyin/sources/${id}/enabled`, { enabled });
+	}
+	async scanDouyinSource(id: number): Promise<ApiResponse<number>> {
+		return this.post<number>(`/douyin/sources/${id}/scan`);
+	}
+	async updateDouyinSource(
+		id: number,
+		request: UpdateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/douyin/sources/${id}`, request);
+	}
+	async resetDouyinSourcePath(id: number, new_path: string): Promise<ApiResponse<YouTubeSource>> {
+		return this.post<YouTubeSource>(`/douyin/sources/${id}/reset-path`, { new_path });
+	}
+	async retryDouyinSource(id: number): Promise<ApiResponse<number>> {
+		return this.post<number>(`/douyin/sources/${id}/retry`);
+	}
+	async deleteDouyinSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
+		return this.delete<boolean>(`/douyin/sources/${id}?delete_local_files=${deleteLocalFiles}`);
+	}
+
 	/**
 	 * 获取视频列表
 	 * @param params 查询参数
@@ -326,7 +374,10 @@ class ApiClient {
 	 * @param id 视频 ID
 	 * @param force 是否强制重置
 	 */
-	async resetVideo(id: string | number, force: boolean = false): Promise<ApiResponse<ResetVideoResponse>> {
+	async resetVideo(
+		id: string | number,
+		force: boolean = false
+	): Promise<ApiResponse<ResetVideoResponse>> {
 		const endpoint = force ? `/videos/${id}/reset?force=true` : `/videos/${id}/reset`;
 		return this.post<ResetVideoResponse>(endpoint);
 	}
@@ -411,15 +462,15 @@ class ApiClient {
 		id: string | number,
 		deleteLocalFiles: boolean = false
 	): Promise<ApiResponse<DeleteVideoSourceResponse>> {
-		if (sourceType === 'youtube') {
-			const result = await this.delete<boolean>(`/youtube/sources/${id}`, {
+		if (sourceType === 'youtube' || sourceType === 'douyin') {
+			const result = await this.delete<boolean>(`/${sourceType}/sources/${id}`, {
 				delete_local_files: deleteLocalFiles.toString()
 			});
 			return {
 				status_code: result.status_code,
 				data: {
 					success: result.data,
-					message: 'YouTube 视频源已删除'
+					message: `${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源已删除`
 				}
 			};
 		}
@@ -439,14 +490,17 @@ class ApiClient {
 		id: number,
 		enabled: boolean
 	): Promise<ApiResponse<UpdateVideoSourceEnabledResponse>> {
-		if (sourceType === 'youtube') {
-			const result = await this.setYouTubeSourceEnabled(id, enabled);
+		if (sourceType === 'youtube' || sourceType === 'douyin') {
+			const result =
+				sourceType === 'douyin'
+					? await this.setDouyinSourceEnabled(id, enabled)
+					: await this.setYouTubeSourceEnabled(id, enabled);
 			return {
 				status_code: result.status_code,
 				data: {
 					success: true,
 					source_id: id,
-					source_type: 'youtube',
+					source_type: sourceType,
 					enabled: result.data.enabled,
 					message: enabled ? '视频源已启用' : '视频源已禁用'
 				}
@@ -550,8 +604,12 @@ class ApiClient {
 			message: string;
 		}>
 	> {
-		if (sourceType === 'youtube') {
-			const result = await this.updateYouTubeSource(id, {
+		if (sourceType === 'youtube' || sourceType === 'douyin') {
+			const update =
+				sourceType === 'douyin'
+					? this.updateDouyinSource.bind(this)
+					: this.updateYouTubeSource.bind(this);
+			const result = await update(id, {
 				audio_only: options.audio_only,
 				audio_only_m4a_only: options.audio_only_m4a_only,
 				flat_folder: options.flat_folder,
@@ -567,7 +625,7 @@ class ApiClient {
 				data: {
 					success: true,
 					source_id: id,
-					source_type: 'youtube',
+					source_type: sourceType,
 					audio_only: source.audio_only,
 					audio_only_m4a_only: source.audio_only_m4a_only,
 					flat_folder: source.flat_folder,
@@ -587,7 +645,7 @@ class ApiClient {
 					use_dynamic_api: false,
 					collection_aggregate_enabled: false,
 					filter_option: source.filter_option,
-					message: 'YouTube 视频源下载设置已更新'
+					message: `${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源下载设置已更新`
 				}
 			};
 		}
@@ -630,21 +688,26 @@ class ApiClient {
 		id: number,
 		params: ResetVideoSourcePathRequest
 	): Promise<ApiResponse<ResetVideoSourcePathResponse>> {
-		if (sourceType === 'youtube') {
-			const before = (await this.getYouTubeSources()).data.find((source) => source.id === id);
-			const result = await this.resetYouTubeSourcePath(id, params.new_path);
+		if (sourceType === 'youtube' || sourceType === 'douyin') {
+			const before = (
+				sourceType === 'douyin' ? await this.getDouyinSources() : await this.getYouTubeSources()
+			).data.find((source) => source.id === id);
+			const result =
+				sourceType === 'douyin'
+					? await this.resetDouyinSourcePath(id, params.new_path)
+					: await this.resetYouTubeSourcePath(id, params.new_path);
 			return {
 				status_code: result.status_code,
 				data: {
 					success: true,
 					source_id: id,
-					source_type: 'youtube',
+					source_type: sourceType,
 					old_path: before?.path ?? '',
 					new_path: result.data.path,
 					moved_files_count: 0,
 					updated_videos_count: result.data.completed_count,
 					cleaned_folders_count: 0,
-					message: 'YouTube 视频源路径已按现有目录规则更新'
+					message: `${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源路径已按现有目录规则更新`
 				}
 			};
 		}
@@ -692,16 +755,17 @@ class ApiClient {
 		sourceType: string,
 		id: number
 	): Promise<ApiResponse<GetKeywordFiltersResponse>> {
-		if (sourceType === 'youtube') {
-			const response = await this.getYouTubeSources();
+		if (sourceType === 'youtube' || sourceType === 'douyin') {
+			const response =
+				sourceType === 'douyin' ? await this.getDouyinSources() : await this.getYouTubeSources();
 			const source = response.data.find((item) => item.id === id);
-			if (!source) throw new Error('YouTube 视频源不存在');
+			if (!source) throw new Error('外部平台视频源不存在');
 			return {
 				status_code: response.status_code,
 				data: {
 					success: true,
 					source_id: id,
-					source_type: 'youtube',
+					source_type: sourceType,
 					blacklist_keywords: source.blacklist_keywords,
 					whitelist_keywords: source.whitelist_keywords,
 					case_sensitive: source.case_sensitive,
@@ -736,8 +800,12 @@ class ApiClient {
 		publishedAfter?: string,
 		publishedBefore?: string
 	): Promise<ApiResponse<UpdateKeywordFiltersResponse>> {
-		if (sourceType === 'youtube') {
-			const response = await this.updateYouTubeSource(id, {
+		if (sourceType === 'youtube' || sourceType === 'douyin') {
+			const update =
+				sourceType === 'douyin'
+					? this.updateDouyinSource.bind(this)
+					: this.updateYouTubeSource.bind(this);
+			const response = await update(id, {
 				blacklist_keywords: blacklistKeywords,
 				whitelist_keywords: whitelistKeywords,
 				case_sensitive: caseSensitive,
@@ -751,10 +819,10 @@ class ApiClient {
 				data: {
 					success: true,
 					source_id: id,
-					source_type: 'youtube',
+					source_type: sourceType,
 					blacklist_count: response.data.blacklist_keywords.length,
 					whitelist_count: response.data.whitelist_keywords.length,
-					message: 'YouTube 视频源过滤设置已更新'
+					message: `${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源过滤设置已更新`
 				}
 			};
 		}
@@ -1278,6 +1346,21 @@ export const api = {
 	getYouTubeVideos: () => apiClient.getYouTubeVideos(),
 	retryYouTubeVideo: (id: number) => apiClient.retryYouTubeVideo(id),
 	getYouTubeQueueStatus: () => apiClient.getYouTubeQueueStatus(),
+	getDouyinStatus: () => apiClient.getDouyinStatus(),
+	importDouyinCookies: (cookies: string) => apiClient.importDouyinCookies(cookies),
+	getDouyinSources: () => apiClient.getDouyinSources(),
+	createDouyinSource: (request: CreateYouTubeSourceRequest) =>
+		apiClient.createDouyinSource(request),
+	setDouyinSourceEnabled: (id: number, enabled: boolean) =>
+		apiClient.setDouyinSourceEnabled(id, enabled),
+	scanDouyinSource: (id: number) => apiClient.scanDouyinSource(id),
+	updateDouyinSource: (id: number, request: UpdateYouTubeSourceRequest) =>
+		apiClient.updateDouyinSource(id, request),
+	resetDouyinSourcePath: (id: number, newPath: string) =>
+		apiClient.resetDouyinSourcePath(id, newPath),
+	retryDouyinSource: (id: number) => apiClient.retryDouyinSource(id),
+	deleteDouyinSource: (id: number, deleteLocalFiles = false) =>
+		apiClient.deleteDouyinSource(id, deleteLocalFiles),
 
 	/**
 	 * 获取视频列表
@@ -1371,6 +1454,13 @@ export const api = {
 	searchYouTube: (params: YouTubeSearchRequest) => apiClient.searchYouTube(params),
 	getYouTubeSourceVideos: (params: YouTubeSourceVideosRequest) =>
 		apiClient.getYouTubeSourceVideos(params),
+	searchDouyin: (keyword: string) => apiClient.searchDouyin(keyword),
+	getDouyinSourceVideos: (params: {
+		url: string;
+		page?: number;
+		page_size?: number;
+		keyword?: string;
+	}) => apiClient.getDouyinSourceVideos(params),
 
 	/**
 	 * 获取用户收藏夹列表

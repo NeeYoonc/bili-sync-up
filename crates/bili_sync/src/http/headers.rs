@@ -67,9 +67,14 @@ pub fn create_navigation_headers() -> HeaderMap {
 
 /// 为Aria2下载器创建请求头字符串数组
 pub fn create_aria2_headers() -> Vec<String> {
+    create_aria2_headers_with_referer("https://www.bilibili.com")
+}
+
+/// 为 Aria2 下载器创建带平台 Referer 的请求头字符串数组。
+pub fn create_aria2_headers_with_referer(referer: &str) -> Vec<String> {
     vec![
         format!("User-Agent: {}", CHROME_USER_AGENT),
-        "Referer: https://www.bilibili.com".to_string(),
+        format!("Referer: {referer}"),
         "Accept: */*".to_string(),
         "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8".to_string(),
         format!("sec-ch-ua: {}", SEC_CH_UA),
@@ -80,4 +85,19 @@ pub fn create_aria2_headers() -> Vec<String> {
         "sec-fetch-site: cross-site".to_string(),
         "Cache-Control: no-cache".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aria2_headers_override_platform_referer() {
+        let headers = create_aria2_headers_with_referer("https://www.douyin.com/");
+
+        assert!(headers
+            .iter()
+            .any(|header| header == "Referer: https://www.douyin.com/"));
+        assert!(!headers.iter().any(|header| header.contains("bilibili.com")));
+    }
 }

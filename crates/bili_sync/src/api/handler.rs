@@ -2934,7 +2934,7 @@ pub async fn get_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<VideosRequest>,
 ) -> Result<ApiResponse<VideosResponse>, ApiError> {
-    if params.platform.as_deref() == Some("youtube") {
+    if matches!(params.platform.as_deref(), Some("youtube" | "douyin")) {
         return Ok(ApiResponse::ok(
             crate::youtube::get_unified_youtube_videos(db.as_ref(), &params).await?,
         ));
@@ -3986,7 +3986,7 @@ pub async fn reset_all_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<crate::api::request::VideosRequest>,
 ) -> Result<ApiResponse<ResetAllVideosResponse>, ApiError> {
-    if params.platform.as_deref() == Some("youtube") {
+    if matches!(params.platform.as_deref(), Some("youtube" | "douyin")) {
         return Ok(ApiResponse::ok(
             crate::youtube::reset_all_unified_youtube_videos(db.as_ref(), &params).await?,
         ));
@@ -4255,7 +4255,7 @@ pub async fn reset_specific_tasks(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     axum::Json(request): axum::Json<crate::api::request::ResetSpecificTasksRequest>,
 ) -> Result<ApiResponse<ResetAllVideosResponse>, ApiError> {
-    if request.platform.as_deref() == Some("youtube") {
+    if matches!(request.platform.as_deref(), Some("youtube" | "douyin")) {
         return Ok(ApiResponse::ok(
             crate::youtube::reset_specific_unified_youtube_tasks(db.as_ref(), &request).await?,
         ));
@@ -7194,16 +7194,16 @@ pub async fn delete_video_source_internal(
     id: i32,
     delete_local_files: bool,
 ) -> Result<crate::api::response::DeleteVideoSourceResponse, ApiError> {
-    if source_type == "youtube" {
+    if matches!(source_type.as_str(), "youtube" | "douyin") {
         crate::youtube::delete_youtube_source_internal(db.as_ref(), id, delete_local_files).await?;
         return Ok(crate::api::response::DeleteVideoSourceResponse {
             success: true,
             source_id: id,
             source_type,
             message: if delete_local_files {
-                "YouTube 视频源、下载记录及已记录本地文件已删除".to_string()
+                "外部平台视频源、下载记录及已记录本地文件已删除".to_string()
             } else {
-                "YouTube 视频源和下载记录已删除，本地文件已保留".to_string()
+                "外部平台视频源和下载记录已删除，本地文件已保留".to_string()
             },
         });
     }
@@ -19155,8 +19155,12 @@ ORDER BY
     let (enabled_youtube_playlists, total_youtube_playlists) = youtube_type_count("playlist");
     let (enabled_youtube_liked, total_youtube_liked) = youtube_type_count("liked");
     let (enabled_youtube_watch_later, total_youtube_watch_later) = youtube_type_count("watch_later");
-    let enabled_youtube_sources = youtube_sources.iter().filter(|source| source.enabled).count() as u64;
-    let total_youtube_sources = youtube_sources.len() as u64;
+    let (enabled_douyin_sources, total_douyin_sources) = youtube_type_count("douyin");
+    let youtube_only = youtube_sources.iter().filter(|source| source.source_type != "douyin");
+    let total_youtube_sources = youtube_only.clone().count() as u64;
+    let enabled_youtube_sources = youtube_only.filter(|source| source.enabled).count() as u64;
+    let enabled_external_sources = enabled_youtube_sources + enabled_douyin_sources;
+    let total_external_sources = total_youtube_sources + total_douyin_sources;
 
     // 获取监听状态信息
     let active_sources = enabled_favorites
@@ -19164,13 +19168,13 @@ ORDER BY
         + enabled_submissions
         + enabled_bangumi
         + if enabled_watch_later > 0 { 1 } else { 0 }
-        + enabled_youtube_sources;
+        + enabled_external_sources;
     let total_all_sources = total_favorites
         + total_collections
         + total_submissions
         + total_bangumi
         + if total_watch_later > 0 { 1 } else { 0 }
-        + total_youtube_sources;
+        + total_external_sources;
     let inactive_sources = total_all_sources - active_sources;
 
     // 从任务状态获取扫描时间信息
@@ -19202,6 +19206,8 @@ ORDER BY
         total_watch_later,
         enabled_youtube_sources,
         total_youtube_sources,
+        enabled_douyin_sources,
+        total_douyin_sources,
         enabled_youtube_subscriptions,
         total_youtube_subscriptions,
         enabled_youtube_channels,

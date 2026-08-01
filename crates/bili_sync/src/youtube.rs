@@ -577,15 +577,75 @@ pub async fn import_youtube_cookie_file(
 pub async fn get_youtube_sources(
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<Vec<YouTubeSourceResponse>>, ApiError> {
+    get_platform_sources(db.as_ref(), "youtube").await
+}
+
+pub async fn get_douyin_sources(
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<Vec<YouTubeSourceResponse>>, ApiError> {
+    get_platform_sources(db.as_ref(), "douyin").await
+}
+
+async fn get_platform_sources(
+    db: &DatabaseConnection,
+    platform: &str,
+) -> Result<ApiResponse<Vec<YouTubeSourceResponse>>, ApiError> {
     let sources = youtube_source::Entity::find()
         .order_by_desc(youtube_source::Column::Id)
-        .all(db.as_ref())
-        .await?;
+        .all(db)
+        .await?
+        .into_iter()
+        .filter(|source| source_platform(source) == platform)
+        .collect::<Vec<_>>();
     let mut response = Vec::with_capacity(sources.len());
     for source in sources {
-        response.push(source_response(db.as_ref(), source).await?);
+        response.push(source_response(db, source).await?);
     }
     Ok(ApiResponse::ok(response))
+}
+
+async fn require_source_platform(
+    db: &DatabaseConnection,
+    id: i32,
+    platform: &str,
+) -> Result<youtube_source::Model, ApiError> {
+    let Some(source) = youtube_source::Entity::find_by_id(id).one(db).await? else {
+        return Err(ApiError::from(anyhow!("外部平台视频源不存在")));
+    };
+    if source_platform(&source) != platform {
+        return Err(ApiError::bad_request(format!(
+            "视频源 {} 不属于 {} 平台",
+            id,
+            if platform == "douyin" { "抖音" } else { "YouTube" }
+        )));
+    }
+    Ok(source)
+}
+
+async fn require_video_platform(db: &DatabaseConnection, id: i32, platform: &str) -> Result<(), ApiError> {
+    let Some(video) = youtube_video::Entity::find_by_id(id).one(db).await? else {
+        return Err(ApiError::from(anyhow!("外部平台下载任务不存在")));
+    };
+    require_source_platform(db, video.source_id, platform).await?;
+    Ok(())
+}
+
+pub async fn create_youtube_source_checked(
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+    Json(request): Json<CreateYouTubeSourceRequest>,
+) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
+    if normalize_source_type(&request.source_type)? == "douyin" {
+        return Err(ApiError::bad_request("请通过抖音视频源接口创建抖音源"));
+    }
+    create_youtube_source(Extension(db), Json(request)).await
+}
+
+pub async fn create_douyin_source(
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+    Json(mut request): Json<CreateYouTubeSourceRequest>,
+) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
+    request.source_type = "douyin".to_string();
+    create_youtube_source(Extension(db), Json(request)).await
 }
 
 pub async fn create_youtube_source(
@@ -594,7 +654,9 @@ pub async fn create_youtube_source(
 ) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
     let source_type = normalize_source_type(&request.source_type)?;
     let url = resolve_source_url(source_type, request.url.as_deref())?;
-    if !is_youtube_url(&url) {
+    if source_type == "douyin" {
+        crate::douyin::resolve_sec_user_id(&url).await?;
+    } else if !is_youtube_url(&url) {
         return Err(ApiError::from(anyhow!("频道或播放列表必须是有效的 YouTube 链接")));
     }
     let path = request.path.trim();
@@ -666,6 +728,24 @@ pub async fn update_youtube_source_enabled(
     let model = active.update(db.as_ref()).await?;
     notify_video_sources_changed();
     Ok(ApiResponse::ok(source_response(db.as_ref(), model).await?))
+}
+
+pub async fn update_youtube_source_enabled_checked(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+    Json(request): Json<UpdateYouTubeSourceEnabledRequest>,
+) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
+    require_source_platform(db.as_ref(), id, "youtube").await?;
+    update_youtube_source_enabled(AxumPath(id), Extension(db), Json(request)).await
+}
+
+pub async fn update_douyin_source_enabled(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+    Json(request): Json<UpdateYouTubeSourceEnabledRequest>,
+) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
+    require_source_platform(db.as_ref(), id, "douyin").await?;
+    update_youtube_source_enabled(AxumPath(id), Extension(db), Json(request)).await
 }
 
 pub async fn update_youtube_source(
@@ -749,6 +829,24 @@ pub async fn update_youtube_source(
     Ok(ApiResponse::ok(source_response(db.as_ref(), model).await?))
 }
 
+pub async fn update_youtube_source_checked(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+    Json(request): Json<UpdateYouTubeSourceRequest>,
+) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
+    require_source_platform(db.as_ref(), id, "youtube").await?;
+    update_youtube_source(AxumPath(id), Extension(db), Json(request)).await
+}
+
+pub async fn update_douyin_source(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+    Json(request): Json<UpdateYouTubeSourceRequest>,
+) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
+    require_source_platform(db.as_ref(), id, "douyin").await?;
+    update_youtube_source(AxumPath(id), Extension(db), Json(request)).await
+}
+
 pub async fn delete_youtube_source(
     AxumPath(id): AxumPath<i32>,
     Query(request): Query<DeleteYouTubeSourceRequest>,
@@ -756,6 +854,24 @@ pub async fn delete_youtube_source(
 ) -> Result<ApiResponse<bool>, ApiError> {
     delete_youtube_source_internal(db.as_ref(), id, request.delete_local_files).await?;
     Ok(ApiResponse::ok(true))
+}
+
+pub async fn delete_youtube_source_checked(
+    AxumPath(id): AxumPath<i32>,
+    Query(request): Query<DeleteYouTubeSourceRequest>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<bool>, ApiError> {
+    require_source_platform(db.as_ref(), id, "youtube").await?;
+    delete_youtube_source(AxumPath(id), Query(request), Extension(db)).await
+}
+
+pub async fn delete_douyin_source(
+    AxumPath(id): AxumPath<i32>,
+    Query(request): Query<DeleteYouTubeSourceRequest>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<bool>, ApiError> {
+    require_source_platform(db.as_ref(), id, "douyin").await?;
+    delete_youtube_source(AxumPath(id), Query(request), Extension(db)).await
 }
 
 pub async fn delete_youtube_source_internal(db: &DatabaseConnection, id: i32, delete_local_files: bool) -> Result<()> {
@@ -832,6 +948,24 @@ pub async fn reset_youtube_source_path(
     Ok(ApiResponse::ok(source_response(db.as_ref(), source).await?))
 }
 
+pub async fn reset_youtube_source_path_checked(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+    Json(request): Json<ResetYouTubeSourcePathRequest>,
+) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
+    require_source_platform(db.as_ref(), id, "youtube").await?;
+    reset_youtube_source_path(AxumPath(id), Extension(db), Json(request)).await
+}
+
+pub async fn reset_douyin_source_path(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+    Json(request): Json<ResetYouTubeSourcePathRequest>,
+) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
+    require_source_platform(db.as_ref(), id, "douyin").await?;
+    reset_youtube_source_path(AxumPath(id), Extension(db), Json(request)).await
+}
+
 pub async fn retry_youtube_source(
     AxumPath(id): AxumPath<i32>,
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
@@ -876,6 +1010,22 @@ pub async fn retry_youtube_source(
     Ok(ApiResponse::ok(retried))
 }
 
+pub async fn retry_youtube_source_checked(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<u64>, ApiError> {
+    require_source_platform(db.as_ref(), id, "youtube").await?;
+    retry_youtube_source(AxumPath(id), Extension(db)).await
+}
+
+pub async fn retry_douyin_source(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<u64>, ApiError> {
+    require_source_platform(db.as_ref(), id, "douyin").await?;
+    retry_youtube_source(AxumPath(id), Extension(db)).await
+}
+
 pub async fn retry_youtube_video(
     AxumPath(id): AxumPath<i32>,
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
@@ -894,19 +1044,66 @@ pub async fn retry_youtube_video(
     Ok(ApiResponse::ok(true))
 }
 
+pub async fn retry_youtube_video_checked(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<bool>, ApiError> {
+    require_video_platform(db.as_ref(), id, "youtube").await?;
+    retry_youtube_video(AxumPath(id), Extension(db)).await
+}
+
+pub async fn retry_douyin_video(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<bool>, ApiError> {
+    require_video_platform(db.as_ref(), id, "douyin").await?;
+    retry_youtube_video(AxumPath(id), Extension(db)).await
+}
+
 pub async fn get_youtube_queue_status(
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<YouTubeQueueStatusResponse>, ApiError> {
+    get_platform_queue_status(db.as_ref(), "youtube").await
+}
+
+pub async fn get_douyin_queue_status(
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<YouTubeQueueStatusResponse>, ApiError> {
+    get_platform_queue_status(db.as_ref(), "douyin").await
+}
+
+async fn get_platform_queue_status(
+    db: &DatabaseConnection,
+    platform: &str,
+) -> Result<ApiResponse<YouTubeQueueStatusResponse>, ApiError> {
+    let source_ids = youtube_source::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .filter(|source| source_platform(source) == platform)
+        .map(|source| source.id)
+        .collect::<Vec<_>>();
+    if source_ids.is_empty() {
+        return Ok(ApiResponse::ok(YouTubeQueueStatusResponse {
+            pending: 0,
+            downloading: 0,
+            completed: 0,
+            failed: 0,
+            tasks: Vec::new(),
+        }));
+    }
     let count = |status: &str| {
         youtube_video::Entity::find()
+            .filter(youtube_video::Column::SourceId.is_in(source_ids.clone()))
             .filter(youtube_video::Column::DownloadStatus.eq(status))
-            .count(db.as_ref())
+            .count(db)
     };
     let tasks = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.is_in(source_ids.clone()))
         .filter(youtube_video::Column::DownloadStatus.is_in(["pending", "downloading", "failed"]))
         .order_by_asc(youtube_video::Column::Id)
         .limit(100)
-        .all(db.as_ref())
+        .all(db)
         .await?
         .into_iter()
         .map(video_response)
@@ -932,19 +1129,106 @@ pub async fn scan_youtube_source(
     Ok(ApiResponse::ok(added))
 }
 
+pub async fn scan_youtube_source_checked(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<u64>, ApiError> {
+    require_source_platform(db.as_ref(), id, "youtube").await?;
+    scan_youtube_source(AxumPath(id), Extension(db)).await
+}
+
+pub async fn scan_douyin_source_endpoint(
+    AxumPath(id): AxumPath<i32>,
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<u64>, ApiError> {
+    let source = require_source_platform(db.as_ref(), id, "douyin").await?;
+    let added = scan_source(db.as_ref(), &source).await?;
+    Ok(ApiResponse::ok(added))
+}
+
 pub async fn get_youtube_videos(
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<Vec<YouTubeVideoResponse>>, ApiError> {
-    let videos = youtube_video::Entity::find()
+    Ok(ApiResponse::ok(
+        get_platform_video_models(db.as_ref(), "youtube")
+            .await?
+            .into_iter()
+            .map(video_response)
+            .collect(),
+    ))
+}
+
+pub async fn get_douyin_videos(
+    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<Vec<YouTubeVideoResponse>>, ApiError> {
+    Ok(ApiResponse::ok(
+        get_platform_video_models(db.as_ref(), "douyin")
+            .await?
+            .into_iter()
+            .map(video_response)
+            .collect(),
+    ))
+}
+
+async fn get_platform_video_models(db: &DatabaseConnection, platform: &str) -> Result<Vec<youtube_video::Model>> {
+    let source_ids = youtube_source::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .filter(|source| source_platform(source) == platform)
+        .map(|source| source.id)
+        .collect::<Vec<_>>();
+    if source_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.is_in(source_ids))
         .order_by_desc(youtube_video::Column::Id)
         .limit(200)
-        .all(db.as_ref())
-        .await?;
-    Ok(ApiResponse::ok(videos.into_iter().map(video_response).collect()))
+        .all(db)
+        .await?)
 }
 
 pub fn unified_youtube_id(value: &str) -> Option<i32> {
-    value.strip_prefix("youtube-").and_then(|id| id.parse::<i32>().ok())
+    value
+        .strip_prefix("youtube-")
+        .or_else(|| value.strip_prefix("douyin-"))
+        .and_then(|id| id.parse::<i32>().ok())
+}
+
+fn is_douyin_source(source: &youtube_source::Model) -> bool {
+    source.source_type == "douyin"
+}
+
+fn source_platform(source: &youtube_source::Model) -> &'static str {
+    if is_douyin_source(source) {
+        "douyin"
+    } else {
+        "youtube"
+    }
+}
+
+fn source_platform_label(source: &youtube_source::Model) -> &'static str {
+    if is_douyin_source(source) {
+        "抖音"
+    } else {
+        "YouTube"
+    }
+}
+
+async fn fetch_platform_asset(
+    downloader: &UnifiedDownloader,
+    source: &youtube_source::Model,
+    urls: &[&str],
+    path: &Path,
+) -> Result<()> {
+    if is_douyin_source(source) {
+        downloader
+            .fetch_with_fallback_with_referer(urls, path, "https://www.douyin.com/")
+            .await
+    } else {
+        downloader.fetch_with_fallback(urls, path).await
+    }
 }
 
 fn youtube_source_type_label(source_type: &str) -> &'static str {
@@ -954,6 +1238,7 @@ fn youtube_source_type_label(source_type: &str) -> &'static str {
         "playlist" => "YouTube 播放列表",
         "liked" => "YouTube 喜欢",
         "watch_later" => "YouTube 稍后观看",
+        "douyin" => "抖音作者",
         _ => "YouTube",
     }
 }
@@ -1064,7 +1349,7 @@ async fn unified_youtube_parts(
         },
         VideoSourceTag {
             source_id: source.id,
-            source_type: "youtube".to_string(),
+            source_type: source_platform(source).to_string(),
             source_type_label: youtube_source_type_label(&source.source_type).to_string(),
             source_name: source.name.clone(),
             split_chapters_after_download: false,
@@ -1089,6 +1374,11 @@ async fn filtered_youtube_models(
         let Some(source) = source_map.get(&video.source_id).cloned() else {
             continue;
         };
+        if let Some(platform) = params.platform.as_deref() {
+            if source_platform(&source) != platform {
+                continue;
+            }
+        }
         if params.youtube.is_some_and(|id| id != source.id) {
             continue;
         }
@@ -1231,7 +1521,7 @@ pub async fn reset_specific_unified_youtube_tasks(
     request: &ResetSpecificTasksRequest,
 ) -> Result<ResetAllVideosResponse, ApiError> {
     let params = VideosRequest {
-        platform: Some("youtube".to_string()),
+        platform: request.platform.clone().or_else(|| Some("youtube".to_string())),
         youtube: request.youtube,
         query: request.query.clone(),
         show_failed_only: request.show_failed_only,
@@ -1329,7 +1619,7 @@ pub async fn process_scheduled_sources(
         return Ok(());
     }
     if let Err(error) = ensure_ytdlp_available().await {
-        warn!(error = %error, "已配置 YouTube 视频源，但 yt-dlp 自动安装失败；跳过本轮 YouTube 扫描");
+        warn!(error = %error, "已配置外部平台视频源，但 yt-dlp 自动安装失败；跳过本轮扫描");
         return Ok(());
     }
     recover_interrupted_downloads(db).await?;
@@ -1338,7 +1628,7 @@ pub async fn process_scheduled_sources(
             return Ok(());
         }
         if let Err(error) = scan_source(db, source).await {
-            warn!(source_id = source.id, error = %error, "扫描 YouTube 视频源失败");
+            warn!(source_id = source.id, error = %error, "扫描外部平台视频源失败");
         }
     }
     if TASK_CONTROLLER.is_paused() {
@@ -1355,6 +1645,9 @@ pub async fn process_scheduled_sources(
 }
 
 async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
+    if is_douyin_source(source) {
+        return scan_douyin_source(db, source).await;
+    }
     let mut command = Command::new(ytdlp_executable());
     command.args(["--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]);
     append_ytdlp_runtime(&mut command);
@@ -1516,7 +1809,124 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     active.update(db).await?;
     notify_video_sources_changed();
     if added > 0 {
-        info!(source_id = source.id, added, "YouTube 视频源发现新视频");
+        info!(
+            platform = source_platform_label(&source),
+            source_id = source.id,
+            added,
+            "外部平台视频源发现新视频"
+        );
+        notify_videos_changed();
+        notify_queue_status_changed();
+    }
+    Ok(added)
+}
+
+async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
+    let posts = crate::douyin::fetch_all_posts(&source.url).await?;
+    let selected_history = source
+        .selected_videos
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
+        .unwrap_or_default();
+    let known_video_ids = source
+        .known_video_ids
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
+        .unwrap_or_default();
+    let created = chrono::NaiveDateTime::parse_from_str(&source.created_at, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .and_then(|value| Local.from_local_datetime(&value).single())
+        .map(|value| value.timestamp());
+    let mut scanned_video_ids = HashSet::new();
+    let mut added = 0u64;
+    for post in posts {
+        scanned_video_ids.insert(post.id.clone());
+        if !selected_history.is_empty()
+            && !selected_history.contains(&post.id)
+            && (known_video_ids.contains(&post.id)
+                || (known_video_ids.is_empty()
+                    && !created
+                        .zip(post.timestamp)
+                        .is_some_and(|(created, published)| published > created)))
+        {
+            continue;
+        }
+        if youtube_video::Entity::find()
+            .filter(youtube_video::Column::SourceId.eq(source.id))
+            .filter(youtube_video::Column::YoutubeId.eq(&post.id))
+            .one(db)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+        if crate::utils::keyword_filter::should_filter_video_dual_list(
+            &post.title,
+            &source.blacklist_keywords,
+            &source.whitelist_keywords,
+            source.keyword_case_sensitive,
+        ) {
+            continue;
+        }
+        if source
+            .min_duration_seconds
+            .zip(post.duration_seconds)
+            .is_some_and(|(minimum, duration)| duration < minimum)
+            || source
+                .max_duration_seconds
+                .zip(post.duration_seconds)
+                .is_some_and(|(maximum, duration)| duration > maximum)
+        {
+            continue;
+        }
+        let compact_date = post.published_at.as_deref();
+        if source
+            .published_after
+            .as_deref()
+            .map(|value| value.replace('-', ""))
+            .zip(compact_date)
+            .is_some_and(|(minimum, actual)| actual < minimum.as_str())
+            || source
+                .published_before
+                .as_deref()
+                .map(|value| value.replace('-', ""))
+                .zip(compact_date)
+                .is_some_and(|(maximum, actual)| actual > maximum.as_str())
+        {
+            continue;
+        }
+        youtube_video::ActiveModel {
+            source_id: Set(source.id),
+            youtube_id: Set(post.id),
+            url: Set(post.url),
+            title: Set(post.title),
+            uploader: Set(post.uploader),
+            thumbnail: Set(post.thumbnail),
+            published_at: Set(post.published_at),
+            duration_seconds: Set(post.duration_seconds),
+            download_status: Set("pending".to_string()),
+            output_path: Set(None),
+            error_message: Set(None),
+            created_at: Set(now_standard_string()),
+            updated_at: Set(now_standard_string()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await?;
+        added += 1;
+    }
+    known_video_ids.into_iter().for_each(|id| {
+        scanned_video_ids.insert(id);
+    });
+    let mut active: youtube_source::ActiveModel = source.clone().into();
+    active.known_video_ids = Set((!scanned_video_ids.is_empty())
+        .then(|| serde_json::to_string(&scanned_video_ids))
+        .transpose()?);
+    active.last_scan_at = Set(Some(now_standard_string()));
+    active.update(db).await?;
+    notify_video_sources_changed();
+    if added > 0 {
+        info!(source_id = source.id, added, "抖音视频源发现新作品");
         notify_videos_changed();
         notify_queue_status_changed();
     }
@@ -1559,7 +1969,7 @@ async fn recover_interrupted_downloads(db: &DatabaseConnection) -> Result<()> {
         active.updated_at = Set(now_standard_string());
         active.update(db).await?;
     }
-    warn!(count, "已恢复上次进程中断的 YouTube 下载任务");
+    warn!(count, "已恢复上次进程中断的外部平台下载任务");
     notify_videos_changed();
     notify_queue_status_changed();
     Ok(())
@@ -1585,7 +1995,7 @@ async fn download_pending(
             let downloader = downloader.clone();
             async move {
                 if let Err(error) = download_video(&db, downloader.as_ref(), video).await {
-                    warn!(error = %error, "下载 YouTube 视频失败");
+                    warn!(error = %error, "下载外部平台视频失败");
                 }
             }
         })
@@ -1618,10 +2028,10 @@ async fn backfill_completed_sidecars(db: &DatabaseConnection, downloader: &Unifi
     let mut refreshed = 0usize;
     let mut warned = 0usize;
 
-    info!(total, "开始回填已完成 YouTube 视频的封面、NFO 和字幕");
+    info!(total, "开始回填已完成外部平台视频的封面、NFO 和字幕");
     for video in videos {
         if TASK_CONTROLLER.is_paused() {
-            info!(refreshed, total, "YouTube 附属文件回填因下载暂停而停止");
+            info!(refreshed, total, "外部平台附属文件回填因下载暂停而停止");
             break;
         }
         let Some(output_path) = video.output_path.as_deref().map(PathBuf::from) else {
@@ -1693,7 +2103,7 @@ async fn backfill_completed_sidecars(db: &DatabaseConnection, downloader: &Unifi
                 warn!(
                     youtube_id = %video.youtube_id,
                     error = %error,
-                    "YouTube 媒体已完成，但附属文件元数据解析失败"
+                    "外部平台媒体已完成，但附属文件元数据解析失败"
                 );
                 let mut active: youtube_video::ActiveModel = video.into();
                 active.error_message = Set(Some(format!("媒体已完成；附属文件元数据解析失败：{error:#}")));
@@ -1704,7 +2114,7 @@ async fn backfill_completed_sidecars(db: &DatabaseConnection, downloader: &Unifi
         }
     }
 
-    info!(refreshed, warned, total, "YouTube 已完成媒体附属文件回填结束");
+    info!(refreshed, warned, total, "外部平台已完成媒体附属文件回填结束");
     notify_videos_changed();
     notify_queue_status_changed();
     Ok(())
@@ -1724,6 +2134,7 @@ async fn download_video(
     if !source.enabled {
         return Ok(());
     }
+    let platform_label = source_platform_label(&source);
     loop {
         let mut downloading: youtube_video::ActiveModel = video.clone().into();
         downloading.download_status = Set("downloading".to_string());
@@ -1749,10 +2160,11 @@ async fn download_video(
                 active.published_at = Set(downloaded.published_at);
                 active.duration_seconds = Set(downloaded.duration_seconds);
                 info!(
+                    platform = platform_label,
                     source_id = source.id,
                     youtube_id = %video.youtube_id,
                     path = %downloaded.output_path.display(),
-                    "YouTube 视频下载完成"
+                    "外部平台视频下载完成"
                 );
                 active.update(db).await?;
                 notify_videos_changed();
@@ -1767,11 +2179,12 @@ async fn download_video(
                 active.error_message = Set(Some(format!("{:#}", error)));
                 video = active.update(db).await?;
                 warn!(
+                    platform = platform_label,
                     source_id = source.id,
                     retry_count,
                     max_retries = MAX_DOWNLOAD_RETRIES,
                     error = %error,
-                    "YouTube 视频下载失败，真实错误已持久化"
+                    "外部平台视频下载失败，真实错误已持久化"
                 );
                 notify_videos_changed();
                 notify_queue_status_changed();
@@ -1781,11 +2194,12 @@ async fn download_video(
                 }
                 let retry_delay = Duration::from_secs((retry_count.max(1) as u64) * 5);
                 info!(
+                    platform = platform_label,
                     source_id = source.id,
                     youtube_id = %video.youtube_id,
                     retry_count,
                     delay_seconds = retry_delay.as_secs(),
-                    "等待后刷新 YouTube 直链并重试"
+                    "等待后刷新外部平台直链并重试"
                 );
                 tokio::time::sleep(retry_delay).await;
                 if TASK_CONTROLLER.is_paused() {
@@ -1850,6 +2264,8 @@ struct YtDlpFormat {
     vbr: Option<f64>,
     abr: Option<f64>,
     dynamic_range: Option<String>,
+    #[serde(default)]
+    fallback_urls: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1890,7 +2306,7 @@ async fn download_youtube_media(
     let output_path = youtube_output_path(source, video, &metadata, &title, &uploader)?;
     let media_exists = is_reusable_media_file(&output_path).await;
     if media_exists {
-        info!(path = %output_path.display(), "YouTube 目标文件已存在，复用现有文件");
+        info!(path = %output_path.display(), "外部平台目标文件已存在，复用现有文件");
     } else {
         // 上次 ffmpeg 被中断时可能留下非零但不可播放的最终文件，不能仅凭文件
         // 大小就把任务标记为完成。
@@ -1899,7 +2315,7 @@ async fn download_youtube_media(
     if let Some(parent) = output_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .with_context(|| format!("无法创建 YouTube 下载目录: {}", parent.display()))?;
+            .with_context(|| format!("无法创建外部平台下载目录: {}", parent.display()))?;
     }
 
     let filter_option = source
@@ -1907,31 +2323,49 @@ async fn download_youtube_media(
         .as_ref()
         .map(|value| serde_json::from_value::<FilterOption>(value.clone()))
         .transpose()
-        .context("YouTube 视频源级流过滤设置无效")?
+        .context("外部平台视频源级流过滤设置无效")?
         .unwrap_or_else(|| crate::config::reload_config().filter_option);
     let selected = select_youtube_streams(&metadata.formats, &filter_option, source.audio_only)?;
-    log_selected_youtube_streams(&selected, &filter_option);
+    log_selected_youtube_streams(&selected, &filter_option, source_platform_label(source));
     if media_exists {
         // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
     } else if source.audio_only {
-        let audio = selected
-            .audio
-            .or(selected.mixed)
-            .ok_or_else(|| anyhow!("YouTube 未返回可用音频流"))?;
-        let url = audio.url.as_deref().context("YouTube 音频流缺少下载地址")?;
-        let temporary = output_path.with_extension("download.m4a");
-        if let Err(error) = downloader
-            .fetch_with_fallback(&[url], &temporary)
-            .await
-            .context("使用项目统一下载器下载 YouTube 音频失败")
-        {
-            let _ = remove_file_if_exists(&temporary).await;
-            return Err(error);
+        if let Some(audio) = selected.audio {
+            let urls = format_urls(&audio)?;
+            let temporary = output_path.with_extension("download.m4a");
+            if let Err(error) = fetch_platform_asset(downloader, source, &urls, &temporary)
+                .await
+                .context("使用项目统一下载器下载外部平台音频失败")
+            {
+                let _ = remove_file_if_exists(&temporary).await;
+                return Err(error);
+            }
+            replace_file(&temporary, &output_path).await?;
+        } else {
+            // 抖音只提供带音轨的 MP4。先由统一下载器取得用户选择质量的
+            // 混合流，再复用项目 ffmpeg 工具提取为真正的 M4A。
+            let mixed = selected.mixed.ok_or_else(|| anyhow!("外部平台未返回可用音频流"))?;
+            let urls = format_urls(&mixed)?;
+            let source_temporary = output_path.with_extension("audio-source.mp4");
+            let audio_temporary = output_path.with_extension("download.m4a");
+            if let Err(error) = fetch_platform_asset(downloader, source, &urls, &source_temporary)
+                .await
+                .context("使用项目统一下载器下载外部平台音频源失败")
+            {
+                let _ = remove_file_if_exists(&source_temporary).await;
+                return Err(error);
+            }
+            if let Err(error) = extract_audio_track(&source_temporary, &audio_temporary).await {
+                let _ = remove_file_if_exists(&source_temporary).await;
+                let _ = remove_file_if_exists(&audio_temporary).await;
+                return Err(error);
+            }
+            replace_file(&audio_temporary, &output_path).await?;
+            remove_file_if_exists(&source_temporary).await?;
         }
-        replace_file(&temporary, &output_path).await?;
     } else if let (Some(video_stream), Some(audio_stream)) = (selected.video, selected.audio) {
-        let video_url = video_stream.url.as_deref().context("YouTube 视频流缺少下载地址")?;
-        let audio_url = audio_stream.url.as_deref().context("YouTube 音频流缺少下载地址")?;
+        let video_urls = format_urls(&video_stream)?;
+        let audio_urls = format_urls(&audio_stream)?;
         let video_temporary =
             output_path.with_extension(format!("video.{}", video_stream.ext.as_deref().unwrap_or("mp4")));
         let audio_temporary =
@@ -1940,16 +2374,14 @@ async fn download_youtube_media(
         // YouTube 的高画质通常是独立 DASH 音视频流。两条直链都交给项目
         // 原生统一下载器并行传输，避免大视频完成后才开始等待音频。
         let video_download = async {
-            downloader
-                .fetch_with_fallback(&[video_url], &video_temporary)
+            fetch_platform_asset(downloader, source, &video_urls, &video_temporary)
                 .await
-                .context("使用项目统一下载器下载 YouTube 视频流失败")
+                .context("使用项目统一下载器下载外部平台视频流失败")
         };
         let audio_download = async {
-            downloader
-                .fetch_with_fallback(&[audio_url], &audio_temporary)
+            fetch_platform_asset(downloader, source, &audio_urls, &audio_temporary)
                 .await
-                .context("使用项目统一下载器下载 YouTube 音频流失败")
+                .context("使用项目统一下载器下载外部平台音频流失败")
         };
         if let Err(error) = tokio::try_join!(video_download, audio_download) {
             let _ = remove_file_if_exists(&video_temporary).await;
@@ -1959,7 +2391,7 @@ async fn download_youtube_media(
         if let Err(error) = downloader
             .merge(&video_temporary, &audio_temporary, &merge_temporary)
             .await
-            .context("使用项目现有 ffmpeg 链路合并 YouTube 音视频失败")
+            .context("使用项目现有 ffmpeg 链路合并外部平台音视频失败")
         {
             let _ = remove_file_if_exists(&video_temporary).await;
             let _ = remove_file_if_exists(&audio_temporary).await;
@@ -1970,13 +2402,12 @@ async fn download_youtube_media(
         remove_file_if_exists(&video_temporary).await?;
         remove_file_if_exists(&audio_temporary).await?;
     } else {
-        let mixed = selected.mixed.ok_or_else(|| anyhow!("YouTube 未返回可用的音视频流"))?;
-        let url = mixed.url.as_deref().context("YouTube 混合流缺少下载地址")?;
+        let mixed = selected.mixed.ok_or_else(|| anyhow!("外部平台未返回可用的音视频流"))?;
+        let urls = format_urls(&mixed)?;
         let temporary = output_path.with_extension(format!("download.{}", mixed.ext.as_deref().unwrap_or("mp4")));
-        if let Err(error) = downloader
-            .fetch_with_fallback(&[url], &temporary)
+        if let Err(error) = fetch_platform_asset(downloader, source, &urls, &temporary)
             .await
-            .context("使用项目统一下载器下载 YouTube 混合流失败")
+            .context("使用项目统一下载器下载外部平台混合流失败")
         {
             let _ = remove_file_if_exists(&temporary).await;
             return Err(error);
@@ -2012,6 +2443,40 @@ async fn download_youtube_media(
     })
 }
 
+fn format_urls(format: &YtDlpFormat) -> Result<Vec<&str>> {
+    let mut urls = Vec::with_capacity(1 + format.fallback_urls.len());
+    if let Some(url) = format.url.as_deref().filter(|value| !value.is_empty()) {
+        urls.push(url);
+    }
+    urls.extend(
+        format
+            .fallback_urls
+            .iter()
+            .map(String::as_str)
+            .filter(|value| !value.is_empty()),
+    );
+    if urls.is_empty() {
+        bail!("外部平台媒体流缺少下载地址");
+    }
+    Ok(urls)
+}
+
+async fn extract_audio_track(input: &Path, output: &Path) -> Result<()> {
+    remove_file_if_exists(output).await?;
+    let result = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+        .args(["-y", "-i"])
+        .arg(input)
+        .args(["-map", "0:a:0", "-vn", "-c:a", "copy"])
+        .arg(output)
+        .output()
+        .await
+        .context("启动 ffmpeg 提取外部平台音轨失败")?;
+    if !result.status.success() {
+        bail!("ffmpeg 提取外部平台音轨失败：{}", command_error(&result));
+    }
+    Ok(())
+}
+
 async fn is_reusable_media_file(path: &Path) -> bool {
     if !tokio::fs::metadata(path)
         .await
@@ -2035,6 +2500,9 @@ async fn is_reusable_media_file(path: &Path) -> bool {
 }
 
 async fn extract_youtube_metadata(url: &str) -> Result<YtDlpMetadata> {
+    if let Some(aweme_id) = douyin_aweme_id(url) {
+        return extract_douyin_metadata(aweme_id).await;
+    }
     let mut command = Command::new(ytdlp_executable());
     command.args([
         "--dump-single-json",
@@ -2043,15 +2511,171 @@ async fn extract_youtube_metadata(url: &str) -> Result<YtDlpMetadata> {
         "--no-warnings",
     ]);
     append_ytdlp_runtime(&mut command);
-    append_cookies(&mut command);
+    append_cookies_for_url(&mut command, url);
     command.arg(url);
     let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output())
         .await
         .map_err(|_| anyhow!("解析 YouTube 媒体直链超时"))??;
     if !output.status.success() {
-        bail!("yt-dlp 解析 YouTube 媒体直链失败：{}", command_error(&output));
+        bail!("yt-dlp 解析外部平台媒体直链失败：{}", command_error(&output));
     }
-    serde_json::from_slice(&output.stdout).context("解析 yt-dlp 媒体元数据失败")
+    serde_json::from_slice(&output.stdout).context("解析 yt-dlp 外部平台媒体元数据失败")
+}
+
+fn douyin_aweme_id(url: &str) -> Option<&str> {
+    let path = url.split(['?', '#']).next()?;
+    let id = path.trim_end_matches('/').rsplit('/').next()?;
+    (!id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit())).then_some(id)
+}
+
+async fn extract_douyin_metadata(aweme_id: &str) -> Result<YtDlpMetadata> {
+    let detail = crate::douyin::fetch_aweme_detail(aweme_id).await?;
+    let video = detail.get("video").context("抖音作品详情没有视频流")?;
+    let mut formats = video
+        .get("bit_rate")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(douyin_native_format)
+        .collect::<Vec<_>>();
+    if formats.is_empty() {
+        let width = json_i32(video.get("width"));
+        let height = json_i32(video.get("height"));
+        if let Some((url, fallback_urls)) = douyin_media_urls(video.get("play_addr")) {
+            formats.push(YtDlpFormat {
+                format_id: Some("douyin-default".to_string()),
+                url: Some(url),
+                protocol: Some("https".to_string()),
+                ext: Some("mp4".to_string()),
+                vcodec: Some(
+                    if video.get("is_h265").and_then(serde_json::Value::as_i64) == Some(1) {
+                        "h265"
+                    } else {
+                        "h264"
+                    }
+                    .to_string(),
+                ),
+                acodec: Some("aac".to_string()),
+                width,
+                height,
+                fps: None,
+                tbr: None,
+                vbr: None,
+                abr: Some(128.0),
+                dynamic_range: Some("SDR".to_string()),
+                fallback_urls,
+            });
+        }
+    }
+    if formats.is_empty() {
+        bail!("抖音作品详情没有可用的原生 MP4 地址");
+    }
+    let author = detail.get("author");
+    let uploader = author.and_then(|value| json_text(value, &["nickname", "unique_id"]));
+    let channel_id = author.and_then(|value| json_text(value, &["sec_uid", "uid"]));
+    let thumbnail = douyin_image_url(
+        video
+            .get("cover")
+            .or_else(|| video.get("origin_cover"))
+            .or_else(|| video.get("dynamic_cover")),
+    );
+    let timestamp = detail.get("create_time").and_then(serde_json::Value::as_i64);
+    Ok(YtDlpMetadata {
+        id: detail
+            .get("aweme_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(aweme_id)
+            .to_string(),
+        title: json_text(&detail, &["desc"]),
+        uploader: uploader.clone(),
+        uploader_url: channel_id
+            .as_deref()
+            .map(|id| format!("https://www.douyin.com/user/{id}")),
+        channel: uploader,
+        channel_id: channel_id.clone(),
+        channel_url: channel_id.map(|id| format!("https://www.douyin.com/user/{id}")),
+        thumbnail,
+        description: json_text(&detail, &["desc"]),
+        language: Some("zh-CN".to_string()),
+        upload_date: timestamp
+            .and_then(|value| chrono::DateTime::from_timestamp(value, 0).map(|date| date.format("%Y%m%d").to_string())),
+        duration: video
+            .get("duration")
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value / 1000.0),
+        formats,
+        subtitles: HashMap::new(),
+        automatic_captions: HashMap::new(),
+    })
+}
+
+fn douyin_native_format(value: &serde_json::Value) -> Option<YtDlpFormat> {
+    let play_addr = value.get("play_addr")?;
+    let (url, fallback_urls) = douyin_media_urls(Some(play_addr))?;
+    let bitrate = value
+        .get("bit_rate")
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value / 1000.0);
+    let is_h265 = value.get("is_h265").and_then(serde_json::Value::as_i64) == Some(1)
+        || value.get("is_bytevc1").and_then(serde_json::Value::as_i64) == Some(1);
+    let dynamic_range = json_text(value, &["HDR_type", "HDR_bit"])
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "SDR".to_string());
+    Some(YtDlpFormat {
+        format_id: json_text(value, &["gear_name"]).or_else(|| json_text(play_addr, &["url_key", "uri"])),
+        url: Some(url),
+        protocol: Some("https".to_string()),
+        ext: json_text(value, &["format"]).or_else(|| Some("mp4".to_string())),
+        vcodec: Some(if is_h265 { "h265" } else { "h264" }.to_string()),
+        acodec: Some("aac".to_string()),
+        width: json_i32(play_addr.get("width")),
+        height: json_i32(play_addr.get("height")),
+        fps: value
+            .get("FPS")
+            .or_else(|| value.get("fps"))
+            .and_then(serde_json::Value::as_f64),
+        tbr: bitrate,
+        vbr: bitrate,
+        // 抖音详情未单列 AAC 码率；混合流通常为 128K 左右。
+        abr: Some(128.0),
+        dynamic_range: Some(dynamic_range),
+        fallback_urls,
+    })
+}
+
+fn douyin_media_urls(value: Option<&serde_json::Value>) -> Option<(String, Vec<String>)> {
+    let mut urls = value?
+        .get("url_list")?
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|url| url.starts_with("http"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let first = urls.first()?.clone();
+    urls.remove(0);
+    Some((first, urls))
+}
+
+fn douyin_image_url(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|value| value.get("url_list"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|urls| urls.iter().find_map(serde_json::Value::as_str))
+        .map(str::to_string)
+}
+
+fn json_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(|value| value.as_str().map(str::to_string))
+        .filter(|value| !value.is_empty())
+}
+
+fn json_i32(value: Option<&serde_json::Value>) -> Option<i32> {
+    value
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
 }
 
 fn select_youtube_streams(formats: &[YtDlpFormat], filter: &FilterOption, audio_only: bool) -> Result<SelectedStreams> {
@@ -2074,23 +2698,44 @@ fn select_youtube_streams(formats: &[YtDlpFormat], filter: &FilterOption, audio_
             )
         })
         .cloned();
+    let min_height = youtube_quality_height(filter.video_min_quality);
+    let max_height = youtube_quality_height(filter.video_max_quality);
     if audio_only {
+        let mixed = formats
+            .iter()
+            .filter(|format| {
+                is_http_format(format)
+                    && has_video(format)
+                    && has_audio(format)
+                    && youtube_video_allowed(format, filter)
+                    && youtube_audio_allowed(format, filter)
+            })
+            .max_by_key(|format| {
+                let height = format_quality_height(format);
+                let in_range = height >= min_height && height <= max_height;
+                let under_max = height <= max_height;
+                (
+                    i32::from(in_range),
+                    i32::from(under_max),
+                    if under_max { height } else { -height },
+                    format.tbr.unwrap_or_default() as i32,
+                )
+            })
+            .cloned();
         return Ok(SelectedStreams {
             video: None,
             audio,
-            mixed: None,
+            mixed,
         });
     }
 
-    let min_height = youtube_quality_height(filter.video_min_quality);
-    let max_height = youtube_quality_height(filter.video_max_quality);
     let video = formats
         .iter()
         .filter(|format| {
             is_http_format(format) && has_video(format) && !has_audio(format) && youtube_video_allowed(format, filter)
         })
         .max_by_key(|format| {
-            let height = format.height.unwrap_or_default();
+            let height = format_quality_height(format);
             let in_range = height >= min_height && height <= max_height;
             let under_max = height <= max_height;
             (
@@ -2113,7 +2758,7 @@ fn select_youtube_streams(formats: &[YtDlpFormat], filter: &FilterOption, audio_
                 && youtube_audio_allowed(format, filter)
         })
         .max_by_key(|format| {
-            let height = format.height.unwrap_or_default();
+            let height = format_quality_height(format);
             let in_range = height >= min_height && height <= max_height;
             let under_max = height <= max_height;
             let audio_bitrate = youtube_audio_bitrate(format);
@@ -2134,9 +2779,18 @@ fn select_youtube_streams(formats: &[YtDlpFormat], filter: &FilterOption, audio_
             .filter_map(|format| format.format_id.as_deref())
             .collect::<Vec<_>>()
             .join(",");
-        bail!("YouTube 没有可下载的视频格式；解析到的格式 ID: {}", ids);
+        bail!("外部平台没有可下载的视频格式；解析到的格式 ID: {}", ids);
     }
     Ok(SelectedStreams { video, audio, mixed })
+}
+
+fn format_quality_height(format: &YtDlpFormat) -> i32 {
+    match (format.width, format.height) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => width.min(height),
+        (_, Some(height)) => height,
+        (Some(width), None) => width,
+        _ => 0,
+    }
 }
 
 fn youtube_video_allowed(format: &YtDlpFormat, filter: &FilterOption) -> bool {
@@ -2185,7 +2839,7 @@ fn youtube_audio_max_bitrate(quality: AudioQuality) -> i32 {
     }
 }
 
-fn log_selected_youtube_streams(selected: &SelectedStreams, filter: &FilterOption) {
+fn log_selected_youtube_streams(selected: &SelectedStreams, filter: &FilterOption, platform: &str) {
     let describe = |format: &YtDlpFormat| {
         format!(
             "id={} {}x{} fps={} vcodec={} acodec={} tbr={} vbr={} abr={}",
@@ -2201,6 +2855,7 @@ fn log_selected_youtube_streams(selected: &SelectedStreams, filter: &FilterOptio
         )
     };
     info!(
+        platform,
         video_min = ?filter.video_min_quality,
         video_max = ?filter.video_max_quality,
         audio_min = ?filter.audio_min_quality,
@@ -2209,7 +2864,7 @@ fn log_selected_youtube_streams(selected: &SelectedStreams, filter: &FilterOptio
         video = selected.video.as_ref().map(&describe),
         audio = selected.audio.as_ref().map(&describe),
         mixed = selected.mixed.as_ref().map(&describe),
-        "YouTube 已按项目流过滤设置选择下载格式"
+        "外部平台已按项目流过滤设置选择下载格式"
     );
 }
 
@@ -2266,28 +2921,29 @@ async fn ensure_youtube_sidecars(
     source: &youtube_source::Model,
 ) -> Option<String> {
     let mut warnings = Vec::new();
+    let platform = source_platform_label(source);
     let profile_url = metadata.channel_url.as_deref().or(metadata.uploader_url.as_deref());
-    if let Err(error) = download_youtube_upper_face(downloader, uploader, profile_url).await {
-        warn!(youtube_id = %metadata.id, error = %error, "YouTube 媒体已下载，但 UP 头像子任务失败");
+    if let Err(error) = download_youtube_upper_face(downloader, uploader, profile_url, source).await {
+        warn!(platform, youtube_id = %metadata.id, error = %error, "外部平台媒体已下载，但 UP 头像子任务失败");
         warnings.push(format!("UP头像下载失败：{error:#}"));
     }
-    if let Err(error) = download_youtube_cover(downloader, metadata, output_path).await {
-        warn!(youtube_id = %metadata.id, error = %error, "YouTube 媒体已下载，但封面子任务失败");
+    if let Err(error) = download_youtube_cover(downloader, metadata, output_path, source).await {
+        warn!(platform, youtube_id = %metadata.id, error = %error, "外部平台媒体已下载，但封面子任务失败");
         warnings.push(format!("封面下载失败：{error:#}"));
     }
-    if let Err(error) = generate_youtube_nfo(metadata, output_path, video_url, title, uploader).await {
-        warn!(youtube_id = %metadata.id, error = %error, "YouTube 媒体已下载，但 NFO 子任务失败");
+    if let Err(error) = generate_youtube_nfo(metadata, output_path, video_url, title, uploader, source).await {
+        warn!(platform, youtube_id = %metadata.id, error = %error, "外部平台媒体已下载，但 NFO 子任务失败");
         warnings.push(format!("NFO 生成失败：{error:#}"));
     }
     if source.download_subtitle {
         if let Err(error) =
             download_youtube_subtitle(downloader, metadata, output_path, &source.ai_subtitle_language).await
         {
-            warn!(youtube_id = %metadata.id, error = %error, "YouTube 媒体已下载，但字幕子任务失败");
+            warn!(platform, youtube_id = %metadata.id, error = %error, "外部平台媒体已下载，但字幕子任务失败");
             warnings.push(format!("字幕下载失败：{error:#}"));
         }
     }
-    if source.download_danmaku {
+    if source.download_danmaku && !is_douyin_source(source) {
         if let Err(error) = download_youtube_live_chat(downloader, metadata, output_path).await {
             warn!(youtube_id = %metadata.id, error = %error, "YouTube 媒体已下载，但直播聊天子任务失败");
             warnings.push(format!("直播聊天下载失败：{error:#}"));
@@ -2311,7 +2967,7 @@ async fn youtube_sidecars_complete(video: &youtube_video::Model, source: &youtub
     let upper_ok = face_path.is_file() && person_nfo_path.is_file();
     let subtitle_ok = !source.download_subtitle || youtube_subtitle_exists(&output_path).await.unwrap_or(false);
     let core_complete = media_ok && cover_ok && fanart_ok && nfo_ok && upper_ok && subtitle_ok;
-    if !core_complete || !source.download_danmaku {
+    if !core_complete || !source.download_danmaku || is_douyin_source(source) {
         return core_complete;
     }
     let live_chat_path = output_path.with_extension("live_chat.json");
@@ -2337,14 +2993,12 @@ async fn download_youtube_upper_face(
     downloader: &UnifiedDownloader,
     uploader: &str,
     profile_url: Option<&str>,
+    source: &youtube_source::Model,
 ) -> Result<()> {
     let uploader = crate::utils::filenamify::filenamify(uploader);
     if uploader.is_empty() {
-        bail!("YouTube UP主名称为空");
+        bail!("外部平台 UP主名称为空");
     }
-    let Some(profile_url) = profile_url.filter(|url| url.starts_with("http")) else {
-        bail!("YouTube 元数据没有频道主页地址");
-    };
     let upper_root = crate::config::reload_config().upper_path;
     let bucket = uploader.chars().next().unwrap_or('_').to_string().to_lowercase();
     let upper_dir = upper_root.join(bucket).join(&uploader);
@@ -2360,78 +3014,93 @@ async fn download_youtube_upper_face(
         return Ok(());
     }
 
-    let profile = extract_youtube_source_metadata(profile_url).await?;
-
     tokio::fs::create_dir_all(&upper_dir)
         .await
-        .with_context(|| format!("创建 YouTube UP头像目录失败: {}", upper_dir.display()))?;
+        .with_context(|| format!("创建外部平台 UP头像目录失败: {}", upper_dir.display()))?;
 
     if !face_exists {
-        let avatar_url = profile
-            .thumbnails
-            .iter()
-            .filter(|thumbnail| {
-                thumbnail
-                    .id
-                    .as_deref()
-                    .is_some_and(|id| id.to_ascii_lowercase().contains("avatar"))
-                    || thumbnail
-                        .width
-                        .zip(thumbnail.height)
-                        .is_some_and(|(width, height)| width == height)
-            })
-            .max_by_key(|thumbnail| {
-                let avatar = thumbnail
-                    .id
-                    .as_deref()
-                    .is_some_and(|id| id.to_ascii_lowercase().contains("avatar"));
-                (
-                    i32::from(avatar),
+        let avatar_url = if is_douyin_source(source) {
+            crate::douyin::fetch_profile(&source.url)
+                .await?
+                .avatar_url
+                .context("抖音作者资料没有返回头像")?
+        } else {
+            let profile_url = profile_url
+                .filter(|url| url.starts_with("http"))
+                .context("YouTube 元数据没有频道主页地址")?;
+            extract_youtube_source_metadata(profile_url)
+                .await?
+                .thumbnails
+                .iter()
+                .filter(|thumbnail| {
                     thumbnail
-                        .width
-                        .unwrap_or_default()
-                        .saturating_mul(thumbnail.height.unwrap_or_default()),
-                )
-            })
-            .map(|thumbnail| thumbnail.url.as_str())
-            .context("YouTube 频道主页没有返回 UP 头像")?;
+                        .id
+                        .as_deref()
+                        .is_some_and(|id| id.to_ascii_lowercase().contains("avatar"))
+                        || thumbnail
+                            .width
+                            .zip(thumbnail.height)
+                            .is_some_and(|(width, height)| width == height)
+                })
+                .max_by_key(|thumbnail| {
+                    let avatar = thumbnail
+                        .id
+                        .as_deref()
+                        .is_some_and(|id| id.to_ascii_lowercase().contains("avatar"));
+                    (
+                        i32::from(avatar),
+                        thumbnail
+                            .width
+                            .unwrap_or_default()
+                            .saturating_mul(thumbnail.height.unwrap_or_default()),
+                    )
+                })
+                .map(|thumbnail| thumbnail.url.clone())
+                .context("YouTube 频道主页没有返回 UP 头像")?
+        };
         let temporary = upper_dir.join("folder.download");
-        if let Err(error) = downloader
-            .fetch_with_fallback(&[avatar_url], &temporary)
+        if let Err(error) = fetch_platform_asset(downloader, source, &[avatar_url.as_str()], &temporary)
             .await
-            .context("使用项目统一下载器下载 YouTube UP头像失败")
+            .context("使用项目统一下载器下载外部平台 UP头像失败")
         {
             let _ = remove_file_if_exists(&temporary).await;
             return Err(error);
         }
         replace_file(&temporary, &face_path).await?;
-        info!(uploader, path = %face_path.display(), "YouTube UP头像下载完成");
+        info!(platform = source_platform_label(source), uploader, path = %face_path.display(), "外部平台 UP头像下载完成");
     }
 
     if !person_nfo_exists {
-        let channel_id = profile
-            .channel_id
-            .as_deref()
-            .or(profile.uploader_id.as_deref())
-            .or(profile.id.as_deref())
-            .filter(|id| !id.trim().is_empty())
-            .context("YouTube 频道主页没有返回频道 ID")?;
-        let xml = generate_youtube_person_nfo(&uploader, channel_id);
+        let channel_id = if is_douyin_source(source) {
+            crate::douyin::resolve_sec_user_id(&source.url).await?
+        } else {
+            let profile_url = profile_url
+                .filter(|url| url.starts_with("http"))
+                .context("YouTube 元数据没有频道主页地址")?;
+            let profile = extract_youtube_source_metadata(profile_url).await?;
+            profile
+                .channel_id
+                .or(profile.uploader_id)
+                .or(profile.id)
+                .filter(|id| !id.trim().is_empty())
+                .context("YouTube 频道主页没有返回频道 ID")?
+        };
+        let xml = generate_youtube_person_nfo(&uploader, &channel_id, source_platform(source));
         let temporary = upper_dir.join("person.nfo.download");
         if let Err(error) = tokio::fs::write(&temporary, xml.as_bytes())
             .await
-            .with_context(|| format!("写入 YouTube UP主 NFO 临时文件失败: {}", temporary.display()))
+            .with_context(|| format!("写入外部平台 UP主 NFO 临时文件失败: {}", temporary.display()))
         {
             let _ = remove_file_if_exists(&temporary).await;
             return Err(error);
         }
         replace_file(&temporary, &person_nfo_path).await?;
-        info!(uploader, path = %person_nfo_path.display(), "YouTube UP主 person.nfo 生成完成");
+        info!(platform = source_platform_label(source), uploader, path = %person_nfo_path.display(), "外部平台 UP主 person.nfo 生成完成");
     }
     Ok(())
 }
 
-fn generate_youtube_person_nfo(uploader: &str, channel_id: &str) -> String {
+fn generate_youtube_person_nfo(uploader: &str, channel_id: &str, platform: &str) -> String {
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     format!(
         r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>
@@ -2442,11 +3111,12 @@ fn generate_youtube_person_nfo(uploader: &str, channel_id: &str) -> String {
     <dateadded>{}</dateadded>
     <title>{}</title>
     <sorttitle>{}</sorttitle>
-    <uniqueid type="youtube_channel" default="true">{}</uniqueid>
+    <uniqueid type="{}_channel" default="true">{}</uniqueid>
 </person>"#,
         now_standard_string(),
         escape(uploader),
         escape(uploader),
+        escape(platform),
         escape(channel_id),
     )
 }
@@ -2474,11 +3144,11 @@ async fn extract_youtube_source_metadata(url: &str) -> Result<YtDlpSourceMetadat
 }
 
 fn youtube_sidecar_path(output_path: &Path, suffix: &str) -> Result<PathBuf> {
-    let parent = output_path.parent().context("YouTube 输出文件没有父目录")?;
+    let parent = output_path.parent().context("外部平台输出文件没有父目录")?;
     let stem = output_path
         .file_stem()
         .and_then(|value| value.to_str())
-        .context("YouTube 输出文件名无效")?;
+        .context("外部平台输出文件名无效")?;
     Ok(parent.join(format!("{stem}{suffix}")))
 }
 
@@ -2486,27 +3156,27 @@ async fn download_youtube_cover(
     downloader: &UnifiedDownloader,
     metadata: &YtDlpMetadata,
     output_path: &Path,
+    source: &youtube_source::Model,
 ) -> Result<()> {
     let url = metadata
         .thumbnail
         .as_deref()
-        .context("YouTube 元数据没有返回视频封面")?;
+        .context("外部平台元数据没有返回视频封面")?;
     let thumb_path = youtube_sidecar_path(output_path, "-thumb.jpg")?;
     if !tokio::fs::metadata(&thumb_path)
         .await
         .is_ok_and(|metadata| metadata.len() >= 1024)
     {
         let temporary = youtube_sidecar_path(output_path, "-thumb.download")?;
-        if let Err(error) = downloader
-            .fetch_with_fallback(&[url], &temporary)
+        if let Err(error) = fetch_platform_asset(downloader, source, &[url], &temporary)
             .await
-            .context("使用项目统一下载器下载 YouTube 封面失败")
+            .context("使用项目统一下载器下载外部平台封面失败")
         {
             let _ = remove_file_if_exists(&temporary).await;
             return Err(error);
         }
         replace_file(&temporary, &thumb_path).await?;
-        info!(youtube_id = %metadata.id, path = %thumb_path.display(), "YouTube 视频封面下载完成");
+        info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %thumb_path.display(), "外部平台视频封面下载完成");
     }
     let fanart_path = youtube_sidecar_path(output_path, "-fanart.jpg")?;
     if !tokio::fs::metadata(&fanart_path)
@@ -2515,8 +3185,8 @@ async fn download_youtube_cover(
     {
         tokio::fs::copy(&thumb_path, &fanart_path)
             .await
-            .with_context(|| format!("生成 YouTube fanart 失败: {}", fanart_path.display()))?;
-        info!(youtube_id = %metadata.id, path = %fanart_path.display(), "YouTube fanart 生成完成");
+            .with_context(|| format!("生成外部平台 fanart 失败: {}", fanart_path.display()))?;
+        info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %fanart_path.display(), "外部平台 fanart 生成完成");
     }
     Ok(())
 }
@@ -2527,6 +3197,7 @@ async fn generate_youtube_nfo(
     video_url: &str,
     title: &str,
     uploader: &str,
+    source: &youtube_source::Model,
 ) -> Result<()> {
     if !crate::config::reload_config().nfo_config.enabled {
         return Ok(());
@@ -2546,6 +3217,8 @@ async fn generate_youtube_nfo(
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     let thumbnail = metadata.thumbnail.as_deref().unwrap_or_default();
     let description = metadata.description.as_deref().unwrap_or_default();
+    let platform = source_platform(source);
+    let studio = if platform == "douyin" { "抖音" } else { "YouTube" };
     let xml = format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n\
 <movie>\n\
@@ -2553,11 +3226,11 @@ async fn generate_youtube_nfo(
     <originaltitle>{}</originaltitle>\n\
     <sorttitle>{}</sorttitle>\n\
     <plot>{}</plot>\n\
-    <uniqueid type=\"youtube\" default=\"true\">{}</uniqueid>\n\
+    <uniqueid type=\"{}\" default=\"true\">{}</uniqueid>\n\
     <year>{}</year>\n\
     <premiered>{}</premiered>\n\
     <aired>{}</aired>\n\
-    <studio>YouTube</studio>\n\
+    <studio>{}</studio>\n\
     <director>{}</director>\n\
     <actor><name>{}</name><role>频道</role></actor>\n\
     <thumb aspect=\"poster\">{}</thumb>\n\
@@ -2568,9 +3241,11 @@ async fn generate_youtube_nfo(
         escape(title),
         escape(title),
         escape(description),
+        escape(platform),
         escape(&metadata.id),
         aired.format("%Y"),
         aired.format("%Y-%m-%d"),
+        escape(studio),
         aired.format("%Y-%m-%d"),
         escape(uploader),
         escape(uploader),
@@ -2581,7 +3256,7 @@ async fn generate_youtube_nfo(
     let temporary = nfo_path.with_extension("nfo.download");
     tokio::fs::write(&temporary, xml.as_bytes())
         .await
-        .with_context(|| format!("写入 YouTube NFO 失败: {}", temporary.display()))?;
+        .with_context(|| format!("写入外部平台 NFO 失败: {}", temporary.display()))?;
     replace_file(&temporary, &nfo_path).await
 }
 
@@ -2594,6 +3269,7 @@ async fn download_youtube_subtitle(
     if youtube_subtitle_exists(output_path).await? {
         return Ok(());
     }
+    let checked_path = output_path.with_extension("subtitle.checked");
     let mut requested_order = youtube_subtitle_language_candidates(preferred_language);
     requested_order.extend(["zh-Hans", "zh-CN", "zh", "en", "ja"].map(str::to_string));
     requested_order.dedup();
@@ -2613,7 +3289,10 @@ async fn download_youtube_subtitle(
     });
     let selected = manual.or(automatic);
     let Some((language, subtitle, url)) = selected else {
-        info!(youtube_id = %metadata.id, "YouTube 视频没有匹配的字幕，跳过字幕子任务");
+        tokio::fs::write(&checked_path, b"no matching subtitle\n")
+            .await
+            .with_context(|| format!("写入字幕检查标记失败: {}", checked_path.display()))?;
+        info!(youtube_id = %metadata.id, "外部平台视频没有匹配的字幕，跳过字幕子任务");
         return Ok(());
     };
     let extension = subtitle.ext.as_deref().unwrap_or("vtt");
@@ -2621,11 +3300,12 @@ async fn download_youtube_subtitle(
     if let Err(error) = downloader
         .fetch_with_fallback(&[url], &subtitle_path)
         .await
-        .context("使用项目统一下载器下载 YouTube 字幕失败")
+        .context("使用项目统一下载器下载外部平台字幕失败")
     {
         let _ = remove_file_if_exists(&subtitle_path).await;
         return Err(error);
     }
+    let _ = remove_file_if_exists(&checked_path).await;
     Ok(())
 }
 
@@ -2705,6 +3385,12 @@ fn select_subtitle_item<'a>(
 }
 
 async fn youtube_subtitle_exists(output_path: &Path) -> Result<bool> {
+    if tokio::fs::metadata(output_path.with_extension("subtitle.checked"))
+        .await
+        .is_ok_and(|metadata| metadata.len() > 0)
+    {
+        return Ok(true);
+    }
     let Some(parent) = output_path.parent() else {
         return Ok(false);
     };
@@ -2756,7 +3442,7 @@ fn youtube_codec(codec: Option<&str>) -> Option<VideoCodecs> {
     let codec = codec.unwrap_or_default().to_ascii_lowercase();
     if codec.starts_with("avc") || codec.starts_with("h264") {
         Some(VideoCodecs::AVC)
-    } else if codec.starts_with("hev") || codec.starts_with("hvc") {
+    } else if codec.starts_with("hev") || codec.starts_with("hvc") || codec.starts_with("h265") {
         Some(VideoCodecs::HEV)
     } else if codec.starts_with("av01") || codec.starts_with("av1") {
         Some(VideoCodecs::AV1)
@@ -2878,7 +3564,8 @@ fn normalize_source_type(value: &str) -> Result<&'static str> {
         "playlist" => Ok("playlist"),
         "liked" => Ok("liked"),
         "watch_later" => Ok("watch_later"),
-        _ => bail!("来源类型必须是 subscriptions、channel、playlist、liked 或 watch_later"),
+        "douyin" => Ok("douyin"),
+        _ => bail!("来源类型必须是 subscriptions、channel、playlist、liked、watch_later 或 douyin"),
     }
 }
 fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
@@ -2886,6 +3573,11 @@ fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
         "subscriptions" => Ok(SUBSCRIPTIONS_URL.to_string()),
         "liked" => Ok(LIKED_URL.to_string()),
         "watch_later" => Ok(WATCH_LATER_URL.to_string()),
+        "douyin" => supplied
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("抖音作者来源必须填写主页链接")),
         _ => {
             let url = supplied
                 .map(str::trim)
@@ -3378,6 +4070,14 @@ fn append_cookies(command: &mut Command) {
     }
 }
 
+fn append_cookies_for_url(command: &mut Command, url: &str) {
+    if url.contains("douyin.com") {
+        crate::douyin::append_cookies(command);
+    } else {
+        append_cookies(command);
+    }
+}
+
 fn append_ytdlp_runtime(command: &mut Command) {
     if let Some((name, path)) = ytdlp_js_runtime() {
         command.arg("--js-runtimes").arg(format!("{name}:{}", path.display()));
@@ -3593,7 +4293,7 @@ mod tests {
 
     #[test]
     fn youtube_person_nfo_matches_existing_library_shape() {
-        let nfo = generate_youtube_person_nfo("A&B <频道>", "UC-A&B");
+        let nfo = generate_youtube_person_nfo("A&B <频道>", "UC-A&B", "youtube");
         assert!(nfo.contains("<person>"));
         assert!(nfo.contains("<title>A&amp;B &lt;频道&gt;</title>"));
         assert!(nfo.contains("<sorttitle>A&amp;B &lt;频道&gt;</sorttitle>"));

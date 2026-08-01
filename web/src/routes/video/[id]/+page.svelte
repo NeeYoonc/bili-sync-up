@@ -51,9 +51,14 @@
 	let chargeLockedDisplayMode: 'local' | null = null;
 	$: routeResourceId = $page.params.id ?? '';
 	$: isYouTube = routeResourceId.startsWith('youtube-');
+	$: isDouyin = routeResourceId.startsWith('douyin-');
+	$: isExternal = isYouTube || isDouyin;
+	let externalPlatform: 'bilibili' | 'youtube' | 'douyin' = 'bilibili';
+	$: externalPlatform = isDouyin ? 'douyin' : isYouTube ? 'youtube' : 'bilibili';
+	$: platformLabel = isDouyin ? '抖音' : isYouTube ? 'YouTube' : 'B站';
 
 	function videoDetailHref(videoId: number) {
-		return isYouTube ? `/video/youtube-${videoId}` : `/video/${videoId}`;
+		return isExternal ? `/video/${externalPlatform}-${videoId}` : `/video/${videoId}`;
 	}
 
 	function showChargeLockedToast(mode: 'local') {
@@ -71,6 +76,7 @@
 	function getEmbeddedPlayerUrl() {
 		const bvid = videoData?.video.bvid;
 		if (!bvid) return null;
+		if (isDouyin) return null;
 		if (isYouTube) {
 			return `https://www.youtube.com/embed/${encodeURIComponent(bvid)}?autoplay=1`;
 		}
@@ -88,10 +94,10 @@
 		const currentPage = getCurrentPageInfo();
 		if (!currentPage) {
 			return videoData?.video.name
-				? `${isYouTube ? 'YouTube' : 'B站'}内嵌播放器 - ${videoData.video.name}`
-				: `${isYouTube ? 'YouTube' : 'B站'}内嵌播放器`;
+				? `${platformLabel}内嵌播放器 - ${videoData.video.name}`
+				: `${platformLabel}内嵌播放器`;
 		}
-		return `${isYouTube ? 'YouTube' : 'B站'}内嵌播放器 - P${currentPage.pid} ${currentPage.name}`;
+		return `${platformLabel}内嵌播放器 - P${currentPage.pid} ${currentPage.name}`;
 	}
 
 	function resetPlaybackState(options?: { keepPlayerVisible?: boolean; keepPlayMode?: boolean }) {
@@ -343,7 +349,7 @@
 	async function loadPageVideos(pageNum: number) {
 		const state = get(appStateStore);
 		const params = buildVideosRequest({
-			platform: isYouTube ? 'youtube' : 'bilibili',
+			platform: externalPlatform,
 			page: pageNum,
 			pageSize: state.pageSize,
 			query: state.query,
@@ -365,7 +371,7 @@
 	// 根据视频类型动态生成任务名称
 	$: videoTaskNames = (() => {
 		if (!videoData?.video) return ['视频封面', '视频信息', 'UP主头像', 'UP主信息', '分P下载'];
-		if (isYouTube) return ['视频封面', '视频 NFO', 'UP主头像', 'UP主 person.nfo', '视频下载'];
+		if (isExternal) return ['视频封面', '视频 NFO', 'UP主头像', 'UP主 person.nfo', '视频下载'];
 
 		const isBangumi = videoData.video.bangumi_title !== undefined;
 		if (isBangumi) {
@@ -413,10 +419,7 @@
 
 	async function loadVideoDetail() {
 		const resourceId = $page.params.id ?? '';
-		const videoId = Number.parseInt(
-			resourceId.startsWith('youtube-') ? resourceId.slice('youtube-'.length) : resourceId,
-			10
-		);
+		const videoId = Number.parseInt(resourceId.replace(/^(youtube|douyin)-/, ''), 10);
 		if (isNaN(videoId)) {
 			error = '无效的视频ID';
 			toast.error('无效的视频ID');
@@ -430,7 +433,7 @@
 
 		try {
 			const previousState = get(appStateStore);
-			const targetPlatform = isYouTube ? 'youtube' : 'bilibili';
+			const targetPlatform = externalPlatform;
 			if (previousState.platform !== targetPlatform) {
 				setVideoIds([]);
 			}
@@ -469,7 +472,7 @@
 
 		while (currentPage < maxPages) {
 			const params = buildVideosRequest({
-				platform: isYouTube ? 'youtube' : 'bilibili',
+				platform: externalPlatform,
 				page: currentPage,
 				pageSize,
 				query: state.query,
@@ -556,10 +559,15 @@
 	// 打开平台原始页面
 	async function openExternalPage() {
 		try {
-			if (isYouTube) {
-				const youtubeId = videoData?.video.bvid;
-				if (!youtubeId) throw new Error('无法获取 YouTube 视频标识');
-				window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(youtubeId)}`, '_blank');
+			if (isExternal) {
+				const externalId = videoData?.video.bvid;
+				if (!externalId) throw new Error(`无法获取${platformLabel}视频标识`);
+				window.open(
+					isDouyin
+						? `https://www.douyin.com/video/${encodeURIComponent(externalId)}`
+						: `https://www.youtube.com/watch?v=${encodeURIComponent(externalId)}`,
+					'_blank'
+				);
 				return;
 			}
 			const videoId = getPlayVideoId();
@@ -580,8 +588,8 @@
 			}
 		} catch (error) {
 			console.error('获取平台链接失败:', error);
-			toast.error(`无法获取${isYouTube ? ' YouTube' : 'B站'}链接`, {
-				description: `该视频可能没有有效的${isYouTube ? ' YouTube' : 'B站'}链接信息`
+			toast.error(`无法获取${platformLabel}链接`, {
+				description: `该视频可能没有有效的${platformLabel}链接信息`
 			});
 		}
 	}
@@ -595,7 +603,9 @@
 	// 获取视频播放源
 	function getVideoSource() {
 		const videoId = getPlayVideoId();
-		return videoId ? `/api/videos/stream/${isYouTube ? `youtube-${videoId}` : videoId}` : undefined;
+		return videoId
+			? `/api/videos/stream/${isExternal ? `${externalPlatform}-${videoId}` : videoId}`
+			: undefined;
 	}
 
 	// 删除视频
@@ -754,14 +764,14 @@
 					variant="outline"
 					class="{isMobile ? 'w-full' : 'shrink-0'} cursor-pointer"
 					onclick={openExternalPage}
-					title="在{isYouTube ? 'YouTube' : 'B站'}打开此视频"
+					title="在{platformLabel}打开此视频"
 				>
 					<svg class="mr-2 h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
 						<path
 							d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36c-.5-.23-1.05-.36-1.64-.36-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l2.36 2.36c-.23.5-.36 1.05-.36 1.64 0 2.21 1.79 4 4 4s4-1.79 4-4-1.79-4-4-4c-.59 0-1.14.13-1.64.36L14 12l2.36-2.36c.5.23 1.05.36 1.64.36 2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4c0 .59.13 1.14.36 1.64L12 10 9.64 7.64z"
 						/>
 					</svg>
-					访问{isYouTube ? ' YouTube' : 'B站'}
+					访问 {platformLabel}
 				</Button>
 				<Button
 					size="sm"
@@ -860,7 +870,7 @@
 					<div class="text-muted-foreground text-sm">
 						共 {videoData.pages.length} 个分页
 					</div>
-					{#if !isYouTube}
+					{#if !isExternal}
 					<Button
 						size="sm"
 						variant="outline"
@@ -909,13 +919,13 @@
 									showActions={false}
 									customTitle="P{pageInfo.pid}: {pageInfo.name}"
 									customSubtitle=""
-									taskNames={isYouTube
-										? ['视频封面', '视频内容', '视频 NFO', '直播聊天', '视频字幕']
+									taskNames={isExternal
+										? ['视频封面', '视频内容', '视频 NFO', isDouyin ? '作品信息' : '直播聊天', '视频字幕']
 										: ['视频封面', '视频内容', '视频信息', '视频弹幕', '视频字幕']}
 									showProgress={true}
 								/>
 
-								{#if !isYouTube}
+								{#if !isExternal}
 								<div
 									class="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-3 py-2"
 								>
@@ -976,9 +986,13 @@
 								</div>
 								{:else}
 									<div class="bg-muted/40 rounded-lg border px-3 py-2 text-sm">
-										<div class="font-medium">YouTube 字幕 / 直播聊天</div>
+										<div class="font-medium">
+											{isDouyin ? '抖音作品附属文件' : 'YouTube 字幕 / 直播聊天'}
+										</div>
 										<div class="text-muted-foreground text-xs">
-											源站提供字幕或直播聊天时使用项目统一下载器保存；普通视频无直播聊天、无字幕时显示为已跳过。
+											{isDouyin
+												? '封面、NFO、作者头像和 person.nfo 与媒体一起由现有下载链路生成。'
+												: '源站提供字幕或直播聊天时使用项目统一下载器保存；普通视频无直播聊天、无字幕时显示为已跳过。'}
 										</div>
 									</div>
 								{/if}
@@ -1002,11 +1016,12 @@
 											本地播放
 										</Button>
 									{/if}
+									{#if !isDouyin}
 									<Button
 										size="sm"
 										variant="outline"
 										class="flex-1"
-										title="{isYouTube ? 'YouTube' : 'B站'}内嵌播放（清晰度由平台控制）"
+										title="{platformLabel}内嵌播放（清晰度由平台控制）"
 										onclick={() => {
 											currentPlayingPageIndex = index;
 											onlinePlayMode = true;
@@ -1015,8 +1030,9 @@
 										}}
 									>
 										<PlayIcon class="mr-2 h-4 w-4" />
-										{isYouTube ? 'YouTube' : 'B站'}内嵌
+										{platformLabel}内嵌
 									</Button>
+									{/if}
 								</div>
 							</div>
 						{/each}
@@ -1035,13 +1051,15 @@
 											? 'bg-blue-100 text-blue-700'
 											: 'bg-gray-100 text-gray-700'}"
 									>
-										{onlinePlayMode ? `${isYouTube ? 'YouTube' : 'B站'}内嵌播放` : '本地播放'}
+										{onlinePlayMode ? `${platformLabel}内嵌播放` : '本地播放'}
 									</span>
 								</div>
 								<div class="flex items-center gap-2">
-									<Button size="sm" variant="ghost" onclick={togglePlayMode}>
-										{onlinePlayMode ? '切换到本地' : `切换到${isYouTube ? 'YouTube' : 'B站'}内嵌`}
-									</Button>
+									{#if !isDouyin}
+										<Button size="sm" variant="ghost" onclick={togglePlayMode}>
+											{onlinePlayMode ? '切换到本地' : `切换到${platformLabel}内嵌`}
+										</Button>
+									{/if}
 									<Button size="sm" variant="outline" onclick={() => (showVideoPlayer = false)}>
 										<XIcon class="mr-2 h-4 w-4" />
 										关闭
@@ -1059,7 +1077,7 @@
 							{/if}
 							{#if onlinePlayMode}
 								<div class="mb-3 text-sm text-gray-500">
-									当前为 {isYouTube ? 'YouTube' : 'B 站'}内嵌播放，清晰度和码率由平台播放器控制，不继承 bili-sync
+									当前为 {platformLabel}内嵌播放，清晰度和码率由平台播放器控制，不继承 bili-sync
 									的清晰度设置。
 								</div>
 							{/if}
@@ -1083,7 +1101,7 @@
 										{/key}
 									{:else}
 										<div class="flex h-64 items-center justify-center text-white">
-											<div>当前视频缺少{isYouTube ? ' YouTube' : 'B站'}标识，无法内嵌播放</div>
+											<div>当前视频缺少 {platformLabel} 标识，无法内嵌播放</div>
 										</div>
 									{/if}
 								{:else}

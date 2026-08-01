@@ -13,7 +13,7 @@ use zip::ZipArchive;
 
 use crate::bilibili::Client;
 use crate::config::CONFIG_DIR;
-use crate::http::headers::{create_api_headers, create_aria2_headers};
+use crate::http::headers::{create_api_headers, create_aria2_headers, create_aria2_headers_with_referer};
 
 /// aria2 运行时下载配置
 const ARIA2_VERSION: &str = "1.37.0";
@@ -389,11 +389,16 @@ impl Aria2Downloader {
     }
 
     /// 尝试获取文件大小（用于智能线程调整），带超时控制
-    async fn try_get_file_size(&self, url: &str) -> Option<u64> {
+    async fn try_get_file_size(&self, url: &str, referer: Option<&str>) -> Option<u64> {
         let result = timeout(Duration::from_secs(5), async {
             let mut headers = create_api_headers();
             if let Ok(range) = "bytes=0-0".parse() {
                 headers.insert("Range", range);
+            }
+            if let Some(referer) = referer {
+                if let Ok(referer) = referer.parse() {
+                    headers.insert("Referer", referer);
+                }
             }
 
             self.client
@@ -1009,6 +1014,26 @@ impl Aria2Downloader {
 
     /// 使用aria2下载文件，支持多个URL备选和多进程
     pub async fn fetch_with_aria2_fallback(&self, urls: &[&str], path: &Path) -> Result<()> {
+        self.fetch_with_aria2_fallback_and_optional_referer(urls, path, None)
+            .await
+    }
+
+    pub async fn fetch_with_aria2_fallback_with_referer(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: &str,
+    ) -> Result<()> {
+        self.fetch_with_aria2_fallback_and_optional_referer(urls, path, Some(referer))
+            .await
+    }
+
+    async fn fetch_with_aria2_fallback_and_optional_referer(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: Option<&str>,
+    ) -> Result<()> {
         if urls.is_empty() {
             bail!("No URLs provided");
         }
@@ -1060,7 +1085,7 @@ impl Aria2Downloader {
 
         // 构建aria2 RPC请求
         let gid = self
-            .add_download_task_to_instance(urls, dir, file_name, rpc_port, &rpc_secret)
+            .add_download_task_to_instance(urls, dir, file_name, rpc_port, &rpc_secret, referer)
             .await?;
 
         // 等待下载完成
@@ -1093,6 +1118,7 @@ impl Aria2Downloader {
         file_name: &str,
         rpc_port: u16,
         rpc_secret: &str,
+        referer: Option<&str>,
     ) -> Result<String> {
         let url = format!("http://127.0.0.1:{}/jsonrpc", rpc_port);
 
@@ -1111,7 +1137,7 @@ impl Aria2Downloader {
         };
 
         // 尝试获取文件大小，并根据大小智能调整线程数
-        let threads = if let Some(file_size_bytes) = self.try_get_file_size(urls[0]).await {
+        let threads = if let Some(file_size_bytes) = self.try_get_file_size(urls[0], referer).await {
             let file_size_mb = file_size_bytes / 1_048_576; // MB
             if file_size_mb <= 2 && Self::is_media_like_file(file_name) {
                 base_threads
@@ -1140,6 +1166,9 @@ impl Aria2Downloader {
             tracing::debug!("aria2下载链接{}: {}", i + 1, url);
         }
 
+        let aria2_headers = referer
+            .map(create_aria2_headers_with_referer)
+            .unwrap_or_else(create_aria2_headers);
         let mut options = serde_json::json!({
             "dir": dir,
             "out": file_name,
@@ -1162,7 +1191,7 @@ impl Aria2Downloader {
             "lowest-speed-limit": "1K",
             "stream-piece-selector": "geom",
             "piece-length": "1M",
-            "header": create_aria2_headers()
+            "header": aria2_headers
         });
 
         // 添加SSL/TLS相关配置

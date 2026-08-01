@@ -176,11 +176,19 @@ impl Downloader {
     }
 
     pub async fn fetch(&self, url: &str, path: &Path) -> Result<()> {
+        self.fetch_with_optional_referer(url, path, None).await
+    }
+
+    pub async fn fetch_with_referer(&self, url: &str, path: &Path, referer: &str) -> Result<()> {
+        self.fetch_with_optional_referer(url, path, Some(referer)).await
+    }
+
+    async fn fetch_with_optional_referer(&self, url: &str, path: &Path, referer: Option<&str>) -> Result<()> {
         let config = crate::config::reload_config();
         let parallel = &config.concurrent_limit.parallel_download;
 
         if parallel.enabled && parallel.threads > 1 {
-            match self.fetch_parallel(url, path, parallel.threads).await {
+            match self.fetch_parallel(url, path, parallel.threads, referer).await {
                 Ok(()) => return Ok(()),
                 Err(e) if is_certificate_name_mismatch_error(&e) => return Err(e),
                 Err(e) => {
@@ -204,10 +212,10 @@ impl Downloader {
             }
         }
 
-        self.fetch_single(url, path).await
+        self.fetch_single(url, path, referer).await
     }
 
-    async fn fetch_single(&self, url: &str, path: &Path) -> Result<()> {
+    async fn fetch_single(&self, url: &str, path: &Path, referer: Option<&str>) -> Result<()> {
         // 创建父目录
         if let Some(parent) = path.parent() {
             if !parent.exists() {
@@ -223,7 +231,13 @@ impl Downloader {
             }
         };
 
-        let resp = match self.client.media_request(Method::GET, url).send().await {
+        let request = self.client.media_request(Method::GET, url);
+        let request = if let Some(referer) = referer {
+            request.header(header::REFERER, referer)
+        } else {
+            request
+        };
+        let resp = match request.send().await {
             Ok(r) => match r.error_for_status() {
                 Ok(r) => r,
                 Err(e) => {
@@ -277,7 +291,7 @@ impl Downloader {
         Ok(())
     }
 
-    async fn fetch_parallel(&self, url: &str, path: &Path, threads: usize) -> Result<()> {
+    async fn fetch_parallel(&self, url: &str, path: &Path, threads: usize, referer: Option<&str>) -> Result<()> {
         let is_googlevideo = url_host(url).is_some_and(|host| host.ends_with(".googlevideo.com"));
         // 小型 GoogleVideo 单连接也可能在完整传输前直接关闭 TLS；从 1MiB 起走
         // Range 分片可让失败只影响一个小分片。
@@ -294,7 +308,7 @@ impl Downloader {
             }
         }
 
-        let (total_size, range_supported) = self.get_size_and_range_support(url).await?;
+        let (total_size, range_supported) = self.get_size_and_range_support(url, referer).await?;
         ensure!(total_size > 0, "无法获取文件大小");
         ensure!(
             total_size >= min_parallel_size,
@@ -322,13 +336,23 @@ impl Downloader {
 
         let url_owned = url.to_string();
         let path_owned = path.to_path_buf();
+        let referer_owned = referer.map(str::to_string);
         let tasks = futures::stream::iter(ranges.into_iter().map(|(part_start, part_end)| {
             let client = self.client.clone();
             let url = url_owned.clone();
             let path = path_owned.clone();
+            let referer = referer_owned.clone();
             async move {
-                download_range_to_file_with_retry(client, &url, &path, part_start, part_end, RANGE_DOWNLOAD_ATTEMPTS)
-                    .await
+                download_range_to_file_with_retry(
+                    client,
+                    &url,
+                    &path,
+                    part_start,
+                    part_end,
+                    RANGE_DOWNLOAD_ATTEMPTS,
+                    referer.as_deref(),
+                )
+                .await
             }
         }))
         .buffer_unordered(concurrency)
@@ -348,16 +372,20 @@ impl Downloader {
         Ok(())
     }
 
-    async fn get_size_and_range_support(&self, url: &str) -> Result<(u64, bool)> {
+    async fn get_size_and_range_support(&self, url: &str, referer: Option<&str>) -> Result<(u64, bool)> {
         let mut total_size = None;
         let mut range_supported = false;
 
-        let head_resp = self
+        let request = self
             .client
             .media_request(Method::HEAD, url)
-            .header(header::ACCEPT_ENCODING, "identity")
-            .send()
-            .await;
+            .header(header::ACCEPT_ENCODING, "identity");
+        let request = if let Some(referer) = referer {
+            request.header(header::REFERER, referer)
+        } else {
+            request
+        };
+        let head_resp = request.send().await;
 
         if let Ok(resp) = head_resp {
             if let Ok(resp) = resp.error_for_status() {
@@ -373,7 +401,7 @@ impl Downloader {
         }
 
         if !range_supported || total_size.is_none() {
-            let (probe_supported, probe_size) = self.probe_range_support_and_size(url).await?;
+            let (probe_supported, probe_size) = self.probe_range_support_and_size(url, referer).await?;
             range_supported = range_supported || probe_supported;
             if total_size.is_none() {
                 total_size = probe_size.filter(|size| *size > 0);
@@ -383,15 +411,18 @@ impl Downloader {
         Ok((total_size.unwrap_or(0), range_supported))
     }
 
-    async fn probe_range_support_and_size(&self, url: &str) -> Result<(bool, Option<u64>)> {
-        let resp = self
+    async fn probe_range_support_and_size(&self, url: &str, referer: Option<&str>) -> Result<(bool, Option<u64>)> {
+        let request = self
             .client
             .media_request(Method::GET, url)
             .header(header::RANGE, "bytes=0-0")
-            .header(header::ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-            .context("Range探测请求失败")?;
+            .header(header::ACCEPT_ENCODING, "identity");
+        let request = if let Some(referer) = referer {
+            request.header(header::REFERER, referer)
+        } else {
+            request
+        };
+        let resp = request.send().await.context("Range探测请求失败")?;
 
         let status = resp.status();
         if status == StatusCode::PARTIAL_CONTENT {
@@ -403,6 +434,20 @@ impl Downloader {
     }
 
     pub async fn fetch_with_fallback(&self, urls: &[&str], path: &Path) -> Result<()> {
+        self.fetch_with_fallback_and_optional_referer(urls, path, None).await
+    }
+
+    pub async fn fetch_with_fallback_with_referer(&self, urls: &[&str], path: &Path, referer: &str) -> Result<()> {
+        self.fetch_with_fallback_and_optional_referer(urls, path, Some(referer))
+            .await
+    }
+
+    async fn fetch_with_fallback_and_optional_referer(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: Option<&str>,
+    ) -> Result<()> {
         if urls.is_empty() {
             bail!("no urls provided");
         }
@@ -414,7 +459,11 @@ impl Downloader {
                 continue;
             }
 
-            match self.fetch(url, path).await {
+            let result = match referer {
+                Some(referer) => self.fetch_with_referer(url, path, referer).await,
+                None => self.fetch(url, path).await,
+            };
+            match result {
                 Ok(_) => {
                     return Ok(());
                 }
@@ -608,10 +657,11 @@ async fn download_range_to_file_with_retry(
     start: u64,
     end: u64,
     attempts: usize,
+    referer: Option<&str>,
 ) -> Result<u64> {
     let mut last_error = None;
     for attempt in 1..=attempts.max(1) {
-        match download_range_to_file(client.clone(), url, path, start, end).await {
+        match download_range_to_file(client.clone(), url, path, start, end, referer).await {
             Ok(downloaded) => return Ok(downloaded),
             Err(error) if is_certificate_name_mismatch_error(&error) => return Err(error),
             Err(error) => {
@@ -634,20 +684,30 @@ async fn download_range_to_file_with_retry(
         .with_context(|| format!("Range 分片在重试后仍失败: bytes={start}-{end}"))
 }
 
-async fn download_range_to_file(client: Client, url: &str, path: &Path, start: u64, end: u64) -> Result<u64> {
+async fn download_range_to_file(
+    client: Client,
+    url: &str,
+    path: &Path,
+    start: u64,
+    end: u64,
+    referer: Option<&str>,
+) -> Result<u64> {
     let expected = end.saturating_sub(start) + 1;
 
     let mut file = OpenOptions::new().write(true).open(path).await?;
     file.seek(std::io::SeekFrom::Start(start)).await?;
 
     let range_value = format!("bytes={}-{}", start, end);
-    let resp = client
+    let request = client
         .media_request(Method::GET, url)
         .header(header::RANGE, range_value)
-        .header(header::ACCEPT_ENCODING, "identity")
-        .send()
-        .await
-        .context("Range下载请求失败")?;
+        .header(header::ACCEPT_ENCODING, "identity");
+    let request = if let Some(referer) = referer {
+        request.header(header::REFERER, referer)
+    } else {
+        request
+    };
+    let resp = request.send().await.context("Range下载请求失败")?;
 
     ensure!(
         resp.status() == StatusCode::PARTIAL_CONTENT,

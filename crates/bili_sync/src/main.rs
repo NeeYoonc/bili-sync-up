@@ -8,6 +8,8 @@ mod auth;
 mod bilibili;
 mod config;
 mod database;
+mod douyin;
+mod douyin_sign;
 mod downloader;
 mod error;
 mod hardware;

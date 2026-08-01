@@ -22,6 +22,7 @@ fn is_public_video_cover_path(path: &str) -> bool {
     (!video_id.is_empty() && video_id.chars().all(|ch| ch.is_ascii_digit()))
         || video_id
             .strip_prefix("youtube-")
+            .or_else(|| video_id.strip_prefix("douyin-"))
             .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
 }
 
