@@ -31,6 +31,13 @@ export interface YouTubeSource {
 	download_danmaku: boolean;
 	download_subtitle: boolean;
 	ai_subtitle_language: string;
+	ai_rename: boolean;
+	ai_rename_video_prompt: string;
+	ai_rename_audio_prompt: string;
+	ai_rename_enable_multi_page: boolean;
+	ai_rename_enable_collection: boolean;
+	ai_rename_enable_bangumi: boolean;
+	ai_rename_rename_parent_dir: boolean;
 	filter_option?: FilterOption | null;
 	blacklist_keywords: string[];
 	whitelist_keywords: string[];
@@ -58,6 +65,13 @@ export interface CreateYouTubeSourceRequest {
 	download_danmaku?: boolean;
 	download_subtitle: boolean;
 	ai_subtitle_language?: string;
+	ai_rename?: boolean;
+	ai_rename_video_prompt?: string;
+	ai_rename_audio_prompt?: string;
+	ai_rename_enable_multi_page?: boolean;
+	ai_rename_enable_collection?: boolean;
+	ai_rename_enable_bangumi?: boolean;
+	ai_rename_rename_parent_dir?: boolean;
 	filter_option?: FilterOption;
 	blacklist_keywords?: string[];
 	whitelist_keywords?: string[];
@@ -133,6 +147,13 @@ export interface UpdateYouTubeSourceRequest {
 	download_danmaku?: boolean;
 	download_subtitle?: boolean;
 	ai_subtitle_language?: string;
+	ai_rename?: boolean;
+	ai_rename_video_prompt?: string;
+	ai_rename_audio_prompt?: string;
+	ai_rename_enable_multi_page?: boolean;
+	ai_rename_enable_collection?: boolean;
+	ai_rename_enable_bangumi?: boolean;
+	ai_rename_rename_parent_dir?: boolean;
 	filter_option?: FilterOption | null;
 	inherit_filter_option?: boolean;
 	blacklist_keywords?: string[];
@@ -1247,6 +1268,7 @@ export interface ValidateFavoriteResponse {
 export interface SubmissionVideoInfo {
 	title: string;
 	bvid: string;
+	author?: string;
 	description: string;
 	cover: string;
 	pubtime: string;

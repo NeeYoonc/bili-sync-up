@@ -1402,6 +1402,7 @@ impl BiliClient {
             let video_info = crate::api::response::SubmissionVideoInfo {
                 bvid: video_item["bvid"].as_str().unwrap_or("").to_string(),
                 title: video_item["title"].as_str().unwrap_or("").to_string(),
+                author: None,
                 cover: video_item["pic"].as_str().unwrap_or("").to_string(),
                 pubtime,
                 duration: video_item["length"]

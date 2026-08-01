@@ -111,6 +111,8 @@ pub struct SubmissionVideosResponse {
 pub struct SubmissionVideoInfo {
     pub bvid: String,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     pub cover: String,
     pub pubtime: String,
     pub duration: i32,

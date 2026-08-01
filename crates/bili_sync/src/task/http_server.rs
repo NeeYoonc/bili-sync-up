@@ -116,10 +116,9 @@ use crate::youtube::{
     create_douyin_source, create_youtube_source_checked, delete_douyin_source, delete_youtube_source_checked,
     get_douyin_queue_status, get_douyin_sources, get_douyin_videos, get_youtube_queue_status,
     get_youtube_source_videos, get_youtube_sources, get_youtube_videos, import_youtube_cookie_file,
-    reset_douyin_source_path, reset_youtube_source_path_checked, retry_douyin_source, retry_douyin_video,
-    retry_youtube_source_checked, retry_youtube_video_checked, scan_douyin_source_endpoint,
-    scan_youtube_source_checked, search_youtube, update_douyin_source, update_douyin_source_enabled,
-    update_youtube_source_checked, update_youtube_source_enabled_checked, youtube_status,
+    reset_douyin_source_path, reset_youtube_source_path_checked, retry_douyin_video, retry_youtube_video_checked,
+    search_youtube, update_douyin_source, update_douyin_source_enabled, update_youtube_source_checked,
+    update_youtube_source_enabled_checked, youtube_status,
 };
 // CONFIG导入已移除 - 现在使用动态配置
 
@@ -292,12 +291,10 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
             "/api/youtube/sources/{id}/enabled",
             put(update_youtube_source_enabled_checked),
         )
-        .route("/api/youtube/sources/{id}/scan", post(scan_youtube_source_checked))
         .route(
             "/api/youtube/sources/{id}/reset-path",
             post(reset_youtube_source_path_checked),
         )
-        .route("/api/youtube/sources/{id}/retry", post(retry_youtube_source_checked))
         .route("/api/youtube/videos", get(get_youtube_videos))
         .route("/api/youtube/videos/{id}/retry", post(retry_youtube_video_checked))
         .route("/api/youtube/queue-status", get(get_youtube_queue_status))
@@ -315,14 +312,9 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         )
         .route("/api/douyin/sources/{id}/enabled", put(update_douyin_source_enabled))
         .route(
-            "/api/douyin/sources/{id}/scan",
-            post(scan_douyin_source_endpoint),
-        )
-        .route(
             "/api/douyin/sources/{id}/reset-path",
             post(reset_douyin_source_path),
         )
-        .route("/api/douyin/sources/{id}/retry", post(retry_douyin_source))
         .route("/api/douyin/videos", get(get_douyin_videos))
         .route("/api/douyin/videos/{id}/retry", post(retry_douyin_video))
         .route("/api/douyin/queue-status", get(get_douyin_queue_status))

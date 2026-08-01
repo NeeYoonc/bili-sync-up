@@ -24,6 +24,7 @@ use crate::youtube::{YouTubeLoginResponse, YouTubeSearchResponse, YouTubeSearchR
 
 const DOUYIN_POST_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/post/";
 const DOUYIN_DETAIL_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/detail/";
+const DOUYIN_DANMAKU_API: &str = "https://www.douyin.com/aweme/v1/web/danmaku/get_v2/";
 // `/search/<keyword>?type=user` 当前实际请求这个用户搜索接口。
 // `general/search/single` 是“综合”标签接口，用 `aweme_user_web` 强行请求会被
 // 抖音返回 `verify_check`，这也是此前所有作者关键词都搜索失败的根因。
@@ -97,6 +98,16 @@ pub struct DouyinPost {
 #[derive(Debug, Clone)]
 pub struct DouyinProfile {
     pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct DouyinDanmaku {
+    pub danmaku_id: String,
+    pub user_id: String,
+    pub offset_time: i32,
+    pub text: String,
+    #[serde(default)]
+    pub digg_count: i64,
 }
 
 struct PostPage {
@@ -350,23 +361,31 @@ pub async fn get_douyin_catalog(
 ) -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
     ensure_session()?;
     let source_type = request.source_type.trim().to_ascii_lowercase();
-    let mut results = match source_type.as_str() {
-        "douyin_collection" => fetch_collection_catalog().await?,
-        "douyin_theater" => fetch_theater_catalog().await?,
-        "douyin_series" => fetch_series_catalog().await?,
-        _ => return Err(ApiError::bad_request("右侧列表仅支持收藏夹、放映厅或短剧")),
-    };
-    if let Some(keyword) = request
+    let keyword = request
         .keyword
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+        .filter(|value| !value.is_empty());
+    let direct_id = keyword.filter(|value| value.chars().all(|character| character.is_ascii_digit()));
+    let mut results: Vec<YouTubeSearchResult> = match (source_type.as_str(), direct_id) {
+        ("douyin_theater", Some(id)) => fetch_theater_catalog_item(id).await?.into_iter().collect(),
+        ("douyin_series", Some(id)) => fetch_series_catalog_item(id).await?.into_iter().collect(),
+        ("douyin_collection", _) => fetch_collection_catalog().await?,
+        ("douyin_theater", _) => fetch_theater_catalog().await?,
+        ("douyin_series", _) => fetch_series_catalog().await?,
+        _ => return Err(ApiError::bad_request("右侧列表仅支持收藏夹、放映厅或短剧")),
+    };
+    if let Some(keyword) = keyword {
         let keyword = keyword.to_lowercase();
         results.retain(|item| {
             item.title.to_lowercase().contains(&keyword)
                 || item.author.to_lowercase().contains(&keyword)
                 || item.description.to_lowercase().contains(&keyword)
+                || item
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| id.to_lowercase().contains(&keyword))
+                || item.youtube_url.to_lowercase().contains(&keyword)
         });
     }
     let total = results.len();
@@ -375,6 +394,73 @@ pub async fn get_douyin_catalog(
         results,
         total,
     }))
+}
+
+fn theater_to_search_result(item: &serde_json::Value) -> Option<YouTubeSearchResult> {
+    let album = item.pointer("/lvideo_brief/album_info")?;
+    let id = text(album, &["album_id"])?;
+    Some(YouTubeSearchResult {
+        result_type: "douyin_theater".to_string(),
+        title: text(album, &["title"]).unwrap_or_else(|| format!("放映厅 {id}")),
+        author: text(item.get("author").unwrap_or(&serde_json::Value::Null), &["nickname"]).unwrap_or_default(),
+        youtube_url: format!("https://www.douyin.com/lvdetail/{id}"),
+        channel_id: Some(id),
+        cover: image_url(album.get("cover")).unwrap_or_default(),
+        description: text(album, &["category_str_topic", "region"]).unwrap_or_default(),
+        follower: None,
+    })
+}
+
+fn series_to_search_result(series: &serde_json::Value) -> Option<YouTubeSearchResult> {
+    let id = text(series, &["series_id"])?;
+    let stats = series.get("stats").unwrap_or(&serde_json::Value::Null);
+    let episodes = integer(stats, &["total_episode", "updated_to_episode"]).unwrap_or_default();
+    Some(YouTubeSearchResult {
+        result_type: "douyin_series".to_string(),
+        title: text(series, &["series_name"]).unwrap_or_else(|| format!("短剧 {id}")),
+        author: series
+            .get("author")
+            .and_then(|author| text(author, &["nickname"]))
+            .unwrap_or_default(),
+        youtube_url: format!("https://www.douyin.com/series/{id}"),
+        channel_id: Some(id),
+        cover: image_url(series.get("cover_url")).unwrap_or_default(),
+        description: text(series, &["desc"]).unwrap_or_else(|| format!("共 {episodes} 集")),
+        follower: Some(episodes),
+    })
+}
+
+async fn fetch_theater_catalog_item(id: &str) -> Result<Option<YouTubeSearchResult>> {
+    let mut pairs = common_query_pairs();
+    pairs.push(("album_ids", id.to_string()));
+    let response = signed_get(DOUYIN_THEATER_ITEMS_API, pairs).await?;
+    Ok(response
+        .get("aweme_list")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.iter().find_map(theater_to_search_result)))
+}
+
+async fn fetch_series_catalog_item(id: &str) -> Result<Option<YouTubeSearchResult>> {
+    let mut pairs = common_query_pairs();
+    pairs.extend([
+        ("offset", "0".to_string()),
+        ("count", "10".to_string()),
+        ("content_type", "0".to_string()),
+        ("insert_series_id_list", id.to_string()),
+    ]);
+    let response = signed_get(DOUYIN_SERIES_FEED_API, pairs).await?;
+    ensure_douyin_status_ok(&response, "获取抖音短剧详情")?;
+    Ok(response
+        .get("card_list")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|cards| {
+            cards.iter().find_map(|card| {
+                let series = card.get("series")?;
+                (text(series, &["series_id"]).as_deref() == Some(id))
+                    .then(|| series_to_search_result(series))
+                    .flatten()
+            })
+        }))
 }
 
 async fn fetch_collection_catalog() -> Result<Vec<YouTubeSearchResult>> {
@@ -441,26 +527,14 @@ async fn fetch_theater_catalog() -> Result<Vec<YouTubeSearchResult>> {
             .into_iter()
             .flatten()
         {
-            let Some(album) = item.pointer("/lvideo_brief/album_info") else {
+            let Some(result) = theater_to_search_result(item) else {
                 continue;
             };
-            let Some(id) = text(album, &["album_id"]) else {
-                continue;
-            };
-            if !seen.insert(id.clone()) {
+            let id = result.channel_id.clone().unwrap_or_default();
+            if !seen.insert(id) {
                 continue;
             }
-            let title = text(album, &["title"]).unwrap_or_else(|| format!("放映厅 {id}"));
-            results.push(YouTubeSearchResult {
-                result_type: "douyin_theater".to_string(),
-                title,
-                author: text(item.get("author").unwrap_or(&serde_json::Value::Null), &["nickname"]).unwrap_or_default(),
-                youtube_url: format!("https://www.douyin.com/lvdetail/{id}"),
-                channel_id: Some(id),
-                cover: image_url(album.get("cover")).unwrap_or_default(),
-                description: text(album, &["category_str_topic", "region"]).unwrap_or_default(),
-                follower: None,
-            });
+            results.push(result);
         }
         if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
             break;
@@ -494,30 +568,14 @@ async fn fetch_series_catalog() -> Result<Vec<YouTubeSearchResult>> {
             .into_iter()
             .flatten()
         {
-            let Some(series) = card.get("series") else {
+            let Some(result) = card.get("series").and_then(series_to_search_result) else {
                 continue;
             };
-            let Some(id) = text(series, &["series_id"]) else {
-                continue;
-            };
-            if !seen.insert(id.clone()) {
+            let id = result.channel_id.clone().unwrap_or_default();
+            if !seen.insert(id) {
                 continue;
             }
-            let stats = series.get("stats").unwrap_or(&serde_json::Value::Null);
-            let episodes = integer(stats, &["total_episode", "updated_to_episode"]).unwrap_or_default();
-            results.push(YouTubeSearchResult {
-                result_type: "douyin_series".to_string(),
-                title: text(series, &["series_name"]).unwrap_or_else(|| format!("短剧 {id}")),
-                author: series
-                    .get("author")
-                    .and_then(|author| text(author, &["nickname"]))
-                    .unwrap_or_default(),
-                youtube_url: format!("https://www.douyin.com/series/{id}"),
-                channel_id: Some(id),
-                cover: image_url(series.get("cover_url")).unwrap_or_default(),
-                description: text(series, &["desc"]).unwrap_or_else(|| format!("共 {episodes} 集")),
-                follower: Some(episodes),
-            });
+            results.push(result);
         }
         if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
             break;
@@ -791,6 +849,7 @@ pub async fn get_douyin_source_videos(
         .map(|post| SubmissionVideoInfo {
             bvid: post.id,
             title: post.title,
+            author: (!post.uploader.trim().is_empty()).then_some(post.uploader),
             cover: post.thumbnail.unwrap_or_default(),
             pubtime: post.published_at.unwrap_or_default(),
             duration: post.duration_seconds.unwrap_or_default(),
@@ -1059,6 +1118,64 @@ pub(crate) async fn fetch_aweme_detail(aweme_id: &str) -> Result<serde_json::Val
         .cloned()
         .filter(serde_json::Value::is_object)
         .ok_or_else(|| anyhow!("抖音作品详情为空，请重新导入电脑浏览器刚导出的抖音 Cookie"))
+}
+
+/// 获取抖音点播作品的时间轴弹幕。Web 端按 32 秒窗口返回弹幕，因此这里
+/// 完整遍历视频时长并按 danmaku_id 去重，避免只保存首屏弹幕。
+pub(crate) async fn fetch_aweme_danmaku(aweme_id: &str, duration_seconds: i32) -> Result<Vec<DouyinDanmaku>> {
+    ensure_session()?;
+    let duration_ms = i64::from(duration_seconds.max(1)).saturating_mul(1000);
+    let mut start_time = 0i64;
+    let mut seen = HashSet::new();
+    let mut danmaku = Vec::new();
+
+    while start_time < duration_ms.max(32_000) {
+        let end_time = start_time.saturating_add(32_000);
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("item_id", aweme_id.to_string()),
+            ("duration", duration_ms.to_string()),
+            ("start_time", start_time.to_string()),
+            ("end_time", end_time.to_string()),
+        ]);
+        let response = signed_get(DOUYIN_DANMAKU_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音视频弹幕")?;
+        for item in response
+            .get("danmaku_list")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = text(item, &["danmaku_id"]) else {
+                continue;
+            };
+            let Some(content) = text(item, &["text"]).filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            danmaku.push(DouyinDanmaku {
+                danmaku_id: id,
+                user_id: text(item, &["user_id"]).unwrap_or_default(),
+                offset_time: item
+                    .get("offset_time")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or_default()
+                    .max(0),
+                text: content,
+                digg_count: integer(item, &["digg_count"]).unwrap_or_default(),
+            });
+        }
+        start_time = response
+            .get("end_time")
+            .and_then(serde_json::Value::as_i64)
+            .filter(|next| *next > start_time)
+            .unwrap_or(end_time);
+    }
+    danmaku.sort_by_key(|item| item.offset_time);
+    Ok(danmaku)
 }
 
 async fn fetch_posts_until(sec_uid: &str, limit: usize) -> Result<Vec<DouyinPost>> {
@@ -1717,5 +1834,19 @@ mod tests {
         assert!(users
             .iter()
             .any(|user| text(user, &["sec_uid"]).as_deref() == Some("MS4w.test")));
+    }
+
+    #[test]
+    fn parses_douyin_danmaku() {
+        let item: DouyinDanmaku = serde_json::from_value(serde_json::json!({
+            "danmaku_id": "7570519311301133093",
+            "user_id": "2502937746111147",
+            "offset_time": 447,
+            "text": "欢迎回来",
+            "digg_count": 7
+        }))
+        .unwrap();
+        assert_eq!(item.offset_time, 447);
+        assert_eq!(item.text, "欢迎回来");
     }
 }

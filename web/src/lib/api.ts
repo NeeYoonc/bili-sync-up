@@ -270,9 +270,6 @@ class ApiClient {
 	async setYouTubeSourceEnabled(id: number, enabled: boolean): Promise<ApiResponse<YouTubeSource>> {
 		return this.put<YouTubeSource>(`/youtube/sources/${id}/enabled`, { enabled });
 	}
-	async scanYouTubeSource(id: number): Promise<ApiResponse<number>> {
-		return this.post<number>(`/youtube/sources/${id}/scan`);
-	}
 	async updateYouTubeSource(
 		id: number,
 		request: UpdateYouTubeSourceRequest
@@ -281,9 +278,6 @@ class ApiClient {
 	}
 	async resetYouTubeSourcePath(id: number, new_path: string): Promise<ApiResponse<YouTubeSource>> {
 		return this.post<YouTubeSource>(`/youtube/sources/${id}/reset-path`, { new_path });
-	}
-	async retryYouTubeSource(id: number): Promise<ApiResponse<number>> {
-		return this.post<number>(`/youtube/sources/${id}/retry`);
 	}
 	async deleteYouTubeSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
 		return this.delete<boolean>(`/youtube/sources/${id}?delete_local_files=${deleteLocalFiles}`);
@@ -336,9 +330,6 @@ class ApiClient {
 	async setDouyinSourceEnabled(id: number, enabled: boolean): Promise<ApiResponse<YouTubeSource>> {
 		return this.put<YouTubeSource>(`/douyin/sources/${id}/enabled`, { enabled });
 	}
-	async scanDouyinSource(id: number): Promise<ApiResponse<number>> {
-		return this.post<number>(`/douyin/sources/${id}/scan`);
-	}
 	async updateDouyinSource(
 		id: number,
 		request: UpdateYouTubeSourceRequest
@@ -347,9 +338,6 @@ class ApiClient {
 	}
 	async resetDouyinSourcePath(id: number, new_path: string): Promise<ApiResponse<YouTubeSource>> {
 		return this.post<YouTubeSource>(`/douyin/sources/${id}/reset-path`, { new_path });
-	}
-	async retryDouyinSource(id: number): Promise<ApiResponse<number>> {
-		return this.post<number>(`/douyin/sources/${id}/retry`);
 	}
 	async deleteDouyinSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
 		return this.delete<boolean>(`/douyin/sources/${id}?delete_local_files=${deleteLocalFiles}`);
@@ -769,7 +757,7 @@ class ApiClient {
 			const response =
 				sourceType === 'douyin' ? await this.getDouyinSources() : await this.getYouTubeSources();
 			const source = response.data.find((item) => item.id === id);
-			if (!source) throw new Error('外部平台视频源不存在');
+			if (!source) throw new Error(`${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源不存在`);
 			return {
 				status_code: response.status_code,
 				data: {
@@ -1345,12 +1333,10 @@ export const api = {
 		apiClient.createYouTubeSource(request),
 	setYouTubeSourceEnabled: (id: number, enabled: boolean) =>
 		apiClient.setYouTubeSourceEnabled(id, enabled),
-	scanYouTubeSource: (id: number) => apiClient.scanYouTubeSource(id),
 	updateYouTubeSource: (id: number, request: UpdateYouTubeSourceRequest) =>
 		apiClient.updateYouTubeSource(id, request),
 	resetYouTubeSourcePath: (id: number, newPath: string) =>
 		apiClient.resetYouTubeSourcePath(id, newPath),
-	retryYouTubeSource: (id: number) => apiClient.retryYouTubeSource(id),
 	deleteYouTubeSource: (id: number, deleteLocalFiles = false) =>
 		apiClient.deleteYouTubeSource(id, deleteLocalFiles),
 	getYouTubeVideos: () => apiClient.getYouTubeVideos(),
@@ -1366,12 +1352,10 @@ export const api = {
 		apiClient.createDouyinSource(request),
 	setDouyinSourceEnabled: (id: number, enabled: boolean) =>
 		apiClient.setDouyinSourceEnabled(id, enabled),
-	scanDouyinSource: (id: number) => apiClient.scanDouyinSource(id),
 	updateDouyinSource: (id: number, request: UpdateYouTubeSourceRequest) =>
 		apiClient.updateDouyinSource(id, request),
 	resetDouyinSourcePath: (id: number, newPath: string) =>
 		apiClient.resetDouyinSourcePath(id, newPath),
-	retryDouyinSource: (id: number) => apiClient.retryDouyinSource(id),
 	deleteDouyinSource: (id: number, deleteLocalFiles = false) =>
 		apiClient.deleteDouyinSource(id, deleteLocalFiles),
 

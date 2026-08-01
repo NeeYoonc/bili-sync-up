@@ -854,7 +854,12 @@
 			name = cleanTitle(result.title);
 			applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
 			clearSearchPanel({ clearKeyword: true });
-			openYouTubeHistorySelection();
+			const shouldSelectHistory = isYouTubeHistorySource();
+			if (shouldSelectHistory) {
+				openYouTubeHistorySelection();
+			} else {
+				showSubmissionSelection = false;
+			}
 			const sourceLabel =
 				sourcePlatform !== 'douyin'
 					? 'YouTube 来源'
@@ -866,7 +871,7 @@
 								? '抖音收藏夹'
 								: '抖音作者';
 			toast.success(`已选择${sourceLabel}`, {
-				description: '正在加载历史视频…'
+				description: shouldSelectHistory ? '正在加载历史视频…' : '已填充来源信息'
 			});
 			return;
 		}
@@ -1183,7 +1188,7 @@
 						audio_only: audioOnly,
 						audio_only_m4a_only: audioOnlyM4aOnly,
 						flat_folder: flatFolder,
-						download_danmaku: isDouyin ? false : downloadDanmaku,
+						download_danmaku: downloadDanmaku,
 						download_subtitle: downloadSubtitle,
 						ai_subtitle_language:
 							aiSubtitleLanguage.trim() || DEFAULT_AI_SUBTITLE_LANGUAGE,
@@ -1197,6 +1202,19 @@
 						max_duration_seconds: parsedMaxDuration,
 						published_after: publishedAfter || undefined,
 						published_before: publishedBefore || undefined,
+						ai_rename: aiRename,
+						ai_rename_video_prompt: aiRenameVideoPrompt.trim() || undefined,
+						ai_rename_audio_prompt: aiRenameAudioPrompt.trim() || undefined,
+						ai_rename_enable_multi_page: showAiRenameAdvanced
+							? aiRenameEnableMultiPage
+							: undefined,
+						ai_rename_enable_collection: showAiRenameAdvanced
+							? aiRenameEnableCollection
+							: undefined,
+						ai_rename_enable_bangumi: showAiRenameAdvanced ? aiRenameEnableBangumi : undefined,
+						ai_rename_rename_parent_dir: showAiRenameAdvanced
+							? aiRenameRenameParentDir
+							: undefined,
 						selected_videos:
 							youtubeSourceType === 'subscriptions' ? [] : selectedVideos,
 						selected_channels:
@@ -2265,6 +2283,12 @@
 	let isSearching = false;
 
 	function isYouTubeHistorySource(): boolean {
+		if (
+			sourcePlatform === 'douyin' &&
+			(youtubeSourceType === 'douyin_theater' || youtubeSourceType === 'douyin_series')
+		) {
+			return false;
+		}
 		return (
 			(sourcePlatform === 'douyin' ||
 				(sourcePlatform === 'youtube' &&
@@ -2313,11 +2337,42 @@
 		showSubmissionSelection = true;
 	}
 
+	async function resolveDouyinCatalogLinkName(url: string, sourceType: string) {
+		const id = url
+			.split(/[/?#]/)
+			.reverse()
+			.find((part) => /^\d+$/.test(part));
+		if (!id || !['douyin_theater', 'douyin_series'].includes(sourceType)) return;
+		try {
+			const response = await api.getDouyinCatalog(sourceType, id);
+			if (youtubeUrl.trim() !== url || youtubeSourceType !== sourceType) return;
+			const result = response.data.results.find(
+				(item) => item.channel_id === id || item.youtube_url?.split(/[/?#]/).includes(id)
+			);
+			if (!result) return;
+			name = cleanTitle(result.title);
+			applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(sourceType), name, true);
+		} catch {
+			// 输入过程中静默等待有效的详情链接；提交时后端仍会做完整校验。
+		}
+	}
+
 	function scheduleYouTubeHistorySelection() {
 		showSubmissionSelection = false;
 		if (youtubePreviewTimeout) clearTimeout(youtubePreviewTimeout);
 		if (!youtubeUrl.trim()) return;
-		youtubePreviewTimeout = setTimeout(openYouTubeHistorySelection, 500);
+		const currentUrl = youtubeUrl.trim();
+		const currentType = youtubeSourceType;
+		youtubePreviewTimeout = setTimeout(() => {
+			if (
+				sourcePlatform === 'douyin' &&
+				['douyin_theater', 'douyin_series'].includes(currentType)
+			) {
+				void resolveDouyinCatalogLinkName(currentUrl, currentType);
+				return;
+			}
+			openYouTubeHistorySelection();
+		}, 500);
 	}
 
 	// 搜索过滤投稿 - 使用后端API搜索
@@ -2491,6 +2546,14 @@
 
 			// 添加新视频（去重）
 			const newVideos = response.data.videos || [];
+			if (
+				isYouTubeHistorySource() &&
+				!name.trim() &&
+				newVideos[0]?.author?.trim()
+			) {
+				name = cleanTitle(newVideos[0].author);
+				applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
+			}
 			const existingBvids = new Set(submissionVideos.map((v) => v.bvid));
 			const uniqueNewVideos = newVideos.filter((video) => !existingBvids.has(video.bvid));
 
@@ -3992,7 +4055,6 @@
 								{/if}
 								{/if}
 
-				{#if sourcePlatform !== 'douyin'}
 				<!-- 下载弹幕 / YouTube 直播聊天 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
@@ -4017,8 +4079,8 @@
 											>
 											<p class="text-[10px] text-gray-500 dark:text-gray-400">
 												{sourcePlatform === 'youtube'
-													? '直播和首播存在聊天回放时保存 live_chat JSON'
-													: '下载弹幕文件（ASS格式）'}
+													? '直播和首播存在聊天回放时保存 JSON 并生成 ASS'
+													: '下载抖音时间轴弹幕并生成 ASS'}
 											</p>
 										</div>
 									</div>
@@ -4029,7 +4091,6 @@
 										></div>
 									</label>
 				</div>
-				{/if}
 
 				<!-- 下载字幕 -->
 								<div
@@ -4118,8 +4179,7 @@
 									</div>
 								{/if}
 
-								{#if sourcePlatform === 'bilibili'}
-								<!-- AI重命名 -->
+				<!-- AI重命名 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
 								>
@@ -4291,8 +4351,7 @@
 											{/if}
 										</div>
 									</div>
-								{/if}
-								{/if}
+				{/if}
 							</div>
 						</div>
 

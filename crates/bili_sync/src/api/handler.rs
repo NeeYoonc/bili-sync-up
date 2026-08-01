@@ -7196,14 +7196,15 @@ pub async fn delete_video_source_internal(
 ) -> Result<crate::api::response::DeleteVideoSourceResponse, ApiError> {
     if matches!(source_type.as_str(), "youtube" | "douyin") {
         crate::youtube::delete_youtube_source_internal(db.as_ref(), id, delete_local_files).await?;
+        let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
         return Ok(crate::api::response::DeleteVideoSourceResponse {
             success: true,
             source_id: id,
             source_type,
             message: if delete_local_files {
-                "外部平台视频源、下载记录及已记录本地文件已删除".to_string()
+                format!("{platform_label}视频源、下载记录及已记录本地文件已删除")
             } else {
-                "外部平台视频源和下载记录已删除，本地文件已保留".to_string()
+                format!("{platform_label}视频源和下载记录已删除，本地文件已保留")
             },
         });
     }
@@ -8617,6 +8618,113 @@ pub async fn update_video_source_download_options_internal(
                 use_dynamic_api: false,
                 filter_option: response_filter_option,
                 message: format!("番剧 {} 的下载选项已更新", video_source.name),
+            }
+        }
+        "youtube" | "douyin" => {
+            let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
+            let source = youtube_source::Entity::find_by_id(id)
+                .one(&txn)
+                .await?
+                .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
+            let actual_platform = if source.source_type.starts_with("douyin") {
+                "douyin"
+            } else {
+                "youtube"
+            };
+            if actual_platform != source_type {
+                return Err(anyhow!("视频源平台不匹配").into());
+            }
+
+            let audio_only = params.audio_only.unwrap_or(source.audio_only);
+            let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(source.audio_only_m4a_only);
+            let flat_folder = params.flat_folder.unwrap_or(source.flat_folder);
+            let download_danmaku = params.download_danmaku.unwrap_or(source.download_danmaku);
+            let download_subtitle = params.download_subtitle.unwrap_or(source.download_subtitle);
+            let ai_subtitle_language =
+                ai_subtitle_language_from_request(&params.ai_subtitle_language, &source.ai_subtitle_language);
+            let ai_rename = params.ai_rename.unwrap_or(source.ai_rename);
+            let ai_rename_video_prompt = params
+                .ai_rename_video_prompt
+                .clone()
+                .unwrap_or(source.ai_rename_video_prompt.clone());
+            let ai_rename_audio_prompt = params
+                .ai_rename_audio_prompt
+                .clone()
+                .unwrap_or(source.ai_rename_audio_prompt.clone());
+            let ai_rename_enable_multi_page = params
+                .ai_rename_enable_multi_page
+                .unwrap_or(source.ai_rename_enable_multi_page);
+            let ai_rename_enable_collection = params
+                .ai_rename_enable_collection
+                .unwrap_or(source.ai_rename_enable_collection);
+            let ai_rename_enable_bangumi = params
+                .ai_rename_enable_bangumi
+                .unwrap_or(source.ai_rename_enable_bangumi);
+            let ai_rename_rename_parent_dir = params
+                .ai_rename_rename_parent_dir
+                .unwrap_or(source.ai_rename_rename_parent_dir);
+            let filter_option = match params.filter_option.clone() {
+                Some(value) => value.map(serde_json::to_value).transpose()?,
+                None => source.filter_option.clone(),
+            };
+            let response_filter_option = filter_option
+                .clone()
+                .and_then(|value| serde_json::from_value::<FilterOption>(value).ok());
+
+            youtube_source::Entity::update(youtube_source::ActiveModel {
+                id: Unchanged(id),
+                audio_only: Set(audio_only),
+                audio_only_m4a_only: Set(audio_only_m4a_only),
+                flat_folder: Set(flat_folder),
+                download_danmaku: Set(download_danmaku),
+                download_subtitle: Set(download_subtitle),
+                ai_subtitle_language: Set(ai_subtitle_language.clone()),
+                ai_rename: Set(ai_rename),
+                ai_rename_video_prompt: Set(ai_rename_video_prompt.clone()),
+                ai_rename_audio_prompt: Set(ai_rename_audio_prompt.clone()),
+                ai_rename_enable_multi_page: Set(ai_rename_enable_multi_page),
+                ai_rename_enable_collection: Set(ai_rename_enable_collection),
+                ai_rename_enable_bangumi: Set(ai_rename_enable_bangumi),
+                ai_rename_rename_parent_dir: Set(ai_rename_rename_parent_dir),
+                filter_option: Set(filter_option),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+
+            crate::api::response::UpdateVideoSourceDownloadOptionsResponse {
+                success: true,
+                source_id: id,
+                source_type: actual_platform.to_string(),
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
+                audio_only,
+                audio_only_m4a_only,
+                flat_folder,
+                split_chapters_after_download: false,
+                download_charge_videos: false,
+                download_danmaku,
+                download_subtitle,
+                download_ai_subtitle: download_subtitle,
+                ai_subtitle_language,
+                ai_rename,
+                ai_rename_video_prompt,
+                ai_rename_audio_prompt,
+                ai_rename_enable_multi_page,
+                ai_rename_enable_collection,
+                ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir,
+                use_dynamic_api: false,
+                filter_option: response_filter_option,
+                message: format!(
+                    "{} {} 的下载选项已更新",
+                    if actual_platform == "douyin" {
+                        "抖音"
+                    } else {
+                        "YouTube"
+                    },
+                    source.name
+                ),
             }
         }
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type).into()),
@@ -14163,7 +14271,13 @@ pub async fn get_submission_videos(
     match result {
         Ok((videos, total)) => {
             let response = SubmissionVideosResponse {
-                videos,
+                videos: videos
+                    .into_iter()
+                    .map(|mut video| {
+                        video.author = None;
+                        video
+                    })
+                    .collect(),
                 total,
                 page,
                 page_size,
@@ -20691,7 +20805,7 @@ pub async fn clear_ai_rename_cache_for_source(
     post,
     path = "/api/{source_type}/{id}/ai-rename-history",
     params(
-        ("source_type" = String, Path, description = "视频源类型 (collection/favorite/submission/watch_later/bangumi)"),
+        ("source_type" = String, Path, description = "视频源类型 (collection/favorite/submission/watch_later/bangumi/youtube/douyin)"),
         ("id" = i32, Path, description = "视频源ID"),
     ),
     request_body = crate::api::response::BatchRenameRequest,
@@ -20742,6 +20856,42 @@ pub async fn ai_rename_history(
 
     // 构建 source_key
     let source_key = format!("{}_{}", source_type, id);
+
+    if matches!(source_type.as_str(), "youtube" | "douyin") {
+        let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
+        let source = youtube_source::Entity::find_by_id(id)
+            .one(db.as_ref())
+            .await?
+            .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
+        let actual_platform = if source.source_type.starts_with("douyin") {
+            "douyin"
+        } else {
+            "youtube"
+        };
+        if actual_platform != source_type {
+            return Err(anyhow!("视频源平台不匹配").into());
+        }
+        let rename_parent_dir = req.rename_parent_dir.unwrap_or(source.ai_rename_rename_parent_dir);
+        let result = crate::youtube::ai_rename_external_history(
+            db.as_ref(),
+            &source,
+            &req.video_prompt,
+            &req.audio_prompt,
+            rename_parent_dir,
+        )
+        .await?;
+        notify_videos_changed();
+        return Ok(ApiResponse::ok(crate::api::response::BatchRenameResponse {
+            success: true,
+            renamed_count: result.renamed_count,
+            skipped_count: result.skipped_count,
+            failed_count: result.failed_count,
+            message: format!(
+                "批量重命名完成：重命名 {} 个，跳过 {} 个，失败 {} 个",
+                result.renamed_count, result.skipped_count, result.failed_count
+            ),
+        }));
+    }
 
     // 根据 source_type 获取视频源配置和视频列表
     let (video_prompt, audio_prompt, videos, flat_folder, source_rename_parent_dir) = match source_type.as_str() {
