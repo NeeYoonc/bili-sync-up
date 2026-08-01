@@ -10,9 +10,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{Json, Query};
+use rand::Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::api::response::{SubmissionVideoInfo, SubmissionVideosResponse};
 use crate::api::wrapper::{ApiError, ApiResponse};
@@ -190,28 +192,79 @@ pub async fn search_douyin(
 
 async fn fetch_douyin_user_search(keyword: &str, force_ms_token_refresh: bool) -> Result<serde_json::Value> {
     ensure_search_ms_token(force_ms_token_refresh).await?;
-    let mut pairs = common_query_pairs();
-    // 抖音网页会给全部搜索接口附加 webid 和 UIFID。用户搜索接口沿用
-    // 默认 17.4.0 协议；19.6.0 仅属于 general/search/single 综合搜索。
-    pairs.push(("webid", stable_webid().await?));
     let cookies = cookie_values();
-    if let Some(uifid) = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP")).cloned() {
-        pairs.push(("uifid", uifid));
-    }
-    pairs.extend([
+    let uifid = cookies
+        .get("UIFID")
+        .or_else(|| cookies.get("UIFID_TEMP"))
+        .cloned()
+        .context("抖音 Cookie 缺少 UIFID，请重新导出并导入完整 cookies.txt")?;
+    let verify_fp = stable_verify_fp().await?;
+    // 这里严格使用浏览器 HAR 中 type=user 首屏请求的参数、顺序和网页版本。
+    // 搜索接口比作品/资料接口校验更严格，不能复用后者的 29.1.0 参数集合。
+    let mut pairs = vec![
+        ("device_platform", "webapp".to_string()),
+        ("aid", "6383".to_string()),
+        ("channel", "channel_pc_web".to_string()),
         ("search_channel", "aweme_user_web".to_string()),
         ("keyword", keyword.to_string()),
         ("search_source", "normal_search".to_string()),
         ("query_correct_type", "1".to_string()),
         ("is_filter_search", "0".to_string()),
         ("from_group_id", String::new()),
+        ("disable_rs", "0".to_string()),
         ("offset", "0".to_string()),
-        ("count", "20".to_string()),
+        ("count", "10".to_string()),
         ("need_filter_settings", "1".to_string()),
         ("list_type", "single".to_string()),
-        ("search_id", String::new()),
-    ]);
-    signed_get(DOUYIN_USER_SEARCH_API, pairs).await
+        ("pc_search_top_1_params", r#"{"enable_ai_search_top_1":1}"#.to_string()),
+        ("update_version_code", "170400".to_string()),
+        ("pc_client_type", "1".to_string()),
+        ("pc_libra_divert", "Windows".to_string()),
+        ("support_h265", "1".to_string()),
+        ("support_dash", "1".to_string()),
+        ("cpu_core_num", "16".to_string()),
+        ("version_code", "170400".to_string()),
+        ("version_name", "17.4.0".to_string()),
+        ("cookie_enabled", "true".to_string()),
+        ("screen_width", "2560".to_string()),
+        ("screen_height", "1440".to_string()),
+        ("browser_language", "zh-CN".to_string()),
+        ("browser_platform", "Win32".to_string()),
+        ("browser_name", "Chrome".to_string()),
+        ("browser_version", "149.0.0.0".to_string()),
+        ("browser_online", "true".to_string()),
+        ("engine_name", "Blink".to_string()),
+        ("engine_version", "149.0.0.0".to_string()),
+        ("os_name", "Windows".to_string()),
+        ("os_version", "10".to_string()),
+        ("device_memory", "32".to_string()),
+        ("platform", "PC".to_string()),
+        ("downlink", "10".to_string()),
+        ("effective_type", "4g".to_string()),
+        ("round_trip_time", "0".to_string()),
+        ("webid", stable_webid().await?),
+        ("uifid", uifid.clone()),
+        ("verifyFp", verify_fp.clone()),
+        ("fp", verify_fp),
+    ];
+    if let Some(ms_token) = cookies.get("msToken").cloned() {
+        pairs.push(("msToken", ms_token));
+    }
+
+    let mut referer = reqwest::Url::parse("https://www.douyin.com/jingxuan/search/")?;
+    referer
+        .path_segments_mut()
+        .map_err(|_| anyhow!("无法构造抖音搜索来源页面"))?
+        .pop_if_empty()
+        .push(keyword);
+    referer
+        .query_pairs_mut()
+        .append_pair("aid", &Uuid::new_v4().to_string())
+        .append_pair("type", "user");
+    // 当前搜索接口在具有真实 msToken、webid、verifyFp 和浏览器 TLS 指纹时，
+    // 首屏请求不要求 a_bogus。反而附加旧版签名会直接触发 verify_check。
+    // 作品、资料等既有接口仍继续走项目原来的 signed_get，互不影响。
+    browser_get_with_referer(DOUYIN_USER_SEARCH_API, pairs, referer.as_str()).await
 }
 
 pub async fn get_douyin_followings() -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
@@ -1182,6 +1235,53 @@ async fn signed_get(base_url: &str, pairs: Vec<(&str, String)>) -> Result<serde_
     serde_json::from_slice(&bytes).context("解析抖音 Web API 响应失败")
 }
 
+async fn browser_get_with_referer(
+    base_url: &str,
+    pairs: Vec<(&str, String)>,
+    referer: &str,
+) -> Result<serde_json::Value> {
+    let url = reqwest::Url::parse_with_params(base_url, &pairs)?;
+    // 搜索请求使用与查询参数一致的 Chrome UA，但继续复用项目原有 HTTP
+    // 客户端栈；不内置 Chromium，也不额外增加 Docker 运行进程或镜像依赖。
+    let mut request = reqwest::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+        )
+        .timeout(REQUEST_TIMEOUT)
+        .build()?
+        .get(url.as_str())
+        .header(reqwest::header::COOKIE.as_str(), cookie_header()?)
+        .header(reqwest::header::ACCEPT, "application/json, text/plain, */*")
+        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
+        .header(reqwest::header::PRAGMA, "no-cache")
+        .header(
+            "sec-ch-ua",
+            r#""Not;A=Brand";v="8", "Chromium";v="149", "Google Chrome";v="149""#,
+        )
+        .header("sec-ch-ua-mobile", "?0")
+        .header("sec-ch-ua-platform", r#""Windows""#)
+        .header("sec-fetch-dest", "empty")
+        .header("sec-fetch-mode", "cors")
+        .header("sec-fetch-site", "same-origin")
+        .header(reqwest::header::REFERER, referer);
+    let cookies = cookie_values();
+    if let Some(uifid) = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP")) {
+        request = request.header("uifid", uifid);
+    }
+    let response = request.send().await.context("请求抖音 Web API 失败")?;
+    let status = response.status();
+    let bytes = response.bytes().await?;
+    if !status.is_success() {
+        bail!("抖音 Web API 返回 HTTP {status}");
+    }
+    if bytes.is_empty() {
+        bail!("抖音 Web API 返回空响应；请重新导入电脑浏览器刚导出的抖音 Cookie");
+    }
+    serde_json::from_slice(&bytes).context("解析抖音 Web API 响应失败")
+}
+
 async fn generate_webid() -> Result<String> {
     let response = reqwest::Client::builder()
         .user_agent(douyin_sign::user_agent())
@@ -1228,6 +1328,63 @@ async fn stable_webid() -> Result<String> {
     tokio::fs::write(&temporary, webid.as_bytes()).await?;
     replace_cookie_file(&temporary, &path).await?;
     Ok(webid)
+}
+
+fn valid_verify_fp(value: &str) -> bool {
+    value.len() == 52
+        && value.starts_with("verify_")
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn base36(mut value: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if value == 0 {
+        return "0".to_string();
+    }
+    let mut output = Vec::new();
+    while value > 0 {
+        output.push(DIGITS[(value % 36) as usize]);
+        value /= 36;
+    }
+    output.reverse();
+    String::from_utf8(output).unwrap_or_default()
+}
+
+fn generate_verify_fp() -> String {
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let mut random = rand::thread_rng();
+    let mut suffix = [0u8; 36];
+    for (index, byte) in suffix.iter_mut().enumerate() {
+        *byte = match index {
+            8 | 13 | 18 | 23 => b'_',
+            14 => b'4',
+            19 => ALPHABET[(random.gen_range(0..ALPHABET.len()) & 3) | 8],
+            _ => ALPHABET[random.gen_range(0..ALPHABET.len())],
+        };
+    }
+    format!("verify_{}_{}", base36(timestamp), String::from_utf8_lossy(&suffix))
+}
+
+/// verifyFp/fp 与 webid 一样属于浏览器会话指纹。每次搜索重新生成会导致同一
+/// Cookie 在短时间内不断更换设备指纹，因此首次生成后持久化复用。
+async fn stable_verify_fp() -> Result<String> {
+    let path = CONFIG_DIR.join("douyin-verify-fp.txt");
+    if let Ok(value) = tokio::fs::read_to_string(&path).await {
+        let value = value.trim();
+        if valid_verify_fp(value) {
+            return Ok(value.to_string());
+        }
+    }
+    let value = generate_verify_fp();
+    tokio::fs::create_dir_all(&*CONFIG_DIR).await?;
+    let temporary = path.with_extension("txt.importing");
+    tokio::fs::write(&temporary, value.as_bytes()).await?;
+    replace_cookie_file(&temporary, &path).await?;
+    Ok(value)
 }
 
 fn ms_token_path() -> PathBuf {
