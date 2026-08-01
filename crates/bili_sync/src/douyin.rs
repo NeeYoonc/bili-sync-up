@@ -4,7 +4,7 @@
 //! 解析，文件传输、并发、路径模板、质量筛选、NFO 与状态管理继续复用
 //! `youtube.rs` 中已经接入项目统一下载器的外部媒体链路。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,6 +23,10 @@ use crate::youtube::{YouTubeLoginResponse, YouTubeSearchResponse, YouTubeSearchR
 const DOUYIN_POST_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/post/";
 const DOUYIN_DETAIL_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/detail/";
 const DOUYIN_SEARCH_API: &str = "https://www.douyin.com/aweme/v1/web/general/search/single/";
+const DOUYIN_PROFILE_SELF_API: &str = "https://www.douyin.com/aweme/v1/web/user/profile/self/";
+const DOUYIN_PROFILE_OTHER_API: &str = "https://www.douyin.com/aweme/v1/web/user/profile/other/";
+const DOUYIN_FOLLOWING_API: &str = "https://www.douyin.com/aweme/v1/web/user/following/list/";
+const DOUYIN_PUBLIC_SEARCH_API: &str = "https://www.so.com/s";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Deserialize)]
@@ -128,29 +132,37 @@ pub async fn search_douyin(
         ("search_id", String::new()),
     ]);
     let response = signed_get(DOUYIN_SEARCH_API, pairs).await?;
+    let search_was_blocked = douyin_search_was_blocked(&response);
     let mut results = Vec::new();
     let mut users = Vec::new();
     collect_user_infos(&response, &mut users);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for user in users {
-        let Some(sec_uid) = text(user, &["sec_uid", "sec_user_id"]) else {
-            continue;
-        };
-        if !seen.insert(sec_uid.clone()) {
-            continue;
+        if let Some(result) = user_to_search_result(user) {
+            let Some(sec_uid) = result.channel_id.as_ref() else {
+                continue;
+            };
+            if seen.insert(sec_uid.clone()) {
+                results.push(result);
+            }
         }
-        let nickname = text(user, &["nickname", "unique_id"]).unwrap_or_else(|| sec_uid.clone());
-        let url = format!("https://www.douyin.com/user/{sec_uid}");
-        results.push(YouTubeSearchResult {
-            result_type: "douyin_user".to_string(),
-            title: nickname.clone(),
-            author: text(user, &["unique_id", "short_id"]).unwrap_or_default(),
-            youtube_url: url,
-            channel_id: Some(sec_uid),
-            cover: image_url(user.get("avatar_larger").or_else(|| user.get("avatar_thumb"))).unwrap_or_default(),
-            description: text(user, &["signature"]).unwrap_or_default(),
-            follower: integer(user, &["follower_count", "mplatform_followers_count"]),
-        });
+    }
+
+    // 抖音的用户搜索接口经常对服务端 Cookie 重放返回 verify_check / hit_shark，
+    // 即使同一 Cookie 的作者作品、本人资料和关注列表都正常。这里仅把公共搜索
+    // 当作 sec_uid 发现入口，再逐个调用抖音官方 profile/other 接口校验和补全资料，
+    // 避免把搜索引擎摘要当成最终作者数据。
+    if results.is_empty() {
+        match search_public_douyin_profiles(keyword).await {
+            Ok(fallback) => results = fallback,
+            Err(error) if search_was_blocked => {
+                return Err(anyhow!("抖音搜索触发安全验证，备用作者检索也失败：{error}").into());
+            }
+            Err(error) => warn!(error = %error, keyword, "抖音备用作者搜索失败"),
+        }
+    }
+    if results.is_empty() && search_was_blocked {
+        return Err(anyhow!("抖音搜索触发安全验证，且没有找到可由抖音官方资料接口确认的作者").into());
     }
     let total = results.len();
     Ok(ApiResponse::ok(YouTubeSearchResponse {
@@ -158,6 +170,225 @@ pub async fn search_douyin(
         results,
         total,
     }))
+}
+
+pub async fn get_douyin_followings() -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
+    ensure_session()?;
+    let self_response = signed_get(DOUYIN_PROFILE_SELF_API, common_query_pairs()).await?;
+    ensure_douyin_status_ok(&self_response, "获取当前抖音账号")?;
+    let user = self_response
+        .get("user")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| anyhow!("抖音返回成功但缺少当前账号资料，请重新导入 Cookie"))?;
+    let user = serde_json::Value::Object(user.clone());
+    let uid = text(&user, &["uid"]).ok_or_else(|| anyhow!("当前抖音账号资料缺少 uid"))?;
+    let sec_uid = text(&user, &["sec_uid", "sec_user_id"]).ok_or_else(|| anyhow!("当前抖音账号资料缺少 sec_uid"))?;
+
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    let mut offset = 0i64;
+    let mut min_time = 0i64;
+    let mut max_time = 0i64;
+    for page in 0..250 {
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("user_id", uid.clone()),
+            ("sec_user_id", sec_uid.clone()),
+            ("offset", offset.to_string()),
+            ("min_time", min_time.to_string()),
+            ("max_time", max_time.to_string()),
+            ("count", "20".to_string()),
+            ("source_type", "4".to_string()),
+            ("gps_access", "0".to_string()),
+            ("address_book_access", "0".to_string()),
+            ("is_top", "1".to_string()),
+        ]);
+        let response = signed_get(DOUYIN_FOLLOWING_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取已关注抖音作者")?;
+        let followings = ["followings", "follow_list", "user_list"]
+            .iter()
+            .find_map(|key| response.get(*key).and_then(serde_json::Value::as_array));
+        let Some(followings) = followings else {
+            if page == 0 {
+                return Err(anyhow!("抖音关注列表响应缺少作者数据，请重新导入 Cookie").into());
+            }
+            break;
+        };
+        for following in followings {
+            if let Some(result) = user_to_search_result(following) {
+                let Some(following_sec_uid) = result.channel_id.as_ref() else {
+                    continue;
+                };
+                if seen.insert(following_sec_uid.clone()) {
+                    results.push(result);
+                }
+            }
+        }
+
+        let has_more = response.get("has_more").and_then(value_as_bool).unwrap_or(false);
+        if !has_more {
+            break;
+        }
+        let next_offset = response.get("offset").and_then(value_as_i64).unwrap_or(offset);
+        let next_min_time = response.get("min_time").and_then(value_as_i64).unwrap_or(min_time);
+        let next_max_time = response.get("max_time").and_then(value_as_i64).unwrap_or(max_time);
+        if next_offset == offset && next_min_time == min_time && next_max_time == max_time {
+            warn!(page, "抖音关注列表游标没有前进，停止继续分页");
+            break;
+        }
+        offset = next_offset;
+        min_time = next_min_time;
+        max_time = next_max_time;
+    }
+    let total = results.len();
+    Ok(ApiResponse::ok(YouTubeSearchResponse {
+        success: true,
+        results,
+        total,
+    }))
+}
+
+fn user_to_search_result(user: &serde_json::Value) -> Option<YouTubeSearchResult> {
+    let sec_uid = text(user, &["sec_uid", "sec_user_id"])?;
+    let nickname = text(user, &["nickname", "unique_id"]).unwrap_or_else(|| sec_uid.clone());
+    Some(YouTubeSearchResult {
+        result_type: "douyin_user".to_string(),
+        title: nickname,
+        author: text(user, &["unique_id", "short_id"]).unwrap_or_default(),
+        youtube_url: format!("https://www.douyin.com/user/{sec_uid}"),
+        channel_id: Some(sec_uid),
+        cover: image_url(user.get("avatar_larger").or_else(|| user.get("avatar_thumb"))).unwrap_or_default(),
+        description: text(user, &["signature"]).unwrap_or_default(),
+        follower: integer(user, &["follower_count", "mplatform_followers_count"]),
+    })
+}
+
+fn douyin_search_was_blocked(response: &serde_json::Value) -> bool {
+    response
+        .get("search_nil_info")
+        .and_then(|value| value.get("search_nil_type").or_else(|| value.get("search_nil_item")))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| matches!(value, "verify_check" | "antispam_check" | "hit_shark"))
+}
+
+async fn search_public_douyin_profiles(keyword: &str) -> Result<Vec<YouTubeSearchResult>> {
+    let query = format!("{keyword} 抖音");
+    let url = reqwest::Url::parse_with_params(DOUYIN_PUBLIC_SEARCH_API, &[("q", query)])?;
+    let response = reqwest::Client::builder()
+        .user_agent(douyin_sign::user_agent())
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?
+        .get(url)
+        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")
+        .send()
+        .await
+        .context("请求抖音作者备用搜索失败")?;
+    if !response.status().is_success() {
+        bail!("抖音作者备用搜索返回 HTTP {}", response.status());
+    }
+    let body = response.text().await?;
+    let regex = Regex::new(r#"https?://www\.douyin\.com/user/(MS4w[A-Za-z0-9_-]+)"#)?;
+    let mut sec_uids = Vec::new();
+    let mut seen = HashSet::new();
+    for captures in regex.captures_iter(&body) {
+        let Some(sec_uid) = captures.get(1).map(|value| value.as_str().to_string()) else {
+            continue;
+        };
+        if seen.insert(sec_uid.clone()) {
+            sec_uids.push(sec_uid);
+        }
+        if sec_uids.len() >= 20 {
+            break;
+        }
+    }
+
+    let mut results = Vec::new();
+    for sec_uid in sec_uids {
+        let mut pairs = common_query_pairs();
+        pairs.push(("sec_user_id", sec_uid));
+        let profile = match signed_get(DOUYIN_PROFILE_OTHER_API, pairs).await {
+            Ok(profile) => profile,
+            Err(error) => {
+                warn!(error = %error, "校验备用抖音作者资料失败");
+                continue;
+            }
+        };
+        if ensure_douyin_status_ok(&profile, "校验抖音作者资料").is_err() {
+            continue;
+        }
+        let Some(user) = profile.get("user") else {
+            continue;
+        };
+        let Some(result) = user_to_search_result(user) else {
+            continue;
+        };
+        if search_result_matches(&result, keyword) {
+            results.push(result);
+        }
+    }
+    results.sort_by(|left, right| {
+        search_result_score(right, keyword)
+            .cmp(&search_result_score(left, keyword))
+            .then_with(|| {
+                right
+                    .follower
+                    .unwrap_or_default()
+                    .cmp(&left.follower.unwrap_or_default())
+            })
+    });
+    Ok(results)
+}
+
+fn normalized_search_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn search_result_score(result: &YouTubeSearchResult, keyword: &str) -> u8 {
+    let keyword = normalized_search_text(keyword);
+    let title = normalized_search_text(&result.title);
+    let author = normalized_search_text(&result.author);
+    if author == keyword && !author.is_empty() {
+        5
+    } else if title == keyword {
+        4
+    } else if title.starts_with(&keyword) {
+        3
+    } else if title.contains(&keyword) || author.contains(&keyword) {
+        2
+    } else if normalized_search_text(&result.description).contains(&keyword) {
+        1
+    } else {
+        0
+    }
+}
+
+fn search_result_matches(result: &YouTubeSearchResult, keyword: &str) -> bool {
+    !normalized_search_text(keyword).is_empty() && search_result_score(result, keyword) > 0
+}
+
+fn ensure_douyin_status_ok(response: &serde_json::Value, action: &str) -> Result<()> {
+    match response.get("status_code").and_then(value_as_i64) {
+        Some(0) => Ok(()),
+        Some(8) => bail!("{action}失败：抖音 Cookie 已失效，请在设置页重新导入"),
+        Some(code) => bail!("{action}失败：抖音返回状态码 {code}"),
+        None => bail!("{action}失败：抖音响应缺少状态码"),
+    }
+}
+
+fn value_as_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn value_as_bool(value: &serde_json::Value) -> Option<bool> {
+    value.as_bool().or_else(|| value_as_i64(value).map(|value| value != 0))
 }
 
 fn collect_user_infos<'a>(value: &'a serde_json::Value, users: &mut Vec<&'a serde_json::Value>) {

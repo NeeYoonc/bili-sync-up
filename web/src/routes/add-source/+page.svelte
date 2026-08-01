@@ -208,6 +208,8 @@
 	// 关注的UP主相关
 	let userFollowings: UserFollowing[] = [];
 	let loadingFollowings = false;
+	let douyinFollowings: SearchResultItem[] = [];
+	let loadingDouyinFollowings = false;
 
 	// 番剧季度相关
 	let bangumiSeasons: BangumiSeasonInfo[] = [];
@@ -1868,6 +1870,7 @@
 
 	// 过滤后的关注UP主列表（不完全过滤，而是标记已存在状态）
 	$: filteredUserFollowings = userFollowings;
+	$: filteredDouyinFollowings = douyinFollowings;
 
 	// 过滤后的搜索结果（根据类型过滤已存在的源）
 	$: filteredSearchResults = searchResults.filter((result) => {
@@ -2059,6 +2062,20 @@
 		} else {
 			toast.error('获取关注UP主失败');
 		}
+	}
+
+	async function fetchDouyinFollowings() {
+		clearSearchPanel();
+		const result = await runRequest(() => api.getDouyinFollowings(), {
+			setLoading: (value) => (loadingDouyinFollowings = value),
+			context: '获取已关注抖音作者失败'
+		});
+		if (!result) return;
+
+		douyinFollowings = result.data.results;
+		toast.success('获取已关注抖音作者成功', {
+			description: `共获取到 ${douyinFollowings.length} 个作者，点击即可选择`
+		});
 	}
 
 	// 选择关注的UP主
@@ -3123,9 +3140,23 @@
 													搜索
 												{/if}
 											</Button>
+											{#if sourcePlatform === 'douyin'}
+												<Button
+													type="button"
+													onclick={fetchDouyinFollowings}
+													disabled={loadingDouyinFollowings}
+													size="sm"
+													variant="outline"
+													class={isMobile ? 'w-full' : ''}
+												>
+													{loadingDouyinFollowings ? '获取中...' : '获取关注'}
+												</Button>
+											{/if}
 										</div>
 										<p class="text-muted-foreground text-xs">
-											搜索并选择结果后，将自动填充名称、链接和当前来源类型的快捷路径模板。
+											{sourcePlatform === 'douyin'
+												? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
+												: '搜索并选择结果后，将自动填充名称、链接和当前来源类型的快捷路径模板。'}
 										</p>
 									</div>
 								</div>
@@ -4770,12 +4801,13 @@
 													{/if}
 												</div>
 												<p class="text-muted-foreground truncate text-xs">
-													{result.author}{#if (result.result_type === 'bili_user' ||
-														result.result_type === 'youtube_channel') &&
+											{result.author}{#if (result.result_type === 'bili_user' ||
+												result.result_type === 'youtube_channel' ||
+												result.result_type === 'douyin_user') &&
 													result.follower !== undefined &&
 													result.follower !== null}
 														<span class="ml-2"
-															>· {result.result_type === 'youtube_channel' ? '订阅数' : '粉丝'}:
+													>· {result.result_type === 'youtube_channel' ? '订阅数' : '粉丝'}:
 															{formatSubmissionMetricLabel(result.follower)}</span
 														>
 													{/if}
@@ -4798,6 +4830,57 @@
 									{/if}
 								</span>
 							{/snippet}
+						</SidePanel>
+					</div>
+				{/if}
+
+				<!-- 已关注抖音作者：沿用 B 站关注 UP 的右侧选择方式 -->
+				{#if sourcePlatform === 'douyin' && douyinFollowings.length > 0}
+					<div class={isCompactLayout ? 'w-full' : 'flex-1'}>
+						<SidePanel
+							isMobile={isCompactLayout}
+							title="已关注抖音作者"
+							subtitle={`共 ${douyinFollowings.length} 个作者，点击选择`}
+							maxHeightClass="max-h-126"
+							headerClass="bg-blue-50 dark:bg-blue-950"
+							titleClass="text-base font-medium text-blue-800 dark:text-blue-200"
+							subtitleClass="text-sm text-blue-600 dark:text-blue-400"
+						>
+							<div
+								class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}"
+								style={isMobile
+									? ''
+									: 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}
+							>
+								{#each filteredDouyinFollowings as following (following.channel_id)}
+									<SelectableCardButton onclick={() => selectSearchResult(following)} class="p-3">
+										<div class="flex items-start gap-2">
+											<BiliImage
+												src={following.cover}
+												alt={following.title}
+												class="h-10 w-10 flex-shrink-0 rounded-full object-cover"
+												placeholder="头像"
+											/>
+											<div class="min-w-0 flex-1">
+												<h4 class="mb-1 truncate text-xs font-medium">{following.title}</h4>
+												<p class="text-muted-foreground mb-1 truncate text-xs">
+													{following.author || '未设置抖音号'}
+													{#if following.follower !== undefined && following.follower !== null}
+														<span class="ml-2"
+															>· 粉丝: {formatSubmissionMetricLabel(following.follower)}</span
+														>
+													{/if}
+												</p>
+												{#if following.description}
+													<p class="text-muted-foreground/70 line-clamp-2 text-xs">
+														{following.description}
+													</p>
+												{/if}
+											</div>
+										</div>
+									</SelectableCardButton>
+								{/each}
+							</div>
 						</SidePanel>
 					</div>
 				{/if}
