@@ -6,7 +6,17 @@ export interface ApiResponse<T> {
 }
 
 export type YouTubeSourceType =
-	'subscriptions' | 'channel' | 'playlist' | 'liked' | 'watch_later' | 'douyin';
+	| 'subscriptions'
+	| 'channel'
+	| 'playlist'
+	| 'liked'
+	| 'watch_later'
+	| 'douyin'
+	| 'douyin_liked'
+	| 'douyin_collection'
+	| 'douyin_watch_later'
+	| 'douyin_theater'
+	| 'douyin_series';
 
 export interface YouTubeSource {
 	id: number;

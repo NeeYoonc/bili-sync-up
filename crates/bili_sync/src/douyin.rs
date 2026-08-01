@@ -22,11 +22,24 @@ use crate::youtube::{YouTubeLoginResponse, YouTubeSearchResponse, YouTubeSearchR
 
 const DOUYIN_POST_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/post/";
 const DOUYIN_DETAIL_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/detail/";
-const DOUYIN_SEARCH_API: &str = "https://www.douyin.com/aweme/v1/web/general/search/single/";
+// `/search/<keyword>?type=user` 当前实际请求这个用户搜索接口。
+// `general/search/single` 是“综合”标签接口，用 `aweme_user_web` 强行请求会被
+// 抖音返回 `verify_check`，这也是此前所有作者关键词都搜索失败的根因。
+const DOUYIN_USER_SEARCH_API: &str = "https://www.douyin.com/aweme/v1/web/discover/search/";
 const DOUYIN_PROFILE_SELF_API: &str = "https://www.douyin.com/aweme/v1/web/user/profile/self/";
 const DOUYIN_PROFILE_OTHER_API: &str = "https://www.douyin.com/aweme/v1/web/user/profile/other/";
 const DOUYIN_FOLLOWING_API: &str = "https://www.douyin.com/aweme/v1/web/user/following/list/";
-const DOUYIN_PUBLIC_SEARCH_API: &str = "https://www.so.com/s";
+const DOUYIN_FAVORITE_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/favorite/";
+const DOUYIN_COLLECTIONS_API: &str = "https://www.douyin.com/aweme/v1/web/collects/list/";
+const DOUYIN_COLLECTION_VIDEOS_API: &str = "https://www.douyin.com/aweme/v1/web/collects/video/list/";
+const DOUYIN_WATCH_LATER_API: &str = "https://www.douyin.com/aweme/v1/web/watchlater/list/";
+const DOUYIN_THEATER_FEED_API: &str = "https://www.douyin.com/aweme/v1/web/lvideo/theater/feed/";
+const DOUYIN_THEATER_ITEMS_API: &str = "https://www.douyin.com/aweme/v1/web/lvideo/ent/aweme_list/";
+const DOUYIN_SERIES_FEED_API: &str = "https://www.douyin.com/aweme/v1/web/series/card/feed/";
+const DOUYIN_SERIES_ITEMS_API: &str = "https://www.douyin.com/aweme/v1/web/series/aweme/";
+const DOUYIN_PUBLIC_SEARCH_API: &str = "https://www.sogou.com/web";
+const DOUYIN_MSTOKEN_API: &str = "https://mssdk.bytedance.com/web/r/token?ms_appid=6383&msToken=T4bNG9W2rKF7hBNwaYssDErnJEobDAk641DFaOn4hcsfAM8slpbZeKPM4Ml4rhDQq18iY8nQ0JR3J87SLZtDiDqtZdZawfBjCWAgtolQsoEtG6MLETvo4fwr7F28zGJUFDdJgKEZHibNR0QshVBv28ygsQsJDzerKAtsgj9Pn5WsxyS1vfkiX3I%3D";
+const DOUYIN_MSTOKEN_STR_DATA: &str = include_str!("douyin_mstoken_strdata.txt");
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Deserialize)]
@@ -48,9 +61,20 @@ pub struct DouyinSearchRequest {
 #[derive(Debug, Deserialize)]
 pub struct DouyinSourceVideosRequest {
     pub url: String,
+    #[serde(default = "default_douyin_source_type")]
+    pub source_type: String,
     pub page: Option<i32>,
     pub page_size: Option<i32>,
     pub keyword: Option<String>,
+}
+
+fn default_douyin_source_type() -> String {
+    "douyin".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DouyinCatalogRequest {
+    pub source_type: String,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +87,8 @@ pub struct DouyinPost {
     pub published_at: Option<String>,
     pub timestamp: Option<i64>,
     pub duration_seconds: Option<i32>,
+    pub digg_count: i64,
+    pub is_image_post: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -116,22 +142,12 @@ pub async fn search_douyin(
     if keyword.is_empty() {
         return Err(ApiError::bad_request("请输入抖音作者关键词"));
     }
-    let mut pairs = common_query_pairs();
-    pairs.extend([
-        ("search_channel", "aweme_user_web".to_string()),
-        ("keyword", keyword.to_string()),
-        ("enable_history", "1".to_string()),
-        ("search_source", "tab_search".to_string()),
-        ("query_correct_type", "1".to_string()),
-        ("is_filter_search", "0".to_string()),
-        ("from_group_id", String::new()),
-        ("offset", "0".to_string()),
-        ("count", "15".to_string()),
-        ("need_filter_settings", "1".to_string()),
-        ("list_type", "multi".to_string()),
-        ("search_id", String::new()),
-    ]);
-    let response = signed_get(DOUYIN_SEARCH_API, pairs).await?;
+    let mut response = fetch_douyin_user_search(keyword, false).await?;
+    if douyin_search_was_blocked(&response) && !imported_cookie_has_ms_token() {
+        // mssdk token 有时会提前失效。仅对程序补出的 token 刷新并重试一次；
+        // 浏览器导出的 msToken 则始终以用户真实会话为准。
+        response = fetch_douyin_user_search(keyword, true).await?;
+    }
     let search_was_blocked = douyin_search_was_blocked(&response);
     let mut results = Vec::new();
     let mut users = Vec::new();
@@ -170,6 +186,32 @@ pub async fn search_douyin(
         results,
         total,
     }))
+}
+
+async fn fetch_douyin_user_search(keyword: &str, force_ms_token_refresh: bool) -> Result<serde_json::Value> {
+    ensure_search_ms_token(force_ms_token_refresh).await?;
+    let mut pairs = common_query_pairs();
+    // 抖音网页会给全部搜索接口附加 webid 和 UIFID。用户搜索接口沿用
+    // 默认 17.4.0 协议；19.6.0 仅属于 general/search/single 综合搜索。
+    pairs.push(("webid", stable_webid().await?));
+    let cookies = cookie_values();
+    if let Some(uifid) = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP")).cloned() {
+        pairs.push(("uifid", uifid));
+    }
+    pairs.extend([
+        ("search_channel", "aweme_user_web".to_string()),
+        ("keyword", keyword.to_string()),
+        ("search_source", "normal_search".to_string()),
+        ("query_correct_type", "1".to_string()),
+        ("is_filter_search", "0".to_string()),
+        ("from_group_id", String::new()),
+        ("offset", "0".to_string()),
+        ("count", "20".to_string()),
+        ("need_filter_settings", "1".to_string()),
+        ("list_type", "single".to_string()),
+        ("search_id", String::new()),
+    ]);
+    signed_get(DOUYIN_USER_SEARCH_API, pairs).await
 }
 
 pub async fn get_douyin_followings() -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
@@ -248,6 +290,180 @@ pub async fn get_douyin_followings() -> Result<ApiResponse<YouTubeSearchResponse
     }))
 }
 
+/// 返回需要在添加源页面右侧选择的抖音列表，交互方式与 B 站收藏夹/合集一致。
+pub async fn get_douyin_catalog(
+    Query(request): Query<DouyinCatalogRequest>,
+) -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
+    ensure_session()?;
+    let source_type = request.source_type.trim().to_ascii_lowercase();
+    let results = match source_type.as_str() {
+        "douyin_collection" => fetch_collection_catalog().await?,
+        "douyin_theater" => fetch_theater_catalog().await?,
+        "douyin_series" => fetch_series_catalog().await?,
+        _ => return Err(ApiError::bad_request("右侧列表仅支持收藏夹、放映厅或短剧")),
+    };
+    let total = results.len();
+    Ok(ApiResponse::ok(YouTubeSearchResponse {
+        success: true,
+        results,
+        total,
+    }))
+}
+
+async fn fetch_collection_catalog() -> Result<Vec<YouTubeSearchResult>> {
+    let mut cursor = 0i64;
+    let mut results = Vec::new();
+    for _ in 0..100 {
+        let mut pairs = common_query_pairs();
+        pairs.extend([("cursor", cursor.to_string()), ("count", "12".to_string())]);
+        let response = signed_get(DOUYIN_COLLECTIONS_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音收藏夹")?;
+        for item in response
+            .get("collects_list")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = text(item, &["collects_id_str", "collects_id"]) else {
+                continue;
+            };
+            let title = text(item, &["collects_name"]).unwrap_or_else(|| format!("收藏夹 {id}"));
+            let count = integer(item, &["total_number"]).unwrap_or_default();
+            results.push(YouTubeSearchResult {
+                result_type: "douyin_collection".to_string(),
+                title,
+                author: item
+                    .get("user_info")
+                    .and_then(|user| text(user, &["nickname"]))
+                    .unwrap_or_default(),
+                youtube_url: format!("https://www.douyin.com/collection/{id}"),
+                channel_id: Some(id),
+                cover: image_url(item.get("collects_cover")).unwrap_or_default(),
+                description: format!("共 {count} 个作品"),
+                follower: Some(count),
+            });
+        }
+        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(results)
+}
+
+async fn fetch_theater_catalog() -> Result<Vec<YouTubeSearchResult>> {
+    let mut cursor = 0i64;
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..30 {
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("count", "12".to_string()),
+            ("custom_album_type", "0".to_string()),
+            ("cursor", cursor.to_string()),
+        ]);
+        let response = signed_get(DOUYIN_THEATER_FEED_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音放映厅")?;
+        for item in response
+            .get("aweme_list")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(album) = item.pointer("/lvideo_brief/album_info") else {
+                continue;
+            };
+            let Some(id) = text(album, &["album_id"]) else {
+                continue;
+            };
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let title = text(album, &["title"]).unwrap_or_else(|| format!("放映厅 {id}"));
+            results.push(YouTubeSearchResult {
+                result_type: "douyin_theater".to_string(),
+                title,
+                author: text(item.get("author").unwrap_or(&serde_json::Value::Null), &["nickname"]).unwrap_or_default(),
+                youtube_url: format!("https://www.douyin.com/lvdetail/{id}"),
+                channel_id: Some(id),
+                cover: image_url(album.get("cover")).unwrap_or_default(),
+                description: text(album, &["category_str_topic", "region"]).unwrap_or_default(),
+                follower: None,
+            });
+        }
+        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("next_cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(results)
+}
+
+async fn fetch_series_catalog() -> Result<Vec<YouTubeSearchResult>> {
+    let mut offset = 0i64;
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..30 {
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("offset", offset.to_string()),
+            ("count", "10".to_string()),
+            ("content_type", "0".to_string()),
+            ("insert_series_id_list", String::new()),
+        ]);
+        let response = signed_get(DOUYIN_SERIES_FEED_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音短剧")?;
+        for card in response
+            .get("card_list")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(series) = card.get("series") else {
+                continue;
+            };
+            let Some(id) = text(series, &["series_id"]) else {
+                continue;
+            };
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let stats = series.get("stats").unwrap_or(&serde_json::Value::Null);
+            let episodes = integer(stats, &["total_episode", "updated_to_episode"]).unwrap_or_default();
+            results.push(YouTubeSearchResult {
+                result_type: "douyin_series".to_string(),
+                title: text(series, &["series_name"]).unwrap_or_else(|| format!("短剧 {id}")),
+                author: series
+                    .get("author")
+                    .and_then(|author| text(author, &["nickname"]))
+                    .unwrap_or_default(),
+                youtube_url: format!("https://www.douyin.com/series/{id}"),
+                channel_id: Some(id),
+                cover: image_url(series.get("cover_url")).unwrap_or_default(),
+                description: text(series, &["desc"]).unwrap_or_else(|| format!("共 {episodes} 集")),
+                follower: Some(episodes),
+            });
+        }
+        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("offset").and_then(value_as_i64).unwrap_or(offset);
+        if next == offset {
+            break;
+        }
+        offset = next;
+    }
+    Ok(results)
+}
+
 fn user_to_search_result(user: &serde_json::Value) -> Option<YouTubeSearchResult> {
     let sec_uid = text(user, &["sec_uid", "sec_user_id"])?;
     let nickname = text(user, &["nickname", "unique_id"]).unwrap_or_else(|| sec_uid.clone());
@@ -273,7 +489,7 @@ fn douyin_search_was_blocked(response: &serde_json::Value) -> bool {
 
 async fn search_public_douyin_profiles(keyword: &str) -> Result<Vec<YouTubeSearchResult>> {
     let query = format!("{keyword} 抖音");
-    let url = reqwest::Url::parse_with_params(DOUYIN_PUBLIC_SEARCH_API, &[("q", query)])?;
+    let url = reqwest::Url::parse_with_params(DOUYIN_PUBLIC_SEARCH_API, &[("query", query)])?;
     let response = reqwest::Client::builder()
         .user_agent(douyin_sign::user_agent())
         .timeout(REQUEST_TIMEOUT)
@@ -288,22 +504,41 @@ async fn search_public_douyin_profiles(keyword: &str) -> Result<Vec<YouTubeSearc
         bail!("抖音作者备用搜索返回 HTTP {}", response.status());
     }
     let body = response.text().await?;
-    let regex = Regex::new(r#"https?://www\.douyin\.com/user/(MS4w[A-Za-z0-9_-]+)"#)?;
+    // 搜索引擎不一定直接收录作者主页，通常更容易命中该作者发布的视频或图文。
+    // 两类链接都收集：主页通过 profile/other 校验，作品通过 aweme/detail 反查
+    // author。这样官方搜索接口临时触发 verify_check 时仍能得到经过抖音官方
+    // 接口确认的作者，而不是把搜索引擎摘要直接返回给前端。
+    let user_regex = Regex::new(r#"https?://www\.douyin\.com/user/(MS4w[A-Za-z0-9_-]+)"#)?;
+    let aweme_regex = Regex::new(r#"https?://www\.douyin\.com/(?:video|note)/(\d+)"#)?;
     let mut sec_uids = Vec::new();
-    let mut seen = HashSet::new();
-    for captures in regex.captures_iter(&body) {
+    let mut aweme_ids = Vec::new();
+    let mut seen_candidates = HashSet::new();
+    let mut seen_aweme_ids = HashSet::new();
+    for captures in user_regex.captures_iter(&body) {
         let Some(sec_uid) = captures.get(1).map(|value| value.as_str().to_string()) else {
             continue;
         };
-        if seen.insert(sec_uid.clone()) {
+        if seen_candidates.insert(sec_uid.clone()) {
             sec_uids.push(sec_uid);
         }
         if sec_uids.len() >= 20 {
             break;
         }
     }
+    for captures in aweme_regex.captures_iter(&body) {
+        let Some(aweme_id) = captures.get(1).map(|value| value.as_str().to_string()) else {
+            continue;
+        };
+        if seen_aweme_ids.insert(aweme_id.clone()) {
+            aweme_ids.push(aweme_id);
+        }
+        if aweme_ids.len() >= 20 {
+            break;
+        }
+    }
 
     let mut results = Vec::new();
+    let mut seen_results = HashSet::new();
     for sec_uid in sec_uids {
         let mut pairs = common_query_pairs();
         pairs.push(("sec_user_id", sec_uid));
@@ -323,9 +558,52 @@ async fn search_public_douyin_profiles(keyword: &str) -> Result<Vec<YouTubeSearc
         let Some(result) = user_to_search_result(user) else {
             continue;
         };
-        if search_result_matches(&result, keyword) {
+        if search_result_matches(&result, keyword) && seen_results.insert(result.channel_id.clone().unwrap_or_default())
+        {
             results.push(result);
         }
+    }
+    for aweme_id in aweme_ids {
+        let mut pairs = common_query_pairs();
+        pairs.push(("aweme_id", aweme_id));
+        let detail = match signed_get(DOUYIN_DETAIL_API, pairs).await {
+            Ok(detail) => detail,
+            Err(error) => {
+                warn!(error = %error, "通过搜索作品反查抖音作者失败");
+                continue;
+            }
+        };
+        if ensure_douyin_status_ok(&detail, "校验抖音搜索作品").is_err() {
+            continue;
+        }
+        let Some(author) = detail.pointer("/aweme_detail/author") else {
+            continue;
+        };
+        let Some(result) = user_to_search_result(author) else {
+            continue;
+        };
+        let Some(sec_uid) = result.channel_id.as_ref() else {
+            continue;
+        };
+        if !search_result_matches(&result, keyword) || !seen_results.insert(sec_uid.clone()) {
+            continue;
+        }
+
+        // 作品详情里的作者字段足以识别账号，但粉丝数等资料有时被裁剪；再用
+        // profile/other 补全一次，失败时仍保留已由详情接口确认的结果。
+        let mut profile_pairs = common_query_pairs();
+        profile_pairs.push(("sec_user_id", sec_uid.clone()));
+        let result = match signed_get(DOUYIN_PROFILE_OTHER_API, profile_pairs).await {
+            Ok(profile) if ensure_douyin_status_ok(&profile, "补全抖音作者资料").is_ok() => {
+                profile.get("user").and_then(user_to_search_result).unwrap_or(result)
+            }
+            Ok(_) => result,
+            Err(error) => {
+                warn!(error = %error, "补全搜索到的抖音作者资料失败");
+                result
+            }
+        };
+        results.push(result);
     }
     results.sort_by(|left, right| {
         search_result_score(right, keyword)
@@ -420,9 +698,8 @@ pub async fn get_douyin_source_videos(
 ) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
     let page = request.page.unwrap_or(1).max(1);
     let page_size = request.page_size.unwrap_or(100).clamp(1, 200);
-    let sec_uid = resolve_sec_user_id(&request.url).await?;
     let target_end = page.saturating_mul(page_size) as usize;
-    let posts = fetch_posts_until(&sec_uid, target_end.saturating_add(1)).await?;
+    let posts = fetch_source_posts(&request.source_type, &request.url, target_end.saturating_add(1)).await?;
     let keyword = request
         .keyword
         .as_deref()
@@ -450,7 +727,9 @@ pub async fn get_douyin_source_videos(
             cover: post.thumbnail.unwrap_or_default(),
             pubtime: post.published_at.unwrap_or_default(),
             duration: post.duration_seconds.unwrap_or_default(),
-            view: 0,
+            // 抖音 Web 接口对历史作品的 play_count 经常统一返回 0，
+            // digg_count 才是稳定、真实的公开统计，因此这里按抖音语义展示点赞数。
+            view: i32::try_from(post.digg_count).unwrap_or(i32::MAX),
             danmaku: 0,
             description: String::new(),
         })
@@ -462,6 +741,195 @@ pub async fn get_douyin_source_videos(
         page,
         page_size,
     }))
+}
+
+pub async fn fetch_source_posts(source_type: &str, source_url: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+    match source_type.trim().to_ascii_lowercase().as_str() {
+        "douyin" => {
+            let sec_uid = resolve_sec_user_id(source_url).await?;
+            fetch_posts_until(&sec_uid, limit).await
+        }
+        "douyin_liked" => fetch_liked_posts(limit).await,
+        "douyin_collection" => {
+            let id = numeric_id(source_url).context("无法从抖音收藏夹链接识别收藏夹 ID")?;
+            fetch_collection_posts(id, limit).await
+        }
+        "douyin_watch_later" => fetch_watch_later_posts(limit).await,
+        "douyin_theater" => {
+            let id = numeric_id(source_url).context("无法从放映厅详情链接识别专辑 ID")?;
+            fetch_theater_posts(id, limit).await
+        }
+        "douyin_series" => {
+            let id = numeric_id(source_url).context("无法从短剧链接识别短剧 ID")?;
+            fetch_series_posts(id, limit).await
+        }
+        value => bail!("不支持的抖音来源类型: {value}"),
+    }
+}
+
+fn numeric_id(value: &str) -> Option<&str> {
+    value
+        .split(['?', '#', '/'])
+        .rev()
+        .find(|part| !part.is_empty() && part.chars().all(|character| character.is_ascii_digit()))
+}
+
+async fn current_user_ids() -> Result<(String, String)> {
+    let response = signed_get(DOUYIN_PROFILE_SELF_API, common_query_pairs()).await?;
+    ensure_douyin_status_ok(&response, "获取当前抖音账号")?;
+    let user = response.get("user").context("抖音当前账号资料为空")?;
+    Ok((
+        text(user, &["uid"]).context("当前抖音账号缺少 uid")?,
+        text(user, &["sec_uid", "sec_user_id"]).context("当前抖音账号缺少 sec_uid")?,
+    ))
+}
+
+async fn fetch_liked_posts(limit: usize) -> Result<Vec<DouyinPost>> {
+    let (_, sec_uid) = current_user_ids().await?;
+    let mut cursor = 0i64;
+    let mut posts = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..1000 {
+        let page_size = page_size_for(limit, posts.len());
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("sec_user_id", sec_uid.clone()),
+            ("max_cursor", cursor.to_string()),
+            ("min_cursor", "0".to_string()),
+            ("whale_cut_token", String::new()),
+            ("cut_version", "1".to_string()),
+            ("count", page_size.to_string()),
+        ]);
+        let response = signed_get(DOUYIN_FAVORITE_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取我的喜欢")?;
+        append_awemes(&response, "aweme_list", &mut posts, &mut seen);
+        if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("max_cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(posts)
+}
+
+async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+    let mut cursor = 0i64;
+    let mut posts = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..1000 {
+        let page_size = page_size_for(limit, posts.len());
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("collects_id", id.to_string()),
+            ("cursor", cursor.to_string()),
+            ("count", page_size.to_string()),
+        ]);
+        let response = signed_get(DOUYIN_COLLECTION_VIDEOS_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音收藏夹作品")?;
+        append_awemes(&response, "aweme_list", &mut posts, &mut seen);
+        if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(posts)
+}
+
+async fn fetch_watch_later_posts(limit: usize) -> Result<Vec<DouyinPost>> {
+    let mut offset = 0i64;
+    let mut posts = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..1000 {
+        let page_size = page_size_for(limit, posts.len());
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("offset", offset.to_string()),
+            ("count", page_size.to_string()),
+            ("list_type", "0".to_string()),
+            ("operate_type", "0".to_string()),
+        ]);
+        let response = signed_get(DOUYIN_WATCH_LATER_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音稍后再看")?;
+        append_awemes(&response, "items", &mut posts, &mut seen);
+        if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("offset").and_then(value_as_i64).unwrap_or(offset);
+        offset = if next == offset {
+            offset + i64::from(page_size)
+        } else {
+            next
+        };
+    }
+    Ok(posts)
+}
+
+async fn fetch_theater_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+    let mut pairs = common_query_pairs();
+    pairs.push(("album_ids", id.to_string()));
+    let response = signed_get(DOUYIN_THEATER_ITEMS_API, pairs).await?;
+    Ok(response
+        .get("aweme_list")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(parse_post)
+        .take(limit)
+        .collect())
+}
+
+async fn fetch_series_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+    let mut cursor = 0i64;
+    let mut posts = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..1000 {
+        let page_size = page_size_for(limit, posts.len());
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("series_id", id.to_string()),
+            ("pull_type", "2".to_string()),
+            ("cursor", cursor.to_string()),
+            ("count", page_size.to_string()),
+        ]);
+        let response = signed_get(DOUYIN_SERIES_ITEMS_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音短剧剧集")?;
+        append_awemes(&response, "aweme_list", &mut posts, &mut seen);
+        if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("max_cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(posts)
+}
+
+fn page_size_for(limit: usize, loaded: usize) -> i32 {
+    i32::try_from(limit.saturating_sub(loaded).min(50)).unwrap_or(50).max(1)
+}
+
+fn append_awemes(response: &serde_json::Value, key: &str, posts: &mut Vec<DouyinPost>, seen: &mut HashSet<String>) {
+    for item in response
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(post) = parse_post(item) {
+            if seen.insert(post.id.clone()) {
+                posts.push(post);
+            }
+        }
+    }
 }
 
 pub async fn resolve_sec_user_id(value: &str) -> Result<String> {
@@ -492,9 +960,14 @@ pub async fn fetch_all_posts(source_url: &str) -> Result<Vec<DouyinPost>> {
 
 pub async fn fetch_profile(source_url: &str) -> Result<DouyinProfile> {
     let sec_uid = resolve_sec_user_id(source_url).await?;
-    let page = fetch_post_page(&sec_uid, 0, 1).await?;
-    page.profile
-        .ok_or_else(|| anyhow!("抖音作者没有公开作品，无法取得头像资料"))
+    let mut pairs = common_query_pairs();
+    pairs.push(("sec_user_id", sec_uid));
+    let response = signed_get(DOUYIN_PROFILE_OTHER_API, pairs).await?;
+    ensure_douyin_status_ok(&response, "获取抖音作者头像")?;
+    let user = response.get("user").context("抖音作者资料为空")?;
+    Ok(DouyinProfile {
+        avatar_url: image_url(user.get("avatar_larger").or_else(|| user.get("avatar_thumb"))),
+    })
 }
 
 /// 获取单个视频作品的原生详情。抖音 Web 详情接口会直接返回各档
@@ -603,15 +1076,10 @@ async fn fetch_post_page(sec_uid: &str, cursor: i64, count: i32) -> Result<PostP
 }
 
 fn parse_post(item: &serde_json::Value) -> Option<DouyinPost> {
-    // 图文笔记会包含多张 images，但没有能够进入项目现有
-    // mp4/m4a 下载和媒体库链路的单一视频流；视频源只枚举视频作品。
-    if item
+    let is_image_post = item
         .get("images")
         .and_then(serde_json::Value::as_array)
-        .is_some_and(|images| !images.is_empty())
-    {
-        return None;
-    }
+        .is_some_and(|images| !images.is_empty());
     let id = text(item, &["aweme_id", "group_id"])?;
     let author = item.get("author");
     let timestamp = item.get("create_time").and_then(serde_json::Value::as_i64);
@@ -624,16 +1092,32 @@ fn parse_post(item: &serde_json::Value) -> Option<DouyinPost> {
         uploader: author
             .and_then(|value| text(value, &["nickname", "unique_id"]))
             .unwrap_or_default(),
-        thumbnail: item
-            .get("video")
-            .and_then(|video| image_url(video.get("cover").or_else(|| video.get("origin_cover")))),
+        thumbnail: if is_image_post {
+            item.get("images")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|images| images.first())
+                .and_then(|image| image_url(Some(image)))
+        } else {
+            item.get("video")
+                .and_then(|video| image_url(video.get("cover").or_else(|| video.get("origin_cover"))))
+        },
         published_at: timestamp
             .and_then(|value| chrono::DateTime::from_timestamp(value, 0).map(|date| date.format("%Y%m%d").to_string())),
         timestamp,
-        duration_seconds: item
-            .get("duration")
-            .and_then(serde_json::Value::as_i64)
-            .and_then(|duration| i32::try_from((duration + 500) / 1000).ok()),
+        duration_seconds: if is_image_post {
+            item.get("music")
+                .and_then(|music| integer(music, &["duration"]))
+                .and_then(|duration| i32::try_from(duration).ok())
+        } else {
+            item.get("duration")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|duration| i32::try_from((duration + 500) / 1000).ok())
+        },
+        digg_count: item
+            .get("statistics")
+            .and_then(|statistics| integer(statistics, &["digg_count"]))
+            .unwrap_or_default(),
+        is_image_post,
     })
 }
 
@@ -679,12 +1163,14 @@ async fn signed_get(base_url: &str, pairs: Vec<(&str, String)>) -> Result<serde_
     let signature = douyin_sign::generate(&params);
     let mut url = reqwest::Url::parse_with_params(base_url, &pairs)?;
     url.query_pairs_mut().append_pair("a_bogus", &signature);
-    let response = client()?
+    let mut request = client()?
         .get(url)
-        .header(reqwest::header::REFERER, "https://www.douyin.com/")
-        .send()
-        .await
-        .context("请求抖音 Web API 失败")?;
+        .header(reqwest::header::REFERER, "https://www.douyin.com/");
+    let cookies = cookie_values();
+    if let Some(uifid) = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP")) {
+        request = request.header("uifid", uifid);
+    }
+    let response = request.send().await.context("请求抖音 Web API 失败")?;
     let status = response.status();
     let bytes = response.bytes().await?;
     if !status.is_success() {
@@ -694,6 +1180,129 @@ async fn signed_get(base_url: &str, pairs: Vec<(&str, String)>) -> Result<serde_
         bail!("抖音 Web API 返回空响应；请重新导入电脑浏览器刚导出的抖音 Cookie");
     }
     serde_json::from_slice(&bytes).context("解析抖音 Web API 响应失败")
+}
+
+async fn generate_webid() -> Result<String> {
+    let response = reqwest::Client::builder()
+        .user_agent(douyin_sign::user_agent())
+        .timeout(REQUEST_TIMEOUT)
+        .build()?
+        .post("https://mcs.zijieapi.com/webid?aid=6383&sdk_version=5.1.18_zip&device_platform=web")
+        .header(reqwest::header::REFERER, "https://www.douyin.com/")
+        .json(&serde_json::json!({
+            "app_id": 6383,
+            "referer": "https://www.douyin.com/",
+            "url": "https://www.douyin.com/",
+            "user_agent": douyin_sign::user_agent(),
+            "user_unique_id": ""
+        }))
+        .send()
+        .await
+        .context("获取抖音搜索 webid 失败")?;
+    if !response.status().is_success() {
+        bail!("获取抖音搜索 webid 返回 HTTP {}", response.status());
+    }
+    response
+        .json::<serde_json::Value>()
+        .await?
+        .get("web_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .context("抖音 webid 响应缺少 web_id")
+}
+
+/// webid 是抖音网页的设备标识，不是一次性请求参数。浏览器会长期复用同一个
+/// user_unique_id；每次搜索都重新生成会被识别为同一会话在不断更换设备，几次
+/// 请求后即返回 verify_check。因此首次生成后与 Cookie 一样落到配置目录复用。
+async fn stable_webid() -> Result<String> {
+    let path = CONFIG_DIR.join("douyin-webid.txt");
+    if let Ok(value) = tokio::fs::read_to_string(&path).await {
+        let value = value.trim();
+        if (15..=24).contains(&value.len()) && value.chars().all(|character| character.is_ascii_digit()) {
+            return Ok(value.to_string());
+        }
+    }
+    let webid = generate_webid().await?;
+    tokio::fs::create_dir_all(&*CONFIG_DIR).await?;
+    let temporary = path.with_extension("txt.importing");
+    tokio::fs::write(&temporary, webid.as_bytes()).await?;
+    replace_cookie_file(&temporary, &path).await?;
+    Ok(webid)
+}
+
+fn ms_token_path() -> PathBuf {
+    CONFIG_DIR.join("douyin-mstoken.txt")
+}
+
+fn valid_ms_token(value: &str) -> bool {
+    matches!(value.trim().len(), 164 | 184)
+}
+
+fn imported_cookie_has_ms_token() -> bool {
+    read_cookie_file_values()
+        .get("msToken")
+        .is_some_and(|value| valid_ms_token(value))
+}
+
+async fn ensure_search_ms_token(force_refresh: bool) -> Result<()> {
+    if imported_cookie_has_ms_token() {
+        return Ok(());
+    }
+    let path = ms_token_path();
+    if !force_refresh {
+        let fresh = tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|elapsed| elapsed < Duration::from_secs(12 * 60 * 60));
+        if fresh {
+            if let Ok(value) = tokio::fs::read_to_string(&path).await {
+                if valid_ms_token(&value) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let response = reqwest::Client::builder()
+        .user_agent(douyin_sign::user_agent())
+        .timeout(REQUEST_TIMEOUT)
+        .build()?
+        .post(DOUYIN_MSTOKEN_API)
+        .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .json(&serde_json::json!({
+            "magic": 538969122u64,
+            "version": 1,
+            "dataType": 8,
+            "strData": DOUYIN_MSTOKEN_STR_DATA.trim(),
+            "ulr": 0,
+            "tspFromClient": timestamp
+        }))
+        .send()
+        .await
+        .context("生成抖音搜索 msToken 失败")?;
+    if !response.status().is_success() {
+        bail!("生成抖音搜索 msToken 返回 HTTP {}", response.status());
+    }
+    let token = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|part| part.trim().strip_prefix("msToken=").map(str::to_string))
+        .filter(|value| valid_ms_token(value))
+        .context("抖音 mssdk 响应没有返回有效 msToken")?;
+    tokio::fs::create_dir_all(&*CONFIG_DIR).await?;
+    let temporary = path.with_extension("txt.importing");
+    tokio::fs::write(&temporary, token.as_bytes()).await?;
+    replace_cookie_file(&temporary, &path).await?;
+    Ok(())
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -723,7 +1332,7 @@ fn cookie_header() -> Result<String> {
         .join("; "))
 }
 
-fn cookie_values() -> HashMap<String, String> {
+fn read_cookie_file_values() -> HashMap<String, String> {
     std::fs::read_to_string(cookie_path())
         .ok()
         .map(|contents| {
@@ -741,6 +1350,18 @@ fn cookie_values() -> HashMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn cookie_values() -> HashMap<String, String> {
+    let mut values = read_cookie_file_values();
+    if !values.contains_key("msToken") {
+        if let Ok(token) = std::fs::read_to_string(ms_token_path()) {
+            if valid_ms_token(&token) {
+                values.insert("msToken".to_string(), token.trim().to_string());
+            }
+        }
+    }
+    values
 }
 
 pub(crate) fn append_cookies(command: &mut tokio::process::Command) {

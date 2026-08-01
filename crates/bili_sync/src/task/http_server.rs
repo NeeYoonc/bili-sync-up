@@ -107,7 +107,8 @@ use crate::api::wrapper::ApiResponse;
 use crate::api::ws;
 use crate::bilibili::{get_captcha_info, serve_captcha_page, submit_captcha_result};
 use crate::douyin::{
-    douyin_status, get_douyin_followings, get_douyin_source_videos, import_douyin_cookie_file, search_douyin,
+    douyin_status, get_douyin_catalog, get_douyin_followings, get_douyin_source_videos, import_douyin_cookie_file,
+    search_douyin,
 };
 use crate::utils::model::queue_missing_video_file_size_backfill;
 use crate::youtube::{
@@ -304,6 +305,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/douyin/cookies", post(import_douyin_cookie_file))
         .route("/api/douyin/search", get(search_douyin))
         .route("/api/douyin/followings", get(get_douyin_followings))
+        .route("/api/douyin/catalog", get(get_douyin_catalog))
         .route("/api/douyin/source-videos", get(get_douyin_source_videos))
         .route("/api/douyin/sources", get(get_douyin_sources).post(create_douyin_source))
         .route(

@@ -210,6 +210,8 @@
 	let loadingFollowings = false;
 	let douyinFollowings: SearchResultItem[] = [];
 	let loadingDouyinFollowings = false;
+	let douyinCatalog: SearchResultItem[] = [];
+	let loadingDouyinCatalog = false;
 
 	// 番剧季度相关
 	let bangumiSeasons: BangumiSeasonInfo[] = [];
@@ -325,7 +327,12 @@
 		{ value: 'watch_later', label: '稍后再看', description: '同步当前登录账号的稍后再看列表' }
 	];
 	const douyinSourceTypeOptions = [
-		{ value: 'douyin', label: '作者投稿', description: '同步指定抖音作者的公开作品' }
+		{ value: 'douyin', label: '作者投稿', description: '同步指定抖音作者的视频和图文作品' },
+		{ value: 'douyin_liked', label: '我的喜欢', description: '同步当前登录账号点赞的视频和图文' },
+		{ value: 'douyin_collection', label: '收藏夹', description: '从右侧选择当前账号的抖音收藏夹' },
+		{ value: 'douyin_watch_later', label: '稍后再看', description: '同步当前登录账号的稍后再看列表' },
+		{ value: 'douyin_theater', label: '放映厅', description: '从右侧选择放映厅专辑，按当前账号可见权限同步' },
+		{ value: 'douyin_series', label: '短剧', description: '从右侧选择短剧，按当前账号可见权限同步剧集' }
 	];
 	const sourceTypeLabelMap: Record<string, string> = {
 		collection: '合集',
@@ -348,11 +355,16 @@
 	function handleYouTubeSourceTypeChange(nextValue: unknown) {
 		youtubeSourceType = String(nextValue ?? 'subscriptions') as YouTubeSourceType;
 		youtubeUrl = '';
+		douyinCatalog = [];
 		selectedVideos = [];
 		resetSubmissionState();
 		clearSearchPanel({ clearKeyword: true });
 		name =
-			youtubeSourceType === 'subscriptions'
+			youtubeSourceType === 'douyin_liked'
+				? '我的喜欢'
+				: youtubeSourceType === 'douyin_watch_later'
+					? '稍后再看'
+				: youtubeSourceType === 'subscriptions'
 				? '我的订阅'
 				: youtubeSourceType === 'liked'
 					? '喜欢的视频'
@@ -361,15 +373,43 @@
 						: '';
 		applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
 		showSubmissionSelection =
-			youtubeSourceType === 'subscriptions' || youtubeSourceType === 'liked';
+			youtubeSourceType === 'subscriptions' ||
+			youtubeSourceType === 'liked' ||
+			youtubeSourceType === 'douyin_liked' ||
+			youtubeSourceType === 'douyin_watch_later';
+		if (
+			sourcePlatform === 'douyin' &&
+			['douyin_collection', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)
+		) {
+			void loadDouyinCatalog();
+		}
+	}
+
+	function douyinSourceNeedsSelection(): boolean {
+		return ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series'].includes(
+			youtubeSourceType
+		);
+	}
+
+	async function loadDouyinCatalog() {
+		const result = await runRequest(() => api.getDouyinCatalog(youtubeSourceType), {
+			setLoading: (value) => (loadingDouyinCatalog = value),
+			context: '获取抖音可选列表失败'
+		});
+		if (result) douyinCatalog = result.data.results;
 	}
 
 	function getYouTubeQuickSubscriptionType(type: YouTubeSourceType): VideoCategory {
 		switch (type) {
 			case 'playlist':
+			case 'douyin_collection':
+			case 'douyin_theater':
+			case 'douyin_series':
 				return 'collection';
 			case 'liked':
 			case 'watch_later':
+			case 'douyin_liked':
+			case 'douyin_watch_later':
 				return 'favorite';
 			case 'subscriptions':
 			case 'channel':
@@ -1073,13 +1113,15 @@
 		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin') {
 			const isDouyin = sourcePlatform === 'douyin';
 			if (
-				(isDouyin || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist') &&
+				((isDouyin && douyinSourceNeedsSelection()) ||
+					youtubeSourceType === 'channel' ||
+					youtubeSourceType === 'playlist') &&
 				!youtubeUrl.trim()
 			) {
-				toast.error(isDouyin ? '请输入抖音作者主页链接' : '请输入 YouTube 链接', {
+				toast.error(isDouyin ? '请先选择抖音来源' : '请输入 YouTube 链接', {
 					description:
 						isDouyin
-							? '作者投稿需要提供抖音作者主页链接'
+							? '作者、收藏夹、放映厅或短剧需要从右侧选择，也可填写对应详情链接'
 							: youtubeSourceType === 'channel'
 							? '频道投稿需要提供频道链接'
 							: '播放列表来源需要提供播放列表链接'
@@ -2227,14 +2269,18 @@
 	$: youtubeSelectionTitleLabel = youtubeChannelSelection
 		? '选择订阅频道'
 		: sourcePlatform === 'douyin'
-			? '选择历史作品'
+			? youtubeSourceType === 'douyin_liked'
+				? '选择喜欢的作品'
+				: youtubeSourceType === 'douyin_watch_later'
+					? '选择稍后再看作品'
+					: '选择历史作品'
 		: youtubeSourceType === 'liked'
 			? '选择喜欢的视频'
 			: '选择历史视频';
 	$: youtubeSelectionDescriptionText = youtubeChannelSelection
 		? '仅同步勾选频道以后发布的视频。'
 		: sourcePlatform === 'douyin'
-			? '首次仅下载勾选的历史作品，之后该作者发布的新作品会自动同步。'
+			? '首次仅下载勾选的现有作品，之后该来源新增的视频或图文会自动同步。统计数字为真实点赞数。'
 		: youtubeSourceType === 'liked'
 			? '首次仅下载勾选的历史视频，之后新加入“喜欢”的视频会自动同步。'
 			: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。';
@@ -2242,7 +2288,7 @@
 	function openYouTubeHistorySelection() {
 		if (
 			!isYouTubeHistorySource() ||
-			((sourcePlatform === 'douyin' ||
+			(((sourcePlatform === 'douyin' && douyinSourceNeedsSelection()) ||
 				youtubeSourceType === 'channel' ||
 				youtubeSourceType === 'playlist') &&
 				!youtubeUrl.trim())
@@ -2291,6 +2337,7 @@
 					? sourcePlatform === 'douyin'
 						? api.getDouyinSourceVideos({
 								url: youtubeUrl.trim(),
+								source_type: youtubeSourceType,
 								page: 1,
 								page_size: 100,
 								keyword: submissionSearchQuery.trim()
@@ -2342,7 +2389,7 @@
 		if (
 			(!sourceId && !isYouTubeHistorySource()) ||
 			(isYouTubeHistorySource() &&
-				(sourcePlatform === 'douyin' ||
+				((sourcePlatform === 'douyin' && douyinSourceNeedsSelection()) ||
 					youtubeSourceType === 'channel' ||
 					youtubeSourceType === 'playlist') &&
 				!youtubeUrl.trim())
@@ -2399,6 +2446,7 @@
 				? sourcePlatform === 'douyin'
 					? await api.getDouyinSourceVideos({
 							url: youtubeUrl.trim(),
+							source_type: youtubeSourceType,
 							page,
 							page_size: pageSize
 						})
@@ -2564,6 +2612,7 @@
 			(isYouTubeHistorySource() &&
 				(youtubeSourceType === 'subscriptions' ||
 					youtubeSourceType === 'liked' ||
+					(sourcePlatform === 'douyin' && !douyinSourceNeedsSelection()) ||
 					youtubeUrl.trim())))
 	) {
 		resetSubmissionState();
@@ -3098,7 +3147,7 @@
 						</div>
 
 						{#if sourcePlatform === 'youtube' || sourcePlatform === 'douyin'}
-							{#if sourcePlatform === 'douyin' || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist'}
+							{#if (sourcePlatform === 'douyin' && youtubeSourceType === 'douyin') || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist'}
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
 								>
@@ -3188,11 +3237,25 @@
 											: '请填写包含 list= 的 YouTube 播放列表链接。'}
 									</p>
 								</div>
+							{:else if sourcePlatform === 'douyin' && douyinSourceNeedsSelection()}
+								<div class="space-y-2">
+									<Label for="youtube-url">
+										{youtubeSourceType === 'douyin_collection'
+											? '抖音收藏夹链接'
+											: youtubeSourceType === 'douyin_theater'
+												? '放映厅详情链接'
+												: '短剧详情链接'}
+									</Label>
+									<Input id="youtube-url" bind:value={youtubeUrl} oninput={scheduleYouTubeHistorySelection} />
+									<p class="text-muted-foreground text-xs">
+										可直接填写链接，也可在右侧使用与 B 站源一致的列表选择方式。
+									</p>
+								</div>
 							{:else}
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
 								>
-									此来源使用“设置 → YouTube 登录”中保存的账号登录状态，不需要另外填写链接。
+									此来源使用“设置 → {sourcePlatform === 'douyin' ? '抖音' : 'YouTube'} 登录”中保存的账号状态，不需要另外填写链接。
 								</div>
 							{/if}
 						{/if}
@@ -4830,6 +4893,44 @@
 									{/if}
 								</span>
 							{/snippet}
+						</SidePanel>
+					</div>
+				{/if}
+
+				<!-- 抖音收藏夹/放映厅/短剧：沿用 B 站收藏夹和合集的右侧选择方式 -->
+				{#if sourcePlatform === 'douyin' && (douyinCatalog.length > 0 || loadingDouyinCatalog)}
+					<div class={isCompactLayout ? 'w-full' : 'flex-1'}>
+						<SidePanel
+							isMobile={isCompactLayout}
+							title={youtubeSourceType === 'douyin_collection'
+								? '我的抖音收藏夹'
+								: youtubeSourceType === 'douyin_theater'
+									? '抖音放映厅'
+									: '抖音短剧'}
+							subtitle={loadingDouyinCatalog ? '正在获取…' : `共 ${douyinCatalog.length} 个，点击选择`}
+							maxHeightClass="max-h-126"
+							headerClass="bg-green-50 dark:bg-green-950"
+							titleClass="text-base font-medium text-green-800 dark:text-green-200"
+							subtitleClass="text-sm text-green-600 dark:text-green-400"
+						>
+							{#if loadingDouyinCatalog}
+								<Loading />
+							{:else}
+								<div class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}" style={isMobile ? '' : 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}>
+									{#each douyinCatalog as item (item.youtube_url)}
+										<SelectableCardButton onclick={() => selectSearchResult(item)} class="p-3">
+											<div class="flex items-start gap-3">
+												<BiliImage src={item.cover} alt={item.title} class="h-16 w-12 flex-shrink-0 rounded object-cover" placeholder="封面" />
+												<div class="min-w-0 flex-1">
+													<h4 class="line-clamp-2 text-sm font-medium">{item.title}</h4>
+													<p class="text-muted-foreground mt-1 text-xs">{item.author}</p>
+													{#if item.description}<p class="text-muted-foreground/70 mt-1 line-clamp-2 text-xs">{item.description}</p>{/if}
+												</div>
+											</div>
+										</SelectableCardButton>
+									{/each}
+								</div>
+							{/if}
 						</SidePanel>
 					</div>
 				{/if}

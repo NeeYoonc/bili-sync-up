@@ -310,8 +310,12 @@ class ApiClient {
 	async getDouyinFollowings(): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/douyin/followings');
 	}
+	async getDouyinCatalog(source_type: string): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/douyin/catalog', { source_type });
+	}
 	async getDouyinSourceVideos(params: {
 		url: string;
+		source_type?: string;
 		page?: number;
 		page_size?: number;
 		keyword?: string;
@@ -324,7 +328,7 @@ class ApiClient {
 	async createDouyinSource(
 		request: CreateYouTubeSourceRequest
 	): Promise<ApiResponse<YouTubeSource>> {
-		return this.post<YouTubeSource>('/douyin/sources', { ...request, source_type: 'douyin' });
+		return this.post<YouTubeSource>('/douyin/sources', request);
 	}
 	async setDouyinSourceEnabled(id: number, enabled: boolean): Promise<ApiResponse<YouTubeSource>> {
 		return this.put<YouTubeSource>(`/douyin/sources/${id}/enabled`, { enabled });
@@ -1352,6 +1356,7 @@ export const api = {
 	getDouyinStatus: () => apiClient.getDouyinStatus(),
 	importDouyinCookies: (cookies: string) => apiClient.importDouyinCookies(cookies),
 	getDouyinFollowings: () => apiClient.getDouyinFollowings(),
+	getDouyinCatalog: (sourceType: string) => apiClient.getDouyinCatalog(sourceType),
 	getDouyinSources: () => apiClient.getDouyinSources(),
 	createDouyinSource: (request: CreateYouTubeSourceRequest) =>
 		apiClient.createDouyinSource(request),
@@ -1461,6 +1466,7 @@ export const api = {
 	searchDouyin: (keyword: string) => apiClient.searchDouyin(keyword),
 	getDouyinSourceVideos: (params: {
 		url: string;
+		source_type?: string;
 		page?: number;
 		page_size?: number;
 		keyword?: string;
