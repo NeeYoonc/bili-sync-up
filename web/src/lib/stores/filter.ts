@@ -156,7 +156,6 @@ export const setPlatform = (platform: 'bilibili' | 'youtube' | 'douyin') => {
 export const setSort = (sortBy: SortBy, sortOrder: SortOrder) => {
 	appStateStore.update((state) => ({
 		...state,
-		platform: 'bilibili',
 		sortBy,
 		sortOrder
 	}));

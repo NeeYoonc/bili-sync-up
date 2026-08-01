@@ -14,6 +14,7 @@ pub struct Model {
     pub thumbnail: Option<String>,
     pub published_at: Option<String>,
     pub duration_seconds: Option<i32>,
+    pub is_image_post: bool,
     pub download_status: String,
     pub retry_count: i32,
     pub output_path: Option<String>,

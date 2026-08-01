@@ -77,6 +77,7 @@ fn default_douyin_source_type() -> String {
 #[derive(Debug, Deserialize)]
 pub struct DouyinCatalogRequest {
     pub source_type: String,
+    pub keyword: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -349,12 +350,25 @@ pub async fn get_douyin_catalog(
 ) -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
     ensure_session()?;
     let source_type = request.source_type.trim().to_ascii_lowercase();
-    let results = match source_type.as_str() {
+    let mut results = match source_type.as_str() {
         "douyin_collection" => fetch_collection_catalog().await?,
         "douyin_theater" => fetch_theater_catalog().await?,
         "douyin_series" => fetch_series_catalog().await?,
         _ => return Err(ApiError::bad_request("右侧列表仅支持收藏夹、放映厅或短剧")),
     };
+    if let Some(keyword) = request
+        .keyword
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let keyword = keyword.to_lowercase();
+        results.retain(|item| {
+            item.title.to_lowercase().contains(&keyword)
+                || item.author.to_lowercase().contains(&keyword)
+                || item.description.to_lowercase().contains(&keyword)
+        });
+    }
     let total = results.len();
     Ok(ApiResponse::ok(YouTubeSearchResponse {
         success: true,

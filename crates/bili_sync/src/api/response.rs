@@ -376,6 +376,9 @@ pub struct VideoInfo {
     pub cover: String,
     pub valid: bool,
     pub is_charge_video: bool,
+    pub is_image_post: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bangumi_title: Option<String>, // 番剧真实标题，用于番剧类型视频的显示
 }
@@ -406,6 +409,8 @@ impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> f
             cover,
             valid,
             is_charge_video,
+            is_image_post: false,
+            image_urls: Vec::new(),
             bangumi_title: None, // 默认为None，将在API层根据视频类型填充
         }
     }

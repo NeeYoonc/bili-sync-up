@@ -149,6 +149,36 @@
 			youtubeSourceType: 'douyin',
 			title: '作者投稿',
 			icon: UserIcon
+		},
+		DOUYIN_LIKED: {
+			type: 'douyin',
+			youtubeSourceType: 'douyin_liked',
+			title: '我的喜欢',
+			icon: HeartIcon
+		},
+		DOUYIN_COLLECTION: {
+			type: 'douyin',
+			youtubeSourceType: 'douyin_collection',
+			title: '收藏夹',
+			icon: ListTreeIcon
+		},
+		DOUYIN_WATCH_LATER: {
+			type: 'douyin',
+			youtubeSourceType: 'douyin_watch_later',
+			title: '稍后再看',
+			icon: HistoryIcon
+		},
+		DOUYIN_THEATER: {
+			type: 'douyin',
+			youtubeSourceType: 'douyin_theater',
+			title: '放映厅',
+			icon: ListVideoIcon
+		},
+		DOUYIN_SERIES: {
+			type: 'douyin',
+			youtubeSourceType: 'douyin_series',
+			title: '短剧',
+			icon: ListTreeIcon
 		}
 	} as const;
 

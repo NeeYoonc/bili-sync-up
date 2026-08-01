@@ -23,6 +23,7 @@
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import EditIcon from '@lucide/svelte/icons/edit';
 	import PlayIcon from '@lucide/svelte/icons/play';
+	import ImageIcon from '@lucide/svelte/icons/image';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
 	import XIcon from '@lucide/svelte/icons/x';
@@ -41,6 +42,11 @@
 	let showVideoPlayer = false;
 	let currentPlayingPageIndex = 0;
 	let onlinePlayMode = false; // false: 本地播放, true: B站内嵌播放
+	let imageViewMode = false;
+	let currentImageIndex = 0;
+	let imageUrls: string[] = [];
+	let isImagePost = false;
+	let safeImageIndex = 0;
 	let deleteDialogOpen = false;
 	let deleting = false;
 	let refreshingVideoDanmaku = false;
@@ -56,6 +62,9 @@
 	let externalPlatform: 'bilibili' | 'youtube' | 'douyin' = 'bilibili';
 	$: externalPlatform = isDouyin ? 'douyin' : isYouTube ? 'youtube' : 'bilibili';
 	$: platformLabel = isDouyin ? '抖音' : isYouTube ? 'YouTube' : 'B站';
+	$: imageUrls = videoData?.video.image_urls ?? [];
+	$: isImagePost = Boolean(videoData?.video.is_image_post);
+	$: safeImageIndex = imageUrls.length > 0 ? Math.min(Math.max(currentImageIndex, 0), imageUrls.length - 1) : 0;
 
 	function videoDetailHref(videoId: number) {
 		return isExternal ? `/video/${externalPlatform}-${videoId}` : `/video/${videoId}`;
@@ -105,10 +114,30 @@
 		chargeLockedDisplayMode = null;
 		if (!options?.keepPlayerVisible) {
 			showVideoPlayer = false;
+			imageViewMode = false;
+			currentImageIndex = 0;
 		}
 		if (!options?.keepPlayMode) {
 			onlinePlayMode = false;
 		}
+	}
+
+	function showImageGallery() {
+		if (imageUrls.length === 0) return;
+		currentImageIndex = 0;
+		imageViewMode = true;
+		onlinePlayMode = false;
+		showVideoPlayer = true;
+	}
+
+	function showPreviousImage() {
+		if (imageUrls.length <= 1) return;
+		currentImageIndex = (safeImageIndex - 1 + imageUrls.length) % imageUrls.length;
+	}
+
+	function showNextImage() {
+		if (imageUrls.length <= 1) return;
+		currentImageIndex = (safeImageIndex + 1) % imageUrls.length;
 	}
 
 	function parseBeijingTimestamp(value?: string | null): Date | null {
@@ -811,6 +840,8 @@
 					download_status: videoData.video.download_status,
 					valid: videoData.video.valid,
 					is_charge_video: videoData.video.is_charge_video,
+					is_image_post: videoData.video.is_image_post,
+					image_urls: videoData.video.image_urls,
 					bangumi_title: videoData.video.bangumi_title
 				}}
 				mode="detail"
@@ -913,7 +944,8 @@
 										cover: '',
 										download_status: pageInfo.download_status,
 										valid: true,
-										is_charge_video: videoData.video.is_charge_video
+										is_charge_video: videoData.video.is_charge_video,
+										is_image_post: videoData.video.is_image_post
 									}}
 									mode="page"
 									showActions={false}
@@ -999,7 +1031,19 @@
 
 								<!-- 播放按钮区域 -->
 								<div class="flex justify-center gap-2">
-									{#if pageInfo.download_status[1] === 7}
+									{#if isImagePost}
+										<Button
+											size="sm"
+											variant="default"
+											class="flex-1"
+											title={imageUrls.length > 0 ? `查看 ${imageUrls.length} 张已下载原图` : '原图尚未下载完成'}
+											onclick={showImageGallery}
+											disabled={imageUrls.length === 0}
+										>
+											<ImageIcon class="mr-2 h-4 w-4" />
+											{imageUrls.length > 0 ? `查看图片（${imageUrls.length}）` : '图片尚未下载'}
+										</Button>
+									{:else if pageInfo.download_status[1] === 7}
 										<Button
 											size="sm"
 											variant="default"
@@ -1016,7 +1060,7 @@
 											本地播放
 										</Button>
 									{/if}
-									{#if !isDouyin}
+									{#if !isDouyin && !isImagePost}
 									<Button
 										size="sm"
 										variant="outline"
@@ -1045,17 +1089,19 @@
 						<div class="sticky top-4">
 							<div class="mb-4 flex items-center justify-between">
 								<div class="flex items-center gap-2">
-									<h3 class="text-lg font-semibold">视频播放</h3>
+									<h3 class="text-lg font-semibold">{imageViewMode ? '图片查看' : '视频播放'}</h3>
 									<span
-										class="rounded px-2 py-1 text-sm {onlinePlayMode
+										class="rounded px-2 py-1 text-sm {imageViewMode
+											? 'bg-fuchsia-100 text-fuchsia-700'
+											: onlinePlayMode
 											? 'bg-blue-100 text-blue-700'
 											: 'bg-gray-100 text-gray-700'}"
 									>
-										{onlinePlayMode ? `${platformLabel}内嵌播放` : '本地播放'}
+										{imageViewMode ? `图文原图 ${safeImageIndex + 1}/${imageUrls.length}` : onlinePlayMode ? `${platformLabel}内嵌播放` : '本地播放'}
 									</span>
 								</div>
 								<div class="flex items-center gap-2">
-									{#if !isDouyin}
+									{#if !isDouyin && !imageViewMode}
 										<Button size="sm" variant="ghost" onclick={togglePlayMode}>
 											{onlinePlayMode ? '切换到本地' : `切换到${platformLabel}内嵌`}
 										</Button>
@@ -1075,7 +1121,7 @@
 									].name}
 								</div>
 							{/if}
-							{#if onlinePlayMode}
+							{#if onlinePlayMode && !imageViewMode}
 								<div class="mb-3 text-sm text-gray-500">
 									当前为 {platformLabel}内嵌播放，清晰度和码率由平台播放器控制，不继承 bili-sync
 									的清晰度设置。
@@ -1083,7 +1129,13 @@
 							{/if}
 
 							<div class="overflow-hidden rounded-lg bg-black">
-								{#if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
+								{#if imageViewMode && imageUrls.length > 0}
+									<img
+										src={imageUrls[safeImageIndex]}
+										alt={`${videoData.video.name} - 第 ${safeImageIndex + 1} 张原图`}
+										class="block h-auto max-h-[70vh] w-full object-contain"
+									/>
+								{:else if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
 									<div class="flex h-64 items-center justify-center text-white">
 										<div>充电视频未充电</div>
 									</div>
@@ -1133,8 +1185,34 @@
 								{/if}
 							</div>
 
+							{#if imageViewMode && imageUrls.length > 0}
+								<div class="mt-3 space-y-3">
+									<div class="flex items-center justify-between gap-3">
+										<Button size="sm" variant="outline" onclick={showPreviousImage} disabled={imageUrls.length <= 1}>
+											<ChevronLeftIcon class="mr-1 h-4 w-4" />上一张
+										</Button>
+										<span class="text-muted-foreground text-sm">第 {safeImageIndex + 1} / {imageUrls.length} 张</span>
+										<Button size="sm" variant="outline" onclick={showNextImage} disabled={imageUrls.length <= 1}>
+											下一张<ChevronRightIcon class="ml-1 h-4 w-4" />
+										</Button>
+									</div>
+									<div class="flex max-w-full gap-2 overflow-x-auto pb-1">
+										{#each imageUrls as imageUrl, imageIndex (imageUrl)}
+											<button
+												type="button"
+												class="shrink-0 overflow-hidden rounded border-2 transition-colors {safeImageIndex === imageIndex ? 'border-primary' : 'border-transparent'}"
+												onclick={() => (currentImageIndex = imageIndex)}
+												title={`查看第 ${imageIndex + 1} 张原图`}
+											>
+												<img src={imageUrl} alt={`第 ${imageIndex + 1} 张缩略图`} class="h-16 w-16 object-cover" loading="lazy" />
+											</button>
+										{/each}
+									</div>
+								</div>
+							{/if}
+
 							<!-- 分页选择按钮 -->
-							{#if videoData.pages.length > 1}
+							{#if videoData.pages.length > 1 && !imageViewMode}
 								<div class="mt-4 space-y-2">
 									<div class="text-sm font-medium text-gray-700">选择分页:</div>
 									<div class="grid max-h-60 grid-cols-2 gap-2 overflow-y-auto">

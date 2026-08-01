@@ -2370,7 +2370,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -15277,6 +15277,49 @@ pub async fn get_video_local_cover(
         image_data.len()
     );
 
+    Ok(axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", content_type)
+        .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+        .header("X-Image-Cache", "LOCAL")
+        .body(axum::body::Body::from(image_data))
+        .unwrap())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/videos/{video_id}/images/{image_index}",
+    params(
+        ("video_id" = String, Path, description = "统一视频资源ID，例如 douyin-123"),
+        ("image_index" = usize, Path, description = "图文原图序号，从1开始")
+    ),
+    responses(
+        (status = 200, description = "抖音图文本地原图", content_type = "image/*"),
+        (status = 404, description = "没有对应的本地原图")
+    )
+)]
+pub async fn get_video_local_image(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path((resource_id, image_index)): Path<(String, usize)>,
+) -> Result<axum::response::Response, ApiError> {
+    let Some(video_id) = crate::youtube::unified_youtube_id(&resource_id) else {
+        return Ok(local_cover_not_found_response());
+    };
+    let Some(image_path) = crate::youtube::unified_youtube_image_path(db.as_ref(), video_id, image_index).await? else {
+        return Ok(local_cover_not_found_response());
+    };
+    let image_data = match tokio::fs::read(&image_path).await {
+        Ok(image_data) if !image_data.is_empty() => image_data,
+        Ok(_) => return Ok(local_cover_not_found_response()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(local_cover_not_found_response());
+        }
+        Err(error) => return Err(anyhow!("读取抖音图文原图失败: {} ({})", image_path.display(), error).into()),
+    };
+    let content_type = mime_guess::from_path(&image_path)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
     Ok(axum::response::Response::builder()
         .status(200)
         .header("Content-Type", content_type)

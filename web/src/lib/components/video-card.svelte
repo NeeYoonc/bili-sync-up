@@ -330,9 +330,10 @@
 				loading="lazy"
 				on:error={handleCoverImageError}
 			/>
-			<!-- 选择模式复选框覆盖在封面左上角 -->
-			{#if selectionMode}
-				<div class="absolute top-2 left-2 z-20">
+			<!-- 类型标识和选择框统一排列在封面左上角 -->
+			{#if selectionMode || video.is_image_post || video.is_charge_video}
+				<div class="absolute top-2 left-2 z-20 flex items-center gap-1.5">
+					{#if selectionMode}
 					<input
 						type="checkbox"
 						checked={selected}
@@ -340,17 +341,20 @@
 						on:click|stopPropagation
 						class="h-5 w-5 rounded border-2 border-white bg-white/80 text-blue-600 shadow-lg backdrop-blur-sm focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
 					/>
-				</div>
-			{/if}
-
-			{#if video.is_charge_video}
-				<div class="absolute top-2 {selectionMode ? 'left-10' : 'left-2'} z-20">
-					<Badge
-						class="bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500"
-						title="充电专属视频，播放前需先为 UP 主充电"
-					>
-						充电视频
-					</Badge>
+					{/if}
+					{#if video.is_image_post}
+						<Badge class="bg-fuchsia-600 text-xs text-white shadow-md hover:bg-fuchsia-600" title="抖音图文作品">
+							图文
+						</Badge>
+					{/if}
+					{#if video.is_charge_video}
+						<Badge
+							class="bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500"
+							title="充电专属视频，播放前需先为 UP 主充电"
+						>
+							充电视频
+						</Badge>
+					{/if}
 				</div>
 			{/if}
 
@@ -385,6 +389,11 @@
 					on:click|stopPropagation
 					class="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
 				/>
+			{/if}
+			{#if (coverFailed || mode !== 'default') && video.is_image_post}
+				<Badge class="mt-0.5 shrink-0 bg-fuchsia-600 text-xs text-white hover:bg-fuchsia-600" title="抖音图文作品">
+					图文
+				</Badge>
 			{/if}
 			{#if (coverFailed || mode !== 'default') && video.is_charge_video}
 				<Badge

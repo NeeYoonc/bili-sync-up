@@ -26,6 +26,19 @@ fn is_public_video_cover_path(path: &str) -> bool {
             .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
 }
 
+fn is_public_video_image_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/videos/douyin-") else {
+        return false;
+    };
+    let Some((video_id, image_index)) = rest.split_once("/images/") else {
+        return false;
+    };
+    !video_id.is_empty()
+        && video_id.chars().all(|ch| ch.is_ascii_digit())
+        && !image_index.is_empty()
+        && image_index.chars().all(|ch| ch.is_ascii_digit())
+}
+
 pub async fn auth(headers: HeaderMap, request: Request, next: Next) -> Result<Response, StatusCode> {
     // 排除不需要认证的路径
     let path = request.uri().path();
@@ -93,7 +106,8 @@ pub async fn auth(headers: HeaderMap, request: Request, next: Next) -> Result<Re
 
     let needs_auth = path.starts_with("/api/")
         && !excluded_paths.iter().any(|&excluded| path.starts_with(excluded))
-        && !is_public_video_cover_path(path);
+        && !is_public_video_cover_path(path)
+        && !is_public_video_image_path(path);
 
     if needs_auth {
         return Ok(ApiResponse::unauthorized(()).into_response());

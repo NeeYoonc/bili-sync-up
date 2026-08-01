@@ -298,6 +298,8 @@ export interface VideoInfo {
 	cover: string;
 	valid: boolean;
 	is_charge_video: boolean;
+	is_image_post?: boolean;
+	image_urls?: string[];
 	bangumi_title?: string; // 番剧真实标题，用于番剧类型视频的显示
 }
 

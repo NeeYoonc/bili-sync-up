@@ -331,8 +331,8 @@
 		{ value: 'douyin_liked', label: '我的喜欢', description: '同步当前登录账号点赞的视频和图文' },
 		{ value: 'douyin_collection', label: '收藏夹', description: '从右侧选择当前账号的抖音收藏夹' },
 		{ value: 'douyin_watch_later', label: '稍后再看', description: '同步当前登录账号的稍后再看列表' },
-		{ value: 'douyin_theater', label: '放映厅', description: '从右侧选择放映厅专辑，按当前账号可见权限同步' },
-		{ value: 'douyin_series', label: '短剧', description: '从右侧选择短剧，按当前账号可见权限同步剧集' }
+		{ value: 'douyin_theater', label: '放映厅', description: '搜索并选择放映厅专辑，按当前账号可见权限同步' },
+		{ value: 'douyin_series', label: '短剧', description: '搜索并选择短剧，按当前账号可见权限同步剧集' }
 	];
 	const sourceTypeLabelMap: Record<string, string> = {
 		collection: '合集',
@@ -377,10 +377,7 @@
 			youtubeSourceType === 'liked' ||
 			youtubeSourceType === 'douyin_liked' ||
 			youtubeSourceType === 'douyin_watch_later';
-		if (
-			sourcePlatform === 'douyin' &&
-			['douyin_collection', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)
-		) {
+		if (sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection') {
 			void loadDouyinCatalog();
 		}
 	}
@@ -391,8 +388,8 @@
 		);
 	}
 
-	async function loadDouyinCatalog() {
-		const result = await runRequest(() => api.getDouyinCatalog(youtubeSourceType), {
+	async function loadDouyinCatalog(keyword?: string) {
+		const result = await runRequest(() => api.getDouyinCatalog(youtubeSourceType, keyword), {
 			setLoading: (value) => (loadingDouyinCatalog = value),
 			context: '获取抖音可选列表失败'
 		});
@@ -674,18 +671,27 @@
 			return;
 		}
 		if (sourcePlatform === 'douyin') {
-			const response = await runRequest(() => api.searchDouyin(searchKeyword.trim()), {
+			const isCatalogSearch = ['douyin_theater', 'douyin_series'].includes(youtubeSourceType);
+			const response = await runRequest(
+				() =>
+					isCatalogSearch
+						? api.getDouyinCatalog(youtubeSourceType, searchKeyword.trim())
+						: api.searchDouyin(searchKeyword.trim()),
+				{
 				setLoading: (value) => (searchLoading = value),
-				context: '搜索抖音作者失败'
-			});
+				context: isCatalogSearch ? '搜索抖音内容失败' : '搜索抖音作者失败'
+				}
+			);
 			if (!response) return;
 			searchResults = response.data.results;
 			searchTotalResults = response.data.total;
 			showSearchResults = true;
 			if (response.data.results.length > 0) {
-				toast.success(`搜索完成，共找到 ${response.data.results.length} 个抖音作者`);
+				toast.success(
+					`搜索完成，共找到 ${response.data.results.length} 个${isCatalogSearch ? '结果' : '抖音作者'}`
+				);
 			} else {
-				toast.info('未找到匹配的抖音作者');
+				toast.info(isCatalogSearch ? '未找到匹配内容' : '未找到匹配的抖音作者');
 			}
 			return;
 		}
@@ -849,7 +855,17 @@
 			applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
 			clearSearchPanel({ clearKeyword: true });
 			openYouTubeHistorySelection();
-			toast.success(`已选择${sourcePlatform === 'douyin' ? '抖音作者' : ' YouTube 来源'}`, {
+			const sourceLabel =
+				sourcePlatform !== 'douyin'
+					? 'YouTube 来源'
+					: youtubeSourceType === 'douyin_theater'
+						? '抖音放映厅'
+						: youtubeSourceType === 'douyin_series'
+							? '抖音短剧'
+							: youtubeSourceType === 'douyin_collection'
+								? '抖音收藏夹'
+								: '抖音作者';
+			toast.success(`已选择${sourceLabel}`, {
 				description: '正在加载历史视频…'
 			});
 			return;
@@ -3147,14 +3163,18 @@
 						</div>
 
 						{#if sourcePlatform === 'youtube' || sourcePlatform === 'douyin'}
-							{#if (sourcePlatform === 'douyin' && youtubeSourceType === 'douyin') || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist'}
+							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist'}
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
 								>
 									<div class="space-y-2">
 										<Label for="youtube-search">
 											{sourcePlatform === 'douyin'
-												? '搜索抖音作者'
+												? youtubeSourceType === 'douyin_theater'
+													? '搜索抖音放映厅'
+													: youtubeSourceType === 'douyin_series'
+														? '搜索抖音短剧'
+														: '搜索抖音作者'
 												: youtubeSourceType === 'channel'
 												? '搜索 YouTube 频道'
 												: '搜索 YouTube 播放列表'}
@@ -3164,7 +3184,11 @@
 												id="youtube-search"
 												bind:value={searchKeyword}
 												placeholder={sourcePlatform === 'douyin'
-													? '输入抖音作者昵称或抖音号...'
+													? youtubeSourceType === 'douyin_theater'
+														? '输入放映厅名称、分类或作者...'
+														: youtubeSourceType === 'douyin_series'
+															? '输入短剧名称或作者...'
+															: '输入抖音作者昵称或抖音号...'
 													: youtubeSourceType === 'channel'
 													? '输入频道名称或 @用户名...'
 													: '输入播放列表名称...'}
@@ -3189,7 +3213,7 @@
 													搜索
 												{/if}
 											</Button>
-											{#if sourcePlatform === 'douyin'}
+											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin'}
 												<Button
 													type="button"
 													onclick={fetchDouyinFollowings}
@@ -3204,7 +3228,9 @@
 										</div>
 										<p class="text-muted-foreground text-xs">
 											{sourcePlatform === 'douyin'
-												? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
+												? youtubeSourceType === 'douyin'
+													? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
+													: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
 												: '搜索并选择结果后，将自动填充名称、链接和当前来源类型的快捷路径模板。'}
 										</p>
 									</div>
@@ -3213,7 +3239,11 @@
 								<div class="space-y-2">
 									<Label for="youtube-url">
 										{sourcePlatform === 'douyin'
-											? '抖音作者主页链接'
+											? youtubeSourceType === 'douyin_theater'
+												? '放映厅详情链接'
+												: youtubeSourceType === 'douyin_series'
+													? '短剧详情链接'
+													: '抖音作者主页链接'
 											: youtubeSourceType === 'channel'
 												? 'YouTube 频道链接'
 												: 'YouTube 播放列表链接'}
@@ -3223,7 +3253,11 @@
 										bind:value={youtubeUrl}
 										oninput={scheduleYouTubeHistorySelection}
 										placeholder={sourcePlatform === 'douyin'
-											? 'https://www.douyin.com/user/...'
+											? youtubeSourceType === 'douyin_theater'
+												? 'https://www.douyin.com/lvdetail/...'
+												: youtubeSourceType === 'douyin_series'
+													? 'https://www.douyin.com/series/...'
+													: 'https://www.douyin.com/user/...'
 											: youtubeSourceType === 'channel'
 											? 'https://www.youtube.com/@channel/videos'
 											: 'https://www.youtube.com/playlist?list=...'}
@@ -3231,7 +3265,9 @@
 									/>
 									<p class="text-muted-foreground text-xs">
 										{sourcePlatform === 'douyin'
-											? '支持抖音作者主页链接和 v.douyin.com 分享链接；需要在设置中导入新鲜 Cookie。'
+											? youtubeSourceType === 'douyin'
+												? '支持抖音作者主页链接和 v.douyin.com 分享链接；需要在设置中导入新鲜 Cookie。'
+												: '可以从搜索结果选择，也可以手动填写对应详情链接。'
 											: youtubeSourceType === 'channel'
 											? '支持频道主页、@用户名、/videos 等 YouTube 频道链接。'
 											: '请填写包含 list= 的 YouTube 播放列表链接。'}

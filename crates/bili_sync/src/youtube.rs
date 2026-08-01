@@ -1324,6 +1324,13 @@ async fn unified_youtube_parts(
 ) -> (VideoInfo, PageInfo, VideoSourceTag) {
     let (video_status, page_status) = youtube_artifact_status(video, source).await;
     let output_path = video.output_path.clone();
+    let image_paths = youtube_image_post_paths(video);
+    let is_image_post = is_douyin_source(source) && (video.is_image_post || !image_paths.is_empty());
+    let image_urls = image_paths
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("/api/videos/douyin-{}/images/{}", video.id, index + 1))
+        .collect();
     let parent_path = output_path
         .as_deref()
         .and_then(|path| Path::new(path).parent())
@@ -1341,6 +1348,8 @@ async fn unified_youtube_parts(
             cover: video.thumbnail.clone().unwrap_or_default(),
             valid: true,
             is_charge_video: false,
+            is_image_post,
+            image_urls,
             bangumi_title: None,
         },
         PageInfo {
@@ -1611,6 +1620,53 @@ pub async fn unified_youtube_cover_path(db: &DatabaseConnection, id: i32) -> Res
         .filter(|path| path.is_file()))
 }
 
+fn youtube_image_post_paths(video: &youtube_video::Model) -> Vec<PathBuf> {
+    let Some(output_path) = video.output_path.as_deref().map(Path::new) else {
+        return Vec::new();
+    };
+    let Ok(image_dir) = youtube_sidecar_path(output_path, "-images") else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(image_dir) else {
+        return Vec::new();
+    };
+    let mut paths = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| {
+                        matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "webp")
+                    })
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+pub async fn unified_youtube_image_path(
+    db: &DatabaseConnection,
+    id: i32,
+    image_index: usize,
+) -> Result<Option<PathBuf>, ApiError> {
+    if image_index == 0 {
+        return Ok(None);
+    }
+    let Some(video) = youtube_video::Entity::find_by_id(id).one(db).await? else {
+        return Ok(None);
+    };
+    let Some(source) = youtube_source::Entity::find_by_id(video.source_id).one(db).await? else {
+        return Ok(None);
+    };
+    if !is_douyin_source(&source) {
+        return Ok(None);
+    }
+    Ok(youtube_image_post_paths(&video).into_iter().nth(image_index - 1))
+}
+
 /// 由现有 `video_downloader` 的同一周期调用。来源扫描和待下载任务都受全局暂停、
 /// 下载并发配置及相同的日志/通知周期控制。
 pub async fn process_scheduled_sources(
@@ -1858,13 +1914,18 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
         {
             continue;
         }
-        if youtube_video::Entity::find()
+        if let Some(existing) = youtube_video::Entity::find()
             .filter(youtube_video::Column::SourceId.eq(source.id))
             .filter(youtube_video::Column::YoutubeId.eq(&post.id))
             .one(db)
             .await?
-            .is_some()
         {
+            if existing.is_image_post != post.is_image_post {
+                let mut active: youtube_video::ActiveModel = existing.into();
+                active.is_image_post = Set(post.is_image_post);
+                active.updated_at = Set(now_standard_string());
+                active.update(db).await?;
+            }
             continue;
         }
         if crate::utils::keyword_filter::should_filter_video_dual_list(
@@ -1911,6 +1972,7 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
             thumbnail: Set(post.thumbnail),
             published_at: Set(post.published_at),
             duration_seconds: Set(post.duration_seconds),
+            is_image_post: Set(post.is_image_post),
             download_status: Set("pending".to_string()),
             output_path: Set(None),
             error_message: Set(None),
@@ -2166,6 +2228,7 @@ async fn download_video(
                 active.thumbnail = Set(downloaded.thumbnail);
                 active.published_at = Set(downloaded.published_at);
                 active.duration_seconds = Set(downloaded.duration_seconds);
+                active.is_image_post = Set(downloaded.is_image_post);
                 info!(
                     platform = platform_label,
                     source_id = source.id,
@@ -2292,6 +2355,7 @@ struct DownloadedYouTubeMedia {
     thumbnail: Option<String>,
     published_at: Option<String>,
     duration_seconds: Option<i32>,
+    is_image_post: bool,
     warning_message: Option<String>,
 }
 
@@ -2469,6 +2533,7 @@ async fn download_youtube_media(
         duration_seconds: metadata
             .duration
             .and_then(|value| i32::try_from(value.round() as i64).ok()),
+        is_image_post: !metadata.douyin_images.is_empty(),
         warning_message,
     })
 }
