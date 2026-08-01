@@ -329,8 +329,8 @@
 			pending_count: source.pending_count,
 			completed_count: source.completed_count,
 			failed_count: source.failed_count,
-			scan_deleted_videos: false,
-			scan_deleted_videos_once: false,
+			scan_deleted_videos: source.scan_deleted_videos,
+			scan_deleted_videos_once: source.scan_deleted_videos_once,
 			collection_aggregate_enabled: false,
 			filter_option: source.filter_option,
 			blacklist_keywords: source.blacklist_keywords,
@@ -1995,7 +1995,6 @@
 												</Button>
 
 												<!-- 扫描删除视频设置 -->
-												{#if !isExternalSourceType(sourceConfig.type)}
 												<Button
 													size="sm"
 													variant="ghost"
@@ -2016,9 +2015,7 @@
 															: 'text-gray-400'}"
 													/>
 												</Button>
-												{/if}
 
-												{#if !isExternalSourceType(sourceConfig.type)}
 												<Button
 													size="sm"
 													variant="ghost"
@@ -2039,7 +2036,6 @@
 															: 'text-gray-400'}"
 													/>
 												</Button>
-												{/if}
 
 												<!-- 源级流过滤/码率设置 -->
 												<Button

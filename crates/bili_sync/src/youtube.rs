@@ -15,7 +15,7 @@ use chrono::{Local, NaiveDate, TimeZone};
 use futures::{stream, StreamExt};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -53,6 +53,21 @@ const LIKED_URL: &str = "https://www.youtube.com/playlist?list=LL";
 const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
 static YOUTUBE_SIDECAR_BACKFILL_DONE: AtomicBool = AtomicBool::new(false);
 static YTDLP_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn parse_video_id_set(value: Option<&str>) -> HashSet<String> {
+    value
+        .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
+        .unwrap_or_default()
+}
+
+fn serialize_video_id_set(values: &HashSet<String>) -> Result<Option<String>> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let mut values = values.iter().cloned().collect::<Vec<_>>();
+    values.sort();
+    Ok(Some(serde_json::to_string(&values)?))
+}
 
 #[derive(Debug, Clone, Copy)]
 struct YtDlpPackage {
@@ -212,6 +227,8 @@ pub struct YouTubeSourceResponse {
     pub url: String,
     pub path: String,
     pub enabled: bool,
+    pub scan_deleted_videos: bool,
+    pub scan_deleted_videos_once: bool,
     pub audio_only: bool,
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
@@ -749,6 +766,9 @@ pub async fn create_youtube_source(
             .then(|| serde_json::to_string(&request.selected_channels))
             .transpose()?),
         known_video_ids: Set(None),
+        scan_deleted_videos: Set(false),
+        scan_deleted_videos_once: Set(false),
+        deleted_video_ids: Set(None),
         last_scan_at: Set(None),
         created_at: Set(now_standard_string()),
         ..Default::default()
@@ -918,7 +938,15 @@ pub async fn delete_youtube_source(
     Query(request): Query<DeleteYouTubeSourceRequest>,
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<bool>, ApiError> {
-    delete_youtube_source_internal(db.as_ref(), id, request.delete_local_files).await?;
+    require_source_platform(db.as_ref(), id, "youtube").await?;
+    crate::api::handler::delete_video_source(
+        Extension(db),
+        AxumPath(("youtube".to_string(), id)),
+        Query(crate::api::request::DeleteVideoSourceRequest {
+            delete_local_files: request.delete_local_files,
+        }),
+    )
+    .await?;
     Ok(ApiResponse::ok(true))
 }
 
@@ -927,7 +955,6 @@ pub async fn delete_youtube_source_checked(
     Query(request): Query<DeleteYouTubeSourceRequest>,
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<bool>, ApiError> {
-    require_source_platform(db.as_ref(), id, "youtube").await?;
     delete_youtube_source(AxumPath(id), Query(request), Extension(db)).await
 }
 
@@ -937,29 +964,15 @@ pub async fn delete_douyin_source(
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<bool>, ApiError> {
     require_source_platform(db.as_ref(), id, "douyin").await?;
-    delete_youtube_source(AxumPath(id), Query(request), Extension(db)).await
-}
-
-pub async fn delete_youtube_source_internal(db: &DatabaseConnection, id: i32, delete_local_files: bool) -> Result<()> {
-    let Some(source) = youtube_source::Entity::find_by_id(id).one(db).await? else {
-        return Err(anyhow!("YouTube 视频源不存在"));
-    };
-    if delete_local_files {
-        let videos = youtube_video::Entity::find()
-            .filter(youtube_video::Column::SourceId.eq(id))
-            .all(db)
-            .await?;
-        for video in videos {
-            if let Some(path) = video.output_path.as_deref() {
-                remove_recorded_output(&source.path, path).await?;
-            }
-        }
-    }
-    youtube_source::Entity::delete_by_id(id).exec(db).await?;
-    notify_video_sources_changed();
-    notify_videos_changed();
-    notify_queue_status_changed();
-    Ok(())
+    crate::api::handler::delete_video_source(
+        Extension(db),
+        AxumPath(("douyin".to_string(), id)),
+        Query(crate::api::request::DeleteVideoSourceRequest {
+            delete_local_files: request.delete_local_files,
+        }),
+    )
+    .await?;
+    Ok(ApiResponse::ok(true))
 }
 
 pub async fn reset_youtube_source_path(
@@ -1584,15 +1597,23 @@ pub async fn delete_unified_youtube_video(db: &DatabaseConnection, id: i32) -> R
         .await?
         .ok_or_else(|| anyhow!("YouTube 视频源不存在: {}", video.source_id))?;
     if let Some(output_path) = video.output_path.as_deref() {
-        remove_recorded_output(&source.path, output_path).await?;
+        remove_recorded_output(&source, output_path).await?;
     }
-    youtube_video::Entity::delete_by_id(id).exec(db).await?;
+    let txn = db.begin().await?;
+    let mut deleted_video_ids = parse_video_id_set(source.deleted_video_ids.as_deref());
+    deleted_video_ids.insert(video.youtube_id.clone());
+    let mut active_source: youtube_source::ActiveModel = source.clone().into();
+    active_source.deleted_video_ids = Set(serialize_video_id_set(&deleted_video_ids)?);
+    active_source.update(&txn).await?;
+    youtube_video::Entity::delete_by_id(id).exec(&txn).await?;
+    txn.commit().await?;
     notify_videos_changed();
+    notify_video_sources_changed();
     notify_queue_status_changed();
     Ok(DeleteVideoResponse {
         success: true,
         video_id: id,
-        message: "YouTube 视频已成功删除".to_string(),
+        message: format!("{} 视频已成功删除", source_platform_label(&source)),
     })
 }
 
@@ -1728,11 +1749,9 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         .as_deref()
         .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
         .unwrap_or_default();
-    let known_video_ids = source
-        .known_video_ids
-        .as_deref()
-        .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
-        .unwrap_or_default();
+    let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
+    let mut deleted_video_ids = parse_video_id_set(source.deleted_video_ids.as_deref());
+    let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
     let mut scanned_video_ids = HashSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(item) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -1755,8 +1774,10 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         // 与 B 站投稿源一致：创建来源时只回补勾选的历史视频；以后仅自动加入
         // 来源创建后新发布或新加入列表的视频。known_video_ids 用来识别“刚刚
         // 点赞了一个旧视频”这类发布时间早、但列表成员关系刚发生变化的情况。
+        let was_deleted = deleted_video_ids.contains(youtube_id);
         if !selected_history.is_empty()
             && !selected_history.contains(youtube_id)
+            && !(scan_deleted_videos && was_deleted)
             && (known_video_ids.contains(youtube_id)
                 || (known_video_ids.is_empty() && !youtube_item_is_newer_than_source(&item, &source.created_at)))
         {
@@ -1769,6 +1790,10 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
             .await?
             .is_some();
         if exists {
+            deleted_video_ids.remove(youtube_id);
+            continue;
+        }
+        if was_deleted && !scan_deleted_videos {
             continue;
         }
         let url = item
@@ -1846,6 +1871,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         }
         .insert(db)
         .await?;
+        deleted_video_ids.remove(youtube_id);
         added += 1;
     }
     let mut active: youtube_source::ActiveModel = source.clone().into();
@@ -1855,6 +1881,8 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     active.known_video_ids = Set((!scanned_video_ids.is_empty())
         .then(|| serde_json::to_string(&scanned_video_ids))
         .transpose()?);
+    active.deleted_video_ids = Set(serialize_video_id_set(&deleted_video_ids)?);
+    active.scan_deleted_videos_once = Set(false);
     active.last_scan_at = Set(Some(now_standard_string()));
     active.update(db).await?;
     notify_video_sources_changed();
@@ -1879,11 +1907,9 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
         .as_deref()
         .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
         .unwrap_or_default();
-    let known_video_ids = source
-        .known_video_ids
-        .as_deref()
-        .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
-        .unwrap_or_default();
+    let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
+    let mut deleted_video_ids = parse_video_id_set(source.deleted_video_ids.as_deref());
+    let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
     let created = chrono::NaiveDateTime::parse_from_str(&source.created_at, "%Y-%m-%d %H:%M:%S")
         .ok()
         .and_then(|value| Local.from_local_datetime(&value).single())
@@ -1892,8 +1918,10 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
     let mut added = 0u64;
     for post in posts {
         scanned_video_ids.insert(post.id.clone());
+        let was_deleted = deleted_video_ids.contains(&post.id);
         if !selected_history.is_empty()
             && !selected_history.contains(&post.id)
+            && !(scan_deleted_videos && was_deleted)
             && (known_video_ids.contains(&post.id)
                 || (known_video_ids.is_empty()
                     && !created
@@ -1908,12 +1936,16 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
             .one(db)
             .await?
         {
+            deleted_video_ids.remove(&post.id);
             if existing.is_image_post != post.is_image_post {
                 let mut active: youtube_video::ActiveModel = existing.into();
                 active.is_image_post = Set(post.is_image_post);
                 active.updated_at = Set(now_standard_string());
                 active.update(db).await?;
             }
+            continue;
+        }
+        if was_deleted && !scan_deleted_videos {
             continue;
         }
         if crate::utils::keyword_filter::should_filter_video_dual_list(
@@ -1951,6 +1983,7 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
         {
             continue;
         }
+        deleted_video_ids.remove(&post.id);
         youtube_video::ActiveModel {
             source_id: Set(source.id),
             youtube_id: Set(post.id),
@@ -1979,6 +2012,8 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
     active.known_video_ids = Set((!scanned_video_ids.is_empty())
         .then(|| serde_json::to_string(&scanned_video_ids))
         .transpose()?);
+    active.deleted_video_ids = Set(serialize_video_id_set(&deleted_video_ids)?);
+    active.scan_deleted_videos_once = Set(false);
     active.last_scan_at = Set(Some(now_standard_string()));
     active.update(db).await?;
     notify_video_sources_changed();
@@ -4340,6 +4375,8 @@ async fn source_response(db: &DatabaseConnection, source: youtube_source::Model)
         url: source.url,
         path: source.path,
         enabled: source.enabled,
+        scan_deleted_videos: source.scan_deleted_videos,
+        scan_deleted_videos_once: source.scan_deleted_videos_once,
         audio_only: source.audio_only,
         audio_only_m4a_only: source.audio_only_m4a_only,
         flat_folder: source.flat_folder,
@@ -4802,16 +4839,25 @@ fn cookie_path() -> PathBuf {
 fn default_output_path() -> PathBuf {
     CONFIG_DIR.join("youtube-downloads")
 }
-async fn remove_recorded_output(source_path: &str, output_path: &str) -> Result<()> {
-    let base = PathBuf::from(source_path);
+async fn remove_recorded_output(source: &youtube_source::Model, output_path: &str) -> Result<()> {
+    let base = PathBuf::from(&source.path);
     let output = PathBuf::from(output_path);
     if !output.starts_with(&base) {
-        warn!(path = %output.display(), "跳过不在 YouTube 来源目录中的记录文件");
+        if is_douyin_source(source) {
+            warn!(target: "bili_sync_rs::douyin", path = %output.display(), "跳过不在抖音来源目录中的记录文件");
+        } else {
+            warn!(target: "bili_sync_rs::youtube", path = %output.display(), "跳过不在 YouTube 来源目录中的记录文件");
+        }
         return Ok(());
     }
     for path in recorded_output_files(&output).await? {
         match tokio::fs::remove_file(&path).await {
-            Ok(()) => info!(path = %path.display(), "已删除 YouTube 已记录媒体/附属文件"),
+            Ok(()) if is_douyin_source(source) => {
+                info!(target: "bili_sync_rs::douyin", path = %path.display(), "已删除抖音已记录媒体/附属文件")
+            }
+            Ok(()) => {
+                info!(target: "bili_sync_rs::youtube", path = %path.display(), "已删除 YouTube 已记录媒体/附属文件")
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }

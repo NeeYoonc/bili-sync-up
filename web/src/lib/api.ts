@@ -460,18 +460,6 @@ class ApiClient {
 		id: string | number,
 		deleteLocalFiles: boolean = false
 	): Promise<ApiResponse<DeleteVideoSourceResponse>> {
-		if (sourceType === 'youtube' || sourceType === 'douyin') {
-			const result = await this.delete<boolean>(`/${sourceType}/sources/${id}`, {
-				delete_local_files: deleteLocalFiles.toString()
-			});
-			return {
-				status_code: result.status_code,
-				data: {
-					success: result.data,
-					message: `${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源已删除`
-				}
-			};
-		}
 		return this.delete<DeleteVideoSourceResponse>(`/video-sources/${sourceType}/${id}`, {
 			delete_local_files: deleteLocalFiles.toString()
 		});

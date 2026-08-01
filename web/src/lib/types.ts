@@ -25,6 +25,8 @@ export interface YouTubeSource {
 	url: string;
 	path: string;
 	enabled: boolean;
+	scan_deleted_videos: boolean;
+	scan_deleted_videos_once: boolean;
 	audio_only: boolean;
 	audio_only_m4a_only: boolean;
 	flat_folder: boolean;

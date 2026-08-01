@@ -36,6 +36,9 @@ pub struct Model {
     pub selected_videos: Option<String>,
     pub selected_channels: Option<String>,
     pub known_video_ids: Option<String>,
+    pub scan_deleted_videos: bool,
+    pub scan_deleted_videos_once: bool,
+    pub deleted_video_ids: Option<String>,
     pub last_scan_at: Option<String>,
     pub created_at: String,
 }

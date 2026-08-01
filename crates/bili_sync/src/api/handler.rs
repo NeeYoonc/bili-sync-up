@@ -13,7 +13,9 @@ use html_escape::decode_html_entities;
 
 use crate::http::headers::{create_api_headers, create_image_headers};
 use crate::utils::time_format::{now_standard_string, to_standard_string};
-use bili_sync_entity::{collection, favorite, page, submission, video, video_source, watch_later, youtube_source};
+use bili_sync_entity::{
+    collection, favorite, page, submission, video, video_source, watch_later, youtube_source, youtube_video,
+};
 use bili_sync_migration::Expr;
 use reqwest;
 use sea_orm::{
@@ -742,6 +744,69 @@ fn is_dangerous_path_for_deletion(path: &str) -> bool {
     false
 }
 
+fn normalized_library_path(path: &str) -> String {
+    let normalized = normalize_file_path(path).trim_end_matches('/').to_string();
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn library_paths_overlap(left: &str, right: &str) -> bool {
+    let left = normalized_library_path(left);
+    let right = normalized_library_path(right);
+    left == right || left.starts_with(&format!("{right}/")) || right.starts_with(&format!("{left}/"))
+}
+
+async fn external_source_path_is_shared(
+    conn: &impl ConnectionTrait,
+    excluded_external_source_id: i32,
+    path: &str,
+) -> Result<bool> {
+    let external_sources = youtube_source::Entity::find()
+        .filter(youtube_source::Column::Id.ne(excluded_external_source_id))
+        .all(conn)
+        .await?;
+    if external_sources
+        .iter()
+        .any(|source| library_paths_overlap(path, &source.path))
+    {
+        return Ok(true);
+    }
+
+    if collection::Entity::find()
+        .all(conn)
+        .await?
+        .iter()
+        .any(|source| library_paths_overlap(path, &source.path))
+        || favorite::Entity::find()
+            .all(conn)
+            .await?
+            .iter()
+            .any(|source| library_paths_overlap(path, &source.path))
+        || submission::Entity::find()
+            .all(conn)
+            .await?
+            .iter()
+            .any(|source| library_paths_overlap(path, &source.path))
+        || watch_later::Entity::find()
+            .all(conn)
+            .await?
+            .iter()
+            .any(|source| library_paths_overlap(path, &source.path))
+        || video_source::Entity::find()
+            .all(conn)
+            .await?
+            .iter()
+            .any(|source| library_paths_overlap(path, &source.path))
+    {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// 删除指定目录（仅当目录存在且为空）
 fn cleanup_empty_dir_if_empty(dir: &str, label: &str) {
     use std::fs;
@@ -1137,6 +1202,7 @@ mod rename_tests {
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+    use sea_orm::Database;
     use std::fs;
     use std::path::PathBuf;
 
@@ -1175,6 +1241,91 @@ mod cleanup_tests {
 
         assert!(base.exists(), "deleted_path 等于 stop_at 时应直接返回");
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn external_library_path_overlap_handles_windows_style_paths() {
+        assert!(library_paths_overlap(
+            r"F:\Downloads\测试douyin\作者A",
+            r"F:/Downloads/测试douyin/作者A"
+        ));
+        assert!(library_paths_overlap(
+            r"F:\Downloads\测试douyin",
+            r"F:\Downloads\测试douyin\作者A"
+        ));
+        assert!(!library_paths_overlap(
+            r"F:\Downloads\测试douyin\作者A",
+            r"F:\Downloads\测试douyin\作者B"
+        ));
+    }
+
+    #[tokio::test]
+    async fn external_non_flat_cleanup_removes_complete_source_directory() {
+        let root = unique_temp_dir("external-source-complete");
+        let base = root.join("抖音作者");
+        let video_dir = base.join("视频目录");
+        fs::create_dir_all(video_dir.join("视频-images")).unwrap();
+        let output = video_dir.join("视频.mp4");
+        fs::write(&output, b"media").unwrap();
+        fs::write(video_dir.join("视频.nfo"), b"nfo").unwrap();
+        fs::write(video_dir.join("视频-images").join("01.jpg"), b"image").unwrap();
+        fs::write(base.join("person.nfo"), b"person").unwrap();
+        fs::write(base.join("folder.jpg"), b"avatar").unwrap();
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        execute_local_source_cleanup_plan(
+            &db,
+            LocalSourceCleanupPlan::External {
+                log_name: "抖音视频源测试".to_string(),
+                platform_label: "抖音",
+                base_path: base.to_string_lossy().into_owned(),
+                flat_folder: false,
+                remove_base_dir: true,
+                output_paths: vec![output.to_string_lossy().into_owned()],
+            },
+        )
+        .await;
+
+        assert!(
+            !base.exists(),
+            "非平铺外部平台源应连同头像、person.nfo 和图文原图完整删除"
+        );
+        assert!(root.exists(), "不应删除视频源基础目录之外的父目录");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn external_flat_cleanup_preserves_shared_root_and_unrelated_files() {
+        let root = unique_temp_dir("external-source-flat");
+        fs::create_dir_all(root.join("视频-images")).unwrap();
+        let output = root.join("视频.mp4");
+        fs::write(&output, b"media").unwrap();
+        fs::write(root.join("视频.nfo"), b"nfo").unwrap();
+        fs::write(root.join("视频-thumb.jpg"), b"cover").unwrap();
+        fs::write(root.join("视频-images").join("01.jpg"), b"image").unwrap();
+        fs::write(root.join("保留.txt"), b"keep").unwrap();
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        execute_local_source_cleanup_plan(
+            &db,
+            LocalSourceCleanupPlan::External {
+                log_name: "抖音平铺视频源测试".to_string(),
+                platform_label: "抖音",
+                base_path: root.to_string_lossy().into_owned(),
+                flat_folder: true,
+                remove_base_dir: false,
+                output_paths: vec![output.to_string_lossy().into_owned()],
+            },
+        )
+        .await;
+
+        assert!(root.exists(), "平铺模式必须保留共享根目录");
+        assert!(root.join("保留.txt").exists(), "平铺模式不得删除无关文件");
+        assert!(!output.exists());
+        assert!(!root.join("视频.nfo").exists());
+        assert!(!root.join("视频-thumb.jpg").exists());
+        assert!(!root.join("视频-images").exists());
         let _ = fs::remove_dir_all(&root);
     }
 }
@@ -6540,13 +6691,23 @@ async fn cleanup_root_metadata_if_no_media(root_dir: &std::path::Path, deleted_c
 }
 
 #[derive(Debug, Clone)]
-struct LocalSourceCleanupPlan {
-    log_name: String,
-    base_path: String,
-    base_dir_label: &'static str,
-    flat_folder: bool,
-    orphaned_videos: Vec<video::Model>,
-    pages_by_video_id: HashMap<i32, Vec<page::Model>>,
+enum LocalSourceCleanupPlan {
+    Bilibili {
+        log_name: String,
+        base_path: String,
+        base_dir_label: &'static str,
+        flat_folder: bool,
+        orphaned_videos: Vec<video::Model>,
+        pages_by_video_id: HashMap<i32, Vec<page::Model>>,
+    },
+    External {
+        log_name: String,
+        platform_label: &'static str,
+        base_path: String,
+        flat_folder: bool,
+        remove_base_dir: bool,
+        output_paths: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -6578,7 +6739,7 @@ async fn build_local_source_cleanup_plan(
         }
     }
 
-    Ok(LocalSourceCleanupPlan {
+    Ok(LocalSourceCleanupPlan::Bilibili {
         log_name,
         base_path,
         base_dir_label,
@@ -6852,14 +7013,133 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
 }
 
 async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: LocalSourceCleanupPlan) {
-    let LocalSourceCleanupPlan {
-        log_name,
-        base_path,
-        base_dir_label,
-        flat_folder,
-        orphaned_videos,
-        pages_by_video_id,
-    } = plan;
+    let (log_name, base_path, base_dir_label, flat_folder, orphaned_videos, pages_by_video_id) = match plan {
+        LocalSourceCleanupPlan::Bilibili {
+            log_name,
+            base_path,
+            base_dir_label,
+            flat_folder,
+            orphaned_videos,
+            pages_by_video_id,
+        } => (
+            log_name,
+            base_path,
+            base_dir_label,
+            flat_folder,
+            orphaned_videos,
+            pages_by_video_id,
+        ),
+        LocalSourceCleanupPlan::External {
+            log_name,
+            platform_label,
+            base_path,
+            flat_folder,
+            remove_base_dir,
+            output_paths,
+        } => {
+            if is_dangerous_path_for_deletion(&base_path) {
+                warn!(platform = platform_label, path = %base_path, "检测到危险路径，跳过外部平台视频源本地清理");
+                return;
+            }
+
+            let base = std::path::PathBuf::from(&base_path);
+            let normalized_base = normalize_file_path(&base_path).trim_end_matches('/').to_string();
+            if !flat_folder && remove_base_dir {
+                if base.is_dir() {
+                    match get_directory_size(&base_path) {
+                        Ok(size) => {
+                            let size_mb = size as f64 / 1024.0 / 1024.0;
+                            info!(platform = platform_label, path = %base.display(), size_mb, "开始删除外部平台视频源完整目录");
+                            match std::fs::remove_dir_all(&base) {
+                                Ok(()) => {
+                                    info!(platform = platform_label, path = %base.display(), "外部平台视频源完整目录已删除")
+                                }
+                                Err(error) => {
+                                    error!(platform = platform_label, path = %base.display(), %error, "删除外部平台视频源完整目录失败")
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(platform = platform_label, path = %base.display(), %error, "无法计算外部平台视频源目录大小，继续删除");
+                            match std::fs::remove_dir_all(&base) {
+                                Ok(()) => {
+                                    info!(platform = platform_label, path = %base.display(), "外部平台视频源完整目录已删除")
+                                }
+                                Err(error) => {
+                                    error!(platform = platform_label, path = %base.display(), %error, "删除外部平台视频源完整目录失败")
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    info!(platform = platform_label, path = %base.display(), "外部平台视频源本地目录不存在，无需清理");
+                }
+                return;
+            }
+
+            let mut deleted_paths = HashSet::new();
+            for output_path in output_paths {
+                let output = std::path::PathBuf::from(&output_path);
+                let normalized_output = normalize_file_path(&output_path);
+                if !normalized_output.starts_with(&format!("{normalized_base}/")) {
+                    warn!(platform = platform_label, path = %output.display(), base = %base.display(), "记录路径不在视频源目录内，跳过本地清理");
+                    continue;
+                }
+
+                let Some(parent) = output.parent() else {
+                    continue;
+                };
+                if !flat_folder && parent != base && deleted_paths.insert(parent.to_path_buf()) {
+                    if parent.is_dir() {
+                        match std::fs::remove_dir_all(parent) {
+                            Ok(()) => {
+                                info!(platform = platform_label, path = %parent.display(), "外部平台视频完整目录已删除")
+                            }
+                            Err(error) => {
+                                warn!(platform = platform_label, path = %parent.display(), %error, "删除外部平台视频完整目录失败")
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let stem = output.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+                let Ok(entries) = std::fs::read_dir(parent) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+                    let is_recorded_file = path == output
+                        || (!stem.is_empty()
+                            && (name.starts_with(&format!("{stem}."))
+                                || name.starts_with(&format!("{stem}-thumb."))
+                                || name.starts_with(&format!("{stem}-fanart."))
+                                || name.starts_with(&format!("{stem}-poster."))));
+                    let is_image_dir = path.is_dir() && !stem.is_empty() && name == format!("{stem}-images");
+                    let result = if is_image_dir {
+                        std::fs::remove_dir_all(&path)
+                    } else if is_recorded_file && path.is_file() {
+                        std::fs::remove_file(&path)
+                    } else {
+                        continue;
+                    };
+                    match result {
+                        Ok(()) => {
+                            info!(platform = platform_label, path = %path.display(), "外部平台已记录媒体或附属文件已删除")
+                        }
+                        Err(error) => {
+                            warn!(platform = platform_label, path = %path.display(), %error, "删除外部平台已记录媒体或附属文件失败")
+                        }
+                    }
+                }
+            }
+
+            cleanup_empty_dir_if_empty(&base_path, "外部平台视频源基础目录");
+            info!(platform = platform_label, "{} 本地文件清理完成", log_name);
+            return;
+        }
+    };
 
     if is_dangerous_path_for_deletion(&base_path) {
         warn!("检测到危险路径，跳过删除: {}", base_path);
@@ -6997,7 +7277,7 @@ async fn delete_orphaned_videos_from_db(
 fn is_supported_delete_video_source_type(source_type: &str) -> bool {
     matches!(
         source_type,
-        "collection" | "favorite" | "submission" | "watch_later" | "bangumi"
+        "collection" | "favorite" | "submission" | "watch_later" | "bangumi" | "youtube" | "douyin"
     )
 }
 
@@ -7008,6 +7288,8 @@ fn delete_video_source_missing_message(source_type: &str) -> String {
         "submission" => "未找到指定的UP主投稿".to_string(),
         "watch_later" => "未找到指定的稍后再看".to_string(),
         "bangumi" => "未找到指定的番剧".to_string(),
+        "youtube" => "未找到指定的 YouTube 视频源".to_string(),
+        "douyin" => "未找到指定的抖音视频源".to_string(),
         _ => format!("不支持的视频源类型: {}", source_type),
     }
 }
@@ -7019,6 +7301,17 @@ async fn delete_video_source_record_exists(db: &impl ConnectionTrait, source_typ
         "submission" => Ok(submission::Entity::find_by_id(id).one(db).await?.is_some()),
         "watch_later" => Ok(watch_later::Entity::find_by_id(id).one(db).await?.is_some()),
         "bangumi" => Ok(video_source::Entity::find_by_id(id).one(db).await?.is_some()),
+        "youtube" | "douyin" => {
+            let Some(source) = youtube_source::Entity::find_by_id(id).one(db).await? else {
+                return Ok(false);
+            };
+            let actual_platform = if source.source_type.starts_with("douyin") {
+                "douyin"
+            } else {
+                "youtube"
+            };
+            Ok(actual_platform == source_type)
+        }
         _ => Err(anyhow!("不支持的视频源类型: {}", source_type)),
     }
 }
@@ -7194,20 +7487,6 @@ pub async fn delete_video_source_internal(
     id: i32,
     delete_local_files: bool,
 ) -> Result<crate::api::response::DeleteVideoSourceResponse, ApiError> {
-    if matches!(source_type.as_str(), "youtube" | "douyin") {
-        crate::youtube::delete_youtube_source_internal(db.as_ref(), id, delete_local_files).await?;
-        let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
-        return Ok(crate::api::response::DeleteVideoSourceResponse {
-            success: true,
-            source_id: id,
-            source_type,
-            message: if delete_local_files {
-                format!("{platform_label}视频源、下载记录及已记录本地文件已删除")
-            } else {
-                format!("{platform_label}视频源和下载记录已删除，本地文件已保留")
-            },
-        });
-    }
     // 用于保存需要清除断点的UP主ID（仅submission类型使用）
     let mut upper_id_to_clear: Option<i64> = None;
     let mut cleanup_plan: Option<LocalSourceCleanupPlan> = None;
@@ -7220,6 +7499,18 @@ pub async fn delete_video_source_internal(
     let txn = crate::database::begin_traced_transaction(&db, "api.handler.delete_video_source").await?;
 
     if !delete_video_source_record_exists(&txn, source_type.as_str(), id).await? {
+        if matches!(source_type.as_str(), "youtube" | "douyin") {
+            let response = crate::api::response::DeleteVideoSourceResponse {
+                success: true,
+                source_id: id,
+                source_type: source_type.clone(),
+                message: format!("{}，可能已经删除", delete_video_source_missing_message(&source_type)),
+            };
+            txn.commit().await?;
+            notify_video_sources_changed();
+            notify_videos_changed();
+            return Ok(response);
+        }
         let (response, orphan_cleanup_plan) =
             cleanup_missing_video_source_references(&txn, source_type.as_str(), id, delete_local_files).await?;
         txn.commit().await?;
@@ -7557,6 +7848,58 @@ pub async fn delete_video_source_internal(
                 source_id: id,
                 source_type: "bangumi".to_string(),
                 message: format!("番剧 {} 已成功删除", bangumi.name),
+            }
+        }
+        "youtube" | "douyin" => {
+            let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
+            let source = youtube_source::Entity::find_by_id(id)
+                .one(&txn)
+                .await?
+                .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
+            let videos = youtube_video::Entity::find()
+                .filter(youtube_video::Column::SourceId.eq(id))
+                .all(&txn)
+                .await?;
+
+            if delete_local_files {
+                let remove_base_dir =
+                    !source.flat_folder && !external_source_path_is_shared(&txn, source.id, &source.path).await?;
+                if !source.flat_folder && !remove_base_dir {
+                    info!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        path = %source.path,
+                        "视频源目录与其他来源重叠，仅清理当前来源已记录的视频目录"
+                    );
+                }
+                cleanup_plan = Some(LocalSourceCleanupPlan::External {
+                    log_name: format!("{platform_label}视频源 {}", source.name),
+                    platform_label,
+                    base_path: source.path.clone(),
+                    flat_folder: source.flat_folder,
+                    remove_base_dir,
+                    output_paths: videos.iter().filter_map(|video| video.output_path.clone()).collect(),
+                });
+            }
+
+            youtube_video::Entity::delete_many()
+                .filter(youtube_video::Column::SourceId.eq(id))
+                .exec(&txn)
+                .await?;
+            youtube_source::Entity::delete_by_id(id).exec(&txn).await?;
+
+            crate::api::response::DeleteVideoSourceResponse {
+                success: true,
+                source_id: id,
+                source_type: source_type.clone(),
+                message: if delete_local_files {
+                    format!("{platform_label}视频源 {}、下载记录及本地文件已删除", source.name)
+                } else {
+                    format!(
+                        "{platform_label}视频源 {} 和下载记录已删除，本地文件已保留",
+                        source.name
+                    )
+                },
             }
         }
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type).into()),
@@ -8059,6 +8402,51 @@ pub async fn update_video_source_scan_deleted_internal(
                 message: build_scan_deleted_message(
                     "番剧",
                     Some(&video_source.name),
+                    requested_scan_deleted_videos,
+                    requested_scan_deleted_videos_once,
+                ),
+            }
+        }
+        "youtube" | "douyin" => {
+            let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
+            let source = youtube_source::Entity::find_by_id(id)
+                .one(&txn)
+                .await?
+                .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
+            let actual_platform = if source.source_type.starts_with("douyin") {
+                "douyin"
+            } else {
+                "youtube"
+            };
+            if actual_platform != source_type {
+                return Err(anyhow!("视频源平台不匹配").into());
+            }
+
+            let (scan_deleted_videos, scan_deleted_videos_once) = resolve_scan_deleted_modes(
+                source.scan_deleted_videos,
+                source.scan_deleted_videos_once,
+                requested_scan_deleted_videos,
+                requested_scan_deleted_videos_once,
+            )?;
+
+            youtube_source::Entity::update(youtube_source::ActiveModel {
+                id: sea_orm::ActiveValue::Unchanged(id),
+                scan_deleted_videos: sea_orm::Set(scan_deleted_videos),
+                scan_deleted_videos_once: sea_orm::Set(scan_deleted_videos_once),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+
+            crate::api::response::UpdateVideoSourceScanDeletedResponse {
+                success: true,
+                source_id: id,
+                source_type: actual_platform.to_string(),
+                scan_deleted_videos,
+                scan_deleted_videos_once,
+                message: build_scan_deleted_message(
+                    platform_label,
+                    Some(&source.name),
                     requested_scan_deleted_videos,
                     requested_scan_deleted_videos_once,
                 ),

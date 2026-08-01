@@ -34,7 +34,9 @@
 			favorite: '收藏夹',
 			submission: 'UP主投稿',
 			watch_later: '稍后观看',
-			bangumi: '番剧'
+			bangumi: '番剧',
+			youtube: 'YouTube',
+			douyin: '抖音'
 		};
 		return typeMap[type] || type;
 	}
