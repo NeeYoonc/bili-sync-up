@@ -49,6 +49,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(90);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const MAX_DOWNLOAD_RETRIES: i32 = 4;
 const SUBSCRIPTIONS_URL: &str = "https://www.youtube.com/feed/subscriptions";
+const SUBSCRIPTION_CHANNELS_URL: &str = "https://www.youtube.com/feed/channels";
 const LIKED_URL: &str = "https://www.youtube.com/playlist?list=LL";
 const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
 static YOUTUBE_SIDECAR_BACKFILL_DONE: AtomicBool = AtomicBool::new(false);
@@ -298,10 +299,15 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         warn!(%error, "yt-dlp 自动安装失败");
     }
     let version = ytdlp_version().await;
+    let cookie = cookie_path();
+    let logged_in = has_youtube_session(&cookie)
+        && tokio::time::timeout(Duration::from_secs(15), load_youtube_subscription_channels(&cookie))
+            .await
+            .is_ok_and(|result| result.is_ok());
     Ok(ApiResponse::ok(YouTubeStatusResponse {
         ytdlp_available: version.is_some(),
         ytdlp_version: version,
-        logged_in: has_youtube_session(&cookie_path()),
+        logged_in,
         default_output_path: default_output_path().display().to_string(),
         container_runtime: is_container_runtime(),
         cookie_path: cookie_path().display().to_string(),
@@ -444,7 +450,6 @@ pub async fn search_youtube(
 pub async fn get_youtube_source_videos(
     Query(request): Query<YouTubeSourceVideosRequest>,
 ) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
-    ensure_ytdlp_available().await?;
     let source_type = request.source_type.trim().to_ascii_lowercase();
     if !matches!(source_type.as_str(), "subscriptions" | "channel" | "playlist" | "liked") {
         return Err(ApiError::from(anyhow!(
@@ -460,8 +465,12 @@ pub async fn get_youtube_source_videos(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
+    if source_type == "subscriptions" {
+        return get_youtube_subscription_channels(page, page_size, keyword.as_deref()).await;
+    }
+
+    ensure_ytdlp_available().await?;
     let source_url = match source_type.as_str() {
-        "subscriptions" => "https://www.youtube.com/feed/channels".to_string(),
         "liked" => LIKED_URL.to_string(),
         "channel" | "playlist" => {
             if raw_url.is_empty() || !is_youtube_url(raw_url) {
@@ -473,6 +482,7 @@ pub async fn get_youtube_source_videos(
                 raw_url.to_string()
             }
         }
+        "subscriptions" => unreachable!(),
         _ => unreachable!(),
     };
 
@@ -593,6 +603,258 @@ pub async fn get_youtube_source_videos(
         page,
         page_size,
     }))
+}
+
+async fn get_youtube_subscription_channels(
+    page: i32,
+    page_size: i32,
+    keyword: Option<&str>,
+) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
+    let initial_data = load_youtube_subscription_channels(&cookie_path()).await?;
+    let mut channels = Vec::new();
+    let mut seen = HashSet::new();
+    collect_youtube_channel_renderers(&initial_data, &mut seen, &mut channels);
+    if let Some(keyword) = keyword {
+        channels.retain(|channel| {
+            channel.title.to_ascii_lowercase().contains(keyword)
+                || channel
+                    .author
+                    .as_deref()
+                    .is_some_and(|author| author.to_ascii_lowercase().contains(keyword))
+        });
+    }
+
+    let total = channels.len() as i64;
+    let start = usize::try_from((page - 1).saturating_mul(page_size)).unwrap_or_default();
+    let videos = channels.into_iter().skip(start).take(page_size as usize).collect();
+    Ok(ApiResponse::ok(SubmissionVideosResponse {
+        videos,
+        total,
+        page,
+        page_size,
+    }))
+}
+
+async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::Value> {
+    let cookie_header = youtube_cookie_header(path)?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let response = client
+        .get(SUBSCRIPTION_CHANNELS_URL)
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+        )
+        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
+        .header(reqwest::header::COOKIE, cookie_header)
+        .send()
+        .await
+        .context("访问 YouTube 已订阅频道页面失败")?;
+
+    if response.status().is_redirection() {
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if location.contains("accounts.google.com") || location.contains("ServiceLogin") {
+            bail!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态");
+        }
+        bail!("YouTube 已订阅频道页面发生意外跳转：{location}");
+    }
+    if !response.status().is_success() {
+        bail!("YouTube 已订阅频道页面返回 HTTP {}", response.status());
+    }
+
+    let html = response.text().await.context("读取 YouTube 已订阅频道页面失败")?;
+    if youtube_page_is_logged_out(&html) {
+        bail!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态");
+    }
+    extract_youtube_initial_data(&html)
+        .ok_or_else(|| anyhow!("YouTube 已订阅频道页面缺少频道数据，请重新传输登录状态后重试"))
+}
+
+fn youtube_cookie_header(path: &Path) -> Result<String> {
+    let contents =
+        std::fs::read_to_string(path).with_context(|| format!("读取 YouTube Cookie 失败：{}", path.display()))?;
+    let now = chrono::Utc::now().timestamp();
+    let cookies = contents
+        .lines()
+        .filter_map(|raw_line| {
+            let line = raw_line.strip_prefix("#HttpOnly_").unwrap_or(raw_line);
+            if line.starts_with('#') || line.trim().is_empty() {
+                return None;
+            }
+            let columns = line.split('\t').collect::<Vec<_>>();
+            if columns.len() < 7 || !columns[0].trim_start_matches('.').ends_with("youtube.com") {
+                return None;
+            }
+            let expires = columns[4].parse::<i64>().unwrap_or_default();
+            if expires != 0 && expires <= now {
+                return None;
+            }
+            Some(format!("{}={}", columns[5], columns[6]))
+        })
+        .collect::<Vec<_>>();
+    if cookies.is_empty() {
+        bail!("尚未导入有效的 YouTube Cookie");
+    }
+    Ok(cookies.join("; "))
+}
+
+fn youtube_page_is_logged_out(html: &str) -> bool {
+    html.contains("\"LOGGED_IN\":false")
+        || html.contains("\"loggedIn\":false")
+        || (html.contains("accounts.google.com/ServiceLogin") && !html.contains("\"LOGGED_IN\":true"))
+}
+
+fn extract_youtube_initial_data(html: &str) -> Option<serde_json::Value> {
+    const MARKERS: [&str; 4] = [
+        "var ytInitialData = ",
+        "window[\"ytInitialData\"] = ",
+        "ytInitialData = ",
+        "\"ytInitialData\":",
+    ];
+    for marker in MARKERS {
+        let Some(marker_start) = html.find(marker) else {
+            continue;
+        };
+        let remainder = &html[marker_start + marker.len()..];
+        let Some(json_start) = remainder.find('{') else {
+            continue;
+        };
+        let Some(json) = first_json_object(&remainder[json_start..]) else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str(json) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn first_json_object(input: &str) -> Option<&str> {
+    if !input.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&input[..index + character.len_utf8()]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn youtube_text(value: Option<&serde_json::Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    value
+        .get("simpleText")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            value.get("runs").and_then(|value| value.as_array()).map(|runs| {
+                runs.iter()
+                    .filter_map(|run| run.get("text").and_then(|value| value.as_str()))
+                    .collect::<String>()
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn parse_youtube_channel_renderer(renderer: &serde_json::Value) -> Option<SubmissionVideoInfo> {
+    let channel_id = renderer
+        .get("channelId")
+        .or_else(|| renderer.pointer("/navigationEndpoint/browseEndpoint/browseId"))
+        .and_then(|value| value.as_str())
+        .filter(|value| value.starts_with("UC"))?;
+    let title = youtube_text(renderer.get("title"));
+    if title.trim().is_empty() {
+        return None;
+    }
+    let cover = renderer
+        .pointer("/thumbnail/thumbnails")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.last())
+        .and_then(|thumbnail| thumbnail.get("url"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let cover = if cover.starts_with("//") {
+        format!("https:{cover}")
+    } else {
+        cover.to_string()
+    };
+    let description = [
+        youtube_text(renderer.get("subscriberCountText")),
+        youtube_text(renderer.get("videoCountText")),
+        youtube_text(renderer.get("descriptionSnippet")),
+    ]
+    .into_iter()
+    .filter(|value| !value.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    Some(SubmissionVideoInfo {
+        bvid: channel_id.to_string(),
+        title: title.clone(),
+        author: Some(title),
+        cover,
+        pubtime: String::new(),
+        duration: 0,
+        view: 0,
+        danmaku: 0,
+        description,
+    })
+}
+
+fn collect_youtube_channel_renderers(
+    value: &serde_json::Value,
+    seen: &mut HashSet<String>,
+    channels: &mut Vec<SubmissionVideoInfo>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if matches!(key.as_str(), "channelRenderer" | "gridChannelRenderer") {
+                    if let Some(channel) = parse_youtube_channel_renderer(child) {
+                        if seen.insert(channel.bvid.clone()) {
+                            channels.push(channel);
+                        }
+                    }
+                }
+                collect_youtube_channel_renderers(child, seen, channels);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_youtube_channel_renderers(item, seen, channels);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub async fn import_youtube_cookie_file(
@@ -1213,8 +1475,9 @@ async fn fetch_platform_asset(
     path: &Path,
 ) -> Result<()> {
     if is_douyin_source(source) {
+        let cookie = crate::douyin::cookie_header()?;
         downloader
-            .fetch_with_fallback_with_referer(urls, path, "https://www.douyin.com/")
+            .fetch_with_fallback_with_referer_and_cookie(urls, path, "https://www.douyin.com/", &cookie)
             .await
     } else {
         downloader.fetch_with_fallback(urls, path).await
@@ -3065,6 +3328,10 @@ async fn extract_youtube_metadata(url: &str) -> Result<YtDlpMetadata> {
     if let Some(aweme_id) = douyin_aweme_id(url) {
         return extract_douyin_metadata(aweme_id).await;
     }
+    extract_ytdlp_metadata(url, "YouTube").await
+}
+
+async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<YtDlpMetadata> {
     let mut command = Command::new(ytdlp_executable());
     command.args([
         "--dump-single-json",
@@ -3077,11 +3344,11 @@ async fn extract_youtube_metadata(url: &str) -> Result<YtDlpMetadata> {
     command.arg(url);
     let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output())
         .await
-        .map_err(|_| anyhow!("解析 YouTube 媒体直链超时"))??;
+        .map_err(|_| anyhow!("解析 {platform} 媒体直链超时"))??;
     if !output.status.success() {
-        bail!("yt-dlp 解析 YouTube 媒体直链失败：{}", command_error(&output));
+        bail!("yt-dlp 解析 {platform} 媒体直链失败：{}", command_error(&output));
     }
-    serde_json::from_slice(&output.stdout).context("解析 yt-dlp YouTube 媒体元数据失败")
+    serde_json::from_slice(&output.stdout).with_context(|| format!("解析 yt-dlp {platform} 媒体元数据失败"))
 }
 
 fn douyin_aweme_id(url: &str) -> Option<&str> {
@@ -3091,6 +3358,24 @@ fn douyin_aweme_id(url: &str) -> Option<&str> {
 }
 
 async fn extract_douyin_metadata(aweme_id: &str) -> Result<YtDlpMetadata> {
+    match extract_douyin_metadata_native(aweme_id).await {
+        Ok(metadata) => Ok(metadata),
+        Err(native_error) => {
+            warn!(
+                target: "bili_sync_rs::douyin",
+                aweme_id,
+                error = %native_error,
+                "抖音原生详情接口失败，改用 yt-dlp 解析媒体直链"
+            );
+            let url = format!("https://www.douyin.com/video/{aweme_id}");
+            extract_ytdlp_metadata(&url, "抖音")
+                .await
+                .with_context(|| format!("抖音原生详情接口失败：{native_error:#}；yt-dlp 回退也失败"))
+        }
+    }
+}
+
+async fn extract_douyin_metadata_native(aweme_id: &str) -> Result<YtDlpMetadata> {
     let detail = crate::douyin::fetch_aweme_detail(aweme_id).await?;
     let images = detail
         .get("images")
@@ -4926,36 +5211,12 @@ async fn remove_empty_parent_directories(mut current: Option<&Path>, stop_at: &P
 }
 
 async fn validate_youtube_login_cookie(path: &Path) -> Result<()> {
-    let auth_output = tokio::time::timeout(LOGIN_TIMEOUT, async {
-        let mut command = Command::new(ytdlp_executable());
-        command.arg("--cookies").arg(path).args([
-            "--verbose",
-            "--flat-playlist",
-            "--playlist-end",
-            "1",
-            "--dump-single-json",
-            "--no-warnings",
-        ]);
-        append_ytdlp_runtime(&mut command);
-        command.arg(SUBSCRIPTIONS_URL).output().await
-    })
-    .await
-    .map_err(|_| anyhow!("验证 YouTube 账号登录状态超时"))??;
-    if !auth_output.status.success() {
-        bail!("{}", command_error(&auth_output));
-    }
-    let auth_diagnostics = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&auth_output.stderr),
-        String::from_utf8_lossy(&auth_output.stdout)
-    );
-    if !auth_diagnostics.contains("Found YouTube account cookies") {
-        bail!("Cookie 文件可以访问 YouTube，但 yt-dlp 未识别到有效账号登录状态");
-    }
-
-    // 登录导入只验证账号会话本身。公开视频能否返回指定音视频格式会受到
-    // Docker 出口 IP、YouTube 播放器客户端和 PO Token 等因素影响，不能用于
-    // 判断 Cookie 是否有效，否则会把已经识别到的账号 Cookie 错误拒绝。
+    // 不再仅依据 yt-dlp 输出中的 `Found YouTube account cookies` 判断登录。
+    // 该提示只说明文件里存在账号 Cookie 名称，过期或不完整的会话也可能出现。
+    // 真实访问账号专属的“已订阅频道”页面，才能确认 Cookie 当前确实可用。
+    tokio::time::timeout(LOGIN_TIMEOUT, load_youtube_subscription_channels(path))
+        .await
+        .map_err(|_| anyhow!("验证 YouTube 账号登录状态超时"))??;
     Ok(())
 }
 
@@ -5136,11 +5397,12 @@ fn trim_output(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_channel_url, checksum_for_release_asset, current_ytdlp_package, generate_youtube_person_nfo,
-        is_netscape_youtube_cookie_file, is_youtube_url, normalize_source_type, parse_youtube_live_chat,
-        resolve_source_url, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for, ytdlp_runtime_target_env,
-        SUBSCRIPTIONS_URL,
+        canonical_channel_url, checksum_for_release_asset, collect_youtube_channel_renderers, current_ytdlp_package,
+        extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
+        normalize_source_type, parse_youtube_live_chat, resolve_source_url, youtube_page_is_logged_out,
+        youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for, ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
     };
+    use std::collections::HashSet;
     use std::path::Path;
     #[test]
     fn validates_types_and_urls() {
@@ -5192,6 +5454,44 @@ mod tests {
         let youtube_session = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tvalue\n";
         assert!(!is_netscape_youtube_cookie_file(google_only));
         assert!(is_netscape_youtube_cookie_file(youtube_session));
+    }
+
+    #[test]
+    fn parses_subscribed_channels_from_youtube_initial_data() {
+        let data = serde_json::json!({
+            "contents": { "items": [
+                { "channelRenderer": {
+                    "channelId": "UC-one",
+                    "title": { "simpleText": "频道一" },
+                    "thumbnail": { "thumbnails": [{ "url": "//img.example/one.jpg" }] },
+                    "subscriberCountText": { "simpleText": "1万位订阅者" }
+                } },
+                { "gridChannelRenderer": {
+                    "navigationEndpoint": { "browseEndpoint": { "browseId": "UC-two" } },
+                    "title": { "runs": [{ "text": "频道二" }] },
+                    "thumbnail": { "thumbnails": [{ "url": "https://img.example/two.jpg" }] }
+                } }
+            ] }
+        });
+        let html = format!("<script>var ytInitialData = {data};</script>");
+        let initial_data = extract_youtube_initial_data(&html).expect("应解析 ytInitialData");
+        let mut channels = Vec::new();
+        let mut seen = HashSet::new();
+        collect_youtube_channel_renderers(&initial_data, &mut seen, &mut channels);
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channels[0].bvid, "UC-one");
+        assert_eq!(channels[0].title, "频道一");
+        assert_eq!(channels[0].cover, "https://img.example/one.jpg");
+        assert_eq!(channels[1].bvid, "UC-two");
+        assert_eq!(channels[1].title, "频道二");
+    }
+
+    #[test]
+    fn detects_logged_out_youtube_page() {
+        assert!(youtube_page_is_logged_out(
+            r#"{"LOGGED_IN":false,"signInUrl":"https://accounts.google.com/ServiceLogin"}"#
+        ));
+        assert!(!youtube_page_is_logged_out(r#"{"LOGGED_IN":true}"#));
     }
 
     #[test]

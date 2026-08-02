@@ -1608,7 +1608,7 @@ fn client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-fn cookie_header() -> Result<String> {
+pub(crate) fn cookie_header() -> Result<String> {
     let values = cookie_values();
     if values.is_empty() {
         bail!("尚未导入抖音 cookies.txt");

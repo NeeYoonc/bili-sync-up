@@ -59,8 +59,23 @@ where
         let mut visitor = MessageVisitor::new();
         event.record(&mut visitor);
 
-        if let Some(message) = visitor.message {
-            let target = event.metadata().target().to_string();
+        if let Some(mut message) = visitor.message {
+            if let Some(error) = visitor.error.filter(|error| !error.trim().is_empty()) {
+                message.push_str("：");
+                message.push_str(&error);
+            }
+            let mut target = event.metadata().target().to_string();
+            if target == "bili_sync_rs::youtube"
+                && (visitor
+                    .platform
+                    .as_deref()
+                    .is_some_and(|platform| platform.eq_ignore_ascii_case("douyin") || platform == "抖音")
+                    || message.starts_with("抖音")
+                    || message.starts_with("下载抖音")
+                    || message.starts_with("扫描抖音"))
+            {
+                target = "bili_sync_rs::douyin".to_string();
+            }
 
             // 写入文件日志
             if let Some(ref writer) = *file_logger::FILE_LOG_WRITER {
@@ -76,24 +91,37 @@ where
 // 用于提取日志消息的访问者
 struct MessageVisitor {
     message: Option<String>,
+    error: Option<String>,
+    platform: Option<String>,
 }
 
 impl MessageVisitor {
     fn new() -> Self {
-        Self { message: None }
+        Self {
+            message: None,
+            error: None,
+            platform: None,
+        }
     }
 }
 
 impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
-        if field.name() == "message" {
-            self.message = Some(format!("{:?}", value));
+        let value = format!("{:?}", value);
+        match field.name() {
+            "message" => self.message = Some(value),
+            "error" => self.error = Some(value.trim_matches('"').to_string()),
+            "platform" => self.platform = Some(value.trim_matches('"').to_string()),
+            _ => {}
         }
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "message" {
-            self.message = Some(value.to_string());
+        match field.name() {
+            "message" => self.message = Some(value.to_string()),
+            "error" => self.error = Some(value.to_string()),
+            "platform" => self.platform = Some(value.to_string()),
+            _ => {}
         }
     }
 }

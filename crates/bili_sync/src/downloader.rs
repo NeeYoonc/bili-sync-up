@@ -212,10 +212,10 @@ impl Downloader {
             }
         }
 
-        self.fetch_single(url, path, referer).await
+        self.fetch_single(url, path, referer, None).await
     }
 
-    async fn fetch_single(&self, url: &str, path: &Path, referer: Option<&str>) -> Result<()> {
+    async fn fetch_single(&self, url: &str, path: &Path, referer: Option<&str>, cookie: Option<&str>) -> Result<()> {
         // 创建父目录
         if let Some(parent) = path.parent() {
             if !parent.exists() {
@@ -234,6 +234,11 @@ impl Downloader {
         let request = self.client.media_request(Method::GET, url);
         let request = if let Some(referer) = referer {
             request.header(header::REFERER, referer)
+        } else {
+            request
+        };
+        let request = if let Some(cookie) = cookie {
+            request.header(header::COOKIE, cookie)
         } else {
             request
         };
@@ -440,6 +445,39 @@ impl Downloader {
     pub async fn fetch_with_fallback_with_referer(&self, urls: &[&str], path: &Path, referer: &str) -> Result<()> {
         self.fetch_with_fallback_and_optional_referer(urls, path, Some(referer))
             .await
+    }
+
+    /// 下载需要网页会话 Cookie 的平台媒体。该路径使用单连接，确保每个请求
+    /// 都携带 yt-dlp/浏览器会话所需的 Cookie，避免 CDN 返回 403。
+    pub async fn fetch_with_fallback_with_referer_and_cookie(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: &str,
+        cookie: &str,
+    ) -> Result<()> {
+        if cookie.trim().is_empty() {
+            return self.fetch_with_fallback_with_referer(urls, path, referer).await;
+        }
+        if urls.is_empty() {
+            bail!("no urls provided");
+        }
+        let mut last_error = None;
+        for url in urls {
+            match self.fetch_single(url, path, Some(referer), Some(cookie)).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    warn!("下载失败: {error:#}");
+                    last_error = Some(error);
+                }
+            }
+        }
+        match last_error {
+            Some(error) => Err(error)
+                .context("所有URL尝试失败")
+                .with_context(|| format!("failed to download from {:?}", urls)),
+            None => bail!("所有URL尝试失败"),
+        }
     }
 
     async fn fetch_with_fallback_and_optional_referer(

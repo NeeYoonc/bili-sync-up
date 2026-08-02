@@ -7038,7 +7038,7 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
             output_paths,
         } => {
             if is_dangerous_path_for_deletion(&base_path) {
-                warn!(platform = platform_label, path = %base_path, "检测到危险路径，跳过外部平台视频源本地清理");
+                warn!(platform = platform_label, path = %base_path, "检测到危险路径，跳过{}视频源本地清理", platform_label);
                 return;
             }
 
@@ -7049,30 +7049,30 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
                     match get_directory_size(&base_path) {
                         Ok(size) => {
                             let size_mb = size as f64 / 1024.0 / 1024.0;
-                            info!(platform = platform_label, path = %base.display(), size_mb, "开始删除外部平台视频源完整目录");
+                            info!(platform = platform_label, path = %base.display(), size_mb, "开始删除{}视频源完整目录", platform_label);
                             match std::fs::remove_dir_all(&base) {
                                 Ok(()) => {
-                                    info!(platform = platform_label, path = %base.display(), "外部平台视频源完整目录已删除")
+                                    info!(platform = platform_label, path = %base.display(), "{}视频源完整目录已删除", platform_label)
                                 }
                                 Err(error) => {
-                                    error!(platform = platform_label, path = %base.display(), %error, "删除外部平台视频源完整目录失败")
+                                    error!(platform = platform_label, path = %base.display(), %error, "删除{}视频源完整目录失败", platform_label)
                                 }
                             }
                         }
                         Err(error) => {
-                            warn!(platform = platform_label, path = %base.display(), %error, "无法计算外部平台视频源目录大小，继续删除");
+                            warn!(platform = platform_label, path = %base.display(), %error, "无法计算{}视频源目录大小，继续删除", platform_label);
                             match std::fs::remove_dir_all(&base) {
                                 Ok(()) => {
-                                    info!(platform = platform_label, path = %base.display(), "外部平台视频源完整目录已删除")
+                                    info!(platform = platform_label, path = %base.display(), "{}视频源完整目录已删除", platform_label)
                                 }
                                 Err(error) => {
-                                    error!(platform = platform_label, path = %base.display(), %error, "删除外部平台视频源完整目录失败")
+                                    error!(platform = platform_label, path = %base.display(), %error, "删除{}视频源完整目录失败", platform_label)
                                 }
                             }
                         }
                     }
                 } else {
-                    info!(platform = platform_label, path = %base.display(), "外部平台视频源本地目录不存在，无需清理");
+                    info!(platform = platform_label, path = %base.display(), "{}视频源本地目录不存在，无需清理", platform_label);
                 }
                 return;
             }
@@ -7093,10 +7093,10 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
                     if parent.is_dir() {
                         match std::fs::remove_dir_all(parent) {
                             Ok(()) => {
-                                info!(platform = platform_label, path = %parent.display(), "外部平台视频完整目录已删除")
+                                info!(platform = platform_label, path = %parent.display(), "{}视频完整目录已删除", platform_label)
                             }
                             Err(error) => {
-                                warn!(platform = platform_label, path = %parent.display(), %error, "删除外部平台视频完整目录失败")
+                                warn!(platform = platform_label, path = %parent.display(), %error, "删除{}视频完整目录失败", platform_label)
                             }
                         }
                     }
@@ -7126,16 +7126,16 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
                     };
                     match result {
                         Ok(()) => {
-                            info!(platform = platform_label, path = %path.display(), "外部平台已记录媒体或附属文件已删除")
+                            info!(platform = platform_label, path = %path.display(), "{}已记录媒体或附属文件已删除", platform_label)
                         }
                         Err(error) => {
-                            warn!(platform = platform_label, path = %path.display(), %error, "删除外部平台已记录媒体或附属文件失败")
+                            warn!(platform = platform_label, path = %path.display(), %error, "删除{}已记录媒体或附属文件失败", platform_label)
                         }
                     }
                 }
             }
 
-            cleanup_empty_dir_if_empty(&base_path, "外部平台视频源基础目录");
+            cleanup_empty_dir_if_empty(&base_path, &format!("{}视频源基础目录", platform_label));
             info!(platform = platform_label, "{} 本地文件清理完成", log_name);
             return;
         }

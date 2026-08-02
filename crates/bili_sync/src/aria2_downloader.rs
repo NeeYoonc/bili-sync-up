@@ -1014,7 +1014,7 @@ impl Aria2Downloader {
 
     /// 使用aria2下载文件，支持多个URL备选和多进程
     pub async fn fetch_with_aria2_fallback(&self, urls: &[&str], path: &Path) -> Result<()> {
-        self.fetch_with_aria2_fallback_and_optional_referer(urls, path, None)
+        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, None, None)
             .await
     }
 
@@ -1024,15 +1024,30 @@ impl Aria2Downloader {
         path: &Path,
         referer: &str,
     ) -> Result<()> {
-        self.fetch_with_aria2_fallback_and_optional_referer(urls, path, Some(referer))
+        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, Some(referer), None)
             .await
     }
 
-    async fn fetch_with_aria2_fallback_and_optional_referer(
+    pub async fn fetch_with_aria2_fallback_with_referer_and_cookie(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: &str,
+        cookie: &str,
+    ) -> Result<()> {
+        if cookie.trim().is_empty() {
+            return self.fetch_with_aria2_fallback_with_referer(urls, path, referer).await;
+        }
+        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, Some(referer), Some(cookie))
+            .await
+    }
+
+    async fn fetch_with_aria2_fallback_and_optional_headers(
         &self,
         urls: &[&str],
         path: &Path,
         referer: Option<&str>,
+        cookie: Option<&str>,
     ) -> Result<()> {
         if urls.is_empty() {
             bail!("No URLs provided");
@@ -1085,7 +1100,7 @@ impl Aria2Downloader {
 
         // 构建aria2 RPC请求
         let gid = self
-            .add_download_task_to_instance(urls, dir, file_name, rpc_port, &rpc_secret, referer)
+            .add_download_task_to_instance(urls, dir, file_name, rpc_port, &rpc_secret, referer, cookie)
             .await?;
 
         // 等待下载完成
@@ -1119,6 +1134,7 @@ impl Aria2Downloader {
         rpc_port: u16,
         rpc_secret: &str,
         referer: Option<&str>,
+        cookie: Option<&str>,
     ) -> Result<String> {
         let url = format!("http://127.0.0.1:{}/jsonrpc", rpc_port);
 
@@ -1166,9 +1182,12 @@ impl Aria2Downloader {
             tracing::debug!("aria2下载链接{}: {}", i + 1, url);
         }
 
-        let aria2_headers = referer
+        let mut aria2_headers = referer
             .map(create_aria2_headers_with_referer)
             .unwrap_or_else(create_aria2_headers);
+        if let Some(cookie) = cookie {
+            aria2_headers.push(format!("Cookie: {cookie}"));
+        }
         let mut options = serde_json::json!({
             "dir": dir,
             "out": file_name,
