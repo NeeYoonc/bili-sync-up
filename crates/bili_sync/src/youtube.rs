@@ -637,9 +637,13 @@ async fn get_youtube_subscription_channels(
 }
 
 async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::Value> {
-    let cookie_header = youtube_cookie_header(path)?;
+    let cookie_jar = youtube_cookie_jar(path)?;
     let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+        // Netscape 文件同时包含 YouTube 和 Google 账号域 Cookie。必须让
+        // Cookie Jar 按域名分别发送：直接拼成一个 Cookie 请求头会把
+        // google.com 的同名 SID/PSID 错发给 youtube.com，导致有效会话也被判为退出。
+        .cookie_provider(cookie_jar)
+        .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(Duration::from_secs(30))
         .build()?;
     let response = client
@@ -649,21 +653,13 @@ async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::V
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
         )
         .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
-        .header(reqwest::header::COOKIE, cookie_header)
         .send()
         .await
         .context("访问 YouTube 已订阅频道页面失败")?;
 
-    if response.status().is_redirection() {
-        let location = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        if location.contains("accounts.google.com") || location.contains("ServiceLogin") {
-            bail!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态");
-        }
-        bail!("YouTube 已订阅频道页面发生意外跳转：{location}");
+    let final_url = response.url().to_string();
+    if final_url.contains("accounts.google.com") || final_url.contains("ServiceLogin") {
+        bail!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态");
     }
     if !response.status().is_success() {
         bail!("YouTube 已订阅频道页面返回 HTTP {}", response.status());
@@ -677,32 +673,43 @@ async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::V
         .ok_or_else(|| anyhow!("YouTube 已订阅频道页面缺少频道数据，请重新传输登录状态后重试"))
 }
 
-fn youtube_cookie_header(path: &Path) -> Result<String> {
+fn youtube_cookie_jar(path: &Path) -> Result<Arc<reqwest::cookie::Jar>> {
     let contents =
         std::fs::read_to_string(path).with_context(|| format!("读取 YouTube Cookie 失败：{}", path.display()))?;
     let now = chrono::Utc::now().timestamp();
-    let cookies = contents
-        .lines()
-        .filter_map(|raw_line| {
-            let line = raw_line.strip_prefix("#HttpOnly_").unwrap_or(raw_line);
-            if line.starts_with('#') || line.trim().is_empty() {
-                return None;
-            }
-            let columns = line.split('\t').collect::<Vec<_>>();
-            if columns.len() < 7 || !is_youtube_auth_cookie_domain(columns[0]) {
-                return None;
-            }
-            let expires = columns[4].parse::<i64>().unwrap_or_default();
-            if expires != 0 && expires <= now {
-                return None;
-            }
-            Some(format!("{}={}", columns[5], columns[6]))
-        })
-        .collect::<Vec<_>>();
-    if cookies.is_empty() {
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    let mut cookie_count = 0usize;
+    for raw_line in contents.lines() {
+        let line = raw_line.strip_prefix("#HttpOnly_").unwrap_or(raw_line);
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let columns = line.split('\t').collect::<Vec<_>>();
+        if columns.len() < 7 || !is_youtube_auth_cookie_domain(columns[0]) {
+            continue;
+        }
+        let expires = columns[4].parse::<i64>().unwrap_or_default();
+        if expires != 0 && expires <= now {
+            continue;
+        }
+        let host = columns[0].trim().trim_start_matches('.');
+        let url = reqwest::Url::parse(&format!("https://{host}/"))
+            .with_context(|| format!("YouTube Cookie 域名无效：{}", columns[0]))?;
+        let path = if columns[2].starts_with('/') { columns[2] } else { "/" };
+        let mut cookie = format!("{}={}; Path={path}", columns[5], columns[6]);
+        if columns[1].eq_ignore_ascii_case("TRUE") || columns[0].starts_with('.') {
+            cookie.push_str(&format!("; Domain=.{}", host));
+        }
+        if columns[3].eq_ignore_ascii_case("TRUE") {
+            cookie.push_str("; Secure");
+        }
+        jar.add_cookie_str(&cookie, &url);
+        cookie_count += 1;
+    }
+    if cookie_count == 0 {
         bail!("尚未导入有效的 YouTube Cookie");
     }
-    Ok(cookies.join("; "))
+    Ok(jar)
 }
 
 fn youtube_page_is_logged_out(html: &str) -> bool {
@@ -717,6 +724,40 @@ fn is_youtube_auth_cookie_domain(domain: &str) -> bool {
         || domain.ends_with(".youtube.com")
         || domain == "google.com"
         || domain.ends_with(".google.com")
+}
+
+fn youtube_cookie_diagnostic(contents: &str) -> String {
+    let helper_version = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("# Bili Sync Login Helper "))
+        .unwrap_or("未知旧版");
+    let mut youtube_count = 0usize;
+    let mut google_count = 0usize;
+    let mut google_session = false;
+    for raw_line in contents.lines() {
+        let line = raw_line.strip_prefix("#HttpOnly_").unwrap_or(raw_line);
+        if line.starts_with('#') {
+            continue;
+        }
+        let columns = line.split('\t').collect::<Vec<_>>();
+        if columns.len() < 7 {
+            continue;
+        }
+        let domain = columns[0].trim().trim_start_matches('.').to_ascii_lowercase();
+        if domain == "youtube.com" || domain.ends_with(".youtube.com") {
+            youtube_count += 1;
+        } else if domain == "google.com" || domain.ends_with(".google.com") {
+            google_count += 1;
+            google_session |= matches!(
+                columns[5],
+                "SID" | "SAPISID" | "APISID" | "__Secure-1PSID" | "__Secure-3PSID"
+            );
+        }
+    }
+    format!(
+        "助手 {helper_version}，YouTube Cookie {youtube_count} 个，Google Cookie {google_count} 个，Google 会话 {}",
+        if google_session { "已捕获" } else { "未捕获" }
+    )
 }
 
 fn extract_youtube_initial_data(html: &str) -> Option<serde_json::Value> {
@@ -884,8 +925,9 @@ pub async fn import_youtube_cookie_file(
     if let Err(error) = validate_youtube_login_cookie(&temporary).await {
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(ApiError::bad_request(format!(
-            "YouTube cookies.txt 验证失败：{}",
-            error
+            "YouTube cookies.txt 验证失败：{}（{}）",
+            error,
+            youtube_cookie_diagnostic(&request.cookies)
         )));
     }
     replace_cookie_file(&temporary, &path).await?;
@@ -5029,8 +5071,9 @@ mod tests {
     use super::{
         canonical_channel_url, checksum_for_release_asset, collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
-        normalize_source_type, parse_youtube_live_chat, resolve_source_url, youtube_page_is_logged_out,
-        youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for, ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
+        normalize_source_type, parse_youtube_live_chat, resolve_source_url, youtube_cookie_jar,
+        youtube_page_is_logged_out, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
+        ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -5084,6 +5127,40 @@ mod tests {
         let youtube_session = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tvalue\n";
         assert!(is_netscape_youtube_cookie_file(google_only));
         assert!(is_netscape_youtube_cookie_file(youtube_session));
+    }
+
+    #[test]
+    fn login_cookie_jar_keeps_youtube_and_google_domains_separate() {
+        use reqwest::cookie::CookieStore;
+
+        let path = std::env::temp_dir().join(format!("bili-sync-youtube-cookie-{}.txt", std::process::id()));
+        std::fs::write(
+            &path,
+            concat!(
+                "# Netscape HTTP Cookie File\n",
+                ".youtube.com\tTRUE\t/\tTRUE\t0\tYT_SESSION\tyoutube-value\n",
+                ".google.com\tTRUE\t/\tTRUE\t0\tGOOGLE_SESSION\tgoogle-value\n"
+            ),
+        )
+        .unwrap();
+        let jar = youtube_cookie_jar(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+        let youtube = jar
+            .cookies(&reqwest::Url::parse("https://www.youtube.com/feed/channels").unwrap())
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let google = jar
+            .cookies(&reqwest::Url::parse("https://accounts.google.com/ServiceLogin").unwrap())
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(youtube.contains("YT_SESSION=youtube-value"));
+        assert!(!youtube.contains("GOOGLE_SESSION"));
+        assert!(google.contains("GOOGLE_SESSION=google-value"));
+        assert!(!google.contains("YT_SESSION"));
     }
 
     #[test]

@@ -37,6 +37,7 @@ const exported = buildNetscapeCookies([
 	}
 ]);
 assert.match(exported, /^# Netscape HTTP Cookie File/m);
+assert.match(exported, /# Bili Sync Login Helper 1\.1\.3/);
 assert.match(
 	exported,
 	/\.youtube\.com\tTRUE\t\/\tTRUE\t2000000000\t__Secure-3PSID\tyoutube-session/
