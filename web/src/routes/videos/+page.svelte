@@ -16,6 +16,12 @@
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import FilterIcon from '@lucide/svelte/icons/filter';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
+	import ActivityIcon from '@lucide/svelte/icons/activity';
+	import UserIcon from '@lucide/svelte/icons/user';
+	import ListTreeIcon from '@lucide/svelte/icons/list-tree';
+	import HeartIcon from '@lucide/svelte/icons/heart';
+	import HistoryIcon from '@lucide/svelte/icons/history';
+	import ListVideoIcon from '@lucide/svelte/icons/list-video';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import { toast } from 'svelte-sonner';
@@ -60,6 +66,23 @@
 	let liveUpdateStatus: 'idle' | 'connecting' | 'connected' | 'error' = 'idle';
 	let pendingInsertedCount = 0;
 	let platformTab: 'bilibili' | 'youtube' | 'douyin' = 'bilibili';
+	const EXTERNAL_SOURCE_SECTIONS = {
+		youtube: [
+			{ sourceType: 'subscriptions', title: '订阅动态', icon: ActivityIcon },
+			{ sourceType: 'channel', title: '频道投稿', icon: UserIcon },
+			{ sourceType: 'playlist', title: '播放列表 / 收藏', icon: ListTreeIcon },
+			{ sourceType: 'liked', title: '喜欢的视频', icon: HeartIcon },
+			{ sourceType: 'watch_later', title: '稍后再看', icon: HistoryIcon }
+		],
+		douyin: [
+			{ sourceType: 'douyin', title: '作者投稿', icon: UserIcon },
+			{ sourceType: 'douyin_liked', title: '我的喜欢', icon: HeartIcon },
+			{ sourceType: 'douyin_collection', title: '收藏夹', icon: ListTreeIcon },
+			{ sourceType: 'douyin_watch_later', title: '稍后再看', icon: HistoryIcon },
+			{ sourceType: 'douyin_theater', title: '放映厅', icon: ListVideoIcon },
+			{ sourceType: 'douyin_series', title: '短剧', icon: ListTreeIcon }
+		]
+	} as const;
 
 	// 重置对话框
 	let resetAllDialogOpen = false;
@@ -1222,32 +1245,38 @@
 			<div class="space-y-3">
 				{#if platformTab === 'youtube' || platformTab === 'douyin'}
 					{@const externalSources = platformTab === 'douyin' ? douyinSources : youtubeSources}
-					<div class="space-y-2">
-						<div class="flex items-center gap-2">
-							<span class="text-sm font-medium">{platformTab === 'douyin' ? '抖音' : 'YouTube'}视频源</span>
-							<Badge variant="outline" class="text-xs">{externalSources.length}</Badge>
-						</div>
-						<div class="flex flex-wrap gap-1">
-							{#each externalSources as source (source.id)}
-								<Button
-									variant={selectedSourceType === platformTab &&
-									selectedSourceId === source.id.toString()
-										? 'default'
-										: 'outline'}
-									size="sm"
-									class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
-									onclick={() =>
-										handleSourceFilter(
-											platformTab as 'youtube' | 'douyin',
-											source.id.toString()
-										)}
-								>
-									{source.name}
-									{#if !source.enabled}<span class="ml-1 text-xs opacity-70">(禁用)</span>{/if}
-								</Button>
-							{/each}
-						</div>
-					</div>
+					{#each EXTERNAL_SOURCE_SECTIONS[platformTab] as section (section.sourceType)}
+						{@const sources = externalSources.filter((source) => source.source_type === section.sourceType)}
+						{#if sources.length > 0}
+							<div class="space-y-2">
+								<div class="flex items-center gap-2">
+									<section.icon class="text-muted-foreground h-4 w-4" />
+									<span class="text-sm font-medium">{section.title}</span>
+									<Badge variant="outline" class="text-xs">{sources.length}</Badge>
+								</div>
+								<div class="flex flex-wrap gap-1">
+									{#each sources as source (source.id)}
+										<Button
+											variant={selectedSourceType === platformTab &&
+											selectedSourceId === source.id.toString()
+												? 'default'
+												: 'outline'}
+											size="sm"
+											class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
+											onclick={() =>
+												handleSourceFilter(
+													platformTab as 'youtube' | 'douyin',
+													source.id.toString()
+												)}
+										>
+											{source.name}
+											{#if !source.enabled}<span class="ml-1 text-xs opacity-70">(禁用)</span>{/if}
+										</Button>
+									{/each}
+								</div>
+							</div>
+						{/if}
+					{/each}
 				{:else if videoSources}
 					{#each Object.entries(VIDEO_SOURCES) as [sourceKey, sourceConfig] (sourceKey)}
 						{@const sources = videoSources[sourceConfig.type as VideoSourceType]}

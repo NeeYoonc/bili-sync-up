@@ -284,16 +284,15 @@
 
 	function handleCoverImageError(event: Event) {
 		const target = event.currentTarget as HTMLImageElement;
-		if (
-			/^(youtube|douyin)-/.test(String(resourceId ?? '')) &&
-			video.cover &&
-			target.dataset.coverFallback !== 'remote'
-		) {
+		const isExternalVideo = /^(youtube|douyin)-/.test(String(resourceId ?? ''));
+		// 外部平台先试本地封面，本地不存在时只回源一次。旧逻辑会在
+		// local -> remote -> local 之间无限循环，导致未下载卡片闪烁并刷爆代理日志。
+		if (isExternalVideo && video.cover && !target.dataset.coverFallback) {
 			target.dataset.coverFallback = 'remote';
 			target.src = getProxiedImageUrl(video.cover);
 			return;
 		}
-		if (video.valid !== false && video.cover && target.dataset.coverFallback !== 'local') {
+		if (!isExternalVideo && video.valid !== false && video.cover && target.dataset.coverFallback !== 'local') {
 			target.dataset.coverFallback = 'local';
 			target.src = getLocalCoverUrl(video.id);
 			return;

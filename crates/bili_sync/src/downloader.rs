@@ -25,6 +25,8 @@ const MIN_SEGMENT_SIZE: u64 = 1024 * 1024;
 const GOOGLEVIDEO_SEGMENT_SIZE: u64 = 4 * 1024 * 1024;
 const GOOGLEVIDEO_MAX_CONNECTIONS: usize = 4;
 const RANGE_DOWNLOAD_ATTEMPTS: usize = 3;
+const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
+const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 static BAD_CDN_HOSTS: LazyLock<Mutex<HashMap<String, Instant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -188,7 +190,7 @@ impl Downloader {
         let parallel = &config.concurrent_limit.parallel_download;
 
         if parallel.enabled && parallel.threads > 1 {
-            match self.fetch_parallel(url, path, parallel.threads, referer).await {
+            match self.fetch_parallel(url, path, parallel.threads, referer, None).await {
                 Ok(()) => return Ok(()),
                 Err(e) if is_certificate_name_mismatch_error(&e) => return Err(e),
                 Err(e) => {
@@ -198,21 +200,27 @@ impl Downloader {
                             host,
                             path = %path.display(),
                             reason = %format!("{e:#}"),
-                            "资源无需或无法进行 Range 分片，改用原生单连接下载"
+                            "资源「{}」无需或无法进行 Range 分片，改用原生单连接下载",
+                            path.display()
                         );
                     } else {
                         debug!(
                             host,
                             path = %path.display(),
                             error = %format!("{e:#}"),
-                            "原生多线程下载失败，改用原生单连接下载"
+                            "资源「{}」原生多线程下载失败，改用原生单连接下载",
+                            path.display()
                         );
                     }
                 }
             }
         }
 
-        self.fetch_single(url, path, referer, None).await
+        let result = self.fetch_single(url, path, referer, None).await;
+        if result.is_err() {
+            let _ = fs::remove_file(path).await;
+        }
+        result
     }
 
     async fn fetch_single(&self, url: &str, path: &Path, referer: Option<&str>, cookie: Option<&str>) -> Result<()> {
@@ -242,25 +250,43 @@ impl Downloader {
         } else {
             request
         };
-        let resp = match request.send().await {
-            Ok(r) => match r.error_for_status() {
-                Ok(r) => r,
+        let resp = match tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send()).await {
+            Err(_) => return Err(anyhow!("建立下载响应超时（{} 秒）", FIRST_BYTE_TIMEOUT.as_secs())),
+            Ok(result) => match result {
+                Ok(r) => match r.error_for_status() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!("HTTP状态码错误: {:#}", e);
+                        return Err(e.into());
+                    }
+                },
                 Err(e) => {
-                    error!("HTTP状态码错误: {:#}", e);
+                    error!("HTTP请求失败: {:#}", e);
                     return Err(e.into());
                 }
             },
-            Err(e) => {
-                error!("HTTP请求失败: {:#}", e);
-                return Err(e.into());
-            }
         };
 
         let expected = resp.header_content_length().unwrap_or_default();
 
         let mut received = 0u64;
         let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
+        let mut first_chunk = true;
+        loop {
+            let wait = if first_chunk {
+                FIRST_BYTE_TIMEOUT
+            } else {
+                CHUNK_IDLE_TIMEOUT
+            };
+            let next = tokio::time::timeout(wait, stream.next()).await.map_err(|_| {
+                if first_chunk {
+                    anyhow!("等待下载首字节超时（{} 秒）", wait.as_secs())
+                } else {
+                    anyhow!("下载数据块空闲超时（{} 秒）", wait.as_secs())
+                }
+            })?;
+            let Some(chunk) = next else { break };
+            first_chunk = false;
             match chunk {
                 Ok(chunk) => {
                     file.write_all(&chunk).await?;
@@ -286,6 +312,7 @@ impl Downloader {
 
         file.flush().await?;
 
+        ensure!(received > 0, "下载完成但未收到任何数据");
         ensure!(
             received >= expected,
             "received {} bytes, expected {} bytes",
@@ -296,7 +323,14 @@ impl Downloader {
         Ok(())
     }
 
-    async fn fetch_parallel(&self, url: &str, path: &Path, threads: usize, referer: Option<&str>) -> Result<()> {
+    async fn fetch_parallel(
+        &self,
+        url: &str,
+        path: &Path,
+        threads: usize,
+        referer: Option<&str>,
+        cookie: Option<&str>,
+    ) -> Result<()> {
         let is_googlevideo = url_host(url).is_some_and(|host| host.ends_with(".googlevideo.com"));
         // 小型 GoogleVideo 单连接也可能在完整传输前直接关闭 TLS；从 1MiB 起走
         // Range 分片可让失败只影响一个小分片。
@@ -313,7 +347,7 @@ impl Downloader {
             }
         }
 
-        let (total_size, range_supported) = self.get_size_and_range_support(url, referer).await?;
+        let (total_size, range_supported) = self.get_size_and_range_support(url, referer, cookie).await?;
         ensure!(total_size > 0, "无法获取文件大小");
         ensure!(
             total_size >= min_parallel_size,
@@ -327,7 +361,8 @@ impl Downloader {
 
         let total_mb = total_size as f64 / 1024.0 / 1024.0;
         info!(
-            "原生多线程下载启用: 大小={:.2}MB, 分片数={}, 并发连接={}",
+            "原生多线程下载启用: 文件「{}」, 大小={:.2}MB, 分片数={}, 并发连接={}",
+            path.display(),
             total_mb,
             ranges.len(),
             concurrency
@@ -342,11 +377,13 @@ impl Downloader {
         let url_owned = url.to_string();
         let path_owned = path.to_path_buf();
         let referer_owned = referer.map(str::to_string);
+        let cookie_owned = cookie.map(str::to_string);
         let tasks = futures::stream::iter(ranges.into_iter().map(|(part_start, part_end)| {
             let client = self.client.clone();
             let url = url_owned.clone();
             let path = path_owned.clone();
             let referer = referer_owned.clone();
+            let cookie = cookie_owned.clone();
             async move {
                 download_range_to_file_with_retry(
                     client,
@@ -356,6 +393,7 @@ impl Downloader {
                     part_end,
                     RANGE_DOWNLOAD_ATTEMPTS,
                     referer.as_deref(),
+                    cookie.as_deref(),
                 )
                 .await
             }
@@ -377,7 +415,12 @@ impl Downloader {
         Ok(())
     }
 
-    async fn get_size_and_range_support(&self, url: &str, referer: Option<&str>) -> Result<(u64, bool)> {
+    async fn get_size_and_range_support(
+        &self,
+        url: &str,
+        referer: Option<&str>,
+        cookie: Option<&str>,
+    ) -> Result<(u64, bool)> {
         let mut total_size = None;
         let mut range_supported = false;
 
@@ -390,9 +433,17 @@ impl Downloader {
         } else {
             request
         };
-        let head_resp = request.send().await;
+        let request = if let Some(cookie) = cookie {
+            request.header(header::COOKIE, cookie)
+        } else {
+            request
+        };
+        let head_resp = tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send())
+            .await
+            .ok()
+            .and_then(Result::ok);
 
-        if let Ok(resp) = head_resp {
+        if let Some(resp) = head_resp {
             if let Ok(resp) = resp.error_for_status() {
                 total_size = resp.header_content_length().filter(|size| *size > 0);
 
@@ -406,7 +457,7 @@ impl Downloader {
         }
 
         if !range_supported || total_size.is_none() {
-            let (probe_supported, probe_size) = self.probe_range_support_and_size(url, referer).await?;
+            let (probe_supported, probe_size) = self.probe_range_support_and_size(url, referer, cookie).await?;
             range_supported = range_supported || probe_supported;
             if total_size.is_none() {
                 total_size = probe_size.filter(|size| *size > 0);
@@ -416,7 +467,12 @@ impl Downloader {
         Ok((total_size.unwrap_or(0), range_supported))
     }
 
-    async fn probe_range_support_and_size(&self, url: &str, referer: Option<&str>) -> Result<(bool, Option<u64>)> {
+    async fn probe_range_support_and_size(
+        &self,
+        url: &str,
+        referer: Option<&str>,
+        cookie: Option<&str>,
+    ) -> Result<(bool, Option<u64>)> {
         let request = self
             .client
             .media_request(Method::GET, url)
@@ -427,7 +483,15 @@ impl Downloader {
         } else {
             request
         };
-        let resp = request.send().await.context("Range探测请求失败")?;
+        let request = if let Some(cookie) = cookie {
+            request.header(header::COOKIE, cookie)
+        } else {
+            request
+        };
+        let resp = tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send())
+            .await
+            .map_err(|_| anyhow!("Range探测响应超时（{} 秒）", FIRST_BYTE_TIMEOUT.as_secs()))?
+            .context("Range探测请求失败")?;
 
         let status = resp.status();
         if status == StatusCode::PARTIAL_CONTENT {
@@ -457,8 +521,8 @@ impl Downloader {
             .await
     }
 
-    /// 下载需要网页会话 Cookie 的平台媒体。该路径使用单连接，确保每个请求
-    /// 都携带 yt-dlp/浏览器会话所需的 Cookie，避免 CDN 返回 403。
+    /// 下载需要网页会话 Cookie 的平台媒体。Cookie 会传入 HEAD、Range
+    /// 探测和每个分片，因此与项目其他媒体一样遵循全局原生多线程设置。
     pub async fn fetch_with_fallback_with_referer_and_cookie(
         &self,
         urls: &[&str],
@@ -472,12 +536,37 @@ impl Downloader {
         if urls.is_empty() {
             bail!("no urls provided");
         }
+        let config = crate::config::reload_config();
+        let parallel = &config.concurrent_limit.parallel_download;
         let mut last_error = None;
         for url in urls {
-            match self.fetch_single(url, path, Some(referer), Some(cookie)).await {
+            let result = if parallel.enabled && parallel.threads > 1 {
+                match self
+                    .fetch_parallel(url, path, parallel.threads, Some(referer), Some(cookie))
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(error) if is_certificate_name_mismatch_error(&error) => Err(error),
+                    Err(error) => {
+                        let host = url_host(url).unwrap_or_else(|| "unknown".to_string());
+                        debug!(
+                            host,
+                            path = %path.display(),
+                            reason = %format!("{error:#}"),
+                            "Cookie 媒体「{}」无法进行 Range 分片，改用原生单连接下载",
+                            path.display()
+                        );
+                        self.fetch_single(url, path, Some(referer), Some(cookie)).await
+                    }
+                }
+            } else {
+                self.fetch_single(url, path, Some(referer), Some(cookie)).await
+            };
+            match result {
                 Ok(()) => return Ok(()),
                 Err(error) => {
-                    warn!("下载失败: {error:#}");
+                    let _ = fs::remove_file(path).await;
+                    warn!("下载资源「{}」失败: {error:#}", path.display());
                     last_error = Some(error);
                 }
             }
@@ -519,13 +608,13 @@ impl Downloader {
                     if is_certificate_name_mismatch_error(&err) {
                         mark_bad_cdn_host(url, &err);
                     }
-                    warn!("下载失败: {:#}", err);
+                    warn!("下载资源「{}」失败: {:#}", path.display(), err);
                     last_error = Some(err);
                 }
             }
         }
 
-        warn!("所有URL尝试失败");
+        warn!("资源「{}」的所有 URL 尝试失败", path.display());
         match last_error {
             Some(err) => Err(err)
                 .context("所有URL尝试失败")
@@ -706,10 +795,11 @@ async fn download_range_to_file_with_retry(
     end: u64,
     attempts: usize,
     referer: Option<&str>,
+    cookie: Option<&str>,
 ) -> Result<u64> {
     let mut last_error = None;
     for attempt in 1..=attempts.max(1) {
-        match download_range_to_file(client.clone(), url, path, start, end, referer).await {
+        match download_range_to_file(client.clone(), url, path, start, end, referer, cookie).await {
             Ok(downloaded) => return Ok(downloaded),
             Err(error) if is_certificate_name_mismatch_error(&error) => return Err(error),
             Err(error) => {
@@ -739,6 +829,7 @@ async fn download_range_to_file(
     start: u64,
     end: u64,
     referer: Option<&str>,
+    cookie: Option<&str>,
 ) -> Result<u64> {
     let expected = end.saturating_sub(start) + 1;
 
@@ -755,7 +846,15 @@ async fn download_range_to_file(
     } else {
         request
     };
-    let resp = request.send().await.context("Range下载请求失败")?;
+    let request = if let Some(cookie) = cookie {
+        request.header(header::COOKIE, cookie)
+    } else {
+        request
+    };
+    let resp = tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send())
+        .await
+        .map_err(|_| anyhow!("Range分片响应超时（{} 秒）", FIRST_BYTE_TIMEOUT.as_secs()))?
+        .context("Range下载请求失败")?;
 
     ensure!(
         resp.status() == StatusCode::PARTIAL_CONTENT,
@@ -767,7 +866,18 @@ async fn download_range_to_file(
 
     let mut received = 0u64;
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    let mut first_chunk = true;
+    loop {
+        let wait = if first_chunk {
+            FIRST_BYTE_TIMEOUT
+        } else {
+            CHUNK_IDLE_TIMEOUT
+        };
+        let next = tokio::time::timeout(wait, stream.next())
+            .await
+            .map_err(|_| anyhow!("Range 分片 bytes={start}-{end} 等待数据超时（{} 秒）", wait.as_secs()))?;
+        let Some(chunk) = next else { break };
+        first_chunk = false;
         match chunk {
             Ok(chunk) => {
                 file.write_all(&chunk).await?;

@@ -1313,6 +1313,18 @@ export interface DashBoardResponse {
 	total_youtube_sources: number;
 	enabled_douyin_sources: number;
 	total_douyin_sources: number;
+	enabled_douyin_authors: number;
+	total_douyin_authors: number;
+	enabled_douyin_liked: number;
+	total_douyin_liked: number;
+	enabled_douyin_collections: number;
+	total_douyin_collections: number;
+	enabled_douyin_watch_later: number;
+	total_douyin_watch_later: number;
+	enabled_douyin_theaters: number;
+	total_douyin_theaters: number;
+	enabled_douyin_series: number;
+	total_douyin_series: number;
 	enabled_youtube_subscriptions: number;
 	total_youtube_subscriptions: number;
 	enabled_youtube_channels: number;

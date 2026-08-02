@@ -2832,7 +2832,7 @@ pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_pa
         .collect();
     write_danmaku_ass(output_path, title, duration, elems).await?;
     let _ = remove_file_if_exists(&checked_path).await;
-    info!(aweme_id = %metadata.id, count, path = %ass_path.display(), "抖音弹幕 JSON 和 ASS 生成完成");
+    info!(aweme_id = %metadata.id, count, path = %ass_path.display(), "抖音视频「{}」弹幕 JSON 和 ASS 生成完成", title);
     Ok(())
 }
 

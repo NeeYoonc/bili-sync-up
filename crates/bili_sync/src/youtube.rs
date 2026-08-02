@@ -2020,7 +2020,20 @@ pub async fn process_scheduled_sources(
             return Ok(());
         }
         if let Err(error) = scan_source(db, source).await {
-            warn!(source_id = source.id, error = %error, "扫描{}视频源失败", source_platform_label(source));
+            warn!(source_id = source.id, error = %error, "扫描{}视频源「{}」失败", source_platform_label(source), source.name);
+        }
+        let delay = crate::config::reload_config()
+            .submission_risk_control
+            .source_delay_seconds;
+        if delay > 0 && source.id != sources.last().map(|item| item.id).unwrap_or(source.id) {
+            debug!(
+                source_id = source.id,
+                delay_seconds = delay,
+                "{}视频源「{}」扫描完成，按全局源间风控延迟等待",
+                source_platform_label(source),
+                source.name
+            );
+            tokio::time::sleep(Duration::from_secs(delay)).await;
         }
     }
     if TASK_CONTROLLER.is_paused() {
@@ -2213,8 +2226,10 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
             platform = source_platform_label(&source),
             source_id = source.id,
             added,
-            "{}视频源发现新视频",
-            source_platform_label(&source)
+            "{}视频源「{}」发现 {} 个新视频",
+            source_platform_label(&source),
+            source.name,
+            added
         );
         notify_videos_changed();
         notify_queue_status_changed();
@@ -2561,6 +2576,15 @@ async fn download_video(
     }
     let platform_label = source_platform_label(&source);
     loop {
+        info!(
+            platform = platform_label,
+            source_id = source.id,
+            youtube_id = %video.youtube_id,
+            "{}视频源「{}」开始下载视频「{}」",
+            platform_label,
+            source.name,
+            video.title
+        );
         let mut downloading: youtube_video::ActiveModel = video.clone().into();
         downloading.download_status = Set("downloading".to_string());
         downloading.updated_at = Set(now_standard_string());
@@ -2575,6 +2599,7 @@ async fn download_video(
         active.updated_at = Set(now_standard_string());
         match result {
             Ok(mut downloaded) => {
+                let downloaded_title = downloaded.title.clone();
                 if source.ai_rename && crate::config::reload_config().ai_rename.enabled {
                     match ai_rename_external_file(&source, &video, &downloaded, None, None).await {
                         Ok(path) => downloaded.output_path = path,
@@ -2610,8 +2635,10 @@ async fn download_video(
                     source_id = source.id,
                     youtube_id = %video.youtube_id,
                     path = %downloaded.output_path.display(),
-                    "{}视频下载完成",
-                    platform_label
+                    "{}视频源「{}」视频「{}」下载完成",
+                    platform_label,
+                    source.name,
+                    downloaded_title
                 );
                 active.update(db).await?;
                 notify_videos_changed();
@@ -2632,8 +2659,10 @@ async fn download_video(
                     retry_count,
                     max_retries = MAX_DOWNLOAD_RETRIES,
                     error = %error,
-                    "{}视频下载失败，真实错误已持久化",
-                    platform_label
+                    "{}视频源「{}」视频「{}」下载失败，真实错误已持久化",
+                    platform_label,
+                    source.name,
+                    video.title
                 );
                 notify_videos_changed();
                 notify_queue_status_changed();
@@ -2648,8 +2677,10 @@ async fn download_video(
                     youtube_id = %video.youtube_id,
                     retry_count,
                     delay_seconds = retry_delay.as_secs(),
-                    "等待后刷新{}直链并重试",
-                    platform_label
+                    "{}视频源「{}」视频「{}」等待后刷新直链并重试",
+                    platform_label,
+                    source.name,
+                    video.title
                 );
                 tokio::time::sleep(retry_delay).await;
                 if TASK_CONTROLLER.is_paused() {
@@ -2995,9 +3026,18 @@ async fn download_youtube_media(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| source.name.clone());
     let output_path = youtube_output_path(source, video, &metadata, &title, &uploader)?;
+    info!(
+        platform,
+        source_id = source.id,
+        youtube_id = %video.youtube_id,
+        "{}视频源「{}」正在处理视频「{}」",
+        platform,
+        source.name,
+        title
+    );
     let media_exists = is_reusable_media_file(&output_path).await;
     if media_exists {
-        info!(path = %output_path.display(), "{}目标文件已存在，复用现有文件", platform);
+        info!(path = %output_path.display(), "{}视频源「{}」视频「{}」目标文件已存在，复用现有文件", platform, source.name, title);
     } else {
         // 上次 ffmpeg 被中断时可能留下非零但不可播放的最终文件，不能仅凭文件
         // 大小就把任务标记为完成。
@@ -3018,7 +3058,7 @@ async fn download_youtube_media(
         .unwrap_or_else(|| crate::config::reload_config().filter_option);
     let selected = if metadata.images.is_empty() {
         let selected = select_youtube_streams(&metadata.formats, &filter_option, source.audio_only, platform)?;
-        log_selected_youtube_streams(&selected, &filter_option, platform);
+        log_selected_youtube_streams(&selected, &filter_option, source, &title);
         Some(selected)
     } else {
         None
@@ -3459,7 +3499,13 @@ fn youtube_audio_max_bitrate(quality: AudioQuality) -> i32 {
     }
 }
 
-fn log_selected_youtube_streams(selected: &SelectedStreams, filter: &FilterOption, platform: &str) {
+fn log_selected_youtube_streams(
+    selected: &SelectedStreams,
+    filter: &FilterOption,
+    source: &youtube_source::Model,
+    title: &str,
+) {
+    let platform = source_platform_label(source);
     let describe = |format: &ExternalMediaFormat| {
         format!(
             "id={} {}x{} fps={} vcodec={} acodec={} tbr={} vbr={} abr={}",
@@ -3484,8 +3530,10 @@ fn log_selected_youtube_streams(selected: &SelectedStreams, filter: &FilterOptio
         video = selected.video.as_ref().map(&describe),
         audio = selected.audio.as_ref().map(&describe),
         mixed = selected.mixed.as_ref().map(&describe),
-        "{}已按项目流过滤设置选择下载格式",
-        platform
+        "{}视频源「{}」视频「{}」已按项目流过滤设置选择下载格式",
+        platform,
+        source.name,
+        title
     );
 }
 
@@ -3551,22 +3599,22 @@ async fn ensure_youtube_sidecars(
     let platform = source_platform_label(source);
     let profile_url = metadata.channel_url.as_deref().or(metadata.uploader_url.as_deref());
     if let Err(error) = download_youtube_upper_face(downloader, uploader, profile_url, source).await {
-        warn!(platform, youtube_id = %metadata.id, error = %error, "{}媒体已下载，但 UP 头像子任务失败", platform);
+        warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但 UP 头像子任务失败", platform, source.name, title);
         warnings.push(format!("UP头像下载失败：{error:#}"));
     }
     if let Err(error) = download_youtube_cover(downloader, metadata, output_path, source).await {
-        warn!(platform, youtube_id = %metadata.id, error = %error, "{}媒体已下载，但封面子任务失败", platform);
+        warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但封面子任务失败", platform, source.name, title);
         warnings.push(format!("封面下载失败：{error:#}"));
     }
     if let Err(error) = generate_youtube_nfo(metadata, output_path, video_url, title, uploader, source).await {
-        warn!(platform, youtube_id = %metadata.id, error = %error, "{}媒体已下载，但 NFO 子任务失败", platform);
+        warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但 NFO 子任务失败", platform, source.name, title);
         warnings.push(format!("NFO 生成失败：{error:#}"));
     }
     if source.download_subtitle {
         if let Err(error) =
             download_youtube_subtitle(downloader, metadata, output_path, &source.ai_subtitle_language, source).await
         {
-            warn!(platform, youtube_id = %metadata.id, error = %error, "{}媒体已下载，但字幕子任务失败", platform);
+            warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但字幕子任务失败", platform, source.name, title);
             warnings.push(format!("字幕下载失败：{error:#}"));
         }
     }
@@ -3586,11 +3634,20 @@ async fn ensure_youtube_sidecars(
                 platform,
                 youtube_id = %metadata.id,
                 error = %error,
-                "{}媒体已下载，但{}子任务失败",
+                "{}视频源「{}」视频「{}」媒体已下载，但{}子任务失败",
                 platform,
+                source.name,
+                title,
                 task
             );
             warnings.push(format!("{task}下载失败：{error:#}"));
+        } else {
+            let task = if is_douyin_source(source) {
+                "弹幕"
+            } else {
+                "直播聊天"
+            };
+            info!(platform, youtube_id = %metadata.id, "{}视频源「{}」视频「{}」{} 子任务完成", platform, source.name, title, task);
         }
     }
     (!warnings.is_empty()).then(|| format!("媒体已完成；{}", warnings.join("；")))
@@ -3708,7 +3765,7 @@ async fn download_youtube_upper_face(
             return Err(error);
         }
         replace_file(&temporary, &face_path).await?;
-        info!(platform = source_platform_label(source), uploader, path = %face_path.display(), "{} UP头像下载完成", source_platform_label(source));
+        info!(platform = source_platform_label(source), uploader, path = %face_path.display(), "{}视频源「{}」 UP头像「{}」下载完成", source_platform_label(source), source.name, uploader);
     }
 
     if !person_nfo_exists {
@@ -3739,7 +3796,7 @@ async fn download_youtube_upper_face(
             return Err(error);
         }
         replace_file(&temporary, &person_nfo_path).await?;
-        info!(platform = source_platform_label(source), uploader, path = %person_nfo_path.display(), "{} UP主 person.nfo 生成完成", source_platform_label(source));
+        info!(platform = source_platform_label(source), uploader, path = %person_nfo_path.display(), "{}视频源「{}」 UP主「{}」 person.nfo 生成完成", source_platform_label(source), source.name, uploader);
     }
     Ok(())
 }
@@ -3822,7 +3879,7 @@ async fn download_youtube_cover(
             return Err(error);
         }
         replace_file(&temporary, &thumb_path).await?;
-        info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %thumb_path.display(), "{}视频封面下载完成", source_platform_label(source));
+        info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %thumb_path.display(), "{}视频源「{}」视频「{}」封面下载完成", source_platform_label(source), source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
     }
     let fanart_path = youtube_sidecar_path(output_path, "-fanart.jpg")?;
     if !tokio::fs::metadata(&fanart_path)
@@ -3832,7 +3889,7 @@ async fn download_youtube_cover(
         tokio::fs::copy(&thumb_path, &fanart_path)
             .await
             .with_context(|| format!("生成{platform} fanart 失败: {}", fanart_path.display()))?;
-        info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %fanart_path.display(), "{} fanart 生成完成", source_platform_label(source));
+        info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %fanart_path.display(), "{}视频源「{}」视频「{}」 fanart 生成完成", source_platform_label(source), source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
     }
     Ok(())
 }
@@ -3907,7 +3964,9 @@ async fn generate_youtube_nfo(
             temporary.display()
         )
     })?;
-    replace_file(&temporary, &nfo_path).await
+    replace_file(&temporary, &nfo_path).await?;
+    info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %nfo_path.display(), "{}视频源「{}」视频「{}」 NFO 生成完成", source_platform_label(source), source.name, title);
+    Ok(())
 }
 
 async fn download_youtube_subtitle(
@@ -3944,7 +4003,7 @@ async fn download_youtube_subtitle(
         tokio::fs::write(&checked_path, b"no matching subtitle\n")
             .await
             .with_context(|| format!("写入字幕检查标记失败: {}", checked_path.display()))?;
-        info!(youtube_id = %metadata.id, "{}视频没有匹配的字幕，跳过字幕子任务", platform);
+        info!(youtube_id = %metadata.id, "{}视频源「{}」视频「{}」没有匹配的字幕，跳过字幕子任务", platform, source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
         return Ok(());
     };
     let extension = subtitle.ext.as_deref().unwrap_or("vtt");
@@ -3957,6 +4016,7 @@ async fn download_youtube_subtitle(
         return Err(error);
     }
     let _ = remove_file_if_exists(&checked_path).await;
+    info!(platform, youtube_id = %metadata.id, path = %subtitle_path.display(), "{}视频源「{}」视频「{}」字幕下载完成", platform, source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
     Ok(())
 }
 
@@ -4145,7 +4205,7 @@ async fn download_youtube_live_chat(
         .is_ok_and(|metadata| metadata.len() > 0)
     {
         let count = convert_youtube_live_chat_to_ass(metadata, output_path, title).await?;
-        info!(youtube_id = %metadata.id, count, path = %live_chat_ass_path.display(), "YouTube 直播聊天 ASS 生成完成");
+        info!(youtube_id = %metadata.id, count, path = %live_chat_ass_path.display(), "YouTube 视频「{}」直播聊天 ASS 生成完成", title);
         return Ok(());
     }
     let live_chat = metadata

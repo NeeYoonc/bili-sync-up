@@ -7038,7 +7038,7 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
             output_paths,
         } => {
             if is_dangerous_path_for_deletion(&base_path) {
-                warn!(platform = platform_label, path = %base_path, "检测到危险路径，跳过{}视频源本地清理", platform_label);
+                warn!(platform = platform_label, path = %base_path, "检测到危险路径，跳过{} 本地清理", log_name);
                 return;
             }
 
@@ -7049,30 +7049,30 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
                     match get_directory_size(&base_path) {
                         Ok(size) => {
                             let size_mb = size as f64 / 1024.0 / 1024.0;
-                            info!(platform = platform_label, path = %base.display(), size_mb, "开始删除{}视频源完整目录", platform_label);
+                            info!(platform = platform_label, path = %base.display(), size_mb, "开始删除{} 完整目录", log_name);
                             match std::fs::remove_dir_all(&base) {
                                 Ok(()) => {
-                                    info!(platform = platform_label, path = %base.display(), "{}视频源完整目录已删除", platform_label)
+                                    info!(platform = platform_label, path = %base.display(), "{} 完整目录已删除", log_name)
                                 }
                                 Err(error) => {
-                                    error!(platform = platform_label, path = %base.display(), %error, "删除{}视频源完整目录失败", platform_label)
+                                    error!(platform = platform_label, path = %base.display(), %error, "删除{} 完整目录失败", log_name)
                                 }
                             }
                         }
                         Err(error) => {
-                            warn!(platform = platform_label, path = %base.display(), %error, "无法计算{}视频源目录大小，继续删除", platform_label);
+                            warn!(platform = platform_label, path = %base.display(), %error, "无法计算{} 目录大小，继续删除", log_name);
                             match std::fs::remove_dir_all(&base) {
                                 Ok(()) => {
-                                    info!(platform = platform_label, path = %base.display(), "{}视频源完整目录已删除", platform_label)
+                                    info!(platform = platform_label, path = %base.display(), "{} 完整目录已删除", log_name)
                                 }
                                 Err(error) => {
-                                    error!(platform = platform_label, path = %base.display(), %error, "删除{}视频源完整目录失败", platform_label)
+                                    error!(platform = platform_label, path = %base.display(), %error, "删除{} 完整目录失败", log_name)
                                 }
                             }
                         }
                     }
                 } else {
-                    info!(platform = platform_label, path = %base.display(), "{}视频源本地目录不存在，无需清理", platform_label);
+                    info!(platform = platform_label, path = %base.display(), "{} 本地目录不存在，无需清理", log_name);
                 }
                 return;
             }
@@ -7093,10 +7093,10 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
                     if parent.is_dir() {
                         match std::fs::remove_dir_all(parent) {
                             Ok(()) => {
-                                info!(platform = platform_label, path = %parent.display(), "{}视频完整目录已删除", platform_label)
+                                info!(platform = platform_label, path = %parent.display(), "{} 视频完整目录已删除", log_name)
                             }
                             Err(error) => {
-                                warn!(platform = platform_label, path = %parent.display(), %error, "删除{}视频完整目录失败", platform_label)
+                                warn!(platform = platform_label, path = %parent.display(), %error, "删除{} 视频完整目录失败", log_name)
                             }
                         }
                     }
@@ -7126,10 +7126,10 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
                     };
                     match result {
                         Ok(()) => {
-                            info!(platform = platform_label, path = %path.display(), "{}已记录媒体或附属文件已删除", platform_label)
+                            info!(platform = platform_label, path = %path.display(), "{} 已记录媒体或附属文件已删除", log_name)
                         }
                         Err(error) => {
-                            warn!(platform = platform_label, path = %path.display(), %error, "删除{}已记录媒体或附属文件失败", platform_label)
+                            warn!(platform = platform_label, path = %path.display(), %error, "删除{} 已记录媒体或附属文件失败", log_name)
                         }
                     }
                 }
@@ -7873,7 +7873,7 @@ pub async fn delete_video_source_internal(
                     );
                 }
                 cleanup_plan = Some(LocalSourceCleanupPlan::External {
-                    log_name: format!("{platform_label}视频源 {}", source.name),
+                    log_name: format!("{platform_label}视频源「{}」", source.name),
                     platform_label,
                     base_path: source.path.clone(),
                     flat_folder: source.flat_folder,
@@ -15910,9 +15910,19 @@ pub async fn proxy_image(
     ]
     .iter()
     .any(|domain| host_matches(domain));
-    if !is_bilibili_image && !is_youtube_image {
+    let is_douyin_image = [
+        "douyinpic.com",
+        "douyincdn.com",
+        "byteimg.com",
+        "pstatp.com",
+        "ibytedtos.com",
+        "bytecdn.cn",
+    ]
+    .iter()
+    .any(|domain| host_matches(domain));
+    if !is_bilibili_image && !is_youtube_image && !is_douyin_image {
         debug!("图片代理拒绝非白名单 URL: {}", summarize_image_url(&url));
-        return Err(anyhow!("只支持 B 站和 YouTube 图片 URL").into());
+        return Err(anyhow!("只支持 B 站、YouTube 和抖音图片 URL").into());
     }
 
     let now = Utc::now();
@@ -15961,6 +15971,11 @@ pub async fn proxy_image(
         image_headers.insert(
             reqwest::header::REFERER,
             reqwest::header::HeaderValue::from_static("https://www.youtube.com/"),
+        );
+    } else if is_douyin_image {
+        image_headers.insert(
+            reqwest::header::REFERER,
+            reqwest::header::HeaderValue::from_static("https://www.douyin.com/"),
         );
     }
     let request = client.get(parsed_url).headers(image_headers);
@@ -19766,8 +19781,20 @@ ORDER BY
     let (enabled_youtube_playlists, total_youtube_playlists) = youtube_type_count("playlist");
     let (enabled_youtube_liked, total_youtube_liked) = youtube_type_count("liked");
     let (enabled_youtube_watch_later, total_youtube_watch_later) = youtube_type_count("watch_later");
-    let (enabled_douyin_sources, total_douyin_sources) = youtube_type_count("douyin");
-    let youtube_only = youtube_sources.iter().filter(|source| source.source_type != "douyin");
+    let (enabled_douyin_authors, total_douyin_authors) = youtube_type_count("douyin");
+    let (enabled_douyin_liked, total_douyin_liked) = youtube_type_count("douyin_liked");
+    let (enabled_douyin_collections, total_douyin_collections) = youtube_type_count("douyin_collection");
+    let (enabled_douyin_watch_later, total_douyin_watch_later) = youtube_type_count("douyin_watch_later");
+    let (enabled_douyin_theaters, total_douyin_theaters) = youtube_type_count("douyin_theater");
+    let (enabled_douyin_series, total_douyin_series) = youtube_type_count("douyin_series");
+    let douyin_only = youtube_sources
+        .iter()
+        .filter(|source| source.source_type.starts_with("douyin"));
+    let total_douyin_sources = douyin_only.clone().count() as u64;
+    let enabled_douyin_sources = douyin_only.filter(|source| source.enabled).count() as u64;
+    let youtube_only = youtube_sources
+        .iter()
+        .filter(|source| !source.source_type.starts_with("douyin"));
     let total_youtube_sources = youtube_only.clone().count() as u64;
     let enabled_youtube_sources = youtube_only.filter(|source| source.enabled).count() as u64;
     let enabled_external_sources = enabled_youtube_sources + enabled_douyin_sources;
@@ -19819,6 +19846,18 @@ ORDER BY
         total_youtube_sources,
         enabled_douyin_sources,
         total_douyin_sources,
+        enabled_douyin_authors,
+        total_douyin_authors,
+        enabled_douyin_liked,
+        total_douyin_liked,
+        enabled_douyin_collections,
+        total_douyin_collections,
+        enabled_douyin_watch_later,
+        total_douyin_watch_later,
+        enabled_douyin_theaters,
+        total_douyin_theaters,
+        enabled_douyin_series,
+        total_douyin_series,
         enabled_youtube_subscriptions,
         total_youtube_subscriptions,
         enabled_youtube_channels,

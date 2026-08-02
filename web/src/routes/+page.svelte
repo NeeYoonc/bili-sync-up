@@ -612,18 +612,50 @@
 											</div>
 										</div>
 									{:else}
-										<div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+										<div class="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
 											<div class="flex items-center justify-between">
 												<div class="flex items-center gap-2">
 													<UserIcon class="text-muted-foreground h-4 w-4" />
 													<span class="text-sm">作者投稿</span>
 												</div>
 												<Badge variant="outline">
-													{dashboardData.enabled_douyin_sources} / {dashboardData.total_douyin_sources}
+													{dashboardData.enabled_douyin_authors} / {dashboardData.total_douyin_authors}
 												</Badge>
 											</div>
-											<div class="text-muted-foreground text-sm">
-												持续扫描作者新作品，沿用项目统一下载与媒体附属文件链路。
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<HeartIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">我的喜欢</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_liked} / {dashboardData.total_douyin_liked}</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<FolderIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">收藏夹</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_collections} / {dashboardData.total_douyin_collections}</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<ClockIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">稍后再看</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_watch_later} / {dashboardData.total_douyin_watch_later}</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<TvIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">放映厅</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_theaters} / {dashboardData.total_douyin_theaters}</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<ListVideoIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">短剧</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_series} / {dashboardData.total_douyin_series}</Badge>
 											</div>
 										</div>
 									{/if}

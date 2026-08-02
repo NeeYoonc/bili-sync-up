@@ -85,7 +85,9 @@
 	function getEmbeddedPlayerUrl() {
 		const bvid = videoData?.video.bvid;
 		if (!bvid) return null;
-		if (isDouyin) return null;
+		if (isDouyin) {
+			return `https://open.douyin.com/player/video?vid=${encodeURIComponent(bvid)}&autoplay=1`;
+		}
 		if (isYouTube) {
 			return `https://www.youtube.com/embed/${encodeURIComponent(bvid)}?autoplay=1`;
 		}
@@ -1043,12 +1045,13 @@
 											<ImageIcon class="mr-2 h-4 w-4" />
 											{imageUrls.length > 0 ? `查看图片（${imageUrls.length}）` : '图片尚未下载'}
 										</Button>
-									{:else if pageInfo.download_status[1] === 7}
+									{/if}
+									{#if pageInfo.download_status[1] === 7}
 										<Button
 											size="sm"
 											variant="default"
 											class="flex-1"
-											title="本地播放"
+											title="播放已下载视频"
 											onclick={() => {
 												currentPlayingPageIndex = index;
 												onlinePlayMode = false;
@@ -1057,10 +1060,10 @@
 											}}
 										>
 											<PlayIcon class="mr-2 h-4 w-4" />
-											本地播放
+											播放视频
 										</Button>
 									{/if}
-									{#if !isDouyin && !isImagePost}
+									{#if getEmbeddedPlayerUrl() && (!isImagePost || isExternal)}
 									<Button
 										size="sm"
 										variant="outline"
@@ -1074,7 +1077,7 @@
 										}}
 									>
 										<PlayIcon class="mr-2 h-4 w-4" />
-										{platformLabel}内嵌
+										在线播放
 									</Button>
 									{/if}
 								</div>
@@ -1101,7 +1104,7 @@
 									</span>
 								</div>
 								<div class="flex items-center gap-2">
-									{#if !isDouyin && !imageViewMode}
+									{#if getEmbeddedPlayerUrl() && !imageViewMode}
 										<Button size="sm" variant="ghost" onclick={togglePlayMode}>
 											{onlinePlayMode ? '切换到本地' : `切换到${platformLabel}内嵌`}
 										</Button>
