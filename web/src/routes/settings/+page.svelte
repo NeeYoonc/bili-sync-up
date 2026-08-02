@@ -3125,6 +3125,11 @@
 			添加视频源请前往“视频源管理 → YouTube 视频源 → 添加 YouTube 视频源”。
 		</div>
 	</div>
+	<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t px-6 pt-4'}>
+		<Button type="button" disabled={saving} class="w-full" onclick={saveConfig}>
+			{saving ? '保存中...' : '保存 YouTube 代理'}
+		</Button>
+	</SheetFooter>
 </ResponsiveSheet>
 
 <!-- 抖音登录状态设置抽屉 -->
@@ -3144,11 +3149,6 @@
 			导入后可搜索抖音作者、选择历史作品并持续扫描新作品。媒体仍使用项目现有统一下载器、画质设置、路径模板、封面与 NFO 链路。
 		</div>
 	</div>
-	<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t px-6 pt-4'}>
-		<Button type="button" disabled={saving} class="w-full" onclick={saveConfig}>
-			{saving ? '保存中...' : '保存 YouTube 代理'}
-		</Button>
-	</SheetFooter>
 </ResponsiveSheet>
 
 <!-- 风控配置抽屉 -->
