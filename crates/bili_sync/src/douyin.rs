@@ -1,8 +1,7 @@
 //! 抖音作者作品源。
 //!
-//! 作者枚举由抖音 Web API 完成；每条作品的媒体格式仍交给 yt-dlp
-//! 解析，文件传输、并发、路径模板、质量筛选、NFO 与状态管理继续复用
-//! `youtube.rs` 中已经接入项目统一下载器的外部媒体链路。
+//! 作者枚举、作品详情、视频/图文媒体解析、弹幕和抖音侧 Cookie 均由本模块处理；
+//! 实际文件传输仍复用项目的 `UnifiedDownloader`，不另建一套下载器。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -13,13 +12,18 @@ use axum::extract::{Json, Query};
 use rand::Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+use bili_sync_entity::youtube_source;
 
 use crate::api::response::{SubmissionVideoInfo, SubmissionVideosResponse};
 use crate::api::wrapper::{ApiError, ApiResponse};
+use crate::bilibili::{DanmakuElem, DanmakuWriter, FilterOption, PageInfo as BiliPageInfo, VideoQuality};
 use crate::config::CONFIG_DIR;
 use crate::douyin_sign;
+use crate::external_media::{ExternalMediaFormat, ExternalMediaMetadata};
+use crate::unified_downloader::UnifiedDownloader;
 use crate::youtube::{YouTubeLoginResponse, YouTubeSearchResponse, YouTubeSearchResult};
 
 const DOUYIN_POST_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/post/";
@@ -48,6 +52,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 #[derive(Debug, Deserialize)]
 pub struct DouyinCookieImportRequest {
     pub cookies: String,
+    #[serde(default)]
+    pub webid: Option<String>,
+    #[serde(default)]
+    pub verify_fp: Option<String>,
+    #[serde(default)]
+    pub ms_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,9 +152,44 @@ pub async fn import_douyin_cookie_file(
         .context("写入抖音 cookies.txt 失败")?;
     validate_cookie_file(&temporary).await?;
     replace_cookie_file(&temporary, &path).await?;
+    let mut imported_device_fields = 0usize;
+    if let Some(webid) = request
+        .webid
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| valid_webid(value))
+    {
+        persist_session_value(&CONFIG_DIR.join("douyin-webid.txt"), webid).await?;
+        imported_device_fields += 1;
+    }
+    if let Some(verify_fp) = request
+        .verify_fp
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| valid_verify_fp(value))
+    {
+        persist_session_value(&CONFIG_DIR.join("douyin-verify-fp.txt"), verify_fp).await?;
+        imported_device_fields += 1;
+    }
+    if let Some(ms_token) = request
+        .ms_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| valid_ms_token(value))
+    {
+        persist_session_value(&ms_token_path(), ms_token).await?;
+        imported_device_fields += 1;
+    }
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
-        message: "已导入抖音 cookies.txt；作者作品扫描和媒体解析将使用此状态".to_string(),
+        message: format!(
+            "已导入抖音 cookies.txt{}；作者作品扫描和媒体解析将使用此状态",
+            if imported_device_fields > 0 {
+                format!("及 {imported_device_fields} 项浏览器设备参数")
+            } else {
+                String::new()
+            }
+        ),
     }))
 }
 
@@ -1120,6 +1165,85 @@ pub(crate) async fn fetch_aweme_detail(aweme_id: &str) -> Result<serde_json::Val
         .ok_or_else(|| anyhow!("抖音作品详情为空，请重新导入电脑浏览器刚导出的抖音 Cookie"))
 }
 
+/// 放映厅和短剧的列表接口本身已经返回完整 aweme（包括视频码率和播放地址）。
+/// 这两类作品不应再强制经过普通 `aweme/detail`：后者会额外校验浏览器临时
+/// challenge Cookie，即使同一登录状态能够正常读取关注列表和剧集列表，也可能
+/// 对放映厅/短剧返回空详情。
+pub(crate) async fn fetch_aweme_detail_for_source(
+    source_type: &str,
+    source_url: &str,
+    aweme_id: &str,
+) -> Result<serde_json::Value> {
+    ensure_session()?;
+    let source_result = match source_type.trim().to_ascii_lowercase().as_str() {
+        "douyin_theater" => {
+            let album_id = numeric_id(source_url).context("无法从放映厅详情链接识别专辑 ID")?;
+            fetch_theater_aweme_detail(album_id, aweme_id).await
+        }
+        "douyin_series" => {
+            let series_id = numeric_id(source_url).context("无法从短剧链接识别短剧 ID")?;
+            fetch_series_aweme_detail(series_id, aweme_id).await
+        }
+        _ => return fetch_aweme_detail(aweme_id).await,
+    };
+
+    match source_result {
+        Ok(Some(detail)) => Ok(detail),
+        Ok(None) => fetch_aweme_detail(aweme_id)
+            .await
+            .with_context(|| format!("来源列表中未找到抖音作品 {aweme_id}，普通详情接口也不可用")),
+        Err(source_error) => fetch_aweme_detail(aweme_id)
+            .await
+            .with_context(|| format!("读取抖音来源列表中的作品详情失败：{source_error:#}")),
+    }
+}
+
+fn find_aweme_detail(response: &serde_json::Value, key: &str, aweme_id: &str) -> Option<serde_json::Value> {
+    response
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|item| text(item, &["aweme_id", "group_id"]).as_deref() == Some(aweme_id))
+        .cloned()
+}
+
+async fn fetch_theater_aweme_detail(album_id: &str, aweme_id: &str) -> Result<Option<serde_json::Value>> {
+    let mut pairs = common_query_pairs();
+    pairs.push(("album_ids", album_id.to_string()));
+    let response = signed_get(DOUYIN_THEATER_ITEMS_API, pairs).await?;
+    // 该接口成功响应没有 status_code，与普通 aweme 接口不同；是否成功以
+    // aweme_list 为准，保持和已经验证可用的放映厅扫描路径一致。
+    Ok(find_aweme_detail(&response, "aweme_list", aweme_id))
+}
+
+async fn fetch_series_aweme_detail(series_id: &str, aweme_id: &str) -> Result<Option<serde_json::Value>> {
+    let mut cursor = 0i64;
+    for _ in 0..1000 {
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("series_id", series_id.to_string()),
+            ("pull_type", "2".to_string()),
+            ("cursor", cursor.to_string()),
+            ("count", "50".to_string()),
+        ]);
+        let response = signed_get(DOUYIN_SERIES_ITEMS_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音短剧剧集详情")?;
+        if let Some(detail) = find_aweme_detail(&response, "aweme_list", aweme_id) {
+            return Ok(Some(detail));
+        }
+        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            return Ok(None);
+        }
+        let next = response.get("max_cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            return Ok(None);
+        }
+        cursor = next;
+    }
+    Ok(None)
+}
+
 /// 获取抖音点播作品的时间轴弹幕。Web 端按 32 秒窗口返回弹幕，因此这里
 /// 完整遍历视频时长并按 danmaku_id 去重，避免只保存首屏弹幕。
 pub(crate) async fn fetch_aweme_danmaku(aweme_id: &str, duration_seconds: i32) -> Result<Vec<DouyinDanmaku>> {
@@ -1306,7 +1430,7 @@ fn parse_post(item: &serde_json::Value) -> Option<DouyinPost> {
 }
 
 fn common_query_pairs() -> Vec<(&'static str, String)> {
-    let mut pairs = vec![
+    let pairs = vec![
         ("device_platform", "webapp".to_string()),
         ("aid", "6383".to_string()),
         ("channel", "channel_pc_web".to_string()),
@@ -1336,13 +1460,25 @@ fn common_query_pairs() -> Vec<(&'static str, String)> {
         ("effective_type", "4g".to_string()),
         ("round_trip_time", "50".to_string()),
     ];
-    if let Some(ms_token) = cookie_values().get("msToken").cloned() {
-        pairs.push(("msToken", ms_token));
-    }
     pairs
 }
 
-async fn signed_get(base_url: &str, pairs: Vec<(&str, String)>) -> Result<serde_json::Value> {
+async fn signed_get(base_url: &str, mut pairs: Vec<(&str, String)>) -> Result<serde_json::Value> {
+    // 抓包中的所有受保护 Web API 都会把同一浏览器会话的 webid、verifyFp/fp
+    // 和 msToken 一并纳入 a_bogus。关注列表对这些字段相对宽松，但作品详情、
+    // 放映厅和短剧接口会严格校验，不能因为登录 Cookie 可用就省略设备参数。
+    ensure_search_ms_token(false).await?;
+    let cookies = cookie_values();
+    pairs.push(("webid", stable_webid().await?));
+    if let Some(uifid) = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP")) {
+        pairs.push(("uifid", uifid.clone()));
+    }
+    let verify_fp = stable_verify_fp().await?;
+    pairs.push(("verifyFp", verify_fp.clone()));
+    pairs.push(("fp", verify_fp));
+    if let Some(ms_token) = cookies.get("msToken").cloned() {
+        pairs.push(("msToken", ms_token));
+    }
     let params = serde_urlencoded::to_string(&pairs)?;
     let signature = douyin_sign::generate(&params);
     let mut url = reqwest::Url::parse_with_params(base_url, &pairs)?;
@@ -1449,7 +1585,7 @@ async fn stable_webid() -> Result<String> {
     let path = CONFIG_DIR.join("douyin-webid.txt");
     if let Ok(value) = tokio::fs::read_to_string(&path).await {
         let value = value.trim();
-        if (15..=24).contains(&value.len()) && value.chars().all(|character| character.is_ascii_digit()) {
+        if valid_webid(value) {
             return Ok(value.to_string());
         }
     }
@@ -1459,6 +1595,10 @@ async fn stable_webid() -> Result<String> {
     tokio::fs::write(&temporary, webid.as_bytes()).await?;
     replace_cookie_file(&temporary, &path).await?;
     Ok(webid)
+}
+
+fn valid_webid(value: &str) -> bool {
+    (15..=24).contains(&value.len()) && value.chars().all(|character| character.is_ascii_digit())
 }
 
 fn valid_verify_fp(value: &str) -> bool {
@@ -1763,6 +1903,13 @@ async fn replace_cookie_file(temporary: &Path, target: &Path) -> Result<()> {
     }
 }
 
+async fn persist_session_value(path: &Path, value: &str) -> Result<()> {
+    tokio::fs::create_dir_all(&*CONFIG_DIR).await?;
+    let temporary = path.with_extension("txt.importing");
+    tokio::fs::write(&temporary, value.as_bytes()).await?;
+    replace_cookie_file(&temporary, path).await
+}
+
 fn image_url(value: Option<&serde_json::Value>) -> Option<String> {
     value
         .and_then(|value| value.get("url_list").and_then(serde_json::Value::as_array))
@@ -1770,6 +1917,480 @@ fn image_url(value: Option<&serde_json::Value>) -> Option<String> {
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .or_else(|| value.and_then(serde_json::Value::as_str).map(str::to_string))
+}
+
+/// 从抖音作品、短剧或放映厅链接中提取作品 ID。
+pub(crate) fn aweme_id(url: &str) -> Option<&str> {
+    let path = url.split(['?', '#']).next()?;
+    let id = path.trim_end_matches('/').rsplit('/').next()?;
+    (!id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit())).then_some(id)
+}
+
+/// 解析抖音媒体元数据。原生详情接口优先，yt-dlp 仅作为普通作品的兜底解析器。
+pub(crate) async fn extract_metadata(
+    aweme_id: &str,
+    source: Option<&youtube_source::Model>,
+) -> Result<ExternalMediaMetadata> {
+    match extract_metadata_native(aweme_id, source).await {
+        Ok(metadata) => Ok(metadata),
+        Err(native_error) => {
+            if native_error.to_string().contains("CENC 加密 DASH") {
+                return Err(native_error);
+            }
+            warn!(
+                target: "bili_sync_rs::douyin",
+                aweme_id,
+                error = %native_error,
+                "抖音原生详情接口失败，改用 yt-dlp 解析媒体直链"
+            );
+            let url = format!("https://www.douyin.com/video/{aweme_id}");
+            crate::youtube::extract_ytdlp_metadata(&url, "抖音")
+                .await
+                .with_context(|| format!("抖音原生详情接口失败：{native_error:#}；yt-dlp 回退也失败"))
+        }
+    }
+}
+
+async fn extract_metadata_native(
+    aweme_id: &str,
+    source: Option<&youtube_source::Model>,
+) -> Result<ExternalMediaMetadata> {
+    let detail = if let Some(source) = source.filter(|source| source.source_type.starts_with("douyin")) {
+        fetch_aweme_detail_for_source(&source.source_type, &source.url, aweme_id).await?
+    } else {
+        fetch_aweme_detail(aweme_id).await?
+    };
+    let images = detail
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|image| urls_from_value(Some(image)))
+        .filter(|urls| !urls.is_empty())
+        .collect::<Vec<_>>();
+    let video = detail.get("video");
+    let mut formats = video
+        .and_then(|video| video.get("bit_rate"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(native_format)
+        .collect::<Vec<_>>();
+    if formats.is_empty() && images.is_empty() {
+        let video = video.context("抖音作品详情既没有视频流也没有原图")?;
+        let width = json_i32(video.get("width"));
+        let height = json_i32(video.get("height"));
+        if let Some((url, fallback_urls)) = media_urls(video.get("play_addr")) {
+            formats.push(ExternalMediaFormat {
+                format_id: Some("douyin-default".to_string()),
+                url: Some(url),
+                protocol: Some("https".to_string()),
+                ext: Some("mp4".to_string()),
+                vcodec: Some(
+                    if video.get("is_h265").and_then(serde_json::Value::as_i64) == Some(1) {
+                        "h265"
+                    } else {
+                        "h264"
+                    }
+                    .to_string(),
+                ),
+                acodec: Some("aac".to_string()),
+                width,
+                height,
+                fps: None,
+                tbr: None,
+                vbr: None,
+                abr: Some(128.0),
+                dynamic_range: Some("SDR".to_string()),
+                fallback_urls,
+            });
+        }
+    }
+    if formats.is_empty() && images.is_empty() {
+        let protected_long_video = video.is_some_and(|video| {
+            let is_long_video = video
+                .get("is_long_video")
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .or_else(|| value.as_bool().map(|value| if value { 1 } else { 0 }))
+                })
+                .unwrap_or_default()
+                != 0;
+            is_long_video && video.get("video_model").is_some()
+        });
+        if protected_long_video {
+            bail!(
+                "该抖音放映厅长视频只返回 CENC 加密 DASH（不是 Cookie 缺少）；当前项目统一下载链路不能直接处理此类加密长视频"
+            );
+        }
+        let detail_keys = detail
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+            .unwrap_or_default();
+        let video_keys = video
+            .and_then(serde_json::Value::as_object)
+            .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+            .unwrap_or_default();
+        bail!("抖音作品详情没有可用的原生 MP4 地址（作品字段：{detail_keys}；视频字段：{video_keys}）");
+    }
+    let author = detail.get("author");
+    let uploader = author.and_then(|value| text(value, &["nickname", "unique_id"]));
+    let channel_id = author.and_then(|value| text(value, &["sec_uid", "uid"]));
+    let thumbnail = images.first().and_then(|urls| urls.first()).cloned().or_else(|| {
+        video.and_then(|video| {
+            image_url(
+                video
+                    .get("cover")
+                    .or_else(|| video.get("origin_cover"))
+                    .or_else(|| video.get("dynamic_cover")),
+            )
+        })
+    });
+    let music_urls = urls_from_value(detail.pointer("/music/play_url"));
+    let timestamp = detail.get("create_time").and_then(serde_json::Value::as_i64);
+    Ok(ExternalMediaMetadata {
+        id: detail
+            .get("aweme_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(aweme_id)
+            .to_string(),
+        title: text(&detail, &["desc"]),
+        uploader: uploader.clone(),
+        uploader_url: channel_id
+            .as_deref()
+            .map(|id| format!("https://www.douyin.com/user/{id}")),
+        channel: uploader,
+        channel_id: channel_id.clone(),
+        channel_url: channel_id.map(|id| format!("https://www.douyin.com/user/{id}")),
+        thumbnail,
+        description: text(&detail, &["desc"]),
+        language: Some("zh-CN".to_string()),
+        upload_date: timestamp
+            .and_then(|value| chrono::DateTime::from_timestamp(value, 0).map(|date| date.format("%Y%m%d").to_string())),
+        duration: if images.is_empty() {
+            video
+                .and_then(|video| video.get("duration"))
+                .and_then(serde_json::Value::as_f64)
+                .map(|value| value / 1000.0)
+        } else {
+            detail.pointer("/music/duration").and_then(serde_json::Value::as_f64)
+        },
+        formats,
+        subtitles: HashMap::new(),
+        automatic_captions: HashMap::new(),
+        images,
+        music_urls,
+    })
+}
+
+fn native_format(value: &serde_json::Value) -> Option<ExternalMediaFormat> {
+    let play_addr = value.get("play_addr")?;
+    let (url, fallback_urls) = media_urls(Some(play_addr))?;
+    let bitrate = value
+        .get("bit_rate")
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value / 1000.0);
+    let is_h265 = value.get("is_h265").and_then(serde_json::Value::as_i64) == Some(1)
+        || value.get("is_bytevc1").and_then(serde_json::Value::as_i64) == Some(1);
+    let dynamic_range = text(value, &["HDR_type", "HDR_bit"])
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "SDR".to_string());
+    Some(ExternalMediaFormat {
+        format_id: text(value, &["gear_name"]).or_else(|| text(play_addr, &["url_key", "uri"])),
+        url: Some(url),
+        protocol: Some("https".to_string()),
+        ext: text(value, &["format"]).or_else(|| Some("mp4".to_string())),
+        vcodec: Some(if is_h265 { "h265" } else { "h264" }.to_string()),
+        acodec: Some("aac".to_string()),
+        width: json_i32(play_addr.get("width")),
+        height: json_i32(play_addr.get("height")),
+        fps: value
+            .get("FPS")
+            .or_else(|| value.get("fps"))
+            .and_then(serde_json::Value::as_f64),
+        tbr: bitrate,
+        vbr: bitrate,
+        abr: Some(128.0),
+        dynamic_range: Some(dynamic_range),
+        fallback_urls,
+    })
+}
+
+fn media_urls(value: Option<&serde_json::Value>) -> Option<(String, Vec<String>)> {
+    let mut urls = value?
+        .get("url_list")?
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|url| url.starts_with("http"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let first = urls.first()?.clone();
+    urls.remove(0);
+    Some((first, urls))
+}
+
+fn urls_from_value(value: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    ["url_list", "download_url_list"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|url| url.starts_with("http"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// 下载抖音图文原图和配乐，并生成可被现有视频管理页播放的 MP4。
+pub(crate) async fn download_image_post(
+    downloader: &UnifiedDownloader,
+    metadata: &ExternalMediaMetadata,
+    output_path: &Path,
+    filter: &FilterOption,
+) -> Result<()> {
+    let parent = output_path.parent().context("抖音图文输出路径没有父目录")?;
+    let stem = output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .context("抖音图文输出文件名无效")?;
+    let image_dir = parent.join(format!("{stem}-images"));
+    tokio::fs::create_dir_all(&image_dir).await?;
+    let mut image_paths = Vec::with_capacity(metadata.images.len());
+    for (index, urls) in metadata.images.iter().enumerate() {
+        let path = image_dir.join(format!("{:02}.jpg", index + 1));
+        if !tokio::fs::metadata(&path)
+            .await
+            .is_ok_and(|metadata| metadata.len() >= 1024)
+        {
+            let temporary = image_dir.join(format!("{:02}.download", index + 1));
+            let url_refs = urls.iter().map(String::as_str).collect::<Vec<_>>();
+            if let Err(error) = fetch_media(downloader, &url_refs, &temporary)
+                .await
+                .with_context(|| format!("使用项目统一下载器下载抖音第 {} 张原图失败", index + 1))
+            {
+                let _ = remove_file_if_exists(&temporary).await;
+                return Err(error);
+            }
+            replace_file(&temporary, &path).await?;
+        }
+        image_paths.push(path);
+    }
+    if image_paths.is_empty() {
+        bail!("抖音图文作品没有可下载的原图");
+    }
+
+    let music_path = parent.join(format!("{stem}-music.mp3"));
+    let has_music = if metadata.music_urls.is_empty() {
+        false
+    } else {
+        if !tokio::fs::metadata(&music_path)
+            .await
+            .is_ok_and(|metadata| metadata.len() >= 1024)
+        {
+            let temporary = parent.join(format!("{stem}-music.download"));
+            let urls = metadata.music_urls.iter().map(String::as_str).collect::<Vec<_>>();
+            if let Err(error) = fetch_media(downloader, &urls, &temporary)
+                .await
+                .context("使用项目统一下载器下载抖音图文配乐失败")
+            {
+                let _ = remove_file_if_exists(&temporary).await;
+                return Err(error);
+            }
+            replace_file(&temporary, &music_path).await?;
+        }
+        true
+    };
+
+    let concat_path = parent.join(format!("{stem}-images.concat"));
+    let quote_path = |path: &Path| path.to_string_lossy().replace('\\', "/").replace('\'', "'\\''");
+    let seconds_per_image = 3u64;
+    let mut concat = String::new();
+    for path in &image_paths {
+        concat.push_str(&format!("file '{}'\nduration {seconds_per_image}\n", quote_path(path)));
+    }
+    concat.push_str(&format!("file '{}'\n", quote_path(image_paths.last().unwrap())));
+    tokio::fs::write(&concat_path, concat.as_bytes()).await?;
+
+    let max_short_edge = quality_height(filter.video_max_quality).clamp(360, 2160);
+    let width = max_short_edge - (max_short_edge % 2);
+    let height = ((i64::from(width) * 16 / 9) as i32).max(width) & !1;
+    let total_seconds = u64::try_from(image_paths.len())
+        .unwrap_or(1)
+        .saturating_mul(seconds_per_image)
+        .max(3);
+    let temporary = output_path.with_extension("slideshow.mp4");
+    let mut command = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"));
+    command
+        .args(["-y", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&concat_path);
+    if has_music {
+        command.args(["-stream_loop", "-1", "-i"]).arg(&music_path);
+    }
+    command
+        .args(["-vf", &format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps=30")])
+        .args(["-t", &total_seconds.to_string(), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+    if has_music {
+        command.args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0?",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+        ]);
+    } else {
+        command.arg("-an");
+    }
+    let result = command
+        .arg(&temporary)
+        .output()
+        .await
+        .context("启动 ffmpeg 生成抖音图文幻灯片失败")?;
+    let _ = remove_file_if_exists(&concat_path).await;
+    if !result.status.success() {
+        let _ = remove_file_if_exists(&temporary).await;
+        bail!("ffmpeg 生成抖音图文 MP4 失败：{}", process_error(&result));
+    }
+    replace_file(&temporary, output_path).await?;
+    info!(aweme_id = %metadata.id, images = image_paths.len(), path = %output_path.display(), "抖音图文原图、配乐和 MP4 幻灯片生成完成");
+    Ok(())
+}
+
+/// 下载抖音弹幕并写入 JSON/ASS；图文或无弹幕作品只写检查标记。
+pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_path: &Path, title: &str) -> Result<()> {
+    let ass_path = output_path.with_extension("ass");
+    let json_path = output_path.with_extension("danmaku.json");
+    let checked_path = output_path.with_extension("danmaku.checked");
+    if tokio::fs::metadata(&ass_path)
+        .await
+        .is_ok_and(|metadata| metadata.len() > 0)
+        || tokio::fs::metadata(&checked_path).await.is_ok()
+    {
+        return Ok(());
+    }
+    if !metadata.images.is_empty() {
+        tokio::fs::write(&checked_path, b"image post has no video danmaku\n").await?;
+        debug!(aweme_id = %metadata.id, "抖音图文作品没有视频弹幕，已记录检查结果");
+        return Ok(());
+    }
+    let duration = metadata.duration.map(|value| value.ceil() as i32).unwrap_or(1).max(1);
+    let danmaku = fetch_aweme_danmaku(&metadata.id, duration).await?;
+    if danmaku.is_empty() {
+        tokio::fs::write(&checked_path, b"no douyin danmaku\n")
+            .await
+            .with_context(|| format!("写入抖音弹幕检查标记失败: {}", checked_path.display()))?;
+        info!(aweme_id = %metadata.id, "抖音视频没有可下载的弹幕，已记录检查结果");
+        return Ok(());
+    }
+    let json_temporary = output_path.with_extension("danmaku.json.download");
+    tokio::fs::write(&json_temporary, serde_json::to_vec_pretty(&danmaku)?)
+        .await
+        .with_context(|| format!("写入抖音弹幕 JSON 失败: {}", json_temporary.display()))?;
+    replace_file(&json_temporary, &json_path).await?;
+    let count = danmaku.len();
+    let elems = danmaku
+        .into_iter()
+        .map(|item| DanmakuElem {
+            id: item.danmaku_id.parse().unwrap_or_default(),
+            progress: item.offset_time,
+            mode: 1,
+            fontsize: 25,
+            color: 0xFFFFFF,
+            mid_hash: item.user_id,
+            content: item.text,
+            ctime: 0,
+            weight: i32::try_from(item.digg_count).unwrap_or(i32::MAX),
+            action: String::new(),
+            pool: 0,
+            dmid_str: item.danmaku_id,
+            attr: 0,
+        })
+        .collect();
+    write_danmaku_ass(output_path, title, duration, elems).await?;
+    let _ = remove_file_if_exists(&checked_path).await;
+    info!(aweme_id = %metadata.id, count, path = %ass_path.display(), "抖音弹幕 JSON 和 ASS 生成完成");
+    Ok(())
+}
+
+async fn fetch_media(downloader: &UnifiedDownloader, urls: &[&str], path: &Path) -> Result<()> {
+    let cookie = cookie_header()?;
+    downloader
+        .fetch_with_fallback_with_referer_and_cookie(urls, path, "https://www.douyin.com/", &cookie)
+        .await
+}
+
+async fn write_danmaku_ass(
+    output_path: &Path,
+    title: &str,
+    duration_seconds: i32,
+    danmaku: Vec<DanmakuElem>,
+) -> Result<()> {
+    let ass_path = output_path.with_extension("ass");
+    let temporary = output_path.with_extension("ass.download");
+    let page = BiliPageInfo {
+        cid: 0,
+        page: 1,
+        name: title.to_string(),
+        duration: u32::try_from(duration_seconds.max(0)).unwrap_or_default(),
+        first_frame: None,
+        dimension: None,
+    };
+    let writer = DanmakuWriter::new(&page, danmaku.into_iter().map(Into::into).collect());
+    if let Err(error) = writer.write(temporary.clone()).await {
+        let _ = remove_file_if_exists(&temporary).await;
+        return Err(error).context("生成抖音 ASS 弹幕失败");
+    }
+    replace_file(&temporary, &ass_path).await
+}
+
+fn quality_height(quality: VideoQuality) -> i32 {
+    match quality {
+        VideoQuality::Quality360p => 360,
+        VideoQuality::Quality480p => 480,
+        VideoQuality::Quality720p => 720,
+        VideoQuality::Quality1080p | VideoQuality::Quality1080pPLUS | VideoQuality::Quality1080p60 => 1080,
+        VideoQuality::Quality4k | VideoQuality::QualityHdr | VideoQuality::QualityDolby => 2160,
+        VideoQuality::Quality8k => 4320,
+    }
+}
+
+fn json_i32(value: Option<&serde_json::Value>) -> Option<i32> {
+    value
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+}
+
+async fn replace_file(source: &Path, target: &Path) -> Result<()> {
+    if tokio::fs::try_exists(target).await? {
+        tokio::fs::remove_file(target).await?;
+    }
+    tokio::fs::rename(source, target)
+        .await
+        .with_context(|| format!("保存抖音下载文件失败: {}", target.display()))
+}
+
+async fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn process_error(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else {
+        stderr
+    }
 }
 
 fn text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -1817,6 +2438,20 @@ mod tests {
     }
 
     #[test]
+    fn finds_complete_aweme_in_source_list() {
+        let response = serde_json::json!({
+            "aweme_list": [
+                {"aweme_id": "100", "desc": "第一集"},
+                {"aweme_id": "200", "desc": "目标剧集", "video": {"bit_rate": []}}
+            ]
+        });
+        let detail = find_aweme_detail(&response, "aweme_list", "200").expect("应找到目标剧集");
+        assert_eq!(text(&detail, &["desc"]).as_deref(), Some("目标剧集"));
+        assert!(detail.get("video").is_some());
+        assert!(find_aweme_detail(&response, "aweme_list", "300").is_none());
+    }
+
+    #[test]
     fn parses_nested_user_search_results() {
         let response = serde_json::json!({
             "data": [{
@@ -1848,5 +2483,31 @@ mod tests {
         .unwrap();
         assert_eq!(item.offset_time, 447);
         assert_eq!(item.text, "欢迎回来");
+    }
+
+    #[test]
+    fn extracts_aweme_id_from_supported_links() {
+        assert_eq!(aweme_id("https://www.douyin.com/video/123456?from=web"), Some("123456"));
+        assert_eq!(aweme_id("https://www.douyin.com/note/987654/"), Some("987654"));
+        assert_eq!(aweme_id("https://www.douyin.com/video/not-an-id"), None);
+    }
+
+    #[test]
+    fn parses_native_douyin_media_format() {
+        let format = native_format(&serde_json::json!({
+            "gear_name": "normal_1080_0",
+            "bit_rate": 2500000,
+            "is_h265": 0,
+            "play_addr": {
+                "width": 1080,
+                "height": 1920,
+                "url_list": ["https://example.com/main.mp4", "https://example.com/fallback.mp4"]
+            }
+        }))
+        .expect("应解析出抖音原生媒体格式");
+        assert_eq!(format.height, Some(1920));
+        assert_eq!(format.vcodec.as_deref(), Some("h264"));
+        assert_eq!(format.url.as_deref(), Some("https://example.com/main.mp4"));
+        assert_eq!(format.fallback_urls, vec!["https://example.com/fallback.mp4"]);
     }
 }

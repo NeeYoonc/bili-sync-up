@@ -12,6 +12,7 @@ mod douyin;
 mod douyin_sign;
 mod downloader;
 mod error;
+mod external_media;
 mod hardware;
 mod http;
 mod ingest_log;

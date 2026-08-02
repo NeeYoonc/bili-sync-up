@@ -37,6 +37,7 @@ use crate::bilibili::{
     AudioQuality, DanmakuElem, DanmakuWriter, FilterOption, PageInfo as BiliPageInfo, VideoCodecs, VideoQuality,
 };
 use crate::config::CONFIG_DIR;
+use crate::external_media::{ExternalMediaFormat, ExternalMediaMetadata, ExternalSubtitle};
 use crate::task::TASK_CONTROLLER;
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::live_updates::{notify_queue_status_changed, notify_video_sources_changed, notify_videos_changed};
@@ -2428,7 +2429,7 @@ async fn backfill_completed_sidecars(db: &DatabaseConnection, downloader: &Unifi
             continue;
         }
 
-        match extract_youtube_metadata(&video.url).await {
+        match extract_youtube_metadata(&video.url, Some(source)).await {
             Ok(metadata) => {
                 let title = metadata.title.clone().unwrap_or_else(|| video.title.clone());
                 let uploader = metadata
@@ -2561,7 +2562,8 @@ async fn download_video(
             }
             Err(error) => {
                 let retry_count = video.retry_count.saturating_add(1);
-                let exhausted = retry_count >= MAX_DOWNLOAD_RETRIES;
+                let permanent_failure = error.to_string().contains("CENC 加密 DASH");
+                let exhausted = permanent_failure || retry_count >= MAX_DOWNLOAD_RETRIES;
                 active.retry_count = Set(retry_count);
                 active.download_status = Set(if exhausted { "failed" } else { "pending" }.to_string());
                 active.error_message = Set(Some(format!("{:#}", error)));
@@ -2601,32 +2603,6 @@ async fn download_video(
 }
 
 #[derive(Debug, Deserialize)]
-struct YtDlpMetadata {
-    id: String,
-    title: Option<String>,
-    uploader: Option<String>,
-    uploader_url: Option<String>,
-    channel: Option<String>,
-    channel_id: Option<String>,
-    channel_url: Option<String>,
-    thumbnail: Option<String>,
-    description: Option<String>,
-    language: Option<String>,
-    upload_date: Option<String>,
-    duration: Option<f64>,
-    #[serde(default)]
-    formats: Vec<YtDlpFormat>,
-    #[serde(default)]
-    subtitles: HashMap<String, Vec<YtDlpSubtitle>>,
-    #[serde(default)]
-    automatic_captions: HashMap<String, Vec<YtDlpSubtitle>>,
-    #[serde(default)]
-    douyin_images: Vec<Vec<String>>,
-    #[serde(default)]
-    douyin_music_urls: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct YtDlpSourceMetadata {
     id: Option<String>,
     channel_id: Option<String>,
@@ -2643,31 +2619,6 @@ struct YtDlpThumbnail {
     height: Option<i32>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct YtDlpFormat {
-    format_id: Option<String>,
-    url: Option<String>,
-    protocol: Option<String>,
-    ext: Option<String>,
-    vcodec: Option<String>,
-    acodec: Option<String>,
-    width: Option<i32>,
-    height: Option<i32>,
-    fps: Option<f64>,
-    tbr: Option<f64>,
-    vbr: Option<f64>,
-    abr: Option<f64>,
-    dynamic_range: Option<String>,
-    #[serde(default)]
-    fallback_urls: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct YtDlpSubtitle {
-    url: Option<String>,
-    ext: Option<String>,
-}
-
 struct DownloadedYouTubeMedia {
     output_path: PathBuf,
     title: String,
@@ -2680,9 +2631,9 @@ struct DownloadedYouTubeMedia {
 }
 
 struct SelectedStreams {
-    video: Option<YtDlpFormat>,
-    audio: Option<YtDlpFormat>,
-    mixed: Option<YtDlpFormat>,
+    video: Option<ExternalMediaFormat>,
+    audio: Option<ExternalMediaFormat>,
+    mixed: Option<ExternalMediaFormat>,
 }
 
 fn external_ai_file(
@@ -2977,7 +2928,7 @@ async fn download_youtube_media(
     video: &youtube_video::Model,
 ) -> Result<DownloadedYouTubeMedia> {
     let platform = source_platform_label(source);
-    let metadata = extract_youtube_metadata(&video.url).await?;
+    let metadata = extract_youtube_metadata(&video.url, Some(source)).await?;
     let title = metadata.title.clone().unwrap_or_else(|| video.title.clone());
     let uploader = metadata
         .uploader
@@ -3007,7 +2958,7 @@ async fn download_youtube_media(
         .transpose()
         .with_context(|| format!("{platform}视频源级流过滤设置无效"))?
         .unwrap_or_else(|| crate::config::reload_config().filter_option);
-    let selected = if metadata.douyin_images.is_empty() {
+    let selected = if metadata.images.is_empty() {
         let selected = select_youtube_streams(&metadata.formats, &filter_option, source.audio_only, platform)?;
         log_selected_youtube_streams(&selected, &filter_option, platform);
         Some(selected)
@@ -3016,8 +2967,8 @@ async fn download_youtube_media(
     };
     if media_exists {
         // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
-    } else if !metadata.douyin_images.is_empty() {
-        download_douyin_image_post(downloader, source, &metadata, &output_path, &filter_option).await?;
+    } else if !metadata.images.is_empty() {
+        crate::douyin::download_image_post(downloader, &metadata, &output_path, &filter_option).await?;
     } else if source.audio_only {
         let selected = selected.as_ref().context("图文作品不应进入音频流选择")?;
         if let Some(audio) = selected.audio.as_ref() {
@@ -3116,7 +3067,7 @@ async fn download_youtube_media(
         replace_file(&temporary, &output_path).await?;
     }
 
-    let warning_message = if source.audio_only && source.audio_only_m4a_only && metadata.douyin_images.is_empty() {
+    let warning_message = if source.audio_only && source.audio_only_m4a_only && metadata.images.is_empty() {
         None
     } else {
         ensure_youtube_sidecars(
@@ -3140,135 +3091,12 @@ async fn download_youtube_media(
         duration_seconds: metadata
             .duration
             .and_then(|value| i32::try_from(value.round() as i64).ok()),
-        is_image_post: !metadata.douyin_images.is_empty(),
+        is_image_post: !metadata.images.is_empty(),
         warning_message,
     })
 }
 
-async fn download_douyin_image_post(
-    downloader: &UnifiedDownloader,
-    source: &youtube_source::Model,
-    metadata: &YtDlpMetadata,
-    output_path: &Path,
-    filter: &FilterOption,
-) -> Result<()> {
-    let parent = output_path.parent().context("抖音图文输出路径没有父目录")?;
-    let stem = output_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .context("抖音图文输出文件名无效")?;
-    let image_dir = parent.join(format!("{stem}-images"));
-    tokio::fs::create_dir_all(&image_dir).await?;
-    let mut image_paths = Vec::with_capacity(metadata.douyin_images.len());
-    for (index, urls) in metadata.douyin_images.iter().enumerate() {
-        let path = image_dir.join(format!("{:02}.jpg", index + 1));
-        if !tokio::fs::metadata(&path)
-            .await
-            .is_ok_and(|metadata| metadata.len() >= 1024)
-        {
-            let temporary = image_dir.join(format!("{:02}.download", index + 1));
-            let url_refs = urls.iter().map(String::as_str).collect::<Vec<_>>();
-            if let Err(error) = fetch_platform_asset(downloader, source, &url_refs, &temporary)
-                .await
-                .with_context(|| format!("使用项目统一下载器下载抖音第 {} 张原图失败", index + 1))
-            {
-                let _ = remove_file_if_exists(&temporary).await;
-                return Err(error);
-            }
-            replace_file(&temporary, &path).await?;
-        }
-        image_paths.push(path);
-    }
-    if image_paths.is_empty() {
-        bail!("抖音图文作品没有可下载的原图");
-    }
-
-    let music_path = parent.join(format!("{stem}-music.mp3"));
-    let has_music = if metadata.douyin_music_urls.is_empty() {
-        false
-    } else {
-        if !tokio::fs::metadata(&music_path)
-            .await
-            .is_ok_and(|metadata| metadata.len() >= 1024)
-        {
-            let temporary = parent.join(format!("{stem}-music.download"));
-            let urls = metadata
-                .douyin_music_urls
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>();
-            if let Err(error) = fetch_platform_asset(downloader, source, &urls, &temporary)
-                .await
-                .context("使用项目统一下载器下载抖音图文配乐失败")
-            {
-                let _ = remove_file_if_exists(&temporary).await;
-                return Err(error);
-            }
-            replace_file(&temporary, &music_path).await?;
-        }
-        true
-    };
-
-    let concat_path = parent.join(format!("{stem}-images.concat"));
-    let quote_path = |path: &Path| path.to_string_lossy().replace('\\', "/").replace('\'', "'\\''");
-    let seconds_per_image = 3u64;
-    let mut concat = String::new();
-    for path in &image_paths {
-        concat.push_str(&format!("file '{}\nduration {seconds_per_image}\n", quote_path(path)));
-    }
-    // concat demuxer 要求最后一帧重复一次，否则最后一张的 duration 不生效。
-    concat.push_str(&format!("file '{}\n", quote_path(image_paths.last().unwrap())));
-    tokio::fs::write(&concat_path, concat.as_bytes()).await?;
-
-    let max_short_edge = youtube_quality_height(filter.video_max_quality).clamp(360, 2160);
-    let width = max_short_edge - (max_short_edge % 2);
-    let height = ((i64::from(width) * 16 / 9) as i32).max(width) & !1;
-    let total_seconds = u64::try_from(image_paths.len())
-        .unwrap_or(1)
-        .saturating_mul(seconds_per_image)
-        .max(3);
-    let temporary = output_path.with_extension("slideshow.mp4");
-    let mut command = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"));
-    command
-        .args(["-y", "-f", "concat", "-safe", "0", "-i"])
-        .arg(&concat_path);
-    if has_music {
-        command.args(["-stream_loop", "-1", "-i"]).arg(&music_path);
-    }
-    command
-        .args(["-vf", &format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps=30")])
-        .args(["-t", &total_seconds.to_string(), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
-    if has_music {
-        command.args([
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0?",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-shortest",
-        ]);
-    } else {
-        command.arg("-an");
-    }
-    let result = command
-        .arg(&temporary)
-        .output()
-        .await
-        .context("启动 ffmpeg 生成抖音图文幻灯片失败")?;
-    let _ = remove_file_if_exists(&concat_path).await;
-    if !result.status.success() {
-        let _ = remove_file_if_exists(&temporary).await;
-        bail!("ffmpeg 生成抖音图文 MP4 失败：{}", command_error(&result));
-    }
-    replace_file(&temporary, output_path).await?;
-    info!(youtube_id = %metadata.id, images = image_paths.len(), path = %output_path.display(), "抖音图文原图、配乐和 MP4 幻灯片生成完成");
-    Ok(())
-}
-
-fn format_urls<'a>(format: &'a YtDlpFormat, platform: &str) -> Result<Vec<&'a str>> {
+fn format_urls<'a>(format: &'a ExternalMediaFormat, platform: &str) -> Result<Vec<&'a str>> {
     let mut urls = Vec::with_capacity(1 + format.fallback_urls.len());
     if let Some(url) = format.url.as_deref().filter(|value| !value.is_empty()) {
         urls.push(url);
@@ -3324,14 +3152,15 @@ async fn is_reusable_media_file(path: &Path) -> bool {
         .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
-async fn extract_youtube_metadata(url: &str) -> Result<YtDlpMetadata> {
-    if let Some(aweme_id) = douyin_aweme_id(url) {
-        return extract_douyin_metadata(aweme_id).await;
+async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Model>) -> Result<ExternalMediaMetadata> {
+    if source.is_some_and(is_douyin_source) || url.contains("douyin.com") {
+        let aweme_id = crate::douyin::aweme_id(url).context("抖音作品链接缺少有效作品 ID")?;
+        return crate::douyin::extract_metadata(aweme_id, source).await;
     }
     extract_ytdlp_metadata(url, "YouTube").await
 }
 
-async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<YtDlpMetadata> {
+pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<ExternalMediaMetadata> {
     let mut command = Command::new(ytdlp_executable());
     command.args([
         "--dump-single-json",
@@ -3351,216 +3180,8 @@ async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<YtDlpMetada
     serde_json::from_slice(&output.stdout).with_context(|| format!("解析 yt-dlp {platform} 媒体元数据失败"))
 }
 
-fn douyin_aweme_id(url: &str) -> Option<&str> {
-    let path = url.split(['?', '#']).next()?;
-    let id = path.trim_end_matches('/').rsplit('/').next()?;
-    (!id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit())).then_some(id)
-}
-
-async fn extract_douyin_metadata(aweme_id: &str) -> Result<YtDlpMetadata> {
-    match extract_douyin_metadata_native(aweme_id).await {
-        Ok(metadata) => Ok(metadata),
-        Err(native_error) => {
-            warn!(
-                target: "bili_sync_rs::douyin",
-                aweme_id,
-                error = %native_error,
-                "抖音原生详情接口失败，改用 yt-dlp 解析媒体直链"
-            );
-            let url = format!("https://www.douyin.com/video/{aweme_id}");
-            extract_ytdlp_metadata(&url, "抖音")
-                .await
-                .with_context(|| format!("抖音原生详情接口失败：{native_error:#}；yt-dlp 回退也失败"))
-        }
-    }
-}
-
-async fn extract_douyin_metadata_native(aweme_id: &str) -> Result<YtDlpMetadata> {
-    let detail = crate::douyin::fetch_aweme_detail(aweme_id).await?;
-    let images = detail
-        .get("images")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|image| douyin_urls_from_value(Some(image)))
-        .filter(|urls| !urls.is_empty())
-        .collect::<Vec<_>>();
-    let video = detail.get("video");
-    let mut formats = video
-        .and_then(|video| video.get("bit_rate"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(douyin_native_format)
-        .collect::<Vec<_>>();
-    if formats.is_empty() && images.is_empty() {
-        let video = video.context("抖音作品详情既没有视频流也没有原图")?;
-        let width = json_i32(video.get("width"));
-        let height = json_i32(video.get("height"));
-        if let Some((url, fallback_urls)) = douyin_media_urls(video.get("play_addr")) {
-            formats.push(YtDlpFormat {
-                format_id: Some("douyin-default".to_string()),
-                url: Some(url),
-                protocol: Some("https".to_string()),
-                ext: Some("mp4".to_string()),
-                vcodec: Some(
-                    if video.get("is_h265").and_then(serde_json::Value::as_i64) == Some(1) {
-                        "h265"
-                    } else {
-                        "h264"
-                    }
-                    .to_string(),
-                ),
-                acodec: Some("aac".to_string()),
-                width,
-                height,
-                fps: None,
-                tbr: None,
-                vbr: None,
-                abr: Some(128.0),
-                dynamic_range: Some("SDR".to_string()),
-                fallback_urls,
-            });
-        }
-    }
-    if formats.is_empty() && images.is_empty() {
-        bail!("抖音作品详情没有可用的原生 MP4 地址");
-    }
-    let author = detail.get("author");
-    let uploader = author.and_then(|value| json_text(value, &["nickname", "unique_id"]));
-    let channel_id = author.and_then(|value| json_text(value, &["sec_uid", "uid"]));
-    let thumbnail = images.first().and_then(|urls| urls.first()).cloned().or_else(|| {
-        video.and_then(|video| {
-            douyin_image_url(
-                video
-                    .get("cover")
-                    .or_else(|| video.get("origin_cover"))
-                    .or_else(|| video.get("dynamic_cover")),
-            )
-        })
-    });
-    let music_urls = douyin_urls_from_value(detail.pointer("/music/play_url"));
-    let timestamp = detail.get("create_time").and_then(serde_json::Value::as_i64);
-    Ok(YtDlpMetadata {
-        id: detail
-            .get("aweme_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(aweme_id)
-            .to_string(),
-        title: json_text(&detail, &["desc"]),
-        uploader: uploader.clone(),
-        uploader_url: channel_id
-            .as_deref()
-            .map(|id| format!("https://www.douyin.com/user/{id}")),
-        channel: uploader,
-        channel_id: channel_id.clone(),
-        channel_url: channel_id.map(|id| format!("https://www.douyin.com/user/{id}")),
-        thumbnail,
-        description: json_text(&detail, &["desc"]),
-        language: Some("zh-CN".to_string()),
-        upload_date: timestamp
-            .and_then(|value| chrono::DateTime::from_timestamp(value, 0).map(|date| date.format("%Y%m%d").to_string())),
-        duration: if images.is_empty() {
-            video
-                .and_then(|video| video.get("duration"))
-                .and_then(serde_json::Value::as_f64)
-                .map(|value| value / 1000.0)
-        } else {
-            detail.pointer("/music/duration").and_then(serde_json::Value::as_f64)
-        },
-        formats,
-        subtitles: HashMap::new(),
-        automatic_captions: HashMap::new(),
-        douyin_images: images,
-        douyin_music_urls: music_urls,
-    })
-}
-
-fn douyin_native_format(value: &serde_json::Value) -> Option<YtDlpFormat> {
-    let play_addr = value.get("play_addr")?;
-    let (url, fallback_urls) = douyin_media_urls(Some(play_addr))?;
-    let bitrate = value
-        .get("bit_rate")
-        .and_then(serde_json::Value::as_f64)
-        .map(|value| value / 1000.0);
-    let is_h265 = value.get("is_h265").and_then(serde_json::Value::as_i64) == Some(1)
-        || value.get("is_bytevc1").and_then(serde_json::Value::as_i64) == Some(1);
-    let dynamic_range = json_text(value, &["HDR_type", "HDR_bit"])
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "SDR".to_string());
-    Some(YtDlpFormat {
-        format_id: json_text(value, &["gear_name"]).or_else(|| json_text(play_addr, &["url_key", "uri"])),
-        url: Some(url),
-        protocol: Some("https".to_string()),
-        ext: json_text(value, &["format"]).or_else(|| Some("mp4".to_string())),
-        vcodec: Some(if is_h265 { "h265" } else { "h264" }.to_string()),
-        acodec: Some("aac".to_string()),
-        width: json_i32(play_addr.get("width")),
-        height: json_i32(play_addr.get("height")),
-        fps: value
-            .get("FPS")
-            .or_else(|| value.get("fps"))
-            .and_then(serde_json::Value::as_f64),
-        tbr: bitrate,
-        vbr: bitrate,
-        // 抖音详情未单列 AAC 码率；混合流通常为 128K 左右。
-        abr: Some(128.0),
-        dynamic_range: Some(dynamic_range),
-        fallback_urls,
-    })
-}
-
-fn douyin_media_urls(value: Option<&serde_json::Value>) -> Option<(String, Vec<String>)> {
-    let mut urls = value?
-        .get("url_list")?
-        .as_array()?
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .filter(|url| url.starts_with("http"))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let first = urls.first()?.clone();
-    urls.remove(0);
-    Some((first, urls))
-}
-
-fn douyin_image_url(value: Option<&serde_json::Value>) -> Option<String> {
-    value
-        .and_then(|value| value.get("url_list"))
-        .and_then(serde_json::Value::as_array)
-        .and_then(|urls| urls.iter().find_map(serde_json::Value::as_str))
-        .map(str::to_string)
-}
-
-fn douyin_urls_from_value(value: Option<&serde_json::Value>) -> Vec<String> {
-    let Some(value) = value else {
-        return Vec::new();
-    };
-    ["url_list", "download_url_list"]
-        .into_iter()
-        .filter_map(|key| value.get(key).and_then(serde_json::Value::as_array))
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .filter(|url| url.starts_with("http"))
-        .map(str::to_string)
-        .collect()
-}
-
-fn json_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key))
-        .and_then(|value| value.as_str().map(str::to_string))
-        .filter(|value| !value.is_empty())
-}
-
-fn json_i32(value: Option<&serde_json::Value>) -> Option<i32> {
-    value
-        .and_then(serde_json::Value::as_i64)
-        .and_then(|value| i32::try_from(value).ok())
-}
-
 fn select_youtube_streams(
-    formats: &[YtDlpFormat],
+    formats: &[ExternalMediaFormat],
     filter: &FilterOption,
     audio_only: bool,
     platform: &str,
@@ -3670,7 +3291,7 @@ fn select_youtube_streams(
     Ok(SelectedStreams { video, audio, mixed })
 }
 
-fn format_quality_height(format: &YtDlpFormat) -> i32 {
+fn format_quality_height(format: &ExternalMediaFormat) -> i32 {
     match (format.width, format.height) {
         (Some(width), Some(height)) if width > 0 && height > 0 => width.min(height),
         (_, Some(height)) => height,
@@ -3679,7 +3300,7 @@ fn format_quality_height(format: &YtDlpFormat) -> i32 {
     }
 }
 
-fn youtube_video_allowed(format: &YtDlpFormat, filter: &FilterOption) -> bool {
+fn youtube_video_allowed(format: &ExternalMediaFormat, filter: &FilterOption) -> bool {
     let codec_allowed = youtube_codec(format.vcodec.as_deref()).is_some_and(|codec| filter.codecs.contains(&codec));
     if !codec_allowed {
         return false;
@@ -3694,7 +3315,7 @@ fn youtube_video_allowed(format: &YtDlpFormat, filter: &FilterOption) -> bool {
     true
 }
 
-fn youtube_audio_allowed(format: &YtDlpFormat, filter: &FilterOption) -> bool {
+fn youtube_audio_allowed(format: &ExternalMediaFormat, filter: &FilterOption) -> bool {
     let codec = format.acodec.as_deref().unwrap_or_default().to_ascii_lowercase();
     if filter.no_dolby_audio && (codec.contains("ac-3") || codec.contains("ec-3") || codec.contains("dolby")) {
         return false;
@@ -3702,7 +3323,7 @@ fn youtube_audio_allowed(format: &YtDlpFormat, filter: &FilterOption) -> bool {
     !filter.no_hires || youtube_audio_bitrate(format) <= 256
 }
 
-fn youtube_audio_bitrate(format: &YtDlpFormat) -> i32 {
+fn youtube_audio_bitrate(format: &ExternalMediaFormat) -> i32 {
     format.abr.or(format.tbr).unwrap_or_default().round() as i32
 }
 
@@ -3726,7 +3347,7 @@ fn youtube_audio_max_bitrate(quality: AudioQuality) -> i32 {
 }
 
 fn log_selected_youtube_streams(selected: &SelectedStreams, filter: &FilterOption, platform: &str) {
-    let describe = |format: &YtDlpFormat| {
+    let describe = |format: &ExternalMediaFormat| {
         format!(
             "id={} {}x{} fps={} vcodec={} acodec={} tbr={} vbr={} abr={}",
             format.format_id.as_deref().unwrap_or("-"),
@@ -3758,7 +3379,7 @@ fn log_selected_youtube_streams(selected: &SelectedStreams, filter: &FilterOptio
 fn youtube_output_path(
     source: &youtube_source::Model,
     video: &youtube_video::Model,
-    metadata: &YtDlpMetadata,
+    metadata: &ExternalMediaMetadata,
     title: &str,
     uploader: &str,
 ) -> Result<PathBuf> {
@@ -3791,7 +3412,7 @@ fn youtube_output_path(
     })?;
     // 图文作品必须生成可在现有视频管理页播放的 MP4，
     // 同时原图和配乐仍保留在同目录。
-    let extension = if source.audio_only && metadata.douyin_images.is_empty() {
+    let extension = if source.audio_only && metadata.images.is_empty() {
         "m4a"
     } else {
         "mp4"
@@ -3806,7 +3427,7 @@ fn youtube_output_path(
 
 async fn ensure_youtube_sidecars(
     downloader: &UnifiedDownloader,
-    metadata: &YtDlpMetadata,
+    metadata: &ExternalMediaMetadata,
     output_path: &Path,
     video_url: &str,
     title: &str,
@@ -3844,7 +3465,7 @@ async fn ensure_youtube_sidecars(
     }
     if source.download_danmaku {
         let result = if is_douyin_source(source) {
-            download_douyin_danmaku(metadata, output_path, title).await
+            crate::douyin::download_danmaku(metadata, output_path, title).await
         } else {
             download_youtube_live_chat(metadata, output_path, video_url, title).await
         };
@@ -4070,7 +3691,7 @@ fn youtube_sidecar_path(output_path: &Path, suffix: &str) -> Result<PathBuf> {
 
 async fn download_youtube_cover(
     downloader: &UnifiedDownloader,
-    metadata: &YtDlpMetadata,
+    metadata: &ExternalMediaMetadata,
     output_path: &Path,
     source: &youtube_source::Model,
 ) -> Result<()> {
@@ -4109,7 +3730,7 @@ async fn download_youtube_cover(
 }
 
 async fn generate_youtube_nfo(
-    metadata: &YtDlpMetadata,
+    metadata: &ExternalMediaMetadata,
     output_path: &Path,
     video_url: &str,
     title: &str,
@@ -4183,7 +3804,7 @@ async fn generate_youtube_nfo(
 
 async fn download_youtube_subtitle(
     downloader: &UnifiedDownloader,
-    metadata: &YtDlpMetadata,
+    metadata: &ExternalMediaMetadata,
     output_path: &Path,
     preferred_language: &str,
     platform: &str,
@@ -4264,63 +3885,6 @@ async fn write_external_danmaku_ass(
         return Err(error).context("生成媒体 ASS 弹幕失败");
     }
     replace_file(&temporary, &ass_path).await
-}
-
-async fn download_douyin_danmaku(metadata: &YtDlpMetadata, output_path: &Path, title: &str) -> Result<()> {
-    let ass_path = output_path.with_extension("ass");
-    let json_path = output_path.with_extension("danmaku.json");
-    let checked_path = output_path.with_extension("danmaku.checked");
-    if tokio::fs::metadata(&ass_path)
-        .await
-        .is_ok_and(|metadata| metadata.len() > 0)
-        || tokio::fs::metadata(&checked_path).await.is_ok()
-    {
-        return Ok(());
-    }
-    if !metadata.douyin_images.is_empty() {
-        tokio::fs::write(&checked_path, b"image post has no video danmaku\n").await?;
-        debug!(youtube_id = %metadata.id, "抖音图文作品没有视频弹幕，已记录检查结果");
-        return Ok(());
-    }
-
-    let duration = metadata.duration.map(|value| value.ceil() as i32).unwrap_or(1).max(1);
-    let danmaku = crate::douyin::fetch_aweme_danmaku(&metadata.id, duration).await?;
-    if danmaku.is_empty() {
-        tokio::fs::write(&checked_path, b"no douyin danmaku\n")
-            .await
-            .with_context(|| format!("写入抖音弹幕检查标记失败: {}", checked_path.display()))?;
-        info!(youtube_id = %metadata.id, "抖音视频没有可下载的弹幕，已记录检查结果");
-        return Ok(());
-    }
-
-    let json_temporary = output_path.with_extension("danmaku.json.download");
-    tokio::fs::write(&json_temporary, serde_json::to_vec_pretty(&danmaku)?)
-        .await
-        .with_context(|| format!("写入抖音弹幕 JSON 失败: {}", json_temporary.display()))?;
-    replace_file(&json_temporary, &json_path).await?;
-    let count = danmaku.len();
-    let elems = danmaku
-        .into_iter()
-        .map(|item| DanmakuElem {
-            id: item.danmaku_id.parse().unwrap_or_default(),
-            progress: item.offset_time,
-            mode: 1,
-            fontsize: 25,
-            color: 0xFFFFFF,
-            mid_hash: item.user_id,
-            content: item.text,
-            ctime: 0,
-            weight: i32::try_from(item.digg_count).unwrap_or(i32::MAX),
-            action: String::new(),
-            pool: 0,
-            dmid_str: item.danmaku_id,
-            attr: 0,
-        })
-        .collect();
-    write_external_danmaku_ass(output_path, title, duration, elems).await?;
-    let _ = remove_file_if_exists(&checked_path).await;
-    info!(youtube_id = %metadata.id, count, path = %ass_path.display(), "抖音弹幕 JSON 和 ASS 生成完成");
-    Ok(())
 }
 
 fn youtube_runs_text(value: Option<&serde_json::Value>) -> String {
@@ -4431,7 +3995,11 @@ fn parse_youtube_live_chat(contents: &str) -> Vec<DanmakuElem> {
     elems
 }
 
-async fn convert_youtube_live_chat_to_ass(metadata: &YtDlpMetadata, output_path: &Path, title: &str) -> Result<usize> {
+async fn convert_youtube_live_chat_to_ass(
+    metadata: &ExternalMediaMetadata,
+    output_path: &Path,
+    title: &str,
+) -> Result<usize> {
     let live_chat_path = output_path.with_extension("live_chat.json");
     let contents = tokio::fs::read_to_string(&live_chat_path)
         .await
@@ -4444,7 +4012,7 @@ async fn convert_youtube_live_chat_to_ass(metadata: &YtDlpMetadata, output_path:
 }
 
 async fn download_youtube_live_chat(
-    metadata: &YtDlpMetadata,
+    metadata: &ExternalMediaMetadata,
     output_path: &Path,
     video_url: &str,
     title: &str,
@@ -4523,9 +4091,9 @@ async fn download_youtube_live_chat(
 }
 
 fn select_subtitle_item<'a>(
-    subtitles: &'a HashMap<String, Vec<YtDlpSubtitle>>,
+    subtitles: &'a HashMap<String, Vec<ExternalSubtitle>>,
     language: &str,
-) -> Option<(&'a YtDlpSubtitle, &'a str)> {
+) -> Option<(&'a ExternalSubtitle, &'a str)> {
     subtitles.get(language).and_then(|items| {
         // 同一语言下 yt-dlp 可能同时返回原始字幕与带 `tlang=` 的自动翻译
         // 地址。优先原始 VTT，既符合来源语言，也避免自动翻译端点更容易触发
@@ -4613,7 +4181,7 @@ fn youtube_codec(codec: Option<&str>) -> Option<VideoCodecs> {
     }
 }
 
-fn is_http_format(format: &YtDlpFormat) -> bool {
+fn is_http_format(format: &ExternalMediaFormat) -> bool {
     format.url.as_deref().is_some_and(|url| url.starts_with("http"))
         && format
             .protocol
@@ -4621,11 +4189,11 @@ fn is_http_format(format: &YtDlpFormat) -> bool {
             .is_none_or(|protocol| protocol == "http" || protocol == "https")
 }
 
-fn has_video(format: &YtDlpFormat) -> bool {
+fn has_video(format: &ExternalMediaFormat) -> bool {
     format.vcodec.as_deref().is_some_and(|codec| codec != "none")
 }
 
-fn has_audio(format: &YtDlpFormat) -> bool {
+fn has_audio(format: &ExternalMediaFormat) -> bool {
     format.acodec.as_deref().is_some_and(|codec| codec != "none")
 }
 

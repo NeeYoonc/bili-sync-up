@@ -40,6 +40,44 @@ async function loadConfig() {
 	tokenInput.value = config.authToken || '';
 }
 
+async function captureDouyinSessionParams() {
+	const tabs = await chrome.tabs.query({
+		url: ['https://douyin.com/*', 'https://*.douyin.com/*']
+	});
+	const tab = tabs
+		.filter((item) => item.id)
+		.sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0))[0];
+	if (!tab?.id) return {};
+
+	const [{ result }] = await chrome.scripting.executeScript({
+		target: { tabId: tab.id },
+		func: () => {
+			const result = {};
+			const urls = [
+				...performance
+					.getEntriesByType('resource')
+					.map((entry) => entry.name)
+					.reverse(),
+				window.location.href
+			];
+			for (const value of urls) {
+				try {
+					const url = new URL(value);
+					result.webid ||= url.searchParams.get('webid') || '';
+					result.verify_fp ||=
+						url.searchParams.get('verifyFp') || url.searchParams.get('fp') || '';
+					result.ms_token ||= url.searchParams.get('msToken') || '';
+					if (result.webid && result.verify_fp && result.ms_token) break;
+				} catch {
+					// 忽略无效或非 HTTP 资源地址。
+				}
+			}
+			return result;
+		}
+	});
+	return result || {};
+}
+
 connectButton.addEventListener('click', async () => {
 	setBusy(true);
 	try {
@@ -96,13 +134,14 @@ async function transfer(platform) {
 				]
 			: await chrome.cookies.getAll({ domain: 'youtube.com' });
 		const contents = buildNetscapeCookies(cookies, platform);
+		const douyinSessionParams = douyin ? await captureDouyinSessionParams() : {};
 		const response = await fetch(`${serverUrl}/api/${platform}/cookies`, {
 			method: 'POST',
 			headers: {
 				Authorization: authToken,
 				'Content-Type': 'application/json'
 			},
-			body: JSON.stringify({ cookies: contents })
+			body: JSON.stringify({ cookies: contents, ...douyinSessionParams })
 		});
 		const payload = await response.json().catch(() => null);
 		if (!response.ok) {
