@@ -588,6 +588,8 @@ pub struct ConfigResponse {
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: String,
     pub split_chapters_after_download: bool,
+    // 仅 YouTube 搜索、扫描、解析和下载使用的代理地址
+    pub youtube_proxy: String,
     // B站凭证信息
     pub credential: Option<CredentialInfo>,
     // 推送通知配置

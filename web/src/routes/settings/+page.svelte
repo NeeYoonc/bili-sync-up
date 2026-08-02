@@ -368,6 +368,7 @@
 	let enableAria2HealthCheck = false;
 	let enableAria2AutoRestart = false;
 	let aria2HealthCheckInterval = 300;
+	let youtubeProxy = '';
 
 	// 多P视频目录结构配置
 	let multiPageUseSeasonStructure = false;
@@ -750,6 +751,7 @@
 		enableAria2HealthCheck = config.enable_aria2_health_check ?? false;
 		enableAria2AutoRestart = config.enable_aria2_auto_restart ?? false;
 		aria2HealthCheckInterval = config.aria2_health_check_interval ?? 300;
+		youtubeProxy = config.youtube_proxy ?? '';
 
 		// 多P视频目录结构配置
 		multiPageUseSeasonStructure = config.multi_page_use_season_structure ?? false;
@@ -1231,6 +1233,7 @@
 				DEFAULT_CONFIG_VALUES.largeSourcePlayurlDurationMs
 			),
 			audio_only_use_low_qn_for_playurl: audioOnlyUseLowQnForPlayurl,
+			youtube_proxy: youtubeProxy.trim(),
 			// aria2监控配置
 			enable_aria2_health_check: enableAria2HealthCheck,
 			enable_aria2_auto_restart: enableAria2AutoRestart,
@@ -3103,6 +3106,18 @@
 >
 	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
 		<YouTubeLoginPanel />
+		<div class="mt-4 space-y-2 rounded-lg border p-4">
+			<Label for="youtube-proxy">YouTube 专用代理</Label>
+			<Input
+				id="youtube-proxy"
+				bind:value={youtubeProxy}
+				placeholder="例如：http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
+				autocomplete="off"
+			/>
+			<p class="text-muted-foreground text-sm">
+				仅 YouTube 搜索、订阅、扫描、直链解析、视频、音频、封面、头像、字幕和直播聊天使用；B站与抖音不会使用此代理。留空关闭。
+			</p>
+		</div>
 		<div
 			class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
 		>
@@ -3129,6 +3144,11 @@
 			导入后可搜索抖音作者、选择历史作品并持续扫描新作品。媒体仍使用项目现有统一下载器、画质设置、路径模板、封面与 NFO 链路。
 		</div>
 	</div>
+	<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t px-6 pt-4'}>
+		<Button type="button" disabled={saving} class="w-full" onclick={saveConfig}>
+			{saving ? '保存中...' : '保存 YouTube 代理'}
+		</Button>
+	</SheetFooter>
 </ResponsiveSheet>
 
 <!-- 风控配置抽屉 -->

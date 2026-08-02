@@ -442,6 +442,16 @@ impl Downloader {
         self.fetch_with_fallback_and_optional_referer(urls, path, None).await
     }
 
+    /// 使用项目原生下载逻辑下载文件，但只为本次任务的媒体请求应用代理。
+    pub async fn fetch_with_fallback_with_proxy(&self, urls: &[&str], path: &Path, proxy: &str) -> Result<()> {
+        let proxy = proxy.trim();
+        if proxy.is_empty() {
+            return self.fetch_with_fallback(urls, path).await;
+        }
+        let downloader = Self::new(self.client.with_media_proxy(proxy)?);
+        downloader.fetch_with_fallback(urls, path).await
+    }
+
     pub async fn fetch_with_fallback_with_referer(&self, urls: &[&str], path: &Path, referer: &str) -> Result<()> {
         self.fetch_with_fallback_and_optional_referer(urls, path, Some(referer))
             .await

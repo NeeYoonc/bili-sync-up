@@ -5,7 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{Json, Query};
@@ -13,6 +14,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rand::Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -34,6 +36,7 @@ const DOUYIN_DANMAKU_API: &str = "https://www.douyin.com/aweme/v1/web/danmaku/ge
 // `general/search/single` 是“综合”标签接口，用 `aweme_user_web` 强行请求会被
 // 抖音返回 `verify_check`，这也是此前所有作者关键词都搜索失败的根因。
 const DOUYIN_USER_SEARCH_API: &str = "https://www.douyin.com/aweme/v1/web/discover/search/";
+const DOUYIN_GENERAL_SEARCH_API: &str = "https://www.douyin.com/aweme/v1/web/general/search/single/";
 const DOUYIN_PROFILE_SELF_API: &str = "https://www.douyin.com/aweme/v1/web/user/profile/self/";
 const DOUYIN_PROFILE_OTHER_API: &str = "https://www.douyin.com/aweme/v1/web/user/profile/other/";
 const DOUYIN_FOLLOWING_API: &str = "https://www.douyin.com/aweme/v1/web/user/following/list/";
@@ -49,6 +52,22 @@ const DOUYIN_PUBLIC_SEARCH_API: &str = "https://www.sogou.com/web";
 const DOUYIN_MSTOKEN_API: &str = "https://mssdk.bytedance.com/web/r/token?ms_appid=6383&msToken=T4bNG9W2rKF7hBNwaYssDErnJEobDAk641DFaOn4hcsfAM8slpbZeKPM4Ml4rhDQq18iY8nQ0JR3J87SLZtDiDqtZdZawfBjCWAgtolQsoEtG6MLETvo4fwr7F28zGJUFDdJgKEZHibNR0QshVBv28ygsQsJDzerKAtsgj9Pn5WsxyS1vfkiX3I%3D";
 const DOUYIN_MSTOKEN_STR_DATA: &str = include_str!("douyin_mstoken_strdata.txt");
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+const CATALOG_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+struct CatalogCacheEntry {
+    fetched_at: Instant,
+    items: Vec<YouTubeSearchResult>,
+}
+
+fn theater_catalog_cache() -> &'static RwLock<Option<CatalogCacheEntry>> {
+    static CACHE: OnceLock<RwLock<Option<CatalogCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(None))
+}
+
+fn series_catalog_cache() -> &'static RwLock<Option<CatalogCacheEntry>> {
+    static CACHE: OnceLock<RwLock<Option<CatalogCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(None))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct DouyinCookieImportRequest {
@@ -325,6 +344,75 @@ async fn fetch_douyin_user_search(keyword: &str, force_ms_token_refresh: bool) -
     browser_get_with_referer(DOUYIN_USER_SEARCH_API, pairs, referer.as_str()).await
 }
 
+async fn fetch_douyin_general_search(keyword: &str) -> Result<serde_json::Value> {
+    ensure_search_ms_token(false).await?;
+    let cookies = cookie_values();
+    let uifid = cookies
+        .get("UIFID")
+        .or_else(|| cookies.get("UIFID_TEMP"))
+        .cloned()
+        .context("抖音 Cookie 缺少 UIFID，请重新导出并导入完整 cookies.txt")?;
+    let verify_fp = stable_verify_fp().await?;
+    let mut pairs = vec![
+        ("device_platform", "webapp".to_string()),
+        ("aid", "6383".to_string()),
+        ("channel", "channel_pc_web".to_string()),
+        ("search_channel", "aweme_general".to_string()),
+        ("keyword", keyword.to_string()),
+        ("search_source", "normal_search".to_string()),
+        ("query_correct_type", "1".to_string()),
+        ("is_filter_search", "0".to_string()),
+        ("from_group_id", String::new()),
+        ("disable_rs", "0".to_string()),
+        ("offset", "0".to_string()),
+        ("count", "20".to_string()),
+        ("need_filter_settings", "1".to_string()),
+        ("list_type", "single".to_string()),
+        ("pc_search_top_1_params", r#"{"enable_ai_search_top_1":1}"#.to_string()),
+        ("update_version_code", "170400".to_string()),
+        ("pc_client_type", "1".to_string()),
+        ("pc_libra_divert", "Windows".to_string()),
+        ("support_h265", "1".to_string()),
+        ("support_dash", "1".to_string()),
+        ("cpu_core_num", "16".to_string()),
+        ("version_code", "170400".to_string()),
+        ("version_name", "17.4.0".to_string()),
+        ("cookie_enabled", "true".to_string()),
+        ("screen_width", "2560".to_string()),
+        ("screen_height", "1440".to_string()),
+        ("browser_language", "zh-CN".to_string()),
+        ("browser_platform", "Win32".to_string()),
+        ("browser_name", "Chrome".to_string()),
+        ("browser_version", "149.0.0.0".to_string()),
+        ("browser_online", "true".to_string()),
+        ("engine_name", "Blink".to_string()),
+        ("engine_version", "149.0.0.0".to_string()),
+        ("os_name", "Windows".to_string()),
+        ("os_version", "10".to_string()),
+        ("device_memory", "32".to_string()),
+        ("platform", "PC".to_string()),
+        ("downlink", "10".to_string()),
+        ("effective_type", "4g".to_string()),
+        ("round_trip_time", "0".to_string()),
+        ("webid", stable_webid().await?),
+        ("uifid", uifid),
+        ("verifyFp", verify_fp.clone()),
+        ("fp", verify_fp),
+    ];
+    if let Some(ms_token) = cookies.get("msToken").cloned() {
+        pairs.push(("msToken", ms_token));
+    }
+
+    let mut referer = reqwest::Url::parse("https://www.douyin.com/search/")?;
+    referer
+        .path_segments_mut()
+        .map_err(|_| anyhow!("无法构造抖音综合搜索来源页面"))?
+        .pop_if_empty()
+        .push(keyword);
+    referer.query_pairs_mut().append_pair("type", "general");
+    browser_get_with_referer(DOUYIN_GENERAL_SEARCH_API, pairs, referer.as_str()).await
+}
+
 pub async fn get_douyin_followings() -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
     ensure_session()?;
     let self_response = signed_get(DOUYIN_PROFILE_SELF_API, common_query_pairs()).await?;
@@ -413,15 +501,20 @@ pub async fn get_douyin_catalog(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let direct_id = keyword.filter(|value| value.chars().all(|character| character.is_ascii_digit()));
+    let used_keyword_search = keyword.is_some() && direct_id.is_none();
     let mut results: Vec<YouTubeSearchResult> = match (source_type.as_str(), direct_id) {
         ("douyin_theater", Some(id)) => fetch_theater_catalog_item(id).await?.into_iter().collect(),
         ("douyin_series", Some(id)) => fetch_series_catalog_item(id).await?.into_iter().collect(),
         ("douyin_collection", _) => fetch_collection_catalog().await?,
+        ("douyin_theater", _) if keyword.is_some() => fetch_catalog_from_general_search(keyword.unwrap(), true).await?,
+        ("douyin_series", _) if keyword.is_some() => fetch_catalog_from_general_search(keyword.unwrap(), false).await?,
         ("douyin_theater", _) => fetch_theater_catalog().await?,
         ("douyin_series", _) => fetch_series_catalog().await?,
         _ => return Err(ApiError::bad_request("右侧列表仅支持收藏夹、放映厅或短剧")),
     };
-    if let Some(keyword) = keyword {
+    // 综合搜索接口已经按作品标题/演员/描述做相关性检索，系列名本身不一定
+    // 包含关键词；再做本地 contains 会把真实命中的结果误删。
+    if let Some(keyword) = keyword.filter(|_| !used_keyword_search) {
         let keyword = keyword.to_lowercase();
         results.retain(|item| {
             item.title.to_lowercase().contains(&keyword)
@@ -440,6 +533,121 @@ pub async fn get_douyin_catalog(
         results,
         total,
     }))
+}
+
+/// 使用抖音网页端综合搜索直接找放映厅/短剧系列。
+///
+/// 旧实现需要串行翻最多 30 页首页 feed，再在本地过滤，单次搜索需要十几到
+/// 二十多秒。该接口直接由抖音服务端检索，一次请求即可返回相关系列。
+async fn fetch_catalog_from_general_search(keyword: &str, theater: bool) -> Result<Vec<YouTubeSearchResult>> {
+    let response = fetch_douyin_general_search(keyword).await?;
+    ensure_douyin_status_ok(
+        &response,
+        if theater {
+            "搜索抖音放映厅"
+        } else {
+            "搜索抖音短剧"
+        },
+    )?;
+
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    if theater {
+        collect_theater_search_results(&response, &mut results, &mut seen);
+    } else {
+        collect_series_search_results(&response, &mut results, &mut seen);
+    }
+    if results.is_empty() {
+        // 放映厅作品在综合搜索中经常不携带 lvideo_brief；短剧也可能因
+        // 关键词只命中剧集标题而缺少 series_info。此时用放大页容量后的有限 feed
+        // 回退，保留搜索覆盖率，但不再串行请求 30 页。
+        let mut fallback = if theater {
+            fetch_theater_catalog().await?
+        } else {
+            fetch_series_catalog().await?
+        };
+        let keyword_lower = keyword.to_lowercase();
+        fallback.retain(|item| {
+            item.title.to_lowercase().contains(&keyword_lower)
+                || item.author.to_lowercase().contains(&keyword_lower)
+                || item.description.to_lowercase().contains(&keyword_lower)
+                || item
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| id.to_lowercase().contains(&keyword_lower))
+        });
+        results = fallback;
+    }
+    debug!(
+        keyword,
+        source_type = if theater { "douyin_theater" } else { "douyin_series" },
+        count = results.len(),
+        "抖音综合搜索完成"
+    );
+    Ok(results)
+}
+
+fn collect_theater_search_results(
+    value: &serde_json::Value,
+    results: &mut Vec<YouTubeSearchResult>,
+    seen: &mut HashSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(result) = theater_to_search_result(value) {
+                let id = result.channel_id.clone().unwrap_or_default();
+                if !id.is_empty() && seen.insert(id) {
+                    results.push(result);
+                }
+            }
+            for child in map.values() {
+                collect_theater_search_results(child, results, seen);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_theater_search_results(item, results, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_series_search_results(
+    value: &serde_json::Value,
+    results: &mut Vec<YouTubeSearchResult>,
+    seen: &mut HashSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(series) = map.get("series_info") {
+                if let Some(result) = series_to_search_result(series) {
+                    let id = result.channel_id.clone().unwrap_or_default();
+                    if !id.is_empty() && seen.insert(id) {
+                        results.push(result);
+                    }
+                }
+            }
+            // 部分搜索卡片直接以 `series` 包装，而非作品内的 `series_info`。
+            if let Some(series) = map.get("series") {
+                if let Some(result) = series_to_search_result(series) {
+                    let id = result.channel_id.clone().unwrap_or_default();
+                    if !id.is_empty() && seen.insert(id) {
+                        results.push(result);
+                    }
+                }
+            }
+            for child in map.values() {
+                collect_series_search_results(child, results, seen);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_series_search_results(item, results, seen);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn theater_to_search_result(item: &serde_json::Value) -> Option<YouTubeSearchResult> {
@@ -555,13 +763,29 @@ async fn fetch_collection_catalog() -> Result<Vec<YouTubeSearchResult>> {
 }
 
 async fn fetch_theater_catalog() -> Result<Vec<YouTubeSearchResult>> {
+    if let Some(cached) = theater_catalog_cache().read().await.as_ref() {
+        if cached.fetched_at.elapsed() < CATALOG_CACHE_TTL {
+            return Ok(cached.items.clone());
+        }
+    }
+    let items = fetch_theater_catalog_uncached().await?;
+    *theater_catalog_cache().write().await = Some(CatalogCacheEntry {
+        fetched_at: Instant::now(),
+        items: items.clone(),
+    });
+    Ok(items)
+}
+
+async fn fetch_theater_catalog_uncached() -> Result<Vec<YouTubeSearchResult>> {
     let mut cursor = 0i64;
     let mut results = Vec::new();
     let mut seen = HashSet::new();
-    for _ in 0..30 {
+    for _ in 0..6 {
         let mut pairs = common_query_pairs();
         pairs.extend([
-            ("count", "12".to_string()),
+            // 网页端默认每页只拉 12 条，搜索时会导致大量串行请求。
+            // 后端支持更大的 count，减少首次构建列表的翻页次数。
+            ("count", "50".to_string()),
             ("custom_album_type", "0".to_string()),
             ("cursor", cursor.to_string()),
         ]);
@@ -595,14 +819,28 @@ async fn fetch_theater_catalog() -> Result<Vec<YouTubeSearchResult>> {
 }
 
 async fn fetch_series_catalog() -> Result<Vec<YouTubeSearchResult>> {
+    if let Some(cached) = series_catalog_cache().read().await.as_ref() {
+        if cached.fetched_at.elapsed() < CATALOG_CACHE_TTL {
+            return Ok(cached.items.clone());
+        }
+    }
+    let items = fetch_series_catalog_uncached().await?;
+    *series_catalog_cache().write().await = Some(CatalogCacheEntry {
+        fetched_at: Instant::now(),
+        items: items.clone(),
+    });
+    Ok(items)
+}
+
+async fn fetch_series_catalog_uncached() -> Result<Vec<YouTubeSearchResult>> {
     let mut offset = 0i64;
     let mut results = Vec::new();
     let mut seen = HashSet::new();
-    for _ in 0..30 {
+    for _ in 0..6 {
         let mut pairs = common_query_pairs();
         pairs.extend([
             ("offset", offset.to_string()),
-            ("count", "10".to_string()),
+            ("count", "50".to_string()),
             ("content_type", "0".to_string()),
             ("insert_series_id_list", String::new()),
         ]);

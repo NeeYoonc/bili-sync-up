@@ -183,6 +183,37 @@ impl Client {
     pub fn media_request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
         self.media.request(method, url)
     }
+
+    /// 克隆 API 客户端，并为媒体请求单独创建指定代理的客户端。
+    /// 该代理不会影响 B 站 API、抖音请求或其他共享下载任务。
+    pub fn with_media_proxy(&self, proxy: &str) -> Result<Self> {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            header::HeaderValue::from_static(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            ),
+        );
+        headers.insert(
+            header::REFERER,
+            header::HeaderValue::from_static("https://www.youtube.com/"),
+        );
+        let configured_proxy = reqwest::Proxy::all(proxy).context("无效的 YouTube 代理地址")?;
+        let media = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(configured_proxy)
+            .default_headers(headers)
+            .gzip(true)
+            .referer(false)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .read_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .context("创建 YouTube 代理媒体客户端失败")?;
+        Ok(Self {
+            api: self.api.clone(),
+            media,
+        })
+    }
 }
 
 // clippy 建议实现 Default trait

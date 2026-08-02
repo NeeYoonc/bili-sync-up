@@ -389,7 +389,7 @@ impl Aria2Downloader {
     }
 
     /// 尝试获取文件大小（用于智能线程调整），带超时控制
-    async fn try_get_file_size(&self, url: &str, referer: Option<&str>) -> Option<u64> {
+    async fn try_get_file_size(&self, url: &str, referer: Option<&str>, proxy: Option<&str>) -> Option<u64> {
         let result = timeout(Duration::from_secs(5), async {
             let mut headers = create_api_headers();
             if let Ok(range) = "bytes=0-0".parse() {
@@ -401,11 +401,12 @@ impl Aria2Downloader {
                 }
             }
 
-            self.client
-                .media_request(Method::GET, url)
-                .headers(headers)
-                .send()
-                .await
+            let client = match proxy.filter(|value| !value.trim().is_empty()) {
+                Some(proxy) => self.client.with_media_proxy(proxy)?,
+                None => self.client.clone(),
+            };
+            let response = client.media_request(Method::GET, url).headers(headers).send().await?;
+            Ok::<_, anyhow::Error>(response)
         })
         .await;
 
@@ -1014,8 +1015,20 @@ impl Aria2Downloader {
 
     /// 使用aria2下载文件，支持多个URL备选和多进程
     pub async fn fetch_with_aria2_fallback(&self, urls: &[&str], path: &Path) -> Result<()> {
-        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, None, None)
+        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, None, None, None)
             .await
+    }
+
+    /// 仅为当前 aria2 任务设置代理，不修改 aria2 进程级或全局代理。
+    pub async fn fetch_with_aria2_fallback_with_proxy(&self, urls: &[&str], path: &Path, proxy: &str) -> Result<()> {
+        self.fetch_with_aria2_fallback_and_optional_headers(
+            urls,
+            path,
+            Some("https://www.youtube.com/"),
+            None,
+            Some(proxy),
+        )
+        .await
     }
 
     pub async fn fetch_with_aria2_fallback_with_referer(
@@ -1024,7 +1037,7 @@ impl Aria2Downloader {
         path: &Path,
         referer: &str,
     ) -> Result<()> {
-        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, Some(referer), None)
+        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, Some(referer), None, None)
             .await
     }
 
@@ -1038,7 +1051,7 @@ impl Aria2Downloader {
         if cookie.trim().is_empty() {
             return self.fetch_with_aria2_fallback_with_referer(urls, path, referer).await;
         }
-        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, Some(referer), Some(cookie))
+        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, Some(referer), Some(cookie), None)
             .await
     }
 
@@ -1048,6 +1061,7 @@ impl Aria2Downloader {
         path: &Path,
         referer: Option<&str>,
         cookie: Option<&str>,
+        proxy: Option<&str>,
     ) -> Result<()> {
         if urls.is_empty() {
             bail!("No URLs provided");
@@ -1100,7 +1114,7 @@ impl Aria2Downloader {
 
         // 构建aria2 RPC请求
         let gid = self
-            .add_download_task_to_instance(urls, dir, file_name, rpc_port, &rpc_secret, referer, cookie)
+            .add_download_task_to_instance(urls, dir, file_name, rpc_port, &rpc_secret, referer, cookie, proxy)
             .await?;
 
         // 等待下载完成
@@ -1135,6 +1149,7 @@ impl Aria2Downloader {
         rpc_secret: &str,
         referer: Option<&str>,
         cookie: Option<&str>,
+        proxy: Option<&str>,
     ) -> Result<String> {
         let url = format!("http://127.0.0.1:{}/jsonrpc", rpc_port);
 
@@ -1153,7 +1168,7 @@ impl Aria2Downloader {
         };
 
         // 尝试获取文件大小，并根据大小智能调整线程数
-        let threads = if let Some(file_size_bytes) = self.try_get_file_size(urls[0], referer).await {
+        let threads = if let Some(file_size_bytes) = self.try_get_file_size(urls[0], referer, proxy).await {
             let file_size_mb = file_size_bytes / 1_048_576; // MB
             if file_size_mb <= 2 && Self::is_media_like_file(file_name) {
                 base_threads
@@ -1212,6 +1227,9 @@ impl Aria2Downloader {
             "piece-length": "1M",
             "header": aria2_headers
         });
+        if let Some(proxy) = proxy.map(str::trim).filter(|value| !value.is_empty()) {
+            options["all-proxy"] = serde_json::Value::String(proxy.to_string());
+        }
 
         // 添加SSL/TLS相关配置
         if cfg!(target_os = "linux") {

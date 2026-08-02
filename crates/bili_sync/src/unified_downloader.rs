@@ -63,6 +63,18 @@ impl UnifiedDownloader {
         }
     }
 
+    /// 沿用当前统一下载器，仅为本次下载任务应用代理。
+    pub async fn fetch_with_fallback_with_proxy(&self, urls: &[&str], path: &Path, proxy: &str) -> Result<()> {
+        let proxy = proxy.trim();
+        if proxy.is_empty() {
+            return self.fetch_with_fallback(urls, path).await;
+        }
+        match self {
+            Self::Native(downloader) => downloader.fetch_with_fallback_with_proxy(urls, path, proxy).await,
+            Self::Aria2(downloader) => downloader.fetch_with_aria2_fallback_with_proxy(urls, path, proxy).await,
+        }
+    }
+
     /// 下载文件并覆盖平台 Referer，原生与 aria2 路径保持一致。
     pub async fn fetch_with_fallback_with_referer(&self, urls: &[&str], path: &Path, referer: &str) -> Result<()> {
         match self {

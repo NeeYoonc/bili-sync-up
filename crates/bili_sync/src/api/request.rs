@@ -323,6 +323,8 @@ pub struct UpdateConfigRequest {
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: Option<String>,
     pub split_chapters_after_download: Option<bool>,
+    // 仅 YouTube 搜索、扫描、解析和下载使用的代理地址
+    pub youtube_proxy: Option<String>,
     // 风控验证配置
     pub risk_control_enabled: Option<bool>,
     pub risk_control_mode: Option<String>,

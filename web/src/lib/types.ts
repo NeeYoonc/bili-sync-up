@@ -520,6 +520,7 @@ export interface ConfigResponse {
 	parallel_download_threads: number;
 	parallel_download_use_aria2: boolean;
 	split_chapters_after_download?: boolean;
+	youtube_proxy?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;
@@ -703,6 +704,7 @@ export interface UpdateConfigRequest {
 	parallel_download_threads?: number;
 	parallel_download_use_aria2?: boolean;
 	split_chapters_after_download?: boolean;
+	youtube_proxy?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;

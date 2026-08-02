@@ -10768,6 +10768,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         // ffmpeg 路径
         ffmpeg_path: config.ffmpeg_path.clone(),
         split_chapters_after_download: config.split_chapters_after_download,
+        youtube_proxy: config.youtube_proxy.clone(),
         // B站凭证信息
         credential: {
             let credential = config.credential.load();
@@ -11355,6 +11356,7 @@ pub async fn update_config(
             // ffmpeg 路径
             ffmpeg_path: params.ffmpeg_path.clone(),
             split_chapters_after_download: params.split_chapters_after_download,
+            youtube_proxy: params.youtube_proxy.clone(),
             ai_rename_rename_parent_dir: params.ai_rename_rename_parent_dir,
             task_id: task_id.clone(),
         };
@@ -11473,6 +11475,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "bangumi_quick_subscribe_path" => Some("番剧快捷订阅路径模板"),
         "ffmpeg_path" => Some("ffmpeg路径"),
         "split_chapters_after_download" => Some("下载后按章节切分"),
+        "youtube_proxy" => Some("YouTube专用代理"),
         "bind_address" => Some("服务监听地址"),
         "risk_control.enabled" => Some("风控验证开关"),
         "risk_control.mode" => Some("风控验证模式"),
@@ -11805,6 +11808,29 @@ pub async fn update_config_internal(
         if interval > 0 && interval != config.interval {
             config.interval = interval;
             updated_fields.push("interval");
+        }
+    }
+
+    if let Some(youtube_proxy) = params.youtube_proxy {
+        let youtube_proxy = youtube_proxy.trim().to_string();
+        if !youtube_proxy.is_empty() {
+            let parsed = reqwest::Url::parse(&youtube_proxy).map_err(|_| {
+                ApiError::from(anyhow!(
+                    "YouTube 代理地址无效，请使用 http://、https://、socks5:// 或 socks5h:// 开头的完整地址"
+                ))
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h") || parsed.host_str().is_none() {
+                return Err(anyhow!(
+                    "YouTube 代理地址无效，请使用 http://、https://、socks5:// 或 socks5h:// 开头的完整地址"
+                )
+                .into());
+            }
+            reqwest::Proxy::all(&youtube_proxy)
+                .map_err(|error| ApiError::from(anyhow!("YouTube 代理地址无效：{error}")))?;
+        }
+        if youtube_proxy != config.youtube_proxy {
+            config.youtube_proxy = youtube_proxy;
+            updated_fields.push("youtube_proxy");
         }
     }
 
@@ -12906,6 +12932,11 @@ pub async fn update_config_internal(
                             "split_chapters_after_download",
                             serde_json::to_value(config.split_chapters_after_download)?,
                         )
+                        .await
+                }
+                "youtube_proxy" => {
+                    manager
+                        .update_config_item("youtube_proxy", serde_json::to_value(&config.youtube_proxy)?)
                         .await
                 }
                 "bind_address" => {
@@ -15859,10 +15890,29 @@ pub async fn proxy_image(
         headers.get(IF_NONE_MATCH).is_some()
     );
 
-    // 验证URL是否来自B站
-    if !url.contains("hdslb.com") && !url.contains("bilibili.com") {
-        debug!("图片代理拒绝非B站URL: {}", summarize_image_url(&url));
-        return Err(anyhow!("只支持B站图片URL").into());
+    // 严格按解析后的 host 白名单校验，不使用 contains，避免 SSRF。
+    let parsed_url = reqwest::Url::parse(&url).context("无效的图片 URL")?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        return Err(anyhow!("图片 URL 只支持 HTTP/HTTPS").into());
+    }
+    let host = parsed_url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow!("图片 URL 缺少主机名"))?;
+    let host_matches = |domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
+    let is_bilibili_image = ["hdslb.com", "bilibili.com"].iter().any(|domain| host_matches(domain));
+    let is_youtube_image = [
+        "ytimg.com",
+        "ggpht.com",
+        "googleusercontent.com",
+        "youtube.com",
+        "googlevideo.com",
+    ]
+    .iter()
+    .any(|domain| host_matches(domain));
+    if !is_bilibili_image && !is_youtube_image {
+        debug!("图片代理拒绝非白名单 URL: {}", summarize_image_url(&url));
+        return Err(anyhow!("只支持 B 站和 YouTube 图片 URL").into());
     }
 
     let now = Utc::now();
@@ -15891,13 +15941,29 @@ pub async fn proxy_image(
         );
     }
 
-    // 创建HTTP客户端
-    let client = reqwest::Client::new();
+    // YouTube 图片使用专用代理；B 站图片仍然直连。
+    let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(90));
+    if is_youtube_image {
+        let youtube_proxy = crate::config::with_config(|bundle| bundle.config.youtube_proxy.trim().to_string());
+        if !youtube_proxy.is_empty() {
+            client_builder = client_builder
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(&youtube_proxy).context("无效的 YouTube 代理地址")?);
+        }
+    }
+    let client = client_builder.build().context("创建图片 HTTP 客户端失败")?;
 
     // 请求图片，添加必要的请求头
     tracing::debug!("图片缓存未命中，开始回源下载: {}", summarize_image_url(&url));
 
-    let request = client.get(&url).headers(create_image_headers());
+    let mut image_headers = create_image_headers();
+    if is_youtube_image {
+        image_headers.insert(
+            reqwest::header::REFERER,
+            reqwest::header::HeaderValue::from_static("https://www.youtube.com/"),
+        );
+    }
+    let request = client.get(parsed_url).headers(image_headers);
 
     // 图片下载请求头日志已在建造器时设置
 

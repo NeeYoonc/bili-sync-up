@@ -340,6 +340,7 @@ pub async fn search_youtube(
     ]);
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
+    append_youtube_proxy(&mut command);
     command.arg(search_url.as_str());
     let output = tokio::time::timeout(Duration::from_secs(2 * 60), command.output())
         .await
@@ -504,6 +505,7 @@ pub async fn get_youtube_source_videos(
     ]);
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
+    append_youtube_proxy(&mut command);
     command.arg(&source_url);
     let output = tokio::time::timeout(Duration::from_secs(10 * 60), command.output())
         .await
@@ -638,14 +640,18 @@ async fn get_youtube_subscription_channels(
 
 async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::Value> {
     let cookie_jar = youtube_cookie_jar(path)?;
-    let client = reqwest::Client::builder()
+    let mut client_builder = reqwest::Client::builder()
         // Netscape 文件同时包含 YouTube 和 Google 账号域 Cookie。必须让
         // Cookie Jar 按域名分别发送：直接拼成一个 Cookie 请求头会把
         // google.com 的同名 SID/PSID 错发给 youtube.com，导致有效会话也被判为退出。
         .cookie_provider(cookie_jar)
         .redirect(reqwest::redirect::Policy::limited(10))
-        .timeout(Duration::from_secs(30))
-        .build()?;
+        .timeout(Duration::from_secs(30));
+    let proxy = configured_youtube_proxy();
+    if !proxy.is_empty() {
+        client_builder = client_builder.no_proxy().proxy(reqwest::Proxy::all(&proxy)?);
+    }
+    let client = client_builder.build()?;
     let response = client
         .get(SUBSCRIPTION_CHANNELS_URL)
         .header(
@@ -1531,7 +1537,8 @@ async fn fetch_platform_asset(
             .fetch_with_fallback_with_referer_and_cookie(urls, path, "https://www.douyin.com/", &cookie)
             .await
     } else {
-        downloader.fetch_with_fallback(urls, path).await
+        let proxy = configured_youtube_proxy();
+        downloader.fetch_with_fallback_with_proxy(urls, path, &proxy).await
     }
 }
 
@@ -2037,6 +2044,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     command.args(["--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]);
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
+    append_youtube_proxy(&mut command);
     // 频道的 `/videos`、`/shorts` 和 `/streams` 是三个彼此独立的标签页。
     // 扫描频道根地址时 yt-dlp 会按频道完整枚举三个标签页；若直接使用用户
     // 粘贴的 `/videos` 地址，则只会看到普通视频，漏掉 Shorts 和直播回放。
@@ -3274,6 +3282,7 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
     ]);
     append_ytdlp_runtime(&mut command);
     append_cookies_for_url(&mut command, url);
+    append_youtube_proxy_for_url(&mut command, url);
     command.arg(url);
     let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output())
         .await
@@ -3554,14 +3563,8 @@ async fn ensure_youtube_sidecars(
         warnings.push(format!("NFO 生成失败：{error:#}"));
     }
     if source.download_subtitle {
-        if let Err(error) = download_youtube_subtitle(
-            downloader,
-            metadata,
-            output_path,
-            &source.ai_subtitle_language,
-            platform,
-        )
-        .await
+        if let Err(error) =
+            download_youtube_subtitle(downloader, metadata, output_path, &source.ai_subtitle_language, source).await
         {
             warn!(platform, youtube_id = %metadata.id, error = %error, "{}媒体已下载，但字幕子任务失败", platform);
             warnings.push(format!("字幕下载失败：{error:#}"));
@@ -3774,6 +3777,7 @@ async fn extract_youtube_source_metadata(url: &str) -> Result<YtDlpSourceMetadat
     ]);
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
+    append_youtube_proxy(&mut command);
     command.arg(url);
     let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output())
         .await
@@ -3911,8 +3915,9 @@ async fn download_youtube_subtitle(
     metadata: &ExternalMediaMetadata,
     output_path: &Path,
     preferred_language: &str,
-    platform: &str,
+    source: &youtube_source::Model,
 ) -> Result<()> {
+    let platform = source_platform_label(source);
     if youtube_subtitle_exists(output_path).await? {
         return Ok(());
     }
@@ -3944,8 +3949,7 @@ async fn download_youtube_subtitle(
     };
     let extension = subtitle.ext.as_deref().unwrap_or("vtt");
     let subtitle_path = output_path.with_extension(format!("{language}.{extension}"));
-    if let Err(error) = downloader
-        .fetch_with_fallback(&[url], &subtitle_path)
+    if let Err(error) = fetch_platform_asset(downloader, source, &[url], &subtitle_path)
         .await
         .with_context(|| format!("使用项目统一下载器下载{platform}字幕失败"))
     {
@@ -4175,6 +4179,7 @@ async fn download_youtube_live_chat(
     command.arg(&output_template);
     append_ytdlp_runtime(&mut command);
     append_cookies_for_url(&mut command, video_url);
+    append_youtube_proxy_for_url(&mut command, video_url);
     command.arg(video_url);
     let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output())
         .await
@@ -4913,6 +4918,27 @@ fn append_cookies_for_url(command: &mut Command, url: &str) {
     }
 }
 
+fn configured_youtube_proxy() -> String {
+    crate::config::with_config(|bundle| bundle.config.youtube_proxy.trim().to_string())
+}
+
+fn append_youtube_proxy(command: &mut Command) {
+    let proxy = configured_youtube_proxy();
+    if !proxy.is_empty() {
+        command.arg("--proxy").arg(proxy);
+    }
+}
+
+fn append_youtube_proxy_for_url(command: &mut Command, url: &str) {
+    if should_proxy_ytdlp_url(url) {
+        append_youtube_proxy(command);
+    }
+}
+
+fn should_proxy_ytdlp_url(url: &str) -> bool {
+    is_youtube_url(url)
+}
+
 fn append_ytdlp_runtime(command: &mut Command) {
     if let Some((name, path)) = ytdlp_js_runtime() {
         command.arg("--js-runtimes").arg(format!("{name}:{}", path.display()));
@@ -5071,7 +5097,7 @@ mod tests {
     use super::{
         canonical_channel_url, checksum_for_release_asset, collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
-        normalize_source_type, parse_youtube_live_chat, resolve_source_url, youtube_cookie_jar,
+        normalize_source_type, parse_youtube_live_chat, resolve_source_url, should_proxy_ytdlp_url, youtube_cookie_jar,
         youtube_page_is_logged_out, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
         ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
     };
@@ -5127,6 +5153,14 @@ mod tests {
         let youtube_session = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tvalue\n";
         assert!(is_netscape_youtube_cookie_file(google_only));
         assert!(is_netscape_youtube_cookie_file(youtube_session));
+    }
+
+    #[test]
+    fn ytdlp_proxy_is_scoped_to_youtube_urls() {
+        assert!(should_proxy_ytdlp_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+        assert!(should_proxy_ytdlp_url("https://youtu.be/dQw4w9WgXcQ"));
+        assert!(!should_proxy_ytdlp_url("https://www.douyin.com/video/123456789"));
+        assert!(!should_proxy_ytdlp_url("https://www.bilibili.com/video/BV1xx411c7mD"));
     }
 
     #[test]
