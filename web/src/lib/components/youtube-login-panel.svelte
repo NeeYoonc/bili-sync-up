@@ -134,8 +134,8 @@
 						<li>再次打开助手，点击“传输登录状态”；本页刷新后会显示“已导入”。</li>
 					</ol>
 					<p class="mt-2 text-xs opacity-80">
-						助手只读取 youtube.com Cookie，并调用现有导入接口传输到当前 Bili Sync；不会传输 Google
-						密码，也不需要 Docker 内嵌浏览器。
+						助手只读取 youtube.com 和 google.com 中维持 YouTube 会话的 Cookie，并调用现有导入接口传输到当前
+						Bili Sync；不会传输 Google 密码，也不需要 Docker 内嵌浏览器。
 					</p>
 				</div>
 

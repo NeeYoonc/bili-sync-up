@@ -49,6 +49,10 @@ pub(crate) struct ExternalMediaFormat {
     pub(crate) vbr: Option<f64>,
     pub(crate) abr: Option<f64>,
     pub(crate) dynamic_range: Option<String>,
+    /// CENC 媒体的 16 字节内容密钥（32 位十六进制）。仅在平台明确返回
+    /// 可本地解包的密钥材料时设置，统一下载器本身不接触密钥。
+    #[serde(default)]
+    pub(crate) decryption_key: Option<String>,
     #[serde(default)]
     pub(crate) fallback_urls: Vec<String>,
 }

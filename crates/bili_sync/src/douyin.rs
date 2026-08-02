@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{Json, Query};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rand::Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1977,6 +1978,17 @@ async fn extract_metadata_native(
         .filter_map(native_format)
         .collect::<Vec<_>>();
     if formats.is_empty() && images.is_empty() {
+        if let Some(video_model) = video.and_then(|video| {
+            video
+                .get("video_model")
+                .or_else(|| video.get("videoModel"))
+                .or_else(|| video.get("dynamic_video"))
+                .or_else(|| video.get("dynamicVideo"))
+        }) {
+            formats.extend(encrypted_dash_formats(video_model)?);
+        }
+    }
+    if formats.is_empty() && images.is_empty() {
         let video = video.context("抖音作品详情既没有视频流也没有原图")?;
         let width = json_i32(video.get("width"));
         let height = json_i32(video.get("height"));
@@ -2002,28 +2014,12 @@ async fn extract_metadata_native(
                 vbr: None,
                 abr: Some(128.0),
                 dynamic_range: Some("SDR".to_string()),
+                decryption_key: None,
                 fallback_urls,
             });
         }
     }
     if formats.is_empty() && images.is_empty() {
-        let protected_long_video = video.is_some_and(|video| {
-            let is_long_video = video
-                .get("is_long_video")
-                .and_then(|value| {
-                    value
-                        .as_i64()
-                        .or_else(|| value.as_bool().map(|value| if value { 1 } else { 0 }))
-                })
-                .unwrap_or_default()
-                != 0;
-            is_long_video && video.get("video_model").is_some()
-        });
-        if protected_long_video {
-            bail!(
-                "该抖音放映厅长视频只返回 CENC 加密 DASH（不是 Cookie 缺少）；当前项目统一下载链路不能直接处理此类加密长视频"
-            );
-        }
         let detail_keys = detail
             .as_object()
             .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
@@ -2113,8 +2109,211 @@ fn native_format(value: &serde_json::Value) -> Option<ExternalMediaFormat> {
         vbr: bitrate,
         abr: Some(128.0),
         dynamic_range: Some(dynamic_range),
+        decryption_key: None,
         fallback_urls,
     })
+}
+
+/// 放映厅长视频把独立视频/音频流放在 `video_model.dynamicVideo` 中，并用
+/// `spade_a` 包装标准 CENC 内容密钥。该密钥是本地字节变换，不需要许可证
+/// 服务器；下载仍由 UnifiedDownloader 完成，完成后交给 FFmpeg 解密合并。
+fn encrypted_dash_formats(value: &serde_json::Value) -> Result<Vec<ExternalMediaFormat>> {
+    let parsed;
+    let root = if let Some(raw) = value.as_str() {
+        parsed = serde_json::from_str::<serde_json::Value>(raw).context("解析抖音放映厅 video_model 失败")?;
+        &parsed
+    } else {
+        value
+    };
+    let model = root
+        .get("videoModel")
+        .or_else(|| root.get("video_model"))
+        .unwrap_or(root);
+    let dynamic = model
+        .get("dynamicVideo")
+        .or_else(|| model.get("dynamic_video"))
+        .unwrap_or(model);
+    let video_list = dynamic
+        .get("dynamic_video_list")
+        .or_else(|| dynamic.get("dynamicVideoList"))
+        .and_then(serde_json::Value::as_array);
+    let audio_list = dynamic
+        .get("dynamic_audio_list")
+        .or_else(|| dynamic.get("dynamicAudioList"))
+        .and_then(serde_json::Value::as_array);
+
+    let mut formats = Vec::new();
+    for item in video_list.into_iter().flatten() {
+        let Some((url, fallback_urls)) = dash_urls(item) else {
+            continue;
+        };
+        let bitrate = dash_bitrate(item);
+        formats.push(ExternalMediaFormat {
+            format_id: text(item, &["gear_name", "gearName", "definition"])
+                .or_else(|| Some("douyin-cenc-video".to_string())),
+            url: Some(url),
+            protocol: Some("https".to_string()),
+            ext: Some("mp4".to_string()),
+            vcodec: text(item, &["codec_type", "codecType"]).or_else(|| Some("h264".to_string())),
+            acodec: Some("none".to_string()),
+            width: json_i32(item.get("vwidth").or_else(|| item.get("width"))),
+            height: json_i32(item.get("vheight").or_else(|| item.get("height"))),
+            fps: item
+                .get("float_fps")
+                .or_else(|| item.get("fps"))
+                .and_then(serde_json::Value::as_f64),
+            tbr: bitrate,
+            vbr: bitrate,
+            abr: None,
+            dynamic_range: Some("SDR".to_string()),
+            decryption_key: dash_decryption_key(item)?,
+            fallback_urls,
+        });
+    }
+    for item in audio_list.into_iter().flatten() {
+        let Some((url, fallback_urls)) = dash_urls(item) else {
+            continue;
+        };
+        let bitrate = dash_bitrate(item);
+        formats.push(ExternalMediaFormat {
+            format_id: text(item, &["gear_name", "gearName", "quality"])
+                .or_else(|| Some("douyin-cenc-audio".to_string())),
+            url: Some(url),
+            protocol: Some("https".to_string()),
+            ext: Some("m4a".to_string()),
+            vcodec: Some("none".to_string()),
+            acodec: Some("aac".to_string()),
+            width: None,
+            height: None,
+            fps: None,
+            tbr: bitrate,
+            vbr: None,
+            abr: bitrate,
+            dynamic_range: None,
+            decryption_key: dash_decryption_key(item)?,
+            fallback_urls,
+        });
+    }
+    if !formats.is_empty() {
+        info!(formats = formats.len(), "已解析抖音放映厅 CENC DASH 视频/音频流");
+    }
+    Ok(formats)
+}
+
+fn dash_urls(value: &serde_json::Value) -> Option<(String, Vec<String>)> {
+    let main = text(value, &["main_url", "mainUrl"])
+        .or_else(|| image_url(value.get("main_url").or_else(|| value.get("mainUrl"))))?;
+    let mut fallback = Vec::new();
+    for key in ["backup_url", "backupUrl", "backup_url_1", "backupUrl1"] {
+        let Some(value) = value.get(key) else {
+            continue;
+        };
+        if let Some(url) = value.as_str().filter(|url| url.starts_with("http")) {
+            fallback.push(url.to_string());
+        }
+        fallback.extend(
+            value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|url| url.starts_with("http"))
+                .map(str::to_string),
+        );
+    }
+    fallback.retain(|url| url != &main);
+    fallback.sort();
+    fallback.dedup();
+    Some((main, fallback))
+}
+
+fn dash_bitrate(value: &serde_json::Value) -> Option<f64> {
+    value
+        .get("avg_bitrate")
+        .or_else(|| value.get("real_bitrate"))
+        .or_else(|| value.get("bitrate"))
+        .or_else(|| value.get("bit_rate"))
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| if value > 10_000.0 { value / 1000.0 } else { value })
+}
+
+fn dash_decryption_key(value: &serde_json::Value) -> Result<Option<String>> {
+    let encrypt_info = value.get("encrypt_info").or_else(|| value.get("encryptInfo"));
+    let encrypted = value
+        .get("encrypt")
+        .or_else(|| encrypt_info.and_then(|value| value.get("encrypt")))
+        .and_then(value_as_bool)
+        .unwrap_or(false);
+    let spade = text(value, &["spade_a", "spadeA"])
+        .or_else(|| encrypt_info.and_then(|value| text(value, &["spade_a", "spadeA"])));
+    match spade {
+        Some(spade) => Ok(Some(unwrap_spade_key(&spade)?)),
+        None if encrypted => bail!("抖音放映厅 CENC DASH 缺少 spade_a 内容密钥材料"),
+        None => Ok(None),
+    }
+}
+
+fn unwrap_spade_key(spade_a: &str) -> Result<String> {
+    let spade = BASE64_STANDARD
+        .decode(spade_a.trim())
+        .context("抖音放映厅 spade_a 不是有效 Base64")?;
+    if spade.len() < 3 {
+        bail!("抖音放映厅 spade_a 长度无效");
+    }
+    let marker = spade[0] ^ spade[1] ^ spade[2];
+    let type_length = i32::from(marker) - 0x30;
+    if type_length < 1 {
+        bail!("抖音放映厅 spade_a 类型长度无效");
+    }
+    let work_length = i32::try_from(spade.len()).unwrap_or_default() - i32::from(marker) + 0x2f;
+    if work_length < 1 || 1 + work_length as usize > spade.len() {
+        bail!("抖音放映厅 spade_a 工作区长度无效");
+    }
+    let work_length = work_length as usize;
+    let type_length = type_length as usize;
+    if spade.len() < type_length + 2 {
+        bail!("抖音放映厅 spade_a 类型数据不完整");
+    }
+    let type_xor_left = spade[spade.len() - type_length - 2];
+    let type_xor_right = spade[spade.len() - type_length - 1];
+    let media_type = (0..type_length)
+        .map(|index| type_xor_right ^ type_xor_left ^ spade[index + spade.len() - type_length])
+        .collect::<Vec<_>>();
+    if media_type.starts_with(b"app_v2") || media_type.starts_with(b"web_v2") {
+        bail!("该抖音放映厅视频使用暂不支持的 spade v2 密钥格式");
+    }
+
+    let mut output = spade[1..1 + work_length].to_vec();
+    let mut previous = 0x55_u8;
+    let mut current = 0xfa_u8;
+    for (index, byte) in output.iter_mut().enumerate() {
+        let original = *byte;
+        let mut left = original;
+        let mut right = previous;
+        if index & 1 != 0 {
+            left = current;
+            right = original;
+            current = previous;
+        }
+        let adjustment = -0x15_i32 - i32::try_from(index.count_ones()).unwrap_or_default();
+        *byte = (adjustment + i32::from(current ^ original)).rem_euclid(256) as u8;
+        previous = right;
+        current = left;
+    }
+    let key_trim = match output.first().copied() {
+        Some(value @ b'0'..=b'9') => usize::from(value - b'0'),
+        Some(value @ b'a'..=b'z') => usize::from(value - b'a' + 10),
+        _ => bail!("抖音放映厅 spade_a 密钥长度标记无效"),
+    };
+    let key_end = work_length
+        .checked_sub(key_trim)
+        .filter(|end| *end >= 2)
+        .context("抖音放映厅 spade_a 内容密钥长度无效")?;
+    let key = std::str::from_utf8(&output[1..key_end]).context("抖音放映厅内容密钥不是 UTF-8 十六进制")?;
+    if key.len() != 32 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("抖音放映厅内容密钥格式无效");
+    }
+    Ok(key.to_ascii_lowercase())
 }
 
 fn media_urls(value: Option<&serde_json::Value>) -> Option<(String, Vec<String>)> {
@@ -2260,6 +2459,86 @@ pub(crate) async fn download_image_post(
     }
     replace_file(&temporary, output_path).await?;
     info!(aweme_id = %metadata.id, images = image_paths.len(), path = %output_path.display(), "抖音图文原图、配乐和 MP4 幻灯片生成完成");
+    Ok(())
+}
+
+/// 使用 FFmpeg 的 mov CENC 解密能力处理放映厅独立音视频流，并保持项目原有
+/// `-c copy` 合并方式，不进行二次编码。
+pub(crate) async fn merge_encrypted_dash(
+    video_path: &Path,
+    video_key: &str,
+    audio_path: &Path,
+    audio_key: &str,
+    output_path: &Path,
+) -> Result<()> {
+    validate_content_key(video_key)?;
+    validate_content_key(audio_key)?;
+    remove_file_if_exists(output_path).await?;
+    let output = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+        .args(["-y", "-decryption_key", video_key, "-i"])
+        .arg(video_path)
+        .args(["-decryption_key", audio_key, "-i"])
+        .arg(audio_path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(output_path)
+        .output()
+        .await
+        .context("启动 FFmpeg 解密合并抖音放映厅 CENC DASH 失败")?;
+    if !output.status.success() {
+        remove_file_if_exists(output_path).await?;
+        bail!("FFmpeg 解密合并抖音放映厅 CENC DASH 失败：{}", process_error(&output));
+    }
+    verify_playable_media(output_path).await?;
+    info!(path = %output_path.display(), "抖音放映厅 CENC DASH 已解密并合并为可播放 MP4");
+    Ok(())
+}
+
+pub(crate) async fn decrypt_dash_stream(input_path: &Path, key: &str, output_path: &Path) -> Result<()> {
+    validate_content_key(key)?;
+    remove_file_if_exists(output_path).await?;
+    let output = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+        .args(["-y", "-decryption_key", key, "-i"])
+        .arg(input_path)
+        .args(["-map", "0", "-c", "copy", "-movflags", "+faststart"])
+        .arg(output_path)
+        .output()
+        .await
+        .context("启动 FFmpeg 解密抖音放映厅 CENC 媒体失败")?;
+    if !output.status.success() {
+        remove_file_if_exists(output_path).await?;
+        bail!("FFmpeg 解密抖音放映厅 CENC 媒体失败：{}", process_error(&output));
+    }
+    verify_playable_media(output_path).await?;
+    Ok(())
+}
+
+fn validate_content_key(key: &str) -> Result<()> {
+    if key.len() != 32 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("抖音放映厅 CENC 内容密钥格式无效");
+    }
+    Ok(())
+}
+
+async fn verify_playable_media(path: &Path) -> Result<()> {
+    let output = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-t", "2", "-f", "null", "-"])
+        .output()
+        .await
+        .context("启动 FFmpeg 校验抖音放映厅解密结果失败")?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        bail!("抖音放映厅 CENC 解密结果不可播放：{}", process_error(&output));
+    }
     Ok(())
 }
 
@@ -2509,5 +2788,46 @@ mod tests {
         assert_eq!(format.vcodec.as_deref(), Some("h264"));
         assert_eq!(format.url.as_deref(), Some("https://example.com/main.mp4"));
         assert_eq!(format.fallback_urls, vec!["https://example.com/fallback.mp4"]);
+    }
+
+    #[test]
+    fn unwraps_web_spade_content_key() {
+        assert_eq!(
+            unwrap_spade_key("lLwa92axG8pThwP6eoYr+mKDKv9TsgP4SYA1zX+CMc9/tjewsA==").unwrap(),
+            "95e0fd079fae9d0c1ea6821ad517544c"
+        );
+    }
+
+    #[test]
+    fn parses_theater_cenc_dash_video_and_audio() {
+        let formats = encrypted_dash_formats(&serde_json::json!({
+            "dynamicVideo": {
+                "dynamic_video_list": [{
+                    "main_url": "https://example.com/video.mp4",
+                    "definition": "1080p",
+                    "vwidth": 1920,
+                    "vheight": 1080,
+                    "codec_type": "h264",
+                    "encrypt": true,
+                    "spade_a": "lLwa92axG8pThwP6eoYr+mKDKv9TsgP4SYA1zX+CMc9/tjewsA=="
+                }],
+                "dynamic_audio_list": [{
+                    "main_url": "https://example.com/audio.m4a",
+                    "bitrate": 128000,
+                    "encrypt_info": {
+                        "encrypt": true,
+                        "spade_a": "lLwa92axG8pThwP6eoYr+mKDKv9TsgP4SYA1zX+CMc9/tjewsA=="
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+        assert_eq!(formats.len(), 2);
+        assert_eq!(formats[0].height, Some(1080));
+        assert_eq!(formats[0].vcodec.as_deref(), Some("h264"));
+        assert_eq!(formats[1].acodec.as_deref(), Some("aac"));
+        assert!(formats
+            .iter()
+            .all(|format| format.decryption_key.as_deref() == Some("95e0fd079fae9d0c1ea6821ad517544c")));
     }
 }

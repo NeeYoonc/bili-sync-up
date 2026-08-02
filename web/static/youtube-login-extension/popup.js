@@ -132,7 +132,10 @@ async function transfer(platform) {
 					...(await chrome.cookies.getAll({ domain: 'douyin.com' })),
 					...(await chrome.cookies.getAll({ domain: 'bytedance.com' }))
 				]
-			: await chrome.cookies.getAll({ domain: 'youtube.com' });
+			: [
+					...(await chrome.cookies.getAll({ domain: 'youtube.com' })),
+					...(await chrome.cookies.getAll({ domain: 'google.com' }))
+				];
 		const contents = buildNetscapeCookies(cookies, platform);
 		const douyinSessionParams = douyin ? await captureDouyinSessionParams() : {};
 		const response = await fetch(`${serverUrl}/api/${platform}/cookies`, {

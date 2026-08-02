@@ -1,12 +1,14 @@
 {
 	"manifest_version": 3,
 	"name": "Bili Sync 外部平台登录助手",
-	"version": "1.1.1",
+	"version": "1.1.2",
 	"description": "从电脑浏览器读取已登录的 YouTube/抖音状态并传输到 Bili Sync。",
 	"permissions": ["activeTab", "cookies", "scripting", "storage"],
 	"host_permissions": [
 		"https://youtube.com/*",
 		"https://*.youtube.com/*",
+		"https://google.com/*",
+		"https://*.google.com/*",
 		"https://douyin.com/*",
 		"https://*.douyin.com/*",
 		"https://bytedance.com/*",

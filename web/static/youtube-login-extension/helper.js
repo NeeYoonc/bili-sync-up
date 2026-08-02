@@ -24,7 +24,12 @@ export function isYouTubeCookieDomain(domain) {
 		.trim()
 		.replace(/^\./, '')
 		.toLowerCase();
-	return normalized === 'youtube.com' || normalized.endsWith('.youtube.com');
+	return (
+		normalized === 'youtube.com' ||
+		normalized.endsWith('.youtube.com') ||
+		normalized === 'google.com' ||
+		normalized.endsWith('.google.com')
+	);
 }
 
 export function isDouyinCookieDomain(domain) {

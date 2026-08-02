@@ -14,7 +14,7 @@ assert.equal(
 	'https://nas.example.com/*'
 );
 assert.equal(isYouTubeCookieDomain('.youtube.com'), true);
-assert.equal(isYouTubeCookieDomain('accounts.google.com'), false);
+assert.equal(isYouTubeCookieDomain('accounts.google.com'), true);
 assert.equal(isDouyinCookieDomain('.douyin.com'), true);
 assert.equal(isDouyinCookieDomain('.bytedance.com'), true);
 
@@ -41,7 +41,7 @@ assert.match(
 	exported,
 	/\.youtube\.com\tTRUE\t\/\tTRUE\t2000000000\t__Secure-3PSID\tyoutube-session/
 );
-assert.doesNotMatch(exported, /google-session|accounts\.google\.com/);
+assert.match(exported, /accounts\.google\.com\tTRUE\t\/\tTRUE\t2000000000\tSID\tgoogle-session/);
 assert.throws(() => buildNetscapeCookies([]), /没有检测到 YouTube 登录状态/);
 assert.match(
 	buildNetscapeCookies(

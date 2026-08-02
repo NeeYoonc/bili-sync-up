@@ -20,4 +20,5 @@ Edge：
 4. 点击“打开 YouTube”或“打开抖音”，在当前电脑浏览器中正常登录。
 5. 再次打开助手，点击对应平台的“传输登录状态”。
 
-助手只读取并传输 youtube.com 或 douyin.com Cookie，不读取或传输账号密码。
+助手只读取并传输 youtube.com、google.com 中维持 YouTube 会话的 Cookie，
+或 douyin.com、bytedance.com Cookie；不读取或传输账号密码。

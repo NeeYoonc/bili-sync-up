@@ -689,7 +689,7 @@ fn youtube_cookie_header(path: &Path) -> Result<String> {
                 return None;
             }
             let columns = line.split('\t').collect::<Vec<_>>();
-            if columns.len() < 7 || !columns[0].trim_start_matches('.').ends_with("youtube.com") {
+            if columns.len() < 7 || !is_youtube_auth_cookie_domain(columns[0]) {
                 return None;
             }
             let expires = columns[4].parse::<i64>().unwrap_or_default();
@@ -709,6 +709,14 @@ fn youtube_page_is_logged_out(html: &str) -> bool {
     html.contains("\"LOGGED_IN\":false")
         || html.contains("\"loggedIn\":false")
         || (html.contains("accounts.google.com/ServiceLogin") && !html.contains("\"LOGGED_IN\":true"))
+}
+
+fn is_youtube_auth_cookie_domain(domain: &str) -> bool {
+    let domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    domain == "youtube.com"
+        || domain.ends_with(".youtube.com")
+        || domain == "google.com"
+        || domain.ends_with(".google.com")
 }
 
 fn extract_youtube_initial_data(html: &str) -> Option<serde_json::Value> {
@@ -2981,7 +2989,18 @@ async fn download_youtube_media(
                 let _ = remove_file_if_exists(&temporary).await;
                 return Err(error);
             }
-            replace_file(&temporary, &output_path).await?;
+            if let Some(key) = audio.decryption_key.as_deref() {
+                let decrypted = output_path.with_extension("decrypted.m4a");
+                if let Err(error) = crate::douyin::decrypt_dash_stream(&temporary, key, &decrypted).await {
+                    let _ = remove_file_if_exists(&temporary).await;
+                    let _ = remove_file_if_exists(&decrypted).await;
+                    return Err(error);
+                }
+                replace_file(&decrypted, &output_path).await?;
+                remove_file_if_exists(&temporary).await?;
+            } else {
+                replace_file(&temporary, &output_path).await?;
+            }
         } else {
             // 抖音只提供带音轨的 MP4。先由统一下载器取得用户选择质量的
             // 混合流，再复用项目 ffmpeg 工具提取为真正的 M4A。
@@ -2999,13 +3018,27 @@ async fn download_youtube_media(
                 let _ = remove_file_if_exists(&source_temporary).await;
                 return Err(error);
             }
-            if let Err(error) = extract_audio_track(&source_temporary, &audio_temporary, platform).await {
+            let decrypted_source = output_path.with_extension("audio-source-decrypted.mp4");
+            let extract_source = if let Some(key) = mixed.decryption_key.as_deref() {
+                if let Err(error) = crate::douyin::decrypt_dash_stream(&source_temporary, key, &decrypted_source).await
+                {
+                    let _ = remove_file_if_exists(&source_temporary).await;
+                    let _ = remove_file_if_exists(&decrypted_source).await;
+                    return Err(error);
+                }
+                decrypted_source.as_path()
+            } else {
+                source_temporary.as_path()
+            };
+            if let Err(error) = extract_audio_track(extract_source, &audio_temporary, platform).await {
                 let _ = remove_file_if_exists(&source_temporary).await;
+                let _ = remove_file_if_exists(&decrypted_source).await;
                 let _ = remove_file_if_exists(&audio_temporary).await;
                 return Err(error);
             }
             replace_file(&audio_temporary, &output_path).await?;
             remove_file_if_exists(&source_temporary).await?;
+            remove_file_if_exists(&decrypted_source).await?;
         }
     } else if let (Some(video_stream), Some(audio_stream)) = (
         selected.as_ref().and_then(|streams| streams.video.as_ref()),
@@ -3035,11 +3068,29 @@ async fn download_youtube_media(
             let _ = remove_file_if_exists(&audio_temporary).await;
             return Err(error);
         }
-        if let Err(error) = downloader
-            .merge(&video_temporary, &audio_temporary, &merge_temporary)
-            .await
-            .with_context(|| format!("使用项目现有 ffmpeg 链路合并{platform}音视频失败"))
-        {
+        let merge_result = match (
+            video_stream.decryption_key.as_deref(),
+            audio_stream.decryption_key.as_deref(),
+        ) {
+            (Some(video_key), Some(audio_key)) => {
+                crate::douyin::merge_encrypted_dash(
+                    &video_temporary,
+                    video_key,
+                    &audio_temporary,
+                    audio_key,
+                    &merge_temporary,
+                )
+                .await
+            }
+            (None, None) => {
+                downloader
+                    .merge(&video_temporary, &audio_temporary, &merge_temporary)
+                    .await
+            }
+            _ => Err(anyhow!("{platform}独立音视频流的 CENC 密钥状态不一致")),
+        }
+        .with_context(|| format!("使用项目现有 ffmpeg 链路合并{platform}音视频失败"));
+        if let Err(error) = merge_result {
             let _ = remove_file_if_exists(&video_temporary).await;
             let _ = remove_file_if_exists(&audio_temporary).await;
             let _ = remove_file_if_exists(&merge_temporary).await;
@@ -3064,7 +3115,18 @@ async fn download_youtube_media(
             let _ = remove_file_if_exists(&temporary).await;
             return Err(error);
         }
-        replace_file(&temporary, &output_path).await?;
+        if let Some(key) = mixed.decryption_key.as_deref() {
+            let decrypted = output_path.with_extension("decrypted.mp4");
+            if let Err(error) = crate::douyin::decrypt_dash_stream(&temporary, key, &decrypted).await {
+                let _ = remove_file_if_exists(&temporary).await;
+                let _ = remove_file_if_exists(&decrypted).await;
+                return Err(error);
+            }
+            replace_file(&decrypted, &output_path).await?;
+            remove_file_if_exists(&temporary).await?;
+        } else {
+            replace_file(&temporary, &output_path).await?;
+        }
     }
 
     let warning_message = if source.audio_only && source.audio_only_m4a_only && metadata.images.is_empty() {
@@ -4895,7 +4957,7 @@ fn has_youtube_session(path: &Path) -> bool {
                 return false;
             }
             let columns = line.split('\t').collect::<Vec<_>>();
-            if columns.len() < 7 || !columns[0].contains("youtube.com") {
+            if columns.len() < 7 || !is_youtube_auth_cookie_domain(columns[0]) {
                 return false;
             }
             matches!(
@@ -4918,7 +4980,7 @@ fn is_netscape_youtube_cookie_file(contents: &str) -> bool {
             }
             let columns = line.split('\t').collect::<Vec<_>>();
             columns.len() >= 7
-                && columns[0].contains("youtube.com")
+                && is_youtube_auth_cookie_domain(columns[0])
                 && matches!(
                     columns[5],
                     "SID" | "SAPISID" | "APISID" | "__Secure-1PSID" | "__Secure-3PSID"
@@ -5017,10 +5079,10 @@ mod tests {
     }
 
     #[test]
-    fn login_cookie_must_belong_to_youtube_domain() {
+    fn login_cookie_accepts_youtube_and_google_account_domains() {
         let google_only = "# Netscape HTTP Cookie File\n.google.com\tTRUE\t/\tTRUE\t0\tSID\tvalue\n";
         let youtube_session = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tvalue\n";
-        assert!(!is_netscape_youtube_cookie_file(google_only));
+        assert!(is_netscape_youtube_cookie_file(google_only));
         assert!(is_netscape_youtube_cookie_file(youtube_session));
     }
 
