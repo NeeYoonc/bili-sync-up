@@ -53,13 +53,97 @@ const DOUYIN_MSTOKEN_API: &str = "https://mssdk.bytedance.com/web/r/token?ms_app
 const DOUYIN_MSTOKEN_STR_DATA: &str = include_str!("douyin_mstoken_strdata.txt");
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 /// 抖音 Web 翻页请求之间的人工延迟，避免短时间连续请求触发频率风控（HTTP 403）。
-/// 默认取全局风控配置的 base_request_delay（毫秒），最小不低于 800ms。
+/// 默认取全局风控配置的 base_request_delay（毫秒），最小不低于 800ms；
+/// 自动退避开启且处于风控保持窗口内时，放大到 auto_backoff_base_seconds × 连续次数。
 async fn douyin_page_delay() -> Duration {
-    let configured = crate::config::reload_config()
-        .submission_risk_control
-        .base_request_delay
-        .max(800);
-    Duration::from_millis(configured)
+    let config = crate::config::reload_config().submission_risk_control;
+    let base = Duration::from_millis(config.base_request_delay.max(800));
+    if !config.enable_auto_backoff {
+        return base;
+    }
+    let state = douyin_risk_state().read().await;
+    let Some(last_risk_at) = state.last_risk_at else {
+        return base;
+    };
+    if last_risk_at.elapsed() >= RISK_BACKOFF_WINDOW {
+        return base;
+    }
+    let max_multiplier = config.auto_backoff_max_multiplier.max(1);
+    let multiplier = state.risk_streak.clamp(1, max_multiplier);
+    let backoff =
+        Duration::from_secs(config.auto_backoff_base_seconds.max(1).saturating_mul(multiplier));
+    base.max(backoff)
+}
+
+/// 风控事件后的退避保持窗口：窗口内所有抖音 Web API 请求间隔都会被放大。
+const RISK_BACKOFF_WINDOW: Duration = Duration::from_secs(120);
+/// 抖音弹幕 32 秒窗口请求之间的短间隔（毫秒），平时避免背靠背突发请求。
+const DOUYIN_DANMAKU_DELAY_MS: u64 = 150;
+
+struct DouyinRiskState {
+    /// 最近一次风控/限流事件发生时刻。
+    last_risk_at: Option<Instant>,
+    /// 风控事件连续计数（窗口内累加，用于阶梯放大退避）。
+    risk_streak: u64,
+}
+
+fn douyin_risk_state() -> &'static RwLock<DouyinRiskState> {
+    static STATE: OnceLock<RwLock<DouyinRiskState>> = OnceLock::new();
+    STATE.get_or_init(|| RwLock::new(DouyinRiskState {
+        last_risk_at: None,
+        risk_streak: 0,
+    }))
+}
+
+/// 记录一次风控/限流事件；窗口内的连续事件会阶梯放大后续请求间隔。
+async fn record_douyin_risk_event() {
+    let mut state = douyin_risk_state().write().await;
+    let now = Instant::now();
+    state.risk_streak = match state.last_risk_at {
+        Some(previous) if now.duration_since(previous) < RISK_BACKOFF_WINDOW => {
+            state.risk_streak.saturating_add(1)
+        }
+        _ => 1,
+    };
+    state.last_risk_at = Some(now);
+}
+
+/// 风控退避是否生效（自动退避开关开启且仍在保持窗口内）。
+async fn douyin_risk_backoff_active() -> bool {
+    let config = crate::config::reload_config().submission_risk_control;
+    if !config.enable_auto_backoff {
+        return false;
+    }
+    douyin_risk_state()
+        .read()
+        .await
+        .last_risk_at
+        .is_some_and(|at| at.elapsed() < RISK_BACKOFF_WINDOW)
+}
+
+/// 抖音弹幕 32 秒窗口请求之间的间隔：平时短间隔降突发，风控退避期间跟随翻页退避。
+async fn douyin_danmaku_delay() -> Duration {
+    if douyin_risk_backoff_active().await {
+        douyin_page_delay().await
+    } else {
+        Duration::from_millis(DOUYIN_DANMAKU_DELAY_MS)
+    }
+}
+
+/// 抖音源扫描失败时，判断是否属于风控/限流类错误（用于退避后重试一次）。
+pub(crate) fn is_douyin_risk_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("403")
+        || message.contains("429")
+        || message.contains("Forbidden")
+        || message.contains("触发风控")
+        || message.contains("限流")
+        || message.contains("HTTP 50")
+}
+
+/// 抖音源因风控/限流失败后的退避重试间隔：复用全局风控退避间隔。
+pub(crate) async fn douyin_risk_retry_delay() -> Duration {
+    douyin_page_delay().await
 }
 /// signed_get 对风控/限流状态码的重试次数（403/429/5xx）。
 const RISK_RETRY_ATTEMPTS: usize = 3;
@@ -78,6 +162,39 @@ fn theater_catalog_cache() -> &'static RwLock<Option<CatalogCacheEntry>> {
 fn series_catalog_cache() -> &'static RwLock<Option<CatalogCacheEntry>> {
     static CACHE: OnceLock<RwLock<Option<CatalogCacheEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(None))
+}
+
+#[derive(Clone)]
+struct DouyinItemsCacheEntry {
+    fetched_at: Instant,
+    items: Vec<serde_json::Value>,
+}
+
+fn series_items_cache() -> &'static RwLock<HashMap<String, DouyinItemsCacheEntry>> {
+    static CACHE: OnceLock<RwLock<HashMap<String, DouyinItemsCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn theater_items_cache() -> &'static RwLock<HashMap<String, DouyinItemsCacheEntry>> {
+    static CACHE: OnceLock<RwLock<HashMap<String, DouyinItemsCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// 短时缓存写入前清理过期条目，避免内存无限增长。
+async fn store_fresh_items_cache(
+    cache: &RwLock<HashMap<String, DouyinItemsCacheEntry>>,
+    key: String,
+    items: Vec<serde_json::Value>,
+) {
+    let mut guard = cache.write().await;
+    guard.retain(|_, entry| entry.fetched_at.elapsed() < CATALOG_CACHE_TTL);
+    guard.insert(
+        key,
+        DouyinItemsCacheEntry {
+            fetched_at: Instant::now(),
+            items,
+        },
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -1311,16 +1428,9 @@ async fn fetch_watch_later_posts(limit: usize) -> Result<Vec<DouyinPost>> {
 }
 
 async fn fetch_theater_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
-    let mut pairs = common_query_pairs();
-    pairs.push(("album_ids", id.to_string()));
-    let response = signed_get(DOUYIN_THEATER_ITEMS_API, pairs).await?;
+    let items = fetch_theater_items(id).await?;
     let mut posts = Vec::new();
-    for item in response
-        .get("aweme_list")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for item in &items {
         if let Some(mut post) = parse_post(item) {
             // 放映厅接口返回顺序即剧集播放顺序。
             post.episode_number = i32::try_from(posts.len() + 1).ok();
@@ -1333,18 +1443,64 @@ async fn fetch_theater_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> 
     Ok(posts)
 }
 
+/// 拉取放映厅全部剧集（原始 aweme），结果写入短时缓存供扫描与逐集详情复用。
+async fn fetch_theater_items(album_id: &str) -> Result<Vec<serde_json::Value>> {
+    if let Some(cached) = theater_items_cache().read().await.get(album_id).cloned() {
+        if cached.fetched_at.elapsed() < CATALOG_CACHE_TTL {
+            return Ok(cached.items);
+        }
+    }
+    let mut pairs = common_query_pairs();
+    pairs.push(("album_ids", album_id.to_string()));
+    let response = signed_get(DOUYIN_THEATER_ITEMS_API, pairs).await?;
+    // 该接口成功响应没有 status_code，与普通 aweme 接口不同；是否成功以
+    // aweme_list 为准，保持和已经验证可用的放映厅扫描路径一致。
+    let items = response
+        .get("aweme_list")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    store_fresh_items_cache(theater_items_cache(), album_id.to_string(), items.clone()).await;
+    Ok(items)
+}
+
 async fn fetch_series_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
-    let mut cursor = 0i64;
+    let items = fetch_series_items(id).await?;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
+    for item in &items {
+        if let Some(mut post) = parse_post(item) {
+            if seen.insert(post.id.clone()) {
+                // 短剧接口返回顺序即剧集播放顺序。
+                post.episode_number = i32::try_from(posts.len() + 1).ok();
+                posts.push(post);
+                if posts.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(posts)
+}
+
+/// 拉取短剧完整剧集列表（原始 aweme），翻页之间套用翻页延迟；结果写入短时缓存，
+/// 供扫描与逐集详情查找复用，避免每集都重新翻页。
+async fn fetch_series_items(series_id: &str) -> Result<Vec<serde_json::Value>> {
+    if let Some(cached) = series_items_cache().read().await.get(series_id).cloned() {
+        if cached.fetched_at.elapsed() < CATALOG_CACHE_TTL {
+            return Ok(cached.items);
+        }
+    }
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cursor = 0i64;
     for _ in 0..1000 {
-        let page_size = page_size_for(limit, posts.len());
         let mut pairs = common_query_pairs();
         pairs.extend([
-            ("series_id", id.to_string()),
+            ("series_id", series_id.to_string()),
             ("pull_type", "2".to_string()),
             ("cursor", cursor.to_string()),
-            ("count", page_size.to_string()),
+            ("count", "50".to_string()),
         ]);
         let response = signed_get(DOUYIN_SERIES_ITEMS_API, pairs).await?;
         ensure_douyin_status_ok(&response, "获取抖音短剧剧集")?;
@@ -1353,16 +1509,15 @@ async fn fetch_series_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
             .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
+            .cloned()
         {
-            if let Some(mut post) = parse_post(item) {
-                if seen.insert(post.id.clone()) {
-                    // 短剧接口返回顺序即剧集播放顺序，跨页继续累计集号。
-                    post.episode_number = i32::try_from(posts.len() + 1).ok();
-                    posts.push(post);
+            if let Some(id) = text(&item, &["aweme_id", "group_id"]) {
+                if seen.insert(id) {
+                    items.push(item);
                 }
             }
         }
-        if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
             break;
         }
         let next = response.get("max_cursor").and_then(value_as_i64).unwrap_or(cursor);
@@ -1372,7 +1527,8 @@ async fn fetch_series_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
         cursor = next;
         tokio::time::sleep(douyin_page_delay().await).await;
     }
-    Ok(posts)
+    store_fresh_items_cache(series_items_cache(), series_id.to_string(), items.clone()).await;
+    Ok(items)
 }
 
 fn page_size_for(limit: usize, loaded: usize) -> i32 {
@@ -1489,50 +1645,21 @@ pub(crate) async fn fetch_aweme_detail_for_source(
     }
 }
 
-fn find_aweme_detail(response: &serde_json::Value, key: &str, aweme_id: &str) -> Option<serde_json::Value> {
-    response
-        .get(key)
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
+fn find_aweme_in_items(items: &[serde_json::Value], aweme_id: &str) -> Option<serde_json::Value> {
+    items
+        .iter()
         .find(|item| text(item, &["aweme_id", "group_id"]).as_deref() == Some(aweme_id))
         .cloned()
 }
 
 async fn fetch_theater_aweme_detail(album_id: &str, aweme_id: &str) -> Result<Option<serde_json::Value>> {
-    let mut pairs = common_query_pairs();
-    pairs.push(("album_ids", album_id.to_string()));
-    let response = signed_get(DOUYIN_THEATER_ITEMS_API, pairs).await?;
-    // 该接口成功响应没有 status_code，与普通 aweme 接口不同；是否成功以
-    // aweme_list 为准，保持和已经验证可用的放映厅扫描路径一致。
-    Ok(find_aweme_detail(&response, "aweme_list", aweme_id))
+    let items = fetch_theater_items(album_id).await?;
+    Ok(find_aweme_in_items(&items, aweme_id))
 }
 
 async fn fetch_series_aweme_detail(series_id: &str, aweme_id: &str) -> Result<Option<serde_json::Value>> {
-    let mut cursor = 0i64;
-    for _ in 0..1000 {
-        let mut pairs = common_query_pairs();
-        pairs.extend([
-            ("series_id", series_id.to_string()),
-            ("pull_type", "2".to_string()),
-            ("cursor", cursor.to_string()),
-            ("count", "50".to_string()),
-        ]);
-        let response = signed_get(DOUYIN_SERIES_ITEMS_API, pairs).await?;
-        ensure_douyin_status_ok(&response, "获取抖音短剧剧集详情")?;
-        if let Some(detail) = find_aweme_detail(&response, "aweme_list", aweme_id) {
-            return Ok(Some(detail));
-        }
-        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
-            return Ok(None);
-        }
-        let next = response.get("max_cursor").and_then(value_as_i64).unwrap_or(cursor);
-        if next == cursor {
-            return Ok(None);
-        }
-        cursor = next;
-    }
-    Ok(None)
+    let items = fetch_series_items(series_id).await?;
+    Ok(find_aweme_in_items(&items, aweme_id))
 }
 
 /// 获取抖音点播作品的时间轴弹幕。Web 端按 32 秒窗口返回弹幕，因此这里
@@ -1588,6 +1715,8 @@ pub(crate) async fn fetch_aweme_danmaku(aweme_id: &str, duration_seconds: i32) -
             .and_then(serde_json::Value::as_i64)
             .filter(|next| *next > start_time)
             .unwrap_or(end_time);
+        // 弹幕按 32 秒窗口分页请求，窗口之间加入短间隔，避免背靠背突发。
+        tokio::time::sleep(douyin_danmaku_delay().await).await;
     }
     danmaku.sort_by_key(|item| item.offset_time);
     Ok(danmaku)
@@ -1815,6 +1944,10 @@ async fn signed_get(base_url: &str, mut pairs: Vec<(&str, String)>) -> Result<se
         let risk_limited = status == reqwest::StatusCode::FORBIDDEN
             || status == reqwest::StatusCode::TOO_MANY_REQUESTS
             || status.is_server_error();
+        if risk_limited {
+            // 风控事件写入全局状态，随后的翻页/弹幕/源扫描重试都会放慢节奏。
+            record_douyin_risk_event().await;
+        }
         if !risk_limited || attempt >= RISK_RETRY_ATTEMPTS {
             bail!("抖音 Web API 返回 HTTP {status}");
         }
@@ -3028,6 +3161,18 @@ mod tests {
     }
 
     #[test]
+    fn classifies_douyin_risk_errors() {
+        let risk_403 = anyhow::anyhow!("抖音 Web API 返回 HTTP 403 Forbidden");
+        assert!(is_douyin_risk_error(&risk_403));
+        let risk_429 = anyhow::anyhow!("抖音 Web API 返回 HTTP 429 Too Many Requests");
+        assert!(is_douyin_risk_error(&risk_429));
+        let risk_5xx = anyhow::anyhow!("抖音 Web API 返回 HTTP 503 Service Unavailable");
+        assert!(is_douyin_risk_error(&risk_5xx));
+        let unrelated = anyhow::anyhow!("网络连接失败");
+        assert!(!is_douyin_risk_error(&unrelated));
+    }
+
+    #[test]
     fn parses_douyin_post() {
         let post = parse_post(&serde_json::json!({
             "aweme_id": "123",
@@ -3051,10 +3196,11 @@ mod tests {
                 {"aweme_id": "200", "desc": "目标剧集", "video": {"bit_rate": []}}
             ]
         });
-        let detail = find_aweme_detail(&response, "aweme_list", "200").expect("应找到目标剧集");
+        let items = response.get("aweme_list").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let detail = find_aweme_in_items(&items, "200").expect("应找到目标剧集");
         assert_eq!(text(&detail, &["desc"]).as_deref(), Some("目标剧集"));
         assert!(detail.get("video").is_some());
-        assert!(find_aweme_detail(&response, "aweme_list", "300").is_none());
+        assert!(find_aweme_in_items(&items, "300").is_none());
     }
 
     #[test]

@@ -2157,7 +2157,23 @@ pub async fn process_scheduled_sources(
         if TASK_CONTROLLER.is_paused() {
             return Ok(());
         }
-        if let Err(error) = scan_source(db, source).await {
+        let mut scan_result = scan_source(db, source).await;
+        if let Err(error) = scan_result.as_ref() {
+            if is_douyin_source(source) && crate::douyin::is_douyin_risk_error(error) {
+                warn!(
+                    source_id = source.id,
+                    error = %error,
+                    "扫描{}视频源「{}」失败（风控/限流），等待退避后重试一次",
+                    source_platform_label(source),
+                    source.name
+                );
+                tokio::time::sleep(crate::douyin::douyin_risk_retry_delay().await).await;
+                if !TASK_CONTROLLER.is_paused() {
+                    scan_result = scan_source(db, source).await;
+                }
+            }
+        }
+        if let Err(error) = scan_result {
             warn!(source_id = source.id, error = %error, "扫描{}视频源「{}」失败", source_platform_label(source), source.name);
         }
         let delay = crate::config::reload_config()
