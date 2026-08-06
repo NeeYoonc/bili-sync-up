@@ -78,6 +78,7 @@ mod m20260802_000001_add_youtube_video_image_post;
 mod m20260802_000002_add_youtube_source_ai_rename;
 mod m20260802_000003_enable_douyin_danmaku;
 mod m20260802_000004_add_youtube_scan_deleted;
+mod m20260804_000001_add_external_episode_number;
 
 pub struct Migrator;
 
@@ -163,6 +164,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260802_000002_add_youtube_source_ai_rename::Migration),
             Box::new(m20260802_000003_enable_douyin_danmaku::Migration),
             Box::new(m20260802_000004_add_youtube_scan_deleted::Migration),
+            Box::new(m20260804_000001_add_external_episode_number::Migration),
         ]
     }
 }

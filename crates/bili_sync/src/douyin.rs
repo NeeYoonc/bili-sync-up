@@ -121,6 +121,8 @@ pub struct DouyinPost {
     pub published_at: Option<String>,
     pub timestamp: Option<i64>,
     pub duration_seconds: Option<i32>,
+    /// 剧集类来源（短剧/放映厅/合集）中的集号；普通作品为 None。
+    pub episode_number: Option<i32>,
     pub digg_count: i64,
     pub is_image_post: bool,
 }
@@ -1239,7 +1241,20 @@ async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost
         ]);
         let response = signed_get(DOUYIN_COLLECTION_VIDEOS_API, pairs).await?;
         ensure_douyin_status_ok(&response, "获取抖音收藏夹作品")?;
-        append_awemes(&response, "aweme_list", &mut posts, &mut seen);
+        for item in response
+            .get("aweme_list")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(mut post) = parse_post(item) {
+                if seen.insert(post.id.clone()) {
+                    // 收藏夹没有可靠的返回顺序，集号从标题解析（如“第1集/第x话”）。
+                    post.episode_number = extract_episode_number(&post.title);
+                    posts.push(post);
+                }
+            }
+        }
         if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
             break;
         }
@@ -1285,14 +1300,23 @@ async fn fetch_theater_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> 
     let mut pairs = common_query_pairs();
     pairs.push(("album_ids", id.to_string()));
     let response = signed_get(DOUYIN_THEATER_ITEMS_API, pairs).await?;
-    Ok(response
+    let mut posts = Vec::new();
+    for item in response
         .get("aweme_list")
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(parse_post)
-        .take(limit)
-        .collect())
+    {
+        if let Some(mut post) = parse_post(item) {
+            // 放映厅接口返回顺序即剧集播放顺序。
+            post.episode_number = i32::try_from(posts.len() + 1).ok();
+            posts.push(post);
+            if posts.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(posts)
 }
 
 async fn fetch_series_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
@@ -1310,7 +1334,20 @@ async fn fetch_series_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
         ]);
         let response = signed_get(DOUYIN_SERIES_ITEMS_API, pairs).await?;
         ensure_douyin_status_ok(&response, "获取抖音短剧剧集")?;
-        append_awemes(&response, "aweme_list", &mut posts, &mut seen);
+        for item in response
+            .get("aweme_list")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(mut post) = parse_post(item) {
+                if seen.insert(post.id.clone()) {
+                    // 短剧接口返回顺序即剧集播放顺序，跨页继续累计集号。
+                    post.episode_number = i32::try_from(posts.len() + 1).ok();
+                    posts.push(post);
+                }
+            }
+        }
         if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
             break;
         }
@@ -1665,7 +1702,24 @@ fn parse_post(item: &serde_json::Value) -> Option<DouyinPost> {
             .and_then(|statistics| integer(statistics, &["digg_count"]))
             .unwrap_or_default(),
         is_image_post,
+        episode_number: None,
     })
+}
+
+/// 从抖音作品标题解析集号（如“第1集”“第10话”“EP 03”“E12”）。
+/// 解析失败返回 None，由调用方决定是否按普通视频处理。
+fn extract_episode_number(title: &str) -> Option<i32> {
+    static EPISODE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = EPISODE_RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:第\s*([0-9]{1,4})\s*(?:集|话|期|回|章|节|部)|(?:^|[^0-9])[Ee][Pp]\s*[.:]?\s*([0-9]{1,4})(?:\s|$|[^0-9]))")
+            .expect("集号正则必须有效")
+    });
+    let captures = re.captures(title)?;
+    captures
+        .get(1)
+        .or_else(|| captures.get(2))
+        .and_then(|matched| matched.as_str().parse().ok())
+        .filter(|value| *value >= 1 && *value <= 9999)
 }
 
 fn common_query_pairs() -> Vec<(&'static str, String)> {

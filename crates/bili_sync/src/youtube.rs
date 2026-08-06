@@ -2274,9 +2274,12 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
             .await?
         {
             deleted_video_ids.remove(&post.id);
-            if existing.is_image_post != post.is_image_post {
+            if existing.is_image_post != post.is_image_post
+                || existing.episode_number != post.episode_number
+            {
                 let mut active: youtube_video::ActiveModel = existing.into();
                 active.is_image_post = Set(post.is_image_post);
+                active.episode_number = Set(post.episode_number);
                 active.updated_at = Set(now_standard_string());
                 active.update(db).await?;
             }
@@ -2330,6 +2333,7 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
             thumbnail: Set(post.thumbnail),
             published_at: Set(post.published_at),
             duration_seconds: Set(post.duration_seconds),
+            episode_number: Set(post.episode_number),
             is_image_post: Set(post.is_image_post),
             download_status: Set("pending".to_string()),
             output_path: Set(None),
@@ -3565,12 +3569,45 @@ fn youtube_output_path(
         "pid": 1,
         "pid_pad": "01",
     });
-    let (video_folder, page_name) = crate::config::with_config(|bundle| {
-        Ok::<_, anyhow::Error>((
-            bundle.render_video_template(&args)?,
-            bundle.render_page_template(&args)?,
-        ))
-    })?;
+    // 抖音短剧/放映厅/合集与 B 站合集 up_seasonal 模式保持一致：
+    // 下载根目录/剧集名/S01E001 - 每集标题.mp4。一个剧集一个目录，
+    // 文件名带三位集号保证文件系统排序稳定；无集号时回退到普通单 P 命名。
+    let episodic_source = matches!(
+        source.source_type.as_str(),
+        "douyin_theater" | "douyin_series" | "douyin_collection"
+    );
+    let (video_folder, page_name) = if episodic_source {
+        if let Some(episode) = video.episode_number.filter(|value| *value >= 1) {
+            let series_folder = crate::utils::filenamify::filenamify(&source.name);
+            let series_folder = if series_folder.is_empty() {
+                format!("剧集_{}", source.id)
+            } else {
+                series_folder
+            };
+            let clean_episode_title = crate::utils::filenamify::filenamify(title);
+            let episode_page_name = if clean_episode_title.is_empty() {
+                format!("S{:02}E{:03}", 1, episode)
+            } else {
+                format!("S{:02}E{:03} - {}", 1, episode, clean_episode_title)
+            };
+            (series_folder, episode_page_name)
+        } else {
+            crate::config::with_config(|bundle| {
+                Ok::<_, anyhow::Error>((
+                    bundle.render_video_template(&args)?,
+                    bundle.render_page_template(&args)?,
+                ))
+            })?
+        }
+    } else {
+        crate::config::with_config(|bundle| {
+            Ok::<_, anyhow::Error>((
+                bundle.render_video_template(&args)?,
+                bundle.render_page_template(&args)?,
+            ))
+        })?
+    };
+
     // 图文作品必须生成可在现有视频管理页播放的 MP4，
     // 同时原图和配乐仍保留在同目录。
     let extension = if source.audio_only && metadata.images.is_empty() {
@@ -5380,4 +5417,46 @@ mod tests {
         assert_eq!(elems[0].dmid_str, "chat-1");
         assert_eq!(elems[0].ctime, 1_700_000_000);
     }
+
+    #[test]
+    fn builds_episodic_douyin_output_path_like_bilibili_collection() {
+        use bili_sync_entity::{youtube_source, youtube_video};
+        use crate::external_media::ExternalMediaMetadata;
+        use std::collections::HashMap;
+
+        let mut source = youtube_source::Model::default();
+        source.id = 42;
+        source.source_type = "douyin_series".to_string();
+        source.name = "测试短剧/带斜杠".to_string();
+        source.path = "F:/Downloads/测试".to_string();
+        let video = youtube_video::Model {
+            episode_number: Some(3),
+            ..Default::default()
+        };
+        let metadata = ExternalMediaMetadata {
+            id: "1234567890".to_string(),
+            title: Some("第三集".to_string()),
+            uploader: Some("作者".to_string()),
+            uploader_url: None,
+            channel: None,
+            channel_id: None,
+            channel_url: None,
+            thumbnail: None,
+            description: None,
+            language: None,
+            upload_date: None,
+            duration: None,
+            formats: Vec::new(),
+            subtitles: HashMap::new(),
+            automatic_captions: HashMap::new(),
+            images: Vec::new(),
+            music_urls: Vec::new(),
+        };
+        let path = super::youtube_output_path(&source, &video, &metadata, "第三集标题", "作者").unwrap();
+        let expected = Path::new("F:/Downloads/测试")
+            .join("测试短剧_带斜杠")
+            .join("S01E003 - 第三集标题.mp4");
+        assert_eq!(path, expected, "短剧应输出 下载根/剧集名/S01E003 - 标题.mp4");
+    }
+
 }
