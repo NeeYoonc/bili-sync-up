@@ -2692,6 +2692,27 @@ async fn backfill_completed_sidecars(db: &DatabaseConnection, downloader: &Unifi
             warned += 1;
             continue;
         };
+        if is_douyin_source(source) && crate::douyin::is_cenc_encrypted_media(&output_path).await {
+            // 历史“已完成”文件实为付费密文（未购买时 API 只返回无解密密钥的 CENC
+            // 加密流），与 B 站充电视频一致：清理无效媒体、生成 0 字节占位文件并标记
+            // 失败，避免后续启动反复重下同样不可播放的密文。
+            if let Err(error) = remove_file_if_exists(&output_path).await {
+                warn!(path = %output_path.display(), error = %error, "清理抖音付费密文失败");
+            }
+            if let Err(error) = crate::douyin::create_paid_placeholder(&output_path).await {
+                warn!(path = %output_path.display(), error = %error, "创建抖音付费占位文件失败");
+            }
+            let mut active: youtube_video::ActiveModel = video.into();
+            active.download_status = Set("failed".to_string());
+            active.retry_count = Set(MAX_DOWNLOAD_RETRIES);
+            active.error_message = Set(Some(
+                "抖音付费/加密内容，需购买后才能下载（未购买无法获取解密密钥）；已清理无效密文并生成占位文件".to_string(),
+            ));
+            active.updated_at = Set(now_standard_string());
+            active.update(db).await?;
+            warned += 1;
+            continue;
+        }
         if youtube_sidecars_complete(&video, source).await {
             continue;
         }
@@ -2807,6 +2828,32 @@ async fn download_video(
         active.updated_at = Set(now_standard_string());
         match result {
             Ok(mut downloaded) => {
+                if downloaded.paid_content {
+                    let paid_message = downloaded
+                        .warning_message
+                        .take()
+                        .unwrap_or_else(|| "付费/加密内容，需购买后才能下载".to_string());
+                    let mut paid: youtube_video::ActiveModel = video.clone().into();
+                    paid.download_status = Set("failed".to_string());
+                    paid.retry_count = Set(MAX_DOWNLOAD_RETRIES);
+                    paid.output_path = Set(Some(downloaded.output_path.display().to_string()));
+                    paid.error_message = Set(Some(paid_message.clone()));
+                    paid.updated_at = Set(now_standard_string());
+                    paid.update(db).await?;
+                    info!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        youtube_id = %video.youtube_id,
+                        path = %downloaded.output_path.display(),
+                        "{}视频源「{}」视频「{}」为付费/加密内容，已生成占位文件并停止重试",
+                        platform_label,
+                        source.name,
+                        video.title
+                    );
+                    notify_videos_changed();
+                    notify_queue_status_changed();
+                    return Ok(());
+                }
                 let downloaded_title = downloaded.title.clone();
                 if source.ai_rename && crate::config::reload_config().ai_rename.enabled {
                     match ai_rename_external_file(&source, &video, &downloaded, None, None).await {
@@ -2855,7 +2902,9 @@ async fn download_video(
             }
             Err(error) => {
                 let retry_count = video.retry_count.saturating_add(1);
-                let permanent_failure = error.to_string().contains("CENC 加密 DASH");
+                let error_text = error.to_string();
+                let permanent_failure =
+                    error_text.contains("CENC 加密 DASH") || error_text.contains("付费/加密内容");
                 let exhausted = permanent_failure || retry_count >= MAX_DOWNLOAD_RETRIES;
                 active.retry_count = Set(retry_count);
                 active.download_status = Set(if exhausted { "failed" } else { "pending" }.to_string());
@@ -2925,6 +2974,8 @@ struct DownloadedYouTubeMedia {
     duration_seconds: Option<i32>,
     is_image_post: bool,
     warning_message: Option<String>,
+    /// 抖音付费/加密内容（CENC 加密且无解密密钥）已转占位文件。
+    paid_content: bool,
 }
 
 struct SelectedStreams {
@@ -3136,6 +3187,7 @@ pub async fn ai_rename_external_history(
             duration_seconds: video.duration_seconds,
             is_image_post: video.is_image_post,
             warning_message: None,
+            paid_content: false,
         };
         match external_ai_file(
             source,
@@ -3287,6 +3339,13 @@ async fn download_youtube_media(
                 let _ = remove_file_if_exists(&temporary).await;
                 return Err(error);
             }
+            if audio.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&temporary).await {
+                let _ = remove_file_if_exists(&temporary).await;
+                return Ok(paid_placeholder_result(
+                    output_path, &metadata, title, uploader, platform,
+                )
+                .await?);
+            }
             if let Some(key) = audio.decryption_key.as_deref() {
                 let decrypted = output_path.with_extension("decrypted.m4a");
                 if let Err(error) = crate::douyin::decrypt_dash_stream(&temporary, key, &decrypted).await {
@@ -3315,6 +3374,13 @@ async fn download_youtube_media(
             {
                 let _ = remove_file_if_exists(&source_temporary).await;
                 return Err(error);
+            }
+            if mixed.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&source_temporary).await {
+                let _ = remove_file_if_exists(&source_temporary).await;
+                return Ok(paid_placeholder_result(
+                    output_path, &metadata, title, uploader, platform,
+                )
+                .await?);
             }
             let decrypted_source = output_path.with_extension("audio-source-decrypted.mp4");
             let extract_source = if let Some(key) = mixed.decryption_key.as_deref() {
@@ -3413,6 +3479,13 @@ async fn download_youtube_media(
             let _ = remove_file_if_exists(&temporary).await;
             return Err(error);
         }
+        if mixed.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&temporary).await {
+            let _ = remove_file_if_exists(&temporary).await;
+            return Ok(paid_placeholder_result(
+                output_path, &metadata, title, uploader, platform,
+            )
+            .await?);
+        }
         if let Some(key) = mixed.decryption_key.as_deref() {
             let decrypted = output_path.with_extension("decrypted.mp4");
             if let Err(error) = crate::douyin::decrypt_dash_stream(&temporary, key, &decrypted).await {
@@ -3453,6 +3526,39 @@ async fn download_youtube_media(
             .and_then(|value| i32::try_from(value.round() as i64).ok()),
         is_image_post: !metadata.images.is_empty(),
         warning_message,
+        paid_content: false,
+    })
+}
+
+/// 抖音付费/加密内容统一处理：生成 0 字节占位文件并返回付费结果，
+/// 由 `download_video` 持久化为失败状态并停止重试（与 B 站充电视频占位一致）。
+async fn paid_placeholder_result(
+    output_path: PathBuf,
+    metadata: &ExternalMediaMetadata,
+    title: String,
+    uploader: String,
+    platform: &str,
+) -> Result<DownloadedYouTubeMedia> {
+    crate::douyin::create_paid_placeholder(&output_path).await?;
+    info!(
+        path = %output_path.display(),
+        "检测到{}付费/加密内容，已清理密文并生成占位文件",
+        platform
+    );
+    Ok(DownloadedYouTubeMedia {
+        output_path,
+        title,
+        uploader,
+        thumbnail: metadata.thumbnail.clone(),
+        published_at: metadata.upload_date.clone(),
+        duration_seconds: metadata
+            .duration
+            .and_then(|value| i32::try_from(value.round() as i64).ok()),
+        is_image_post: false,
+        warning_message: Some(format!(
+            "{platform}付费/加密内容（CENC 加密且未提供解密密钥），需购买后才能下载；已清理无效媒体并生成占位文件"
+        )),
+        paid_content: true,
     })
 }
 

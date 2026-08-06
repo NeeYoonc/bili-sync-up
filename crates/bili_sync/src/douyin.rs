@@ -4,6 +4,7 @@
 //! 实际文件传输仍复用项目的 `UnifiedDownloader`，不另建一套下载器。
 
 use std::collections::{HashMap, HashSet};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -3026,6 +3027,142 @@ async fn verify_playable_media(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 检测抖音媒体文件是否为 CENC 加密（付费未购买时下载到的是密文）。
+///
+/// 免费视频的 `stsd` 采样项是 `avc1`/`mp4a` 且没有 `senc` 加密盒；付费短剧未购买时
+/// API 只返回 `er=1` 加密直链（无 `spade_a` 解密密钥），下载后的文件带
+/// `encv`/`enca` 采样与 `senc`/`saio`/`saiz` 盒。该检测只顺序读取 MP4 盒子头部，
+/// 跳过大 `mdat`，对本地文件开销极小。
+fn detect_cenc_encrypted_media_file(path: &Path) -> std::io::Result<bool> {
+    let mut file = std::fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
+    let mut encrypted = false;
+    scan_mp4_boxes(&mut file, 0, file_len, 0, &mut encrypted)?;
+    Ok(encrypted)
+}
+
+fn scan_mp4_boxes(
+    file: &mut std::fs::File,
+    start: u64,
+    end: u64,
+    depth: usize,
+    encrypted: &mut bool,
+) -> std::io::Result<()> {
+    if *encrypted || depth > 32 {
+        return Ok(());
+    }
+    let mut pos = start;
+    while pos + 8 <= end {
+        file.seek(SeekFrom::Start(pos))?;
+        let mut header = [0u8; 16];
+        file.read_exact(&mut header[..8])?;
+        let size32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let box_type = [header[4], header[5], header[6], header[7]];
+        let (box_size, header_len) = match size32 {
+            0 => (end - pos, 8usize),
+            1 => {
+                file.read_exact(&mut header[8..16])?;
+                let large = u64::from_be_bytes(header[8..16].try_into().expect("8 字节大尺寸盒子头"));
+                (large, 16usize)
+            }
+            size => (u64::from(size), 8usize),
+        };
+        if box_size < header_len as u64 || pos + box_size > end {
+            // 盒子尺寸越界说明不是标准 MP4 或文件已损坏，停止解析避免误判。
+            return Ok(());
+        }
+        match &box_type {
+            b"stsd" => {
+                // stsd 是 FullBox：version/flags(4) + entry_count(4) + 首个 sample entry 类型。
+                let entry_offset = pos + header_len as u64 + 8;
+                if entry_offset + 4 <= pos + box_size {
+                    file.seek(SeekFrom::Start(entry_offset))?;
+                    let mut entry = [0u8; 4];
+                    file.read_exact(&mut entry)?;
+                    if entry == *b"encv" || entry == *b"enca" {
+                        *encrypted = true;
+                        return Ok(());
+                    }
+                }
+            }
+            b"senc" | b"pssh" => {
+                *encrypted = true;
+                return Ok(());
+            }
+            b"schm" => {
+                // schm 是 FullBox：version/flags(4) + scheme_type(4)。
+                let scheme_offset = pos + header_len as u64 + 4;
+                if scheme_offset + 4 <= pos + box_size {
+                    file.seek(SeekFrom::Start(scheme_offset))?;
+                    let mut scheme = [0u8; 4];
+                    file.read_exact(&mut scheme)?;
+                    if matches!(&scheme, b"cenc" | b"cbcs" | b"cens" | b"cbc1") {
+                        *encrypted = true;
+                        return Ok(());
+                    }
+                }
+            }
+            b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"edts" | b"udta" | b"meta"
+            | b"ipro" | b"sinf" | b"schi" | b"moof" | b"traf" => {
+                // meta 是 FullBox，子盒从 version/flags 之后开始。
+                let child_start = pos
+                    + header_len as u64
+                    + if box_type == *b"meta" { 4 } else { 0 };
+                if child_start < pos + box_size {
+                    scan_mp4_boxes(file, child_start, pos + box_size, depth + 1, encrypted)?;
+                }
+                if *encrypted {
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+        pos += box_size;
+    }
+    Ok(())
+}
+
+/// 判断抖音媒体文件是否带 CENC 加密盒（未购买付费内容的可靠特征）。
+/// 读取失败时按“未加密”处理并告警，避免阻断正常下载。
+pub(crate) async fn is_cenc_encrypted_media(path: &Path) -> bool {
+    let path = path.to_path_buf();
+    let display_path = path.display().to_string();
+    tokio::task::spawn_blocking(move || detect_cenc_encrypted_media_file(&path))
+        .await
+        .map(|result| match result {
+            Ok(encrypted) => encrypted,
+            Err(error) => {
+                warn!(path = %display_path, error = %error, "检测抖音媒体文件加密状态失败，按未加密处理");
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+
+/// 为付费/加密内容生成 0 字节占位文件（与 B 站充电视频占位一致）。
+/// 已存在非空媒体文件时保留（可能是购买后下载的真实媒体）。
+pub(crate) async fn create_paid_placeholder(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("创建抖音付费占位目录失败: {}", parent.display()))?;
+    }
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.is_file() && meta.len() > 0 => return Ok(()),
+        Ok(_) => {
+            if let Err(error) = remove_file_if_exists(path).await {
+                warn!(path = %path.display(), error = %error, "清理抖音付费占位前的旧文件失败");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context(format!("检查抖音付费占位文件失败: {}", path.display())),
+    }
+    tokio::fs::File::create(path)
+        .await
+        .with_context(|| format!("创建抖音付费占位文件失败: {}", path.display()))?;
+    Ok(())
+}
+
 /// 下载抖音弹幕并写入 JSON/ASS；图文或无弹幕作品只写检查标记。
 pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_path: &Path, title: &str) -> Result<()> {
     let ass_path = output_path.with_extension("ass");
@@ -3352,4 +3489,71 @@ mod tests {
             .iter()
             .all(|format| format.decryption_key.as_deref() == Some("95e0fd079fae9d0c1ea6821ad517544c")));
     }
+    #[test]
+    fn detects_cenc_encrypted_media() {
+        fn mp4_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut data = Vec::new();
+            data.extend_from_slice(&((payload.len() + 8) as u32).to_be_bytes());
+            data.extend_from_slice(box_type);
+            data.extend_from_slice(payload);
+            data
+        }
+
+        fn stsd_box(entry_type: &[u8; 4]) -> Vec<u8> {
+            let mut payload = vec![0u8; 8]; // version/flags + entry_count=1
+            payload[4..8].copy_from_slice(&1u32.to_be_bytes());
+            payload.extend_from_slice(entry_type);
+            mp4_box(b"stsd", &payload)
+        }
+
+        fn wrap_track(stbl_payload: Vec<u8>) -> Vec<u8> {
+            mp4_box(
+                b"moov",
+                &mp4_box(
+                    b"trak",
+                    &mp4_box(
+                        b"mdia",
+                        &mp4_box(
+                            b"minf",
+                            &mp4_box(b"stbl", &stbl_payload),
+                        ),
+                    ),
+                ),
+            )
+        }
+
+        fn temp_file(name: &str, contents: &[u8]) -> std::path::PathBuf {
+            let mut path = std::env::temp_dir();
+            path.push(format!("{}-{}-{}.mp4", name, std::process::id(), name.len()));
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+
+        // 免费视频：stsd 为 avc1/mp4a，无 senc/pssh。
+        let clean = mp4_box(b"ftyp", b"isom");
+        let clean_moov = wrap_track(stsd_box(b"avc1"));
+        let clean_path = temp_file("douyin-clean", &[clean, clean_moov].concat());
+        assert!(!detect_cenc_encrypted_media_file(&clean_path).unwrap());
+
+        // 付费视频：stsd 为 encv 且带 senc 加密盒。
+        let encrypted_moov = {
+            let senc = mp4_box(b"senc", &[0u8; 8]);
+            wrap_track([stsd_box(b"encv"), senc].concat())
+        };
+        let enc_path = temp_file("douyin-enc", &[mp4_box(b"ftyp", b"isom"), encrypted_moov].concat());
+        assert!(detect_cenc_encrypted_media_file(&enc_path).unwrap());
+
+        // 付费视频：仅有 senc 盒（无 stsd 采样项时）也应识别。
+        let senc_only = mp4_box(
+            b"moov",
+            &mp4_box(b"trak", &mp4_box(b"mdia", &mp4_box(b"minf", &mp4_box(b"stbl", &mp4_box(b"senc", &[0u8; 8]))))),
+        );
+        let senc_path = temp_file("douyin-senc", &[mp4_box(b"ftyp", b"isom"), senc_only].concat());
+        assert!(detect_cenc_encrypted_media_file(&senc_path).unwrap());
+
+        let _ = std::fs::remove_file(&clean_path);
+        let _ = std::fs::remove_file(&enc_path);
+        let _ = std::fs::remove_file(&senc_path);
+    }
+
 }
