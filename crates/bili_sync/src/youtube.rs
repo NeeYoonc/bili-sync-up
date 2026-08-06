@@ -2136,6 +2136,30 @@ pub async fn unified_youtube_image_path(
 
 /// 由现有 `video_downloader` 的同一周期调用。来源扫描和待下载任务都受全局暂停、
 /// 下载并发配置及相同的日志/通知周期控制。
+/// 进程启动后的首次外源扫描宽限（秒）：避免与其它启动任务叠加触发抖音风控。
+const STARTUP_EXTERNAL_SCAN_GRACE_SECONDS: u64 = 60;
+/// 进程启动后的首次外源扫描是否仍未执行（仅对启动轮生效）。
+static EXTERNAL_STARTUP_SCAN_PENDING: AtomicBool = AtomicBool::new(true);
+
+/// 距上次成功扫描是否仍在最近一个扫描间隔内（用于启动轮跳过，避免重启后立刻全量重扫）。
+fn source_scanned_recently(last_scan_at: Option<&str>, interval_seconds: u64) -> bool {
+    let Some(last_scan_at) = last_scan_at else {
+        return false;
+    };
+    let Ok(last_scan) = chrono::NaiveDateTime::parse_from_str(last_scan_at, "%Y-%m-%d %H:%M:%S") else {
+        return false;
+    };
+    let interval = interval_seconds.max(60) as i64;
+    (chrono::Local::now().naive_local() - last_scan).num_seconds() < interval
+}
+
+/// 启动轮是否跳过该抖音源的扫描：距上次成功扫描不超过一个扫描间隔时跳过，
+/// 避免进程重启后把所有源立刻重扫一遍、在启动阶段叠加触发风控。
+fn skip_douyin_source_scan_at_startup(source: &youtube_source::Model) -> bool {
+    is_douyin_source(source)
+        && source_scanned_recently(source.last_scan_at.as_deref(), crate::config::reload_config().interval)
+}
+
 pub async fn process_scheduled_sources(
     db: &DatabaseConnection,
     downloader: Arc<UnifiedDownloader>,
@@ -2153,9 +2177,30 @@ pub async fn process_scheduled_sources(
         return Ok(());
     }
     recover_interrupted_downloads(db).await?;
+    let startup_round = EXTERNAL_STARTUP_SCAN_PENDING.swap(false, Ordering::SeqCst);
+    if startup_round && STARTUP_EXTERNAL_SCAN_GRACE_SECONDS > 0 {
+        info!(
+            grace_seconds = STARTUP_EXTERNAL_SCAN_GRACE_SECONDS,
+            "进程启动后延迟 {} 秒开始首次外源扫描，避免启动阶段叠加触发抖音风控",
+            STARTUP_EXTERNAL_SCAN_GRACE_SECONDS
+        );
+        tokio::time::sleep(Duration::from_secs(STARTUP_EXTERNAL_SCAN_GRACE_SECONDS)).await;
+        if TASK_CONTROLLER.is_paused() {
+            return Ok(());
+        }
+    }
     for source in &sources {
         if TASK_CONTROLLER.is_paused() {
             return Ok(());
+        }
+        if startup_round && skip_douyin_source_scan_at_startup(source) {
+            debug!(
+                source_id = source.id,
+                "{}视频源「{}」最近已扫描过，启动轮跳过以避免风控请求叠加",
+                source_platform_label(source),
+                source.name
+            );
+            continue;
         }
         let mut scan_result = scan_source(db, source).await;
         if let Err(error) = scan_result.as_ref() {
@@ -5479,10 +5524,21 @@ fn trim_output(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_skips_recently_scanned_sources() {
+        let now = chrono::Local::now().naive_local();
+        let recent = now.format("%Y-%m-%d %H:%M:%S").to_string();
+        assert!(source_scanned_recently(Some(&recent), 1200));
+        let old = (now - chrono::Duration::hours(2)).format("%Y-%m-%d %H:%M:%S").to_string();
+        assert!(!source_scanned_recently(Some(&old), 1200));
+        assert!(!source_scanned_recently(None, 1200));
+        assert!(!source_scanned_recently(Some("not-a-date"), 1200));
+    }
+
     use super::{
         canonical_channel_url, checksum_for_release_asset, collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
-        normalize_source_type, parse_youtube_live_chat, resolve_source_url, should_proxy_ytdlp_url, youtube_cookie_jar,
+        normalize_source_type, parse_youtube_live_chat, resolve_source_url, should_proxy_ytdlp_url, source_scanned_recently, youtube_cookie_jar,
         youtube_page_is_logged_out, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
         ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
     };
