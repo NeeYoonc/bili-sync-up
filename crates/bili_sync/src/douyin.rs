@@ -1238,7 +1238,7 @@ pub async fn get_douyin_source_videos(
     let page = request.page.unwrap_or(1).max(1);
     let page_size = request.page_size.unwrap_or(100).clamp(1, 200);
     let target_end = page.saturating_mul(page_size) as usize;
-    let posts = fetch_source_posts(&request.source_type, &request.url, target_end.saturating_add(1)).await?;
+    let posts = fetch_source_posts(&request.source_type, &request.url, target_end.saturating_add(1), None).await?;
     let keyword = request
         .keyword
         .as_deref()
@@ -1283,11 +1283,16 @@ pub async fn get_douyin_source_videos(
     }))
 }
 
-pub async fn fetch_source_posts(source_type: &str, source_url: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+pub async fn fetch_source_posts(
+    source_type: &str,
+    source_url: &str,
+    limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
+) -> Result<Vec<DouyinPost>> {
     match source_type.trim().to_ascii_lowercase().as_str() {
         "douyin" => {
             let sec_uid = resolve_sec_user_id(source_url).await?;
-            fetch_posts_until(&sec_uid, limit).await
+            fetch_posts_until(&sec_uid, limit, stop_when_known).await
         }
         "douyin_liked" => fetch_liked_posts(limit).await,
         "douyin_collection" => {
@@ -1573,7 +1578,7 @@ pub async fn resolve_sec_user_id(value: &str) -> Result<String> {
 
 pub async fn fetch_all_posts(source_url: &str) -> Result<Vec<DouyinPost>> {
     let sec_uid = resolve_sec_user_id(source_url).await?;
-    fetch_posts_until(&sec_uid, usize::MAX).await
+    fetch_posts_until(&sec_uid, usize::MAX, None).await
 }
 
 pub async fn fetch_profile(source_url: &str) -> Result<DouyinProfile> {
@@ -1722,12 +1727,21 @@ pub(crate) async fn fetch_aweme_danmaku(aweme_id: &str, duration_seconds: i32) -
     Ok(danmaku)
 }
 
-async fn fetch_posts_until(sec_uid: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+async fn fetch_posts_until(
+    sec_uid: &str,
+    limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
+) -> Result<Vec<DouyinPost>> {
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = std::collections::HashSet::new();
     loop {
         let page = fetch_post_page(sec_uid, cursor, 18).await?;
+        // 作品按发布时间倒序返回：整页都是已知视频时，后续页面必然也已收录，
+        // 提前停止翻页，避免每轮全量枚举几十页触发 aweme/post 限流。
+        if all_posts_known(&page.posts, stop_when_known) {
+            break;
+        }
         for post in page.posts {
             if seen.insert(post.id.clone()) {
                 posts.push(post);
@@ -1744,6 +1758,16 @@ async fn fetch_posts_until(sec_uid: &str, limit: usize) -> Result<Vec<DouyinPost
         }
     }
     Ok(posts)
+}
+
+/// 该页作品是否全部属于已知集合（用于增量扫描提前停止翻页）。
+fn all_posts_known(posts: &[DouyinPost], known: Option<&HashSet<String>>) -> bool {
+    match known {
+        Some(known) if !known.is_empty() => {
+            !posts.is_empty() && posts.iter().all(|post| known.contains(&post.id))
+        }
+        _ => false,
+    }
 }
 
 async fn fetch_post_page(sec_uid: &str, cursor: i64, count: i32) -> Result<PostPage> {
@@ -3170,6 +3194,31 @@ mod tests {
         assert!(is_douyin_risk_error(&risk_5xx));
         let unrelated = anyhow::anyhow!("网络连接失败");
         assert!(!is_douyin_risk_error(&unrelated));
+    }
+
+    #[test]
+    fn stops_pagination_when_page_fully_known() {
+        fn post(id: &str) -> DouyinPost {
+            DouyinPost {
+                id: id.to_string(),
+                url: format!("https://www.douyin.com/video/{id}"),
+                title: String::new(),
+                uploader: String::new(),
+                thumbnail: None,
+                published_at: None,
+                timestamp: None,
+                duration_seconds: None,
+                episode_number: None,
+                digg_count: 0,
+                is_image_post: false,
+            }
+        }
+        let known: HashSet<String> = ["1", "2", "3"].into_iter().map(str::to_string).collect();
+        assert!(all_posts_known(&[post("1"), post("2")], Some(&known)));
+        assert!(!all_posts_known(&[post("9"), post("2")], Some(&known)));
+        assert!(!all_posts_known(&[], Some(&known)));
+        assert!(!all_posts_known(&[post("1")], None));
+        assert!(!all_posts_known(&[post("1")], Some(&HashSet::new())));
     }
 
     #[test]

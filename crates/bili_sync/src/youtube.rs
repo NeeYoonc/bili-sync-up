@@ -2437,7 +2437,6 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
 }
 
 async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
-    let posts = crate::douyin::fetch_source_posts(&source.source_type, &source.url, usize::MAX).await?;
     let selected_history = source
         .selected_videos
         .as_deref()
@@ -2446,6 +2445,12 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
     let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
     let mut deleted_video_ids = parse_video_id_set(source.deleted_video_ids.as_deref());
     let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
+    // 增量优先：作品按发布时间倒序，翻到整页都是已知视频即提前停止，
+    // 避免每轮全量枚举几十页触发 aweme/post 限流；只有开启扫描删除
+    //（需要全量枚举判断作品是否已消失）时才全量翻页。
+    let stop_when_known = (!scan_deleted_videos).then_some(&known_video_ids);
+    let posts =
+        crate::douyin::fetch_source_posts(&source.source_type, &source.url, usize::MAX, stop_when_known).await?;
     let created = chrono::NaiveDateTime::parse_from_str(&source.created_at, "%Y-%m-%d %H:%M:%S")
         .ok()
         .and_then(|value| Local.from_local_datetime(&value).single())
