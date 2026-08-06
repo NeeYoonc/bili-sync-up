@@ -35,6 +35,9 @@
 	export let selected: boolean = false; // 是否被选中
 	export let onSelectionChange: ((videoId: number, selected: boolean) => void) | null = null; // 选择状态变化回调
 	export let resourceId: string | number | null = null; // 统一 API 资源 ID（外部平台使用 platform-{id}）
+
+	// 抖音短剧付费与 B 站充电视频是两套文案
+	$: isDouyin = /^douyin-/.test(String(resourceId ?? ''));
 	export let detailHref: string = ''; // 详情页地址；不传时沿用 B 站地址
 	let coverFailed = false;
 	let lastVideoId: number | null = null;
@@ -349,9 +352,9 @@
 					{#if video.is_charge_video}
 						<Badge
 							class="bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500"
-							title="充电专属视频，播放前需先为 UP 主充电"
+							title={isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
 						>
-							充电视频
+							{isDouyin ? '付费' : '充电视频'}
 						</Badge>
 					{/if}
 				</div>
@@ -397,9 +400,9 @@
 			{#if (coverFailed || mode !== 'default') && video.is_charge_video}
 				<Badge
 					class="mt-0.5 shrink-0 bg-amber-500 text-xs text-white hover:bg-amber-500"
-					title="充电专属视频，播放前需先为 UP 主充电"
+					title={isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
 				>
-					充电视频
+					{isDouyin ? '付费' : '充电视频'}
 				</Badge>
 			{/if}
 			<CardTitle

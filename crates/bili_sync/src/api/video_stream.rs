@@ -104,8 +104,11 @@ async fn stream_video_impl(video_id: String, headers: HeaderMap, db: Arc<Databas
     debug!("视频文件路径: {:?}, 大小: {} bytes", video_path, file_size);
 
     if file_size == 0 {
-        info!("检测到充电视频占位文件，返回不可播放提示: {:?}", video_path);
-        let mut response = Response::new("充电视频未充电".into());
+        let is_douyin = video_id.starts_with("douyin-");
+        info!("检测到充电/付费视频占位文件，返回不可播放提示: {:?}", video_path);
+        let mut response = Response::new(
+            if is_douyin { "付费视频未付费" } else { "充电视频未充电" }.into(),
+        );
         *response.status_mut() = StatusCode::FORBIDDEN;
         let headers = response.headers_mut();
         headers.insert(

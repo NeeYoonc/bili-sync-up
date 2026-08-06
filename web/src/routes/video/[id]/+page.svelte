@@ -74,7 +74,7 @@
 		const noticeKey = `${currentVideoId}-${safePlayingPageIndex}-${mode}-charge-locked`;
 		if (lastPlaybackNoticeKey === noticeKey) return;
 		lastPlaybackNoticeKey = noticeKey;
-		toast.error('充电视频未充电');
+		toast.error(isDouyin ? '付费视频未付费' : '充电视频未充电');
 	}
 
 	function getCurrentPageInfo() {
@@ -1140,7 +1140,7 @@
 									/>
 								{:else if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
 									<div class="flex h-64 items-center justify-center text-white">
-										<div>充电视频未充电</div>
+										<div>{isDouyin ? '付费视频未付费' : '充电视频未充电'}</div>
 									</div>
 								{:else if onlinePlayMode}
 									{#if getEmbeddedPlayerUrl()}
