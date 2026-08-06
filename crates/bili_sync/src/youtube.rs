@@ -3822,7 +3822,144 @@ async fn ensure_youtube_sidecars(
             info!(platform, youtube_id = %metadata.id, "{}视频源「{}」视频「{}」{} 子任务完成", platform, source.name, title, task);
         }
     }
+    // 短剧/放映厅/合集按番剧结构补充剧集级附属文件（tvshow.nfo、season.nfo、folder.jpg、poster.jpg）。
+    if is_episodic_douyin_source(source) {
+        if let Err(error) = ensure_youtube_series_sidecars(downloader, metadata, output_path, source).await {
+            warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」媒体已下载，但剧集附属文件子任务失败", platform, source.name);
+            warnings.push(format!("剧集附属文件生成失败：{error:#}"));
+        }
+    }
     (!warnings.is_empty()).then(|| format!("媒体已完成；{}", warnings.join("；")))
+}
+
+fn is_episodic_douyin_source(source: &youtube_source::Model) -> bool {
+    matches!(
+        source.source_type.as_str(),
+        "douyin_theater" | "douyin_series" | "douyin_collection"
+    )
+}
+
+/// 抖音短剧/放映厅/合集按番剧结构生成剧集级附属文件：
+/// 剧集根目录 tvshow.nfo、folder.jpg、poster.jpg，以及 Season 01/season.nfo。
+/// 幂等：已存在的文件跳过，不重复下载。
+async fn ensure_youtube_series_sidecars(
+    downloader: &UnifiedDownloader,
+    metadata: &ExternalMediaMetadata,
+    output_path: &Path,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    let platform = source_platform_label(source);
+    let Some(season_dir) = output_path.parent() else {
+        return Ok(());
+    };
+    let Some(series_dir) = season_dir.parent() else {
+        return Ok(());
+    };
+    tokio::fs::create_dir_all(&series_dir).await.ok();
+
+    // folder.jpg / poster.jpg：优先复用已下载的单集封面，避免额外请求。
+    let thumb_path = youtube_sidecar_path(output_path, "-thumb.jpg")?;
+    let thumb_exists = tokio::fs::metadata(&thumb_path)
+        .await
+        .is_ok_and(|metadata| metadata.len() >= 1024);
+    for name in ["folder.jpg", "poster.jpg"] {
+        let target = series_dir.join(name);
+        if tokio::fs::metadata(&target)
+            .await
+            .is_ok_and(|metadata| metadata.len() >= 1024)
+        {
+            continue;
+        }
+        if thumb_exists {
+            tokio::fs::copy(&thumb_path, &target)
+                .await
+                .with_context(|| format!("生成{platform}剧集封面失败: {}", target.display()))?;
+        } else if let Some(url) = metadata.thumbnail.as_deref() {
+            let temporary = target.with_extension("download");
+            if let Err(error) = fetch_platform_asset(downloader, source, &[url], &temporary)
+                .await
+                .with_context(|| format!("使用项目统一下载器下载{platform}剧集封面失败"))
+            {
+                let _ = remove_file_if_exists(&temporary).await;
+                return Err(error);
+            }
+            replace_file(&temporary, &target).await?;
+        }
+        info!(platform, path = %target.display(), "{}视频源「{}」剧集封面生成完成", platform, source.name);
+    }
+
+    // 剧集级 NFO 仅在启用 NFO 时生成
+    if !crate::config::reload_config().nfo_config.enabled {
+        return Ok(());
+    }
+    let tvshow_path = series_dir.join("tvshow.nfo");
+    if !tokio::fs::metadata(&tvshow_path)
+        .await
+        .is_ok_and(|metadata| metadata.len() > 0)
+    {
+        let xml = generate_youtube_tvshow_nfo(source, metadata);
+        let temporary = series_dir.join("tvshow.nfo.download");
+        tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
+            format!("写入{platform}剧集 NFO 失败: {}", temporary.display())
+        })?;
+        replace_file(&temporary, &tvshow_path).await?;
+        info!(platform, path = %tvshow_path.display(), "{}视频源「{}」剧集 tvshow.nfo 生成完成", platform, source.name);
+    }
+
+    let season_path = season_dir.join("season.nfo");
+    if !tokio::fs::metadata(&season_path)
+        .await
+        .is_ok_and(|metadata| metadata.len() > 0)
+    {
+        let xml = generate_youtube_season_nfo();
+        let temporary = season_dir.join("season.nfo.download");
+        tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
+            format!("写入{platform}季度 NFO 失败: {}", temporary.display())
+        })?;
+        replace_file(&temporary, &season_path).await?;
+        info!(platform, path = %season_path.display(), "{}视频源「{}」季度 season.nfo 生成完成", platform, source.name);
+    }
+    Ok(())
+}
+
+fn generate_youtube_tvshow_nfo(source: &youtube_source::Model, metadata: &ExternalMediaMetadata) -> String {
+    let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
+    let platform = source_platform(source);
+    let studio = if platform == "douyin" { "抖音" } else { "YouTube" };
+    let description = metadata.description.as_deref().unwrap_or_default();
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<tvshow>
+    <title>{}</title>
+    <originaltitle>{}</originaltitle>
+    <sorttitle>{}</sorttitle>
+    <plot>{}</plot>
+    <studio>{}</studio>
+    <uniqueid type="{}" default="true">{}</uniqueid>
+    <season>-1</season>
+    <episode>-1</episode>
+</tvshow>
+"#,
+        escape(&source.name),
+        escape(&source.name),
+        escape(&source.name),
+        escape(description),
+        escape(studio),
+        escape(platform),
+        escape(&source.url),
+    )
+}
+
+fn generate_youtube_season_nfo() -> String {
+    r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<season>
+    <seasonnumber>1</seasonnumber>
+    <title>Season 01</title>
+    <plot></plot>
+    <locked>false</locked>
+</season>
+"#
+        .to_string()
 }
 
 async fn youtube_sidecars_complete(video: &youtube_video::Model, source: &youtube_source::Model) -> bool {
