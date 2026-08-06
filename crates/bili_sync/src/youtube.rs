@@ -276,6 +276,8 @@ pub struct YouTubeVideoResponse {
     pub thumbnail: Option<String>,
     pub published_at: Option<String>,
     pub duration_seconds: Option<i32>,
+    pub is_charge_video: bool,
+    pub charge_can_play: bool,
     pub download_status: String,
     pub retry_count: i32,
     pub output_path: Option<String>,
@@ -1716,9 +1718,11 @@ async fn youtube_artifact_status(video: &youtube_video::Model, source: &youtube_
     let failure = youtube_failure_status(video);
     let completed = video.download_status == "completed";
     let output = video.output_path.as_deref().map(PathBuf::from);
-    let media_ok = output
-        .as_ref()
-        .is_some_and(|path| path.is_file() && std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0));
+    let charge_locked = video.is_charge_video && !video.charge_can_play;
+    let media_ok = charge_locked
+        || output
+            .as_ref()
+            .is_some_and(|path| path.is_file() && std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0));
     let cover_ok = output
         .as_ref()
         .and_then(|path| youtube_sidecar_path(path, "-thumb.jpg").ok())
@@ -1806,7 +1810,7 @@ async fn unified_youtube_parts(
             download_status: video_status,
             cover: video.thumbnail.clone().unwrap_or_default(),
             valid: true,
-            is_charge_video: false,
+            is_charge_video: video.is_charge_video,
             is_image_post,
             image_urls,
             bangumi_title: None,
@@ -1884,6 +1888,7 @@ async fn filtered_youtube_models(
             "name" => left.0.title.to_lowercase().cmp(&right.0.title.to_lowercase()),
             "pubtime" => left.0.published_at.cmp(&right.0.published_at),
             "file_size" => left.2.cmp(&right.2),
+            "is_charge_video" => left.0.is_charge_video.cmp(&right.0.is_charge_video),
             _ => left.0.id.cmp(&right.0.id),
         };
         if ascending {
@@ -1941,11 +1946,13 @@ pub async fn reset_unified_youtube_video(
         .one(db)
         .await?
         .ok_or_else(|| anyhow!("YouTube 视频不存在: {}", id))?;
-    let should_reset = force || video.download_status == "failed";
+    let should_reset = force || video.download_status == "failed" || (video.is_charge_video && !video.charge_can_play);
     if should_reset {
         let mut active: youtube_video::ActiveModel = video.into();
         active.download_status = Set("pending".to_string());
         active.retry_count = Set(0);
+        active.is_charge_video = Set(false);
+        active.charge_can_play = Set(false);
         active.error_message = Set(None);
         active.updated_at = Set(now_standard_string());
         active.update(db).await?;
@@ -1969,10 +1976,12 @@ pub async fn reset_all_unified_youtube_videos(
     let force = params.force.unwrap_or(false);
     let mut count = 0usize;
     for (video, _, _) in rows {
-        if force || video.download_status == "failed" {
+        if force || video.download_status == "failed" || (video.is_charge_video && !video.charge_can_play) {
             let mut active: youtube_video::ActiveModel = video.into();
             active.download_status = Set("pending".to_string());
             active.retry_count = Set(0);
+            active.is_charge_video = Set(false);
+            active.charge_can_play = Set(false);
             active.error_message = Set(None);
             active.updated_at = Set(now_standard_string());
             active.update(db).await?;
@@ -2695,7 +2704,7 @@ async fn backfill_completed_sidecars(db: &DatabaseConnection, downloader: &Unifi
         if is_douyin_source(source) && crate::douyin::is_cenc_encrypted_media(&output_path).await {
             // 历史“已完成”文件实为付费密文（未购买时 API 只返回无解密密钥的 CENC
             // 加密流），与 B 站充电视频一致：清理无效媒体、生成 0 字节占位文件并标记
-            // 失败，避免后续启动反复重下同样不可播放的密文。
+            // 为充电/付费且不可播放（保持“已完成”，UI 显示充电视频徽标而非失败）。
             if let Err(error) = remove_file_if_exists(&output_path).await {
                 warn!(path = %output_path.display(), error = %error, "清理抖音付费密文失败");
             }
@@ -2703,11 +2712,11 @@ async fn backfill_completed_sidecars(db: &DatabaseConnection, downloader: &Unifi
                 warn!(path = %output_path.display(), error = %error, "创建抖音付费占位文件失败");
             }
             let mut active: youtube_video::ActiveModel = video.into();
-            active.download_status = Set("failed".to_string());
-            active.retry_count = Set(MAX_DOWNLOAD_RETRIES);
-            active.error_message = Set(Some(
-                "抖音付费/加密内容，需购买后才能下载（未购买无法获取解密密钥）；已清理无效密文并生成占位文件".to_string(),
-            ));
+            active.download_status = Set("completed".to_string());
+            active.retry_count = Set(0);
+            active.is_charge_video = Set(true);
+            active.charge_can_play = Set(false);
+            active.error_message = Set(None);
             active.updated_at = Set(now_standard_string());
             active.update(db).await?;
             warned += 1;
@@ -2717,18 +2726,23 @@ async fn backfill_completed_sidecars(db: &DatabaseConnection, downloader: &Unifi
             continue;
         }
         if !is_reusable_media_file(&output_path).await {
-            let mut active: youtube_video::ActiveModel = video.into();
-            active.download_status = Set("pending".to_string());
-            active.retry_count = Set(0);
-            active.output_path = Set(None);
-            active.error_message = Set(Some(format!(
-                "媒体记录为已完成，但文件不存在或不可播放，已自动重新加入下载队列：{}",
-                output_path.display()
-            )));
-            active.updated_at = Set(now_standard_string());
-            active.update(db).await?;
-            warned += 1;
-            continue;
+            if video.is_charge_video && !video.charge_can_play {
+                // 充电/付费视频：0 字节占位文件是预期状态，不重复加入下载队列，
+                // 继续走附属文件回填即可。
+            } else {
+                let mut active: youtube_video::ActiveModel = video.into();
+                active.download_status = Set("pending".to_string());
+                active.retry_count = Set(0);
+                active.output_path = Set(None);
+                active.error_message = Set(Some(format!(
+                    "媒体记录为已完成，但文件不存在或不可播放，已自动重新加入下载队列：{}",
+                    output_path.display()
+                )));
+                active.updated_at = Set(now_standard_string());
+                active.update(db).await?;
+                warned += 1;
+                continue;
+            }
         }
 
         match extract_youtube_metadata(&video.url, Some(source)).await {
@@ -2829,15 +2843,15 @@ async fn download_video(
         match result {
             Ok(mut downloaded) => {
                 if downloaded.paid_content {
-                    let paid_message = downloaded
-                        .warning_message
-                        .take()
-                        .unwrap_or_else(|| "付费/加密内容，需购买后才能下载".to_string());
+                    // 与 B 站充电视频一致：标记为付费/加密且当前不可播放，生成 0 字节
+                    // 占位文件并把下载状态记为已完成（UI 显示充电视频徽标而非失败）。
                     let mut paid: youtube_video::ActiveModel = video.clone().into();
-                    paid.download_status = Set("failed".to_string());
-                    paid.retry_count = Set(MAX_DOWNLOAD_RETRIES);
+                    paid.download_status = Set("completed".to_string());
+                    paid.retry_count = Set(0);
+                    paid.is_charge_video = Set(true);
+                    paid.charge_can_play = Set(false);
                     paid.output_path = Set(Some(downloaded.output_path.display().to_string()));
-                    paid.error_message = Set(Some(paid_message.clone()));
+                    paid.error_message = Set(None);
                     paid.updated_at = Set(now_standard_string());
                     paid.update(db).await?;
                     info!(
@@ -2845,7 +2859,7 @@ async fn download_video(
                         source_id = source.id,
                         youtube_id = %video.youtube_id,
                         path = %downloaded.output_path.display(),
-                        "{}视频源「{}」视频「{}」为付费/加密内容，已生成占位文件并停止重试",
+                        "{}视频源「{}」视频「{}」为付费/加密内容，已按充电视频处理：生成占位文件并标记为已完成",
                         platform_label,
                         source.name,
                         video.title
@@ -4939,6 +4953,8 @@ fn video_response(video: youtube_video::Model) -> YouTubeVideoResponse {
         thumbnail: video.thumbnail,
         published_at: video.published_at,
         duration_seconds: video.duration_seconds,
+        is_charge_video: video.is_charge_video,
+        charge_can_play: video.charge_can_play,
         download_status: video.download_status,
         retry_count: video.retry_count,
         output_path: video.output_path,

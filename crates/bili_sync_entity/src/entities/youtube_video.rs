@@ -16,6 +16,8 @@ pub struct Model {
     pub duration_seconds: Option<i32>,
     pub episode_number: Option<i32>,
     pub is_image_post: bool,
+    pub is_charge_video: bool,
+    pub charge_can_play: bool,
     pub download_status: String,
     pub retry_count: i32,
     pub output_path: Option<String>,
