@@ -212,6 +212,9 @@
 	let loadingDouyinFollowings = false;
 	let douyinCatalog: SearchResultItem[] = [];
 	let loadingDouyinCatalog = false;
+	// YouTube “播放列表/收藏”：搜索 UP 主后展示其全部播放列表
+	let youtubeChannelPlaylists: SearchResultItem[] = [];
+	let loadingYoutubeChannelPlaylists = false;
 
 	// 番剧季度相关
 	let bangumiSeasons: BangumiSeasonInfo[] = [];
@@ -394,6 +397,24 @@
 			context: '获取抖音可选列表失败'
 		});
 		if (result) douyinCatalog = result.data.results;
+	}
+
+	async function loadYoutubeChannelPlaylists(channelUrl: string) {
+		youtubeChannelPlaylists = [];
+		await runRequest(
+			async () => {
+				const response = await api.getYouTubeChannelPlaylists(channelUrl);
+				youtubeChannelPlaylists = response.data.results;
+				return true;
+			},
+			{
+				setLoading: (value) => (loadingYoutubeChannelPlaylists = value),
+				context: '获取 UP 主播放列表失败',
+				onError: () => {
+					youtubeChannelPlaylists = [];
+				}
+			}
+		);
 	}
 
 	function getYouTubeQuickSubscriptionType(type: YouTubeSourceType): VideoCategory {
@@ -846,6 +867,23 @@
 		clearFollowingsPanel();
 
 		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin') {
+			// “播放列表/收藏”来源：先按 UP 主搜索频道，选择频道后加载其全部播放列表
+			if (
+				sourcePlatform === 'youtube' &&
+				youtubeSourceType === 'playlist' &&
+				result.result_type === 'youtube_channel' &&
+				result.youtube_url
+			) {
+				name = cleanTitle(result.title);
+				applyQuickSubscriptionPath('collection', name, true);
+				clearSearchPanel({ clearKeyword: true });
+				void loadYoutubeChannelPlaylists(result.youtube_url);
+				showSubmissionSelection = false;
+				toast.success('已选择 UP 主', {
+					description: '正在加载其全部播放列表…'
+				});
+				return;
+			}
 			if (!result.youtube_url) {
 				toast.error('搜索结果缺少来源链接');
 				return;
@@ -5013,6 +5051,42 @@
 							{:else}
 								<div class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}" style={isMobile ? '' : 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}>
 									{#each douyinCatalog as item (item.youtube_url)}
+										<SelectableCardButton onclick={() => selectSearchResult(item)} class="p-3">
+											<div class="flex items-start gap-3">
+												<BiliImage src={item.cover} alt={item.title} class="h-16 w-12 flex-shrink-0 rounded object-cover" placeholder="封面" />
+												<div class="min-w-0 flex-1">
+													<h4 class="line-clamp-2 text-sm font-medium">{item.title}</h4>
+													<p class="text-muted-foreground mt-1 text-xs">{item.author}</p>
+													{#if item.description}<p class="text-muted-foreground/70 mt-1 line-clamp-2 text-xs">{item.description}</p>{/if}
+												</div>
+											</div>
+										</SelectableCardButton>
+									{/each}
+								</div>
+							{/if}
+						</SidePanel>
+					</div>
+				{/if}
+
+				<!-- YouTube 播放列表/收藏：搜索 UP 主后展示其全部播放列表 -->
+				{#if sourcePlatform === 'youtube' && youtubeSourceType === 'playlist' && (youtubeChannelPlaylists.length > 0 || loadingYoutubeChannelPlaylists)}
+					<div class={isCompactLayout ? 'w-full' : 'flex-1'}>
+						<SidePanel
+							isMobile={isCompactLayout}
+							title="该 UP 的播放列表"
+							subtitle={loadingYoutubeChannelPlaylists ? '正在获取…' : `共 ${youtubeChannelPlaylists.length} 个，点击选择`}
+							maxHeightClass="max-h-126"
+							headerClass="bg-green-50 dark:bg-green-950"
+							titleClass="text-base font-medium text-green-800 dark:text-green-200"
+							subtitleClass="text-sm text-green-600 dark:text-green-400"
+						>
+							{#if loadingYoutubeChannelPlaylists}
+								<Loading />
+							{:else if youtubeChannelPlaylists.length === 0}
+								<p class="text-muted-foreground p-4 text-center text-sm">该 UP 没有公开播放列表</p>
+							{:else}
+								<div class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}" style={isMobile ? '' : 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}>
+									{#each youtubeChannelPlaylists as item (item.youtube_url)}
 										<SelectableCardButton onclick={() => selectSearchResult(item)} class="p-3">
 											<div class="flex items-start gap-3">
 												<BiliImage src={item.cover} alt={item.title} class="h-16 w-12 flex-shrink-0 rounded object-cover" placeholder="封面" />

@@ -122,6 +122,11 @@ pub struct YouTubeSourceVideosRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct YouTubeChannelPlaylistsRequest {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateYouTubeSourceRequest {
     pub source_type: String,
     pub name: String,
@@ -328,7 +333,16 @@ pub async fn search_youtube(
         return Err(ApiError::from(anyhow!("YouTube 搜索仅支持频道或播放列表")));
     }
 
-    let search_url = youtube_search_url(keyword, &source_type)?;
+    // “播放列表/收藏”来源先搜索 UP 主频道，选择频道后再加载其全部播放列表。
+    let channel_mode = matches!(source_type.as_str(), "channel" | "playlist");
+    let search_url = youtube_search_url(
+        keyword,
+        if channel_mode {
+            "channel"
+        } else {
+            &source_type
+        },
+    )?;
     let mut command = Command::new(ytdlp_executable());
     command.args([
         "--flat-playlist",
@@ -360,8 +374,8 @@ pub async fn search_youtube(
         };
         let Some(url) = item
             .get("uploader_url")
-            .filter(|_| source_type == "channel")
-            .or_else(|| item.get("channel_url").filter(|_| source_type == "channel"))
+            .filter(|_| channel_mode)
+            .or_else(|| item.get("channel_url").filter(|_| channel_mode))
             .or_else(|| item.get("webpage_url"))
             .or_else(|| item.get("url"))
             .and_then(|value| value.as_str())
@@ -370,7 +384,7 @@ pub async fn search_youtube(
         else {
             continue;
         };
-        let url = if source_type == "channel" {
+        let url = if channel_mode {
             canonical_channel_url(&url)
         } else {
             url
@@ -421,13 +435,17 @@ pub async fn search_youtube(
             cover.to_string()
         };
         results.push(YouTubeSearchResult {
-            result_type: format!("youtube_{source_type}"),
+            result_type: if channel_mode {
+                "youtube_channel".to_string()
+            } else {
+                format!("youtube_{source_type}")
+            },
             title,
             author,
             youtube_url: url,
             channel_id: item
                 .get("channel_id")
-                .or_else(|| item.get("id").filter(|_| source_type == "channel"))
+                .or_else(|| item.get("id").filter(|_| channel_mode))
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
             cover,
@@ -437,6 +455,126 @@ pub async fn search_youtube(
                 .unwrap_or("")
                 .to_string(),
             follower: item.get("channel_follower_count").and_then(|value| value.as_i64()),
+        });
+    }
+    let total = results.len();
+    Ok(ApiResponse::ok(YouTubeSearchResponse {
+        success: true,
+        results,
+        total,
+    }))
+}
+
+/// 列出指定 YouTube 频道的全部播放列表。添加“播放列表/收藏”来源时，
+/// 先按 UP 主搜索频道，选择频道后调用本接口展示该 UP 的所有播放列表。
+pub async fn get_youtube_channel_playlists(
+    Query(request): Query<YouTubeChannelPlaylistsRequest>,
+) -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
+    ensure_ytdlp_available().await?;
+    let channel_url = request.url.trim();
+    if channel_url.is_empty() || !is_youtube_url(channel_url) {
+        return Err(ApiError::from(anyhow!("请输入有效的 YouTube 频道链接")));
+    }
+    let channel_url = canonical_channel_url(channel_url);
+    let playlists_url = format!("{channel_url}/playlists");
+    let mut command = Command::new(ytdlp_executable());
+    command.args([
+        "--flat-playlist",
+        "--dump-json",
+        "--playlist-end",
+        "100",
+        "--ignore-errors",
+        "--no-warnings",
+    ]);
+    append_ytdlp_runtime(&mut command);
+    append_cookies(&mut command);
+    append_youtube_proxy(&mut command);
+    command.arg(playlists_url.as_str());
+    let output = tokio::time::timeout(Duration::from_secs(5 * 60), command.output())
+        .await
+        .map_err(|_| anyhow!("加载 YouTube 频道播放列表超时"))??;
+    if !output.status.success() {
+        return Err(ApiError::from(anyhow!(
+            "加载 YouTube 频道播放列表失败：{}",
+            command_error(&output)
+        )));
+    }
+
+    let mut seen_urls = HashSet::new();
+    let mut results = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Ok(item) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(playlist_url) = item
+            .get("webpage_url")
+            .or_else(|| item.get("url"))
+            .and_then(|value| value.as_str())
+            .filter(|value| {
+                value.contains("playlist?list=") || value.contains("/playlist/")
+            })
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if !seen_urls.insert(playlist_url.clone()) {
+            continue;
+        }
+        let title = item
+            .get("title")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("未命名播放列表")
+            .to_string();
+        let author = item
+            .get("channel")
+            .or_else(|| item.get("uploader"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let cover = item
+            .get("thumbnails")
+            .and_then(|value| value.as_array())
+            .and_then(|items| {
+                items
+                    .iter()
+                    .filter_map(|thumbnail| {
+                        let url = thumbnail.get("url")?.as_str()?;
+                        let width = thumbnail
+                            .get("width")
+                            .and_then(|value| value.as_i64())
+                            .unwrap_or_default();
+                        let height = thumbnail
+                            .get("height")
+                            .and_then(|value| value.as_i64())
+                            .unwrap_or_default();
+                        Some((width.saturating_mul(height), url))
+                    })
+                    .max_by_key(|(area, _)| *area)
+                    .map(|(_, url)| url)
+            })
+            .unwrap_or("");
+        let cover = if cover.starts_with("//") {
+            format!("https:{cover}")
+        } else {
+            cover.to_string()
+        };
+        results.push(YouTubeSearchResult {
+            result_type: "youtube_playlist".to_string(),
+            title,
+            author,
+            youtube_url: playlist_url,
+            channel_id: item
+                .get("channel_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            cover,
+            description: item
+                .get("description")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            follower: item.get("playlist_count").and_then(|value| value.as_i64()),
         });
     }
     let total = results.len();
@@ -3578,19 +3716,16 @@ fn youtube_output_path(
     );
     let (video_folder, page_name) = if episodic_source {
         if let Some(episode) = video.episode_number.filter(|value| *value >= 1) {
+            // 与 B 站番剧标准结构保持一致：
+            // 下载根目录/剧集名/Season 01/S01E01.mp4（文件名不带标题，避免超长）。
             let series_folder = crate::utils::filenamify::filenamify(&source.name);
             let series_folder = if series_folder.is_empty() {
                 format!("剧集_{}", source.id)
             } else {
                 series_folder
             };
-            let clean_episode_title = crate::utils::filenamify::filenamify(title);
-            let episode_page_name = if clean_episode_title.is_empty() {
-                format!("S{:02}E{:03}", 1, episode)
-            } else {
-                format!("S{:02}E{:03} - {}", 1, episode, clean_episode_title)
-            };
-            (series_folder, episode_page_name)
+            let video_folder = format!("{series_folder}/Season 01");
+            (video_folder, format!("S01E{:02}", episode))
         } else {
             crate::config::with_config(|bundle| {
                 Ok::<_, anyhow::Error>((
@@ -5455,8 +5590,9 @@ mod tests {
         let path = super::youtube_output_path(&source, &video, &metadata, "第三集标题", "作者").unwrap();
         let expected = Path::new("F:/Downloads/测试")
             .join("测试短剧_带斜杠")
-            .join("S01E003 - 第三集标题.mp4");
-        assert_eq!(path, expected, "短剧应输出 下载根/剧集名/S01E003 - 标题.mp4");
+            .join("Season 01")
+            .join("S01E03.mp4");
+        assert_eq!(path, expected, "短剧应输出 下载根/剧集名/Season 01/S01E03.mp4");
     }
 
 }

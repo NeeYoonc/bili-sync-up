@@ -52,6 +52,17 @@ const DOUYIN_PUBLIC_SEARCH_API: &str = "https://www.sogou.com/web";
 const DOUYIN_MSTOKEN_API: &str = "https://mssdk.bytedance.com/web/r/token?ms_appid=6383&msToken=T4bNG9W2rKF7hBNwaYssDErnJEobDAk641DFaOn4hcsfAM8slpbZeKPM4Ml4rhDQq18iY8nQ0JR3J87SLZtDiDqtZdZawfBjCWAgtolQsoEtG6MLETvo4fwr7F28zGJUFDdJgKEZHibNR0QshVBv28ygsQsJDzerKAtsgj9Pn5WsxyS1vfkiX3I%3D";
 const DOUYIN_MSTOKEN_STR_DATA: &str = include_str!("douyin_mstoken_strdata.txt");
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+/// 抖音 Web 翻页请求之间的人工延迟，避免短时间连续请求触发频率风控（HTTP 403）。
+/// 默认取全局风控配置的 base_request_delay（毫秒），最小不低于 800ms。
+async fn douyin_page_delay() -> Duration {
+    let configured = crate::config::reload_config()
+        .submission_risk_control
+        .base_request_delay
+        .max(800);
+    Duration::from_millis(configured)
+}
+/// signed_get 对风控/限流状态码的重试次数（403/429/5xx）。
+const RISK_RETRY_ATTEMPTS: usize = 3;
 const CATALOG_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
 struct CatalogCacheEntry {
@@ -1223,6 +1234,7 @@ async fn fetch_liked_posts(limit: usize) -> Result<Vec<DouyinPost>> {
             break;
         }
         cursor = next;
+        tokio::time::sleep(douyin_page_delay().await).await;
     }
     Ok(posts)
 }
@@ -1263,6 +1275,7 @@ async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost
             break;
         }
         cursor = next;
+        tokio::time::sleep(douyin_page_delay().await).await;
     }
     Ok(posts)
 }
@@ -1292,6 +1305,7 @@ async fn fetch_watch_later_posts(limit: usize) -> Result<Vec<DouyinPost>> {
         } else {
             next
         };
+        tokio::time::sleep(douyin_page_delay().await).await;
     }
     Ok(posts)
 }
@@ -1356,6 +1370,7 @@ async fn fetch_series_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
             break;
         }
         cursor = next;
+        tokio::time::sleep(douyin_page_delay().await).await;
     }
     Ok(posts)
 }
@@ -1593,6 +1608,7 @@ async fn fetch_posts_until(sec_uid: &str, limit: usize) -> Result<Vec<DouyinPost
             break;
         }
         cursor = page.cursor;
+        tokio::time::sleep(douyin_page_delay().await).await;
         if posts.len() > 20_000 {
             warn!(sec_user_id = sec_uid, "抖音作者作品超过 20000 条，停止继续枚举");
             break;
@@ -1776,23 +1792,42 @@ async fn signed_get(base_url: &str, mut pairs: Vec<(&str, String)>) -> Result<se
     let signature = douyin_sign::generate(&params);
     let mut url = reqwest::Url::parse_with_params(base_url, &pairs)?;
     url.query_pairs_mut().append_pair("a_bogus", &signature);
-    let mut request = client()?
-        .get(url)
-        .header(reqwest::header::REFERER, "https://www.douyin.com/");
     let cookies = cookie_values();
-    if let Some(uifid) = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP")) {
-        request = request.header("uifid", uifid);
+    let uifid = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP"));
+    let mut attempt = 0usize;
+    loop {
+        attempt += 1;
+        let mut request = client()?
+            .get(url.clone())
+            .header(reqwest::header::REFERER, "https://www.douyin.com/");
+        if let Some(uifid) = uifid.as_deref() {
+            request = request.header("uifid", uifid);
+        }
+        let response = request.send().await.context("请求抖音 Web API 失败")?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if status.is_success() {
+            if bytes.is_empty() {
+                bail!("抖音 Web API 返回空响应；请重新导入电脑浏览器刚导出的抖音 Cookie");
+            }
+            return serde_json::from_slice(&bytes).context("解析抖音 Web API 响应失败");
+        }
+        let risk_limited = status == reqwest::StatusCode::FORBIDDEN
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status.is_server_error();
+        if !risk_limited || attempt >= RISK_RETRY_ATTEMPTS {
+            bail!("抖音 Web API 返回 HTTP {status}");
+        }
+        let wait = Duration::from_secs(3u64 * attempt as u64);
+        warn!(
+            target: "bili_sync_rs::douyin",
+            status = %status,
+            attempt,
+            wait_secs = wait.as_secs(),
+            "抖音 Web API 触发风控或限流，延迟后重试"
+        );
+        tokio::time::sleep(wait).await;
     }
-    let response = request.send().await.context("请求抖音 Web API 失败")?;
-    let status = response.status();
-    let bytes = response.bytes().await?;
-    if !status.is_success() {
-        bail!("抖音 Web API 返回 HTTP {status}");
-    }
-    if bytes.is_empty() {
-        bail!("抖音 Web API 返回空响应；请重新导入电脑浏览器刚导出的抖音 Cookie");
-    }
-    serde_json::from_slice(&bytes).context("解析抖音 Web API 响应失败")
 }
 
 async fn browser_get_with_referer(

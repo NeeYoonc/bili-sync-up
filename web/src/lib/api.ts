@@ -254,6 +254,11 @@ class ApiClient {
 		return this.get<SubmissionVideosResponse>('/youtube/source-videos', { ...params });
 	}
 
+	/** 列出指定 YouTube 频道的全部播放列表（添加“播放列表/收藏”来源时选择）。 */
+	async getYouTubeChannelPlaylists(url: string): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/youtube/channel-playlists', { url });
+	}
+
 	/** 接收电脑端登录助手或手动选择的 Netscape cookies.txt。 */
 	async importYouTubeCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
 		return this.post<YouTubeLoginResponse>('/youtube/cookies', { cookies });
@@ -1328,6 +1333,7 @@ export const api = {
 	deleteYouTubeSource: (id: number, deleteLocalFiles = false) =>
 		apiClient.deleteYouTubeSource(id, deleteLocalFiles),
 	getYouTubeVideos: () => apiClient.getYouTubeVideos(),
+	getYouTubeChannelPlaylists: (url: string) => apiClient.getYouTubeChannelPlaylists(url),
 	retryYouTubeVideo: (id: number) => apiClient.retryYouTubeVideo(id),
 	getYouTubeQueueStatus: () => apiClient.getYouTubeQueueStatus(),
 	getDouyinStatus: () => apiClient.getDouyinStatus(),
