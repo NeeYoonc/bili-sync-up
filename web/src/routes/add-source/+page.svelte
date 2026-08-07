@@ -2341,6 +2341,7 @@
 		return sourcePlatform === 'youtube' && youtubeSourceType === 'subscriptions';
 	}
 
+	$: isDouyin = sourcePlatform === 'douyin';
 	$: youtubeChannelSelection =
 		sourcePlatform === 'youtube' && youtubeSourceType === 'subscriptions';
 	$: youtubeSelectionNounLabel = youtubeChannelSelection ? '频道' : '视频';
@@ -5902,12 +5903,12 @@
 											? '搜索已订阅频道...'
 											: youtubeSourceType === 'liked'
 												? '搜索喜欢的视频...'
-												: '搜索当前 YouTube 来源的视频标题...'
+												: `搜索当前${isDouyin ? '抖音' : 'YouTube'}来源的视频标题...`
 										: '搜索视频标题（支持关键词搜索UP主所有视频）...'}
 									{isSearching}
 									statusText={isSearching
 										? '搜索中...'
-										: `搜索模式：在${youtubeChannelSelection ? '已订阅频道' : isYouTubeHistorySource() ? '当前 YouTube 来源' : 'UP主所有视频'}中搜索 \"${submissionSearchQuery}\"`}
+										: `搜索模式：在${youtubeChannelSelection ? '已订阅频道' : isYouTubeHistorySource() ? (isDouyin ? '当前抖音来源' : '当前 YouTube 来源') : 'UP主所有视频'}中搜索 \"${submissionSearchQuery}\"`}
 									selectedCount={selectedSubmissionCount}
 									totalCount={filteredSubmissionVideos.length}
 									itemLabel={isYouTubeHistorySource() ? youtubeSelectionNounLabel : '视频'}
@@ -5946,7 +5947,9 @@
 												: isYouTubeHistorySource()
 													? youtubeChannelSelection
 														? '当前登录账号没有已订阅频道'
-														: '该 YouTube 来源暂无视频'
+														: isDouyin
+															? '该抖音来源暂无视频'
+															: '该 YouTube 来源暂无视频'
 													: '该UP主暂无投稿'}
 											class="border-0 bg-transparent p-0 py-8"
 										>
