@@ -345,7 +345,7 @@ pub async fn search_youtube(
             &source_type
         },
     )?;
-    let mut command = Command::new(ytdlp_executable());
+    let mut command = ytdlp_command();
     command.args([
         "--flat-playlist",
         "--dump-json",
@@ -480,7 +480,7 @@ pub async fn get_youtube_channel_playlists(
     }
     let channel_url = canonical_channel_url(channel_url);
     let playlists_url = format!("{channel_url}/playlists");
-    let mut command = Command::new(ytdlp_executable());
+    let mut command = ytdlp_command();
     command.args([
         "--flat-playlist",
         "--dump-json",
@@ -634,7 +634,7 @@ pub async fn get_youtube_source_videos(
     // 大频道继续沿用投稿面板的“加载更多”交互。
     let start = (page - 1).saturating_mul(page_size).saturating_add(1);
     let end_with_probe = start.saturating_add(page_size);
-    let mut command = Command::new(ytdlp_executable());
+    let mut command = ytdlp_command();
     command.args([
         "--flat-playlist",
         "--dump-json",
@@ -2240,6 +2240,18 @@ pub async fn process_scheduled_sources(
                 if !TASK_CONTROLLER.is_paused() {
                     scan_result = scan_source(db, source).await;
                 }
+            } else if !is_douyin_source(source) && is_youtube_transient_error(error) {
+                warn!(
+                    source_id = source.id,
+                    error = %error,
+                    "扫描{}视频源「{}」失败（瞬时网络错误），等待退避后重试一次",
+                    source_platform_label(source),
+                    source.name
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if !TASK_CONTROLLER.is_paused() {
+                    scan_result = scan_source(db, source).await;
+                }
             }
         }
         if let Err(error) = scan_result {
@@ -2276,7 +2288,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     if is_douyin_source(source) {
         return scan_douyin_source(db, source).await;
     }
-    let mut command = Command::new(ytdlp_executable());
+    let mut command = ytdlp_command();
     command.args(["--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]);
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
@@ -3657,7 +3669,7 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
 }
 
 pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<ExternalMediaMetadata> {
-    let mut command = Command::new(ytdlp_executable());
+    let mut command = ytdlp_command();
     command.args([
         "--dump-single-json",
         "--skip-download",
@@ -4334,7 +4346,7 @@ fn generate_youtube_person_nfo(uploader: &str, channel_id: &str, platform: &str)
 }
 
 async fn extract_youtube_source_metadata(url: &str) -> Result<YtDlpSourceMetadata> {
-    let mut command = Command::new(ytdlp_executable());
+    let mut command = ytdlp_command();
     command.args([
         "--dump-single-json",
         "--flat-playlist",
@@ -4736,7 +4748,7 @@ async fn download_youtube_live_chat(
     };
     let _ = url;
     let output_template = output_path.with_extension("%(ext)s");
-    let mut command = Command::new(ytdlp_executable());
+    let mut command = ytdlp_command();
     command.args([
         "--skip-download",
         "--write-subs",
@@ -5635,6 +5647,46 @@ fn should_proxy_ytdlp_url(url: &str) -> bool {
 fn append_ytdlp_tab_args(command: &mut Command) {
     command.args(["--extractor-args", "youtubetab:skip=authcheck"]);
 }
+
+/// 创建 yt-dlp 子进程命令。
+///
+/// 顺手尝试让 Python 以 UTF-8 输出错误消息；打包版 yt-dlp（PyInstaller）可能
+/// 忽略该环境变量，因此 `command_error` 里还有 GBK 回退解码兜底，保证 Windows
+/// 本地化错误文本（如“远程主机强迫关闭了一个现有的连接”）不乱码。
+fn ytdlp_command() -> Command {
+    let mut command = Command::new(ytdlp_executable());
+    command.env("PYTHONUTF8", "1");
+    command.env("PYTHONIOENCODING", "utf-8");
+    command
+}
+
+/// yt-dlp 扫描失败是否为瞬时网络错误（连接被重置/中断/超时）。
+///
+/// 这类错误通常是 YouTube 对突发请求做的瞬时限流或线路抖动，退避后重试
+/// 一次即可恢复，不应视为来源配置或登录状态问题。
+fn is_youtube_transient_error(error: &anyhow::Error) -> bool {
+    let text = format!("{:#}", error).to_ascii_lowercase();
+    [
+        "connection aborted",
+        "connectionreseterror",
+        "connection reset",
+        "remote end closed connection",
+        "broken pipe",
+        "connectionerror",
+        "transporterror",
+        "read timed out",
+        "timed out",
+        "10054",
+        "10053",
+        "10060",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "could not connect",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
 fn append_ytdlp_runtime(command: &mut Command) {
     if let Some((name, path)) = ytdlp_js_runtime() {
         command.arg("--js-runtimes").arg(format!("{name}:{}", path.display()));
@@ -5774,9 +5826,22 @@ fn is_youtube_url(value: &str) -> bool {
     )
 }
 fn command_error(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = decode_command_bytes(&output.stderr);
+    let stdout = decode_command_bytes(&output.stdout);
     trim_output(if stderr.trim().is_empty() { &stdout } else { &stderr })
+}
+
+/// 把子进程输出字节解码为可读文本。
+///
+/// 优先按 UTF-8 解码；失败时按 GBK（Windows 简体中文系统代码页）解码。
+/// Windows 上 yt-dlp 会把 socket 错误文本（如“远程主机强迫关闭了一个
+/// 现有的连接”）按本地代码页编码输出，直接用 from_utf8_lossy 会变成乱码。
+fn decode_command_bytes(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    let (text, _, _) = encoding_rs::GBK.decode(bytes);
+    text.into_owned()
 }
 fn trim_output(text: &str) -> String {
     const MAX: usize = 6_000;
@@ -5790,6 +5855,20 @@ fn trim_output(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decodes_gbk_command_error_text() {
+        // GBK 编码的“远程主机强迫关闭了一个现有的连接”（Windows 10054 错误文本）
+        let gbk: &[u8] = &[
+            0xd4, 0xb6, 0xb3, 0xcc, 0xd6, 0xf7, 0xbb, 0xfa, 0xc7, 0xbf, 0xc6, 0xc8,
+            0xb9, 0xd8, 0xb1, 0xd5, 0xc1, 0xcb, 0xd2, 0xbb, 0xb8, 0xf6, 0xcf, 0xd6,
+            0xd3, 0xd0, 0xb5, 0xc4, 0xc1, 0xac, 0xbd, 0xd3,
+        ];
+        assert!(std::str::from_utf8(gbk).is_err());
+        let decoded = super::decode_command_bytes(gbk);
+        assert!(decoded.contains("远程主机"), "decoded: {decoded}");
+        assert!(decoded.contains("连接"), "decoded: {decoded}");
+    }
+
     #[test]
     fn startup_skips_recently_scanned_sources() {
         let now = chrono::Local::now().naive_local();

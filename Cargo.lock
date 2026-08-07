@@ -472,6 +472,7 @@ dependencies = [
  "cow-utils",
  "dashmap",
  "dirs",
+ "encoding_rs",
  "enum_dispatch",
  "float-ord",
  "futures",
