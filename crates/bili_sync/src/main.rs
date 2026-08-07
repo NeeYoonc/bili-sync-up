@@ -27,6 +27,7 @@ mod youtube;
 use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 // 移除未使用的Lazy导入
 use task::{credential_refresh_scheduler, http_server, video_downloader};
@@ -172,6 +173,7 @@ async fn async_main() -> Result<()> {
         token.clone(),
     );
     spawn_task("定时下载", video_downloader(connection), &tracker, token.clone());
+    spawn_task("日志落盘", flush_logs_periodically(), &tracker, token.clone());
     spawn_task(
         "外源登录状态守护",
         external_login_guard_scheduler(),
@@ -182,6 +184,15 @@ async fn async_main() -> Result<()> {
     tracker.close();
     handle_shutdown(tracker, token).await;
     Ok(())
+}
+
+/// 日志周期落盘：文件日志先写内存缓冲，避免服务繁忙时日志文件长时间不更新、
+/// 让用户误以为任务“卡住”；每 5 秒把缓冲内容刷到磁盘一次。
+async fn flush_logs_periodically() {
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        file_logger::flush_file_logger();
+    }
 }
 
 fn spawn_task(

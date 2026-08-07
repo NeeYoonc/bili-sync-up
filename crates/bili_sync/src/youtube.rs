@@ -2161,7 +2161,9 @@ pub async fn unified_youtube_image_path(
 /// 由现有 `video_downloader` 的同一周期调用。来源扫描和待下载任务都受全局暂停、
 /// 下载并发配置及相同的日志/通知周期控制。
 /// 进程启动后的首次外源扫描宽限（秒）：避免与其它启动任务叠加触发抖音风控。
-const STARTUP_EXTERNAL_SCAN_GRACE_SECONDS: u64 = 60;
+/// 抖音源启动轮另有“最近扫过就跳过”保护，因此这里只保留避开启动风暴的短宽限，
+/// 不再让 YouTube 源无谓等待 60 秒。
+const STARTUP_EXTERNAL_SCAN_GRACE_SECONDS: u64 = 15;
 /// 进程启动后的首次外源扫描是否仍未执行（仅对启动轮生效）。
 static EXTERNAL_STARTUP_SCAN_PENDING: AtomicBool = AtomicBool::new(true);
 
