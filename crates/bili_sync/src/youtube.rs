@@ -53,7 +53,7 @@ const SUBSCRIPTIONS_URL: &str = "https://www.youtube.com/feed/subscriptions";
 const SUBSCRIPTION_CHANNELS_URL: &str = "https://www.youtube.com/feed/channels";
 const LIKED_URL: &str = "https://www.youtube.com/playlist?list=LL";
 const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
-static YOUTUBE_SIDECAR_BACKFILL_DONE: AtomicBool = AtomicBool::new(false);
+
 static YTDLP_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn parse_video_id_set(value: Option<&str>) -> HashSet<String> {
@@ -2277,12 +2277,6 @@ pub async fn process_scheduled_sources(
         return Ok(());
     }
     download_pending(db, downloader.clone(), concurrent_limit.max(1)).await?;
-    if !YOUTUBE_SIDECAR_BACKFILL_DONE.load(Ordering::SeqCst) {
-        backfill_completed_sidecars(db, downloader.as_ref()).await?;
-        if !TASK_CONTROLLER.is_paused() {
-            YOUTUBE_SIDECAR_BACKFILL_DONE.store(true, Ordering::SeqCst);
-        }
-    }
     Ok(())
 }
 
@@ -2686,150 +2680,6 @@ async fn download_pending(
             }
         })
         .await;
-    Ok(())
-}
-
-/// 为升级前已经完成的 YouTube 媒体补齐封面、NFO 和字幕。
-///
-/// 附属文件失败不能把已经验证完成的媒体重新标记为失败；真实错误写入
-/// `error_message`，并在下次进程启动时继续尝试缺失的附属文件。
-async fn backfill_completed_sidecars(db: &DatabaseConnection, downloader: &UnifiedDownloader) -> Result<()> {
-    let videos = youtube_video::Entity::find()
-        .filter(youtube_video::Column::DownloadStatus.eq("completed"))
-        .filter(youtube_video::Column::OutputPath.is_not_null())
-        .order_by_asc(youtube_video::Column::Id)
-        .all(db)
-        .await?;
-    if videos.is_empty() {
-        return Ok(());
-    }
-
-    let sources = youtube_source::Entity::find()
-        .all(db)
-        .await?
-        .into_iter()
-        .map(|source| (source.id, source))
-        .collect::<HashMap<_, _>>();
-    let total = videos.len();
-    let mut refreshed = 0usize;
-    let mut warned = 0usize;
-
-    info!(total, "开始回填已完成 YouTube/抖音视频的封面、NFO 和字幕");
-    for video in videos {
-        if TASK_CONTROLLER.is_paused() {
-            info!(refreshed, total, "YouTube/抖音附属文件回填因下载暂停而停止");
-            break;
-        }
-        let Some(output_path) = video.output_path.as_deref().map(PathBuf::from) else {
-            continue;
-        };
-        let Some(source) = sources.get(&video.source_id) else {
-            let mut active: youtube_video::ActiveModel = video.into();
-            active.error_message = Set(Some("媒体已完成；附属文件回填失败：视频源不存在".to_string()));
-            active.updated_at = Set(now_standard_string());
-            active.update(db).await?;
-            warned += 1;
-            continue;
-        };
-        if is_douyin_source(source) && crate::douyin::is_cenc_encrypted_media(&output_path).await {
-            // 历史“已完成”文件实为付费密文（未购买时 API 只返回无解密密钥的 CENC
-            // 加密流），与 B 站充电视频一致：清理无效媒体、生成 0 字节占位文件并标记
-            // 为充电/付费且不可播放（保持“已完成”，UI 显示充电视频徽标而非失败）。
-            if let Err(error) = remove_file_if_exists(&output_path).await {
-                warn!(path = %output_path.display(), error = %error, "清理抖音付费密文失败");
-            }
-            if let Err(error) = crate::douyin::create_paid_placeholder(&output_path).await {
-                warn!(path = %output_path.display(), error = %error, "创建抖音付费占位文件失败");
-            }
-            let mut active: youtube_video::ActiveModel = video.into();
-            active.download_status = Set("completed".to_string());
-            active.retry_count = Set(0);
-            active.is_charge_video = Set(true);
-            active.charge_can_play = Set(false);
-            active.error_message = Set(None);
-            active.updated_at = Set(now_standard_string());
-            active.update(db).await?;
-            warned += 1;
-            continue;
-        }
-        if youtube_sidecars_complete(&video, source).await {
-            continue;
-        }
-        if !is_reusable_media_file(&output_path).await {
-            if video.is_charge_video && !video.charge_can_play {
-                // 充电/付费视频：0 字节占位文件是预期状态，不重复加入下载队列，
-                // 继续走附属文件回填即可。
-            } else {
-                let mut active: youtube_video::ActiveModel = video.into();
-                active.download_status = Set("pending".to_string());
-                active.retry_count = Set(0);
-                active.output_path = Set(None);
-                active.error_message = Set(Some(format!(
-                    "媒体记录为已完成，但文件不存在或不可播放，已自动重新加入下载队列：{}",
-                    output_path.display()
-                )));
-                active.updated_at = Set(now_standard_string());
-                active.update(db).await?;
-                warned += 1;
-                continue;
-            }
-        }
-
-        match extract_youtube_metadata(&video.url, Some(source)).await {
-            Ok(metadata) => {
-                let title = metadata.title.clone().unwrap_or_else(|| video.title.clone());
-                let uploader = metadata
-                    .uploader
-                    .clone()
-                    .or_else(|| metadata.channel.clone())
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| source.name.clone());
-                let warning_message = ensure_youtube_sidecars(
-                    downloader,
-                    &metadata,
-                    &output_path,
-                    &video.url,
-                    &title,
-                    &uploader,
-                    source,
-                )
-                .await;
-                if warning_message.is_some() {
-                    warned += 1;
-                }
-
-                let mut active: youtube_video::ActiveModel = video.into();
-                active.title = Set(title);
-                active.uploader = Set(uploader);
-                active.thumbnail = Set(metadata.thumbnail);
-                active.published_at = Set(metadata.upload_date);
-                active.duration_seconds = Set(metadata
-                    .duration
-                    .and_then(|value| i32::try_from(value.round() as i64).ok()));
-                active.error_message = Set(warning_message);
-                active.updated_at = Set(now_standard_string());
-                active.update(db).await?;
-                refreshed += 1;
-            }
-            Err(error) => {
-                warn!(
-                    youtube_id = %video.youtube_id,
-                    error = %error,
-                    "{}媒体已完成，但附属文件元数据解析失败",
-                    source_platform_label(source)
-                );
-                let mut active: youtube_video::ActiveModel = video.into();
-                active.error_message = Set(Some(format!("媒体已完成；附属文件元数据解析失败：{error:#}")));
-                active.updated_at = Set(now_standard_string());
-                active.update(db).await?;
-                warned += 1;
-            }
-        }
-    }
-
-    info!(refreshed, warned, total, "YouTube/抖音已完成媒体附属文件回填结束");
-    notify_videos_changed();
-    notify_queue_status_changed();
     Ok(())
 }
 
@@ -4176,36 +4026,6 @@ fn generate_youtube_season_nfo() -> String {
 </season>
 "#
         .to_string()
-}
-
-async fn youtube_sidecars_complete(video: &youtube_video::Model, source: &youtube_source::Model) -> bool {
-    if source.audio_only && source.audio_only_m4a_only {
-        return true;
-    }
-    let Some(output_path) = video.output_path.as_deref().map(PathBuf::from) else {
-        return false;
-    };
-    let media_ok = std::fs::metadata(&output_path).is_ok_and(|metadata| metadata.len() >= 1024);
-    let cover_ok = youtube_sidecar_path(&output_path, "-thumb.jpg").is_ok_and(|path| path.is_file());
-    let fanart_ok = youtube_sidecar_path(&output_path, "-fanart.jpg").is_ok_and(|path| path.is_file());
-    let nfo_ok = output_path.with_extension("nfo").is_file();
-    let (face_path, person_nfo_path) = youtube_upper_paths(&video.uploader);
-    let upper_ok = face_path.is_file() && person_nfo_path.is_file();
-    let subtitle_ok = !source.download_subtitle || youtube_subtitle_exists(&output_path).await.unwrap_or(false);
-    let core_complete = media_ok && cover_ok && fanart_ok && nfo_ok && upper_ok && subtitle_ok;
-    if !core_complete || !source.download_danmaku {
-        return core_complete;
-    }
-    if is_douyin_source(source) {
-        return output_path.with_extension("ass").is_file() || output_path.with_extension("danmaku.checked").is_file();
-    }
-    let live_chat_path = output_path.with_extension("live_chat.json");
-    let live_chat_ass_path = output_path.with_extension("ass");
-    let checked_path = output_path.with_extension("live_chat.checked");
-    if (live_chat_path.is_file() && live_chat_ass_path.is_file()) || checked_path.is_file() {
-        return true;
-    }
-    false
 }
 
 async fn download_youtube_upper_face(
