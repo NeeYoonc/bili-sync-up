@@ -357,6 +357,7 @@ pub async fn search_youtube(
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
+    append_ytdlp_tab_args(&mut command);
     command.arg(search_url.as_str());
     let output = tokio::time::timeout(Duration::from_secs(2 * 60), command.output())
         .await
@@ -491,6 +492,7 @@ pub async fn get_youtube_channel_playlists(
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
+    append_ytdlp_tab_args(&mut command);
     command.arg(playlists_url.as_str());
     let output = tokio::time::timeout(Duration::from_secs(5 * 60), command.output())
         .await
@@ -646,6 +648,7 @@ pub async fn get_youtube_source_videos(
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
+    append_ytdlp_tab_args(&mut command);
     command.arg(&source_url);
     let output = tokio::time::timeout(Duration::from_secs(10 * 60), command.output())
         .await
@@ -2278,6 +2281,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
+    append_ytdlp_tab_args(&mut command);
     // 频道的 `/videos`、`/shorts` 和 `/streams` 是三个彼此独立的标签页。
     // 扫描频道根地址时 yt-dlp 会按频道完整枚举三个标签页；若直接使用用户
     // 粘贴的 `/videos` 地址，则只会看到普通视频，漏掉 Shorts 和直播回放。
@@ -4342,6 +4346,7 @@ async fn extract_youtube_source_metadata(url: &str) -> Result<YtDlpSourceMetadat
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
+    append_ytdlp_tab_args(&mut command);
     command.arg(url);
     let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output())
         .await
@@ -5620,6 +5625,16 @@ fn should_proxy_ytdlp_url(url: &str) -> bool {
     is_youtube_url(url)
 }
 
+
+/// 频道/播放列表 tab 扫描时跳过 yt-dlp 的 authcheck。
+///
+/// yt-dlp 新版在“网页下载不成功”（例如 YouTube 返回登录墙/验证页）时会误判
+/// “播放列表需要登录”并拒绝提取公开内容；对公开频道/播放列表跳过该检查是
+/// 官方推荐做法（--extractor-args youtubetab:skip=authcheck）。cookies 仍会
+/// 正常携带，私有内容在有 cookies 时依旧可以提取。
+fn append_ytdlp_tab_args(command: &mut Command) {
+    command.args(["--extractor-args", "youtubetab:skip=authcheck"]);
+}
 fn append_ytdlp_runtime(command: &mut Command) {
     if let Some((name, path)) = ytdlp_js_runtime() {
         command.arg("--js-runtimes").arg(format!("{name}:{}", path.display()));
