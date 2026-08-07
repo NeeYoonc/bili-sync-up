@@ -322,11 +322,6 @@
 		},
 		{ value: 'channel', label: '频道投稿', description: '同步指定 YouTube 频道的视频' },
 		{
-			value: 'tiktok',
-			label: 'TikTok 作者',
-			description: '同步指定 TikTok 作者主页发布的视频'
-		},
-		{
 			value: 'playlist',
 			label: '播放列表 / 收藏',
 			description: '同步指定 YouTube 播放列表中的视频'
@@ -1210,8 +1205,7 @@
 			if (
 				((isDouyin && douyinSourceNeedsSelection()) ||
 					youtubeSourceType === 'channel' ||
-					youtubeSourceType === 'playlist' ||
-					youtubeSourceType === 'tiktok') &&
+					youtubeSourceType === 'playlist') &&
 				!youtubeUrl.trim()
 			) {
 				toast.error(isDouyin ? '请先选择抖音来源' : '请输入 YouTube 链接', {
@@ -1220,8 +1214,6 @@
 							? '作者、收藏夹、放映厅或短剧需要从右侧选择，也可填写对应详情链接'
 							: youtubeSourceType === 'channel'
 							? '频道投稿需要提供频道链接'
-							: youtubeSourceType === 'tiktok'
-								? 'TikTok 作者需要提供作者主页链接，如 https://www.tiktok.com/@user'
 								: '播放列表来源需要提供播放列表链接'
 				});
 				return;
@@ -2380,7 +2372,6 @@
 					(youtubeSourceType === 'subscriptions' ||
 				youtubeSourceType === 'channel' ||
 				youtubeSourceType === 'playlist' ||
-				youtubeSourceType === 'tiktok' ||
 						youtubeSourceType === 'liked')))
 		);
 	}
@@ -2418,8 +2409,7 @@
 			!isYouTubeHistorySource() ||
 			(((sourcePlatform === 'douyin' && douyinSourceNeedsSelection()) ||
 				youtubeSourceType === 'channel' ||
-				youtubeSourceType === 'playlist' ||
-				youtubeSourceType === 'tiktok') &&
+				youtubeSourceType === 'playlist') &&
 				!youtubeUrl.trim())
 		)
 			return;
@@ -2551,8 +2541,7 @@
 			(isYouTubeHistorySource() &&
 				((sourcePlatform === 'douyin' && douyinSourceNeedsSelection()) ||
 					youtubeSourceType === 'channel' ||
-					youtubeSourceType === 'playlist' ||
-					youtubeSourceType === 'tiktok') &&
+					youtubeSourceType === 'playlist') &&
 				!youtubeUrl.trim())
 		)
 			return;
@@ -3324,7 +3313,7 @@
 						</div>
 
 						{#if sourcePlatform === 'youtube' || sourcePlatform === 'douyin' || sourcePlatform === 'tiktok'}
-							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || youtubeSourceType === 'tiktok'}
+							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || sourcePlatform === 'tiktok'}
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
 								>
@@ -3411,7 +3400,7 @@
 												: youtubeSourceType === 'douyin_series'
 													? '短剧详情链接'
 													: '抖音作者主页链接'
-											: youtubeSourceType === 'tiktok' ? 'TikTok 作者链接，如 https://www.tiktok.com/@user' : youtubeSourceType === 'playlist' ? 'YouTube 播放列表链接' : 'YouTube 频道链接'}
+											: sourcePlatform === 'tiktok' ? 'TikTok 作者链接，如 https://www.tiktok.com/@user' : youtubeSourceType === 'playlist' ? 'YouTube 播放列表链接' : 'YouTube 频道链接'}
 									</Label>
 									<Input
 										id="youtube-url"

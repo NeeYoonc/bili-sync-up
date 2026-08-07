@@ -1162,8 +1162,12 @@ pub async fn create_youtube_source_checked(
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
     Json(request): Json<CreateYouTubeSourceRequest>,
 ) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
-    if normalize_source_type(&request.source_type)?.starts_with("douyin") {
+    let normalized = normalize_source_type(&request.source_type)?;
+    if normalized.starts_with("douyin") {
         return Err(ApiError::bad_request("请通过抖音视频源接口创建抖音源"));
+    }
+    if normalized == "tiktok" {
+        return Err(ApiError::bad_request("请通过 TikTok 视频源接口创建 TikTok 源"));
     }
     create_youtube_source(Extension(db), Json(request)).await
 }
