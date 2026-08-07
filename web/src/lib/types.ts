@@ -8,6 +8,7 @@ export interface ApiResponse<T> {
 export type YouTubeSourceType =
 	| 'subscriptions'
 	| 'channel'
+	| 'tiktok'
 	| 'playlist'
 	| 'liked'
 	| 'watch_later'

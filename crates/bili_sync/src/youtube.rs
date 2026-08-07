@@ -1120,7 +1120,11 @@ async fn get_platform_sources(
         .all(db)
         .await?
         .into_iter()
-        .filter(|source| source_platform(source) == platform)
+        // TikTok 与 YouTube 共用 yt-dlp 扫描/下载链路，列表一并归入 YouTube 平台。
+        .filter(|source| {
+            source_platform(source) == platform
+                || (platform == "youtube" && is_tiktok_source(source))
+        })
         .collect::<Vec<_>>();
     let mut response = Vec::with_capacity(sources.len());
     for source in sources {
@@ -1138,7 +1142,11 @@ async fn require_source_platform(
     let Some(source) = youtube_source::Entity::find_by_id(id).one(db).await? else {
         return Err(ApiError::from(anyhow!("{platform_label}视频源不存在")));
     };
-    if source_platform(&source) != platform {
+    // TikTok 与 YouTube 共用 yt-dlp 扫描/下载链路，管理路由（列表/启停/删除/更新）
+    // 一并归入 YouTube 平台；展示层面仍区分 TikTok 标签。
+    let matches = source_platform(&source) == platform
+        || (platform == "youtube" && is_tiktok_source(&source));
+    if !matches {
         return Err(ApiError::bad_request(format!(
             "视频源 {} 不属于 {} 平台",
             id,
@@ -1185,6 +1193,10 @@ pub async fn create_youtube_source(
     let url = resolve_source_url(source_type, request.url.as_deref())?;
     if source_type == "douyin" {
         crate::douyin::resolve_sec_user_id(&url).await?;
+    } else if source_type == "tiktok" {
+        if !is_tiktok_url(&url) {
+            return Err(ApiError::from(anyhow!("TikTok 来源必须是有效的 tiktok.com 链接")));
+        }
     } else if !source_type.starts_with("douyin") && !is_youtube_url(&url) {
         return Err(ApiError::from(anyhow!("频道或播放列表必须是有效的 YouTube 链接")));
     }
@@ -1664,9 +1676,15 @@ fn is_douyin_source(source: &youtube_source::Model) -> bool {
     source.source_type.starts_with("douyin")
 }
 
+fn is_tiktok_source(source: &youtube_source::Model) -> bool {
+    source.source_type == "tiktok"
+}
+
 fn source_platform(source: &youtube_source::Model) -> &'static str {
     if is_douyin_source(source) {
         "douyin"
+    } else if is_tiktok_source(source) {
+        "tiktok"
     } else {
         "youtube"
     }
@@ -1675,6 +1693,8 @@ fn source_platform(source: &youtube_source::Model) -> &'static str {
 fn source_platform_label(source: &youtube_source::Model) -> &'static str {
     if is_douyin_source(source) {
         "抖音"
+    } else if is_tiktok_source(source) {
+        "TikTok"
     } else {
         "YouTube"
     }
@@ -2284,16 +2304,22 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     if is_douyin_source(source) {
         return scan_douyin_source(db, source).await;
     }
+    let tiktok = is_tiktok_source(source);
     let mut command = ytdlp_command();
     command.args(["--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]);
     append_ytdlp_runtime(&mut command);
-    append_cookies(&mut command);
+    if tiktok {
+        // TikTok 公开内容无需登录；YouTube cookies 不能用于 TikTok。
+    } else {
+        append_cookies(&mut command);
+        append_ytdlp_tab_args(&mut command);
+    }
     append_youtube_proxy(&mut command);
-    append_ytdlp_tab_args(&mut command);
     // 频道的 `/videos`、`/shorts` 和 `/streams` 是三个彼此独立的标签页。
     // 扫描频道根地址时 yt-dlp 会按频道完整枚举三个标签页；若直接使用用户
     // 粘贴的 `/videos` 地址，则只会看到普通视频，漏掉 Shorts 和直播回放。
-    let scan_url = if source.source_type == "channel" {
+    // TikTok 作者主页直接扫描即可，无需改写 URL。
+    let scan_url = if !tiktok && source.source_type == "channel" {
         canonical_channel_url(&source.url)
     } else {
         source.url.clone()
@@ -2301,7 +2327,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     command.arg(&scan_url);
     let output = tokio::time::timeout(Duration::from_secs(10 * 60), command.output())
         .await
-        .map_err(|_| anyhow!("扫描 YouTube 来源超时"))??;
+        .map_err(|_| anyhow!("扫描 {} 来源超时", source_platform_label(source)))??;
     if !output.status.success() {
         bail!("yt-dlp 扫描失败：{}", command_error(&output));
     }
@@ -3516,6 +3542,9 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
     if source.is_some_and(is_douyin_source) || url.contains("douyin.com") {
         let aweme_id = crate::douyin::aweme_id(url).context("抖音作品链接缺少有效作品 ID")?;
         return crate::douyin::extract_metadata(aweme_id, source).await;
+    }
+    if url.contains("tiktok.com") {
+        return extract_ytdlp_metadata(url, "TikTok").await;
     }
     extract_ytdlp_metadata(url, "YouTube").await
 }
@@ -4821,6 +4850,7 @@ fn normalize_source_type(value: &str) -> Result<&'static str> {
         "liked" => Ok("liked"),
         "watch_later" => Ok("watch_later"),
         "douyin" => Ok("douyin"),
+        "tiktok" => Ok("tiktok"),
         "douyin_liked" => Ok("douyin_liked"),
         "douyin_collection" => Ok("douyin_collection"),
         "douyin_watch_later" => Ok("douyin_watch_later"),
@@ -4834,7 +4864,7 @@ fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
         "subscriptions" => Ok(SUBSCRIPTIONS_URL.to_string()),
         "liked" => Ok(LIKED_URL.to_string()),
         "watch_later" => Ok(WATCH_LATER_URL.to_string()),
-        "douyin" | "douyin_collection" | "douyin_theater" | "douyin_series" => supplied
+        "douyin" | "douyin_collection" | "douyin_theater" | "douyin_series" | "tiktok" => supplied
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
@@ -5433,6 +5463,8 @@ fn append_cookies(command: &mut Command) {
 fn append_cookies_for_url(command: &mut Command, url: &str) {
     if url.contains("douyin.com") {
         crate::douyin::append_cookies(command);
+    } else if url.contains("tiktok.com") {
+        // TikTok 公开内容无需登录，避免误用 YouTube cookies。
     } else {
         append_cookies(command);
     }
@@ -5456,7 +5488,7 @@ fn append_youtube_proxy_for_url(command: &mut Command, url: &str) {
 }
 
 fn should_proxy_ytdlp_url(url: &str) -> bool {
-    is_youtube_url(url)
+    is_youtube_url(url) || is_tiktok_url(url)
 }
 
 
@@ -5624,6 +5656,15 @@ fn is_netscape_youtube_cookie_file(contents: &str) -> bool {
                     "SID" | "SAPISID" | "APISID" | "__Secure-1PSID" | "__Secure-3PSID"
                 )
         })
+}
+
+fn is_tiktok_url(value: &str) -> bool {
+    let trimmed = value.trim().to_ascii_lowercase();
+    let host = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .and_then(|rest| rest.split(['/', '?', '#']).next());
+    host.is_some_and(|host| host == "tiktok.com" || host.ends_with(".tiktok.com"))
 }
 
 fn is_youtube_url(value: &str) -> bool {
