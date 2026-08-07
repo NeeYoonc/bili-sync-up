@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 // 移除未使用的Lazy导入
 use task::{credential_refresh_scheduler, http_server, video_downloader};
+use youtube::external_login_guard_scheduler;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -171,6 +172,12 @@ async fn async_main() -> Result<()> {
         token.clone(),
     );
     spawn_task("定时下载", video_downloader(connection), &tracker, token.clone());
+    spawn_task(
+        "外源登录状态守护",
+        external_login_guard_scheduler(),
+        &tracker,
+        token.clone(),
+    );
 
     tracker.close();
     handle_shutdown(tracker, token).await;

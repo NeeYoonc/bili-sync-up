@@ -802,6 +802,15 @@ async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::V
         .send()
         .await
         .context("访问 YouTube 已订阅频道页面失败")?;
+    // 浏览器式被动续约：把页面响应里的 Set-Cookie 合并写回 cookies.txt。
+    let fallback_domain = response.url().host_str().unwrap_or("www.youtube.com").to_string();
+    crate::utils::netscape_cookies::renew_cookie_file(
+        path,
+        response.headers(),
+        &fallback_domain,
+        is_youtube_auth_cookie_domain,
+    )
+    .await;
 
     let final_url = response.url().to_string();
     if final_url.contains("accounts.google.com") || final_url.contains("ServiceLogin") {
@@ -1076,6 +1085,9 @@ pub async fn import_youtube_cookie_file(
             youtube_cookie_diagnostic(&request.cookies)
         )));
     }
+    // 旧版导入可能残留 `*.backup` / `*.importing` / `*.before-*` 等备份快照，
+    // 先清理（排除当前临时文件）再写入新会话，避免新旧 Cookie 混用。
+    clear_youtube_login_state_files_except(Some(&temporary)).await;
     replace_cookie_file(&temporary, &path).await?;
 
     Ok(ApiResponse::ok(YouTubeLoginResponse {
@@ -5354,6 +5366,118 @@ fn ytdlp_executable() -> PathBuf {
 }
 fn cookie_path() -> PathBuf {
     CONFIG_DIR.join("youtube-cookies.txt")
+}
+
+/// 清理旧版或历史导入残留的 YouTube 登录状态文件（主 Cookie 及其备份/临时快照）。
+/// `exclude` 用于跳过当前正在写入的临时文件。
+async fn clear_youtube_login_state_files_except(exclude: Option<&Path>) {
+    let mut removed = 0usize;
+    let Ok(mut entries) = tokio::fs::read_dir(&*CONFIG_DIR).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry.file_type().await.map(|kind| kind.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if exclude.is_some_and(|excluded| entry.path() == excluded) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "youtube-cookies.txt" || name.starts_with("youtube-cookies.txt.") {
+            if let Err(error) = tokio::fs::remove_file(entry.path()).await {
+                warn!(path = %entry.path().display(), error = %error, "清理旧 YouTube 登录状态文件失败");
+            } else {
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        info!(removed, "已清理旧版 YouTube 登录状态文件，重新导入新会话");
+    }
+}
+
+/// 外源（YouTube/抖音）登录状态守护任务的启动延迟与检查间隔。
+const EXTERNAL_LOGIN_GUARD_STARTUP_DELAY: Duration = Duration::from_secs(5 * 60);
+const EXTERNAL_LOGIN_GUARD_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// 外源登录状态守护调度器。
+///
+/// 定期探测 YouTube/抖音登录状态：有效则顺带完成一次浏览器式会话续约；明确
+/// 过期则清理残留登录状态文件并发送通知，避免“看似已登录、实际已失效”导致
+/// 扫描持续报错。风控/网络原因导致的探测失败不会清理会话。
+pub async fn external_login_guard_scheduler() {
+    info!(
+        "外源登录状态守护任务已启动：{} 分钟后首次检查，之后每 {} 小时检查并续约一次",
+        EXTERNAL_LOGIN_GUARD_STARTUP_DELAY.as_secs() / 60,
+        EXTERNAL_LOGIN_GUARD_INTERVAL.as_secs() / 3600
+    );
+    tokio::time::sleep(EXTERNAL_LOGIN_GUARD_STARTUP_DELAY).await;
+    loop {
+        let started = std::time::Instant::now();
+        if let Err(error) = guard_external_login_states().await {
+            warn!(error = %error, "外源登录状态守护检查失败");
+        }
+        let elapsed = started.elapsed();
+        if elapsed < EXTERNAL_LOGIN_GUARD_INTERVAL {
+            tokio::time::sleep(EXTERNAL_LOGIN_GUARD_INTERVAL - elapsed).await;
+        }
+    }
+}
+
+async fn guard_external_login_states() -> Result<()> {
+    // 抖音：探测即续约（signed_get 内部会刷新 msToken/webid/verifyFp 并合并 Set-Cookie）。
+    match crate::douyin::probe_douyin_login().await {
+        crate::douyin::DouyinLoginProbe::Valid => {
+            info!(target: "bili_sync_rs::douyin", "抖音登录状态有效，已完成会话续约");
+        }
+        crate::douyin::DouyinLoginProbe::Expired => {
+            crate::douyin::clear_douyin_login_state().await;
+            record_external_login_expired(
+                "抖音",
+                "抖音登录状态已过期或未登录，已清理残留会话；请重新在设置页导入电脑浏览器导出的 douyin.com cookies.txt",
+            )
+            .await;
+        }
+        crate::douyin::DouyinLoginProbe::Unclear => {
+            debug!(target: "bili_sync_rs::douyin", "抖音登录状态检查结果不确定（网络或风控），保留现有会话");
+        }
+        crate::douyin::DouyinLoginProbe::NotConfigured => {
+            debug!(target: "bili_sync_rs::douyin", "尚未导入抖音登录状态，跳过守护检查");
+        }
+    }
+
+    // YouTube：订阅频道页面探测即续约。
+    let youtube_path = cookie_path();
+    if has_youtube_session(&youtube_path) {
+        match load_youtube_subscription_channels(&youtube_path).await {
+            Ok(_) => info!("YouTube 登录状态有效，已完成会话续约"),
+            Err(error) if format!("{:#}", error).contains("Cookie 已失效") => {
+                let _ = remove_file_if_exists(&youtube_path).await;
+                record_external_login_expired(
+                    "YouTube",
+                    "YouTube 登录状态已过期或未登录，已清理残留会话；请重新在设置页导入 cookies.txt",
+                )
+                .await;
+            }
+            Err(error) => {
+                debug!("YouTube 登录状态检查失败（网络等原因），保留现有会话: {:#}", error);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn record_external_login_expired(platform: &str, message: &str) {
+    info!(platform, "{}登录状态过期，已清理残留会话并提示重新导入", platform);
+    if let Err(error) = crate::utils::notification::send_error_notification(
+        &format!("{platform}登录状态过期"),
+        message,
+        None,
+    )
+    .await
+    {
+        warn!(platform, error = %error, "发送外源登录过期通知失败");
+    }
 }
 fn default_output_path() -> PathBuf {
     CONFIG_DIR.join("youtube-downloads")

@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -302,6 +303,10 @@ pub async fn import_douyin_cookie_file(
         .await
         .context("写入抖音 cookies.txt 失败")?;
     validate_cookie_file(&temporary).await?;
+    // 旧版或历史导入可能残留旧会话的 cookies/msToken/verify_fp/webid 及备份
+    // 快照，混用会导致签名或风控异常；验证通过后先全部清理（排除当前临时
+    // 文件）再写入新会话。
+    clear_douyin_login_state_except(Some(&temporary)).await;
     replace_cookie_file(&temporary, &path).await?;
     let mut imported_device_fields = 0usize;
     if let Some(webid) = request
@@ -1958,6 +1963,7 @@ async fn signed_get(base_url: &str, mut pairs: Vec<(&str, String)>) -> Result<se
             request = request.header("uifid", uifid);
         }
         let response = request.send().await.context("请求抖音 Web API 失败")?;
+        capture_douyin_response_cookies(&response).await;
         let status = response.status();
         let bytes = response.bytes().await?;
         if status.is_success() {
@@ -2024,6 +2030,7 @@ async fn browser_get_with_referer(
         request = request.header("uifid", uifid);
     }
     let response = request.send().await.context("请求抖音 Web API 失败")?;
+    capture_douyin_response_cookies(&response).await;
     let status = response.status();
     let bytes = response.bytes().await?;
     if !status.is_success() {
@@ -2287,6 +2294,131 @@ pub(crate) fn append_cookies(command: &mut tokio::process::Command) {
 
 pub(crate) fn cookie_path() -> PathBuf {
     CONFIG_DIR.join("douyin-cookies.txt")
+}
+
+/// 抖音登录状态相关文件（主 Cookie 与设备参数）的基准名。
+const DOUYIN_LOGIN_STATE_BASES: [&str; 4] = [
+    "douyin-cookies.txt",
+    "douyin-mstoken.txt",
+    "douyin-verify-fp.txt",
+    "douyin-webid.txt",
+];
+
+/// 清理旧版或历史导入残留的抖音登录状态文件。
+///
+/// 旧版本升级后可能残留旧会话的 cookies.txt、msToken、verify_fp、webid 以及
+/// `*.backup` / `*.importing` / `*.before-har-*` 等备份快照；新旧混用会导致
+/// 签名校验或风控异常。新导入前调用，先清干净再写入新会话。
+pub(crate) async fn clear_douyin_login_state() {
+    clear_douyin_login_state_except(None).await;
+}
+
+async fn clear_douyin_login_state_except(exclude: Option<&Path>) {
+    let mut removed = 0usize;
+    let Ok(mut entries) = tokio::fs::read_dir(&*CONFIG_DIR).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry.file_type().await.map(|kind| kind.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if exclude.is_some_and(|excluded| entry.path() == excluded) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_login_state = DOUYIN_LOGIN_STATE_BASES
+            .iter()
+            .any(|base| name == *base || name.starts_with(&format!("{base}.")));
+        if !is_login_state {
+            continue;
+        }
+        match tokio::fs::remove_file(entry.path()).await {
+            Ok(()) => removed += 1,
+            Err(error) => warn!(path = %entry.path().display(), error = %error, "清理旧抖音登录状态文件失败"),
+        }
+    }
+    if removed > 0 {
+        info!(target: "bili_sync_rs::douyin", removed, "已清理旧版抖音登录状态文件，重新导入新会话");
+    }
+}
+
+/// 浏览器式被动续约：把抖音响应里的 `Set-Cookie` 合并写回 cookies.txt。
+///
+/// 抖音服务端会在正常响应中轮换/续期 `ttwid`、`passport_csrf_token` 等会话
+/// Cookie；合并回本地文件后，工具会像浏览器一样持续续约，而不是等到会话过期
+/// 才提示重新导入。写入做了 30 秒节流，避免并发请求互相覆盖。
+static LAST_DOUYIN_COOKIE_RENEW_MS: AtomicU64 = AtomicU64::new(0);
+
+async fn capture_douyin_response_cookies(response: &reqwest::Response) {
+    if response.headers().get_all(reqwest::header::SET_COOKIE).iter().next().is_none() {
+        return;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    if now_ms.saturating_sub(LAST_DOUYIN_COOKIE_RENEW_MS.load(AtomicOrdering::Relaxed)) < 30_000 {
+        return;
+    }
+    LAST_DOUYIN_COOKIE_RENEW_MS.store(now_ms, AtomicOrdering::Relaxed);
+    let fallback_domain = response
+        .url()
+        .host_str()
+        .unwrap_or("www.douyin.com")
+        .to_string();
+    crate::utils::netscape_cookies::renew_cookie_file(
+        &cookie_path(),
+        response.headers(),
+        &fallback_domain,
+        is_douyin_cookie_domain,
+    )
+    .await;
+}
+
+/// 登录状态探测结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DouyinLoginProbe {
+    /// 会话有效，且已顺带完成一次被动续约。
+    Valid,
+    /// 明确未登录/已失效（响应正常但缺少账号资料），守护任务应清理并提示。
+    Expired,
+    /// 网络错误或风控（403/限流），无法判断，保留现有会话不做清理。
+    Unclear,
+    /// 尚未导入过登录状态，守护任务不做处理也不提示。
+    NotConfigured,
+}
+
+/// 探测抖音登录状态：请求当前账号资料接口。
+///
+/// 仅在响应明确表示未登录时返回 `Expired`；HTTP 403 等风控或网络错误一律返回
+/// `Unclear`，避免把“被风控”误判成“掉登录”而清掉用户会话。
+pub(crate) async fn probe_douyin_login() -> DouyinLoginProbe {
+    if !has_douyin_session(&cookie_path()) {
+        return DouyinLoginProbe::NotConfigured;
+    }
+    match signed_get(DOUYIN_PROFILE_SELF_API, common_query_pairs()).await {
+        Ok(value) => {
+            let logged_in = value
+                .get("user")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|user| user.get("uid"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|uid| !uid.trim().is_empty());
+            if logged_in {
+                DouyinLoginProbe::Valid
+            } else {
+                DouyinLoginProbe::Expired
+            }
+        }
+        Err(error) => {
+            let text = format!("{:#}", error);
+            if text.contains("Cookie 已失效") || text.contains("请重新导入") {
+                DouyinLoginProbe::Expired
+            } else {
+                DouyinLoginProbe::Unclear
+            }
+        }
+    }
 }
 
 fn ensure_session() -> Result<()> {

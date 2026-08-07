@@ -12,6 +12,7 @@ pub mod format_arg;
 pub mod keyword_filter;
 pub mod live_updates;
 pub mod model;
+pub mod netscape_cookies;
 pub mod nfo;
 pub mod notification;
 pub mod scan_collector;
