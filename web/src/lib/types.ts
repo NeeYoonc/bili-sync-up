@@ -9,6 +9,8 @@ export type YouTubeSourceType =
 	| 'subscriptions'
 	| 'channel'
 	| 'tiktok'
+	| 'tiktok_favorite'
+	| 'tiktok_collection'
 	| 'playlist'
 	| 'liked'
 	| 'watch_later'
@@ -117,6 +119,11 @@ export interface DouyinStatusResponse {
 	cookie_path: string;
 }
 
+export interface TikTokStatusResponse {
+	logged_in: boolean;
+	cookie_path: string;
+}
+
 export interface YouTubeSearchRequest {
 	keyword: string;
 	source_type: 'channel' | 'playlist';
@@ -185,7 +192,7 @@ export type SortOrder = 'asc' | 'desc';
 
 // 请求参数类型
 export interface VideosRequest {
-	platform?: 'bilibili' | 'youtube' | 'douyin';
+	platform?: 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
 	youtube?: number;
 	collection?: number;
 	favorite?: number;
@@ -1327,6 +1334,8 @@ export interface DashBoardResponse {
 	total_douyin_theaters: number;
 	enabled_douyin_series: number;
 	total_douyin_series: number;
+	enabled_tiktok_sources: number;
+	total_tiktok_sources: number;
 	enabled_youtube_subscriptions: number;
 	total_youtube_subscriptions: number;
 	enabled_youtube_channels: number;
@@ -1402,3 +1411,4 @@ export interface BetaImageUpdateStatusResponse {
 	checked_at?: string;
 	error?: string;
 }
+

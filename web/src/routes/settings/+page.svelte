@@ -47,6 +47,7 @@
 	import Loading from '$lib/components/ui/Loading.svelte';
 	import YouTubeLoginPanel from '$lib/components/youtube-login-panel.svelte';
 	import DouyinLoginPanel from '$lib/components/douyin-login-panel.svelte';
+	import TikTokLoginPanel from '$lib/components/tiktok-login-panel.svelte';
 
 	let config: ConfigResponse | null = null;
 	let loading = false;
@@ -107,6 +108,12 @@
 			icon: Music2Icon
 		},
 		{
+			id: 'tiktok_login',
+			title: 'TikTok 登录状态',
+			description: '从 cookies.txt 导入，公开内容无需登录',
+			icon: Music2Icon
+		},
+		{
 			id: 'risk',
 			title: '风控配置',
 			description: 'UP主投稿获取风控策略',
@@ -158,6 +165,7 @@
 		credential: '填写 B 站登录凭证，影响会员画质、互动内容和受限接口访问。',
 		youtube_login: '通过电脑端登录助手或 cookies.txt 管理 yt-dlp 使用的 YouTube 登录状态。',
 		douyin_login: '通过同一个电脑端登录助手或 cookies.txt 管理抖音作者作品扫描和下载所需的 Cookie。',
+		tiktok_login: '管理 TikTok 作者扫描所用的 cookies.txt；TikTok 公开作者主页无需登录即可同步，导入后 yt-dlp 可访问需要登录的私密/受限内容。',
 		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
 		captcha: '设置遇到验证码风控时的处理模式、超时和自动识别参数。',
 		aria2: '配置外部 Aria2 的健康检查、自动重启和监控策略。',
@@ -3147,6 +3155,25 @@
 		<DouyinLoginPanel />
 		<div class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200">
 			导入后可搜索抖音作者、选择历史作品并持续扫描新作品。媒体仍使用项目现有统一下载器、画质设置、路径模板、封面与 NFO 链路。
+		</div>
+	</div>
+</ResponsiveSheet>
+
+<!-- TikTok 登录状态设置抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'tiktok_login'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="TikTok 登录状态"
+	description="从电脑浏览器导出的 cookies.txt 导入 TikTok 登录状态"
+	titleTooltip={getSettingTooltip('tiktok_login')}
+	{isMobile}
+>
+	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+		<TikTokLoginPanel />
+		<div class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200">
+			TikTok 作者主页公开内容无需登录即可同步；导入登录状态后，作者扫描会携带该 Cookie，可访问需要登录才可见的私密/受限内容，且不会与 YouTube、抖音的 Cookie 混用。
 		</div>
 	</div>
 </ResponsiveSheet>

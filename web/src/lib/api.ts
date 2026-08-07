@@ -58,6 +58,7 @@ import type {
 	YouTubeLoginResponse,
 	YouTubeStatusResponse,
 	DouyinStatusResponse,
+	TikTokStatusResponse,
 	YouTubeSearchRequest,
 	YouTubeSearchResponse,
 	YouTubeSourceVideosRequest,
@@ -309,6 +310,24 @@ class ApiClient {
 	async searchTikTok(keyword: string): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/tiktok/search', { keyword });
 	}
+	async getTikTokStatus(): Promise<ApiResponse<TikTokStatusResponse>> {
+		return this.get<TikTokStatusResponse>('/tiktok/status');
+	}
+	async importTikTokCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
+		return this.post<YouTubeLoginResponse>('/tiktok/cookies', { cookies });
+	}
+	async getTikTokSourceVideos(params: {
+		url?: string;
+		source_type: string;
+		page?: number;
+		page_size?: number;
+		keyword?: string;
+	}): Promise<ApiResponse<SubmissionVideosResponse>> {
+		return this.get<SubmissionVideosResponse>('/tiktok/source-videos', { ...params });
+	}
+	async getTikTokPlaylists(url: string): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>(`/tiktok/playlists?url=${encodeURIComponent(url)}`);
+	}
 	async getDouyinFollowings(): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/douyin/followings');
 	}
@@ -508,11 +527,13 @@ class ApiClient {
 		id: number,
 		enabled: boolean
 	): Promise<ApiResponse<UpdateVideoSourceEnabledResponse>> {
-		if (sourceType === 'youtube' || sourceType === 'douyin') {
+		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
 			const result =
-				sourceType === 'douyin'
-					? await this.setDouyinSourceEnabled(id, enabled)
-					: await this.setYouTubeSourceEnabled(id, enabled);
+				sourceType === 'tiktok'
+					? await this.setTikTokSourceEnabled(id, enabled)
+					: sourceType === 'douyin'
+						? await this.setDouyinSourceEnabled(id, enabled)
+						: await this.setYouTubeSourceEnabled(id, enabled);
 			return {
 				status_code: result.status_code,
 				data: {
@@ -622,11 +643,13 @@ class ApiClient {
 			message: string;
 		}>
 	> {
-		if (sourceType === 'youtube' || sourceType === 'douyin') {
+		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
 			const update =
-				sourceType === 'douyin'
-					? this.updateDouyinSource.bind(this)
-					: this.updateYouTubeSource.bind(this);
+				sourceType === 'tiktok'
+					? this.updateTikTokSource.bind(this)
+					: sourceType === 'douyin'
+						? this.updateDouyinSource.bind(this)
+						: this.updateYouTubeSource.bind(this);
 			const result = await update(id, {
 				audio_only: options.audio_only,
 				audio_only_m4a_only: options.audio_only_m4a_only,
@@ -706,14 +729,20 @@ class ApiClient {
 		id: number,
 		params: ResetVideoSourcePathRequest
 	): Promise<ApiResponse<ResetVideoSourcePathResponse>> {
-		if (sourceType === 'youtube' || sourceType === 'douyin') {
+		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
 			const before = (
-				sourceType === 'douyin' ? await this.getDouyinSources() : await this.getYouTubeSources()
+				sourceType === 'tiktok'
+					? await this.getTikTokSources()
+					: sourceType === 'douyin'
+						? await this.getDouyinSources()
+						: await this.getYouTubeSources()
 			).data.find((source) => source.id === id);
 			const result =
-				sourceType === 'douyin'
-					? await this.resetDouyinSourcePath(id, params.new_path)
-					: await this.resetYouTubeSourcePath(id, params.new_path);
+				sourceType === 'tiktok'
+					? await this.resetTikTokSourcePath(id, params.new_path)
+					: sourceType === 'douyin'
+						? await this.resetDouyinSourcePath(id, params.new_path)
+						: await this.resetYouTubeSourcePath(id, params.new_path);
 			return {
 				status_code: result.status_code,
 				data: {
@@ -773,11 +802,18 @@ class ApiClient {
 		sourceType: string,
 		id: number
 	): Promise<ApiResponse<GetKeywordFiltersResponse>> {
-		if (sourceType === 'youtube' || sourceType === 'douyin') {
+		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
 			const response =
-				sourceType === 'douyin' ? await this.getDouyinSources() : await this.getYouTubeSources();
+				sourceType === 'tiktok'
+					? await this.getTikTokSources()
+					: sourceType === 'douyin'
+						? await this.getDouyinSources()
+						: await this.getYouTubeSources();
 			const source = response.data.find((item) => item.id === id);
-			if (!source) throw new Error(`${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源不存在`);
+			if (!source)
+				throw new Error(
+					`${sourceType === 'tiktok' ? 'TikTok' : sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源不存在`
+				);
 			return {
 				status_code: response.status_code,
 				data: {
@@ -818,11 +854,13 @@ class ApiClient {
 		publishedAfter?: string,
 		publishedBefore?: string
 	): Promise<ApiResponse<UpdateKeywordFiltersResponse>> {
-		if (sourceType === 'youtube' || sourceType === 'douyin') {
+		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
 			const update =
-				sourceType === 'douyin'
-					? this.updateDouyinSource.bind(this)
-					: this.updateYouTubeSource.bind(this);
+				sourceType === 'tiktok'
+					? this.updateTikTokSource.bind(this)
+					: sourceType === 'douyin'
+						? this.updateDouyinSource.bind(this)
+						: this.updateYouTubeSource.bind(this);
 			const response = await update(id, {
 				blacklist_keywords: blacklistKeywords,
 				whitelist_keywords: whitelistKeywords,
@@ -840,7 +878,7 @@ class ApiClient {
 					source_type: sourceType,
 					blacklist_count: response.data.blacklist_keywords.length,
 					whitelist_count: response.data.whitelist_keywords.length,
-					message: `${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源过滤设置已更新`
+					message: `${sourceType === 'tiktok' ? 'TikTok' : sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源过滤设置已更新`
 				}
 			};
 		}
@@ -1473,6 +1511,16 @@ export const api = {
 	getYouTubeSourceVideos: (params: YouTubeSourceVideosRequest) =>
 		apiClient.getYouTubeSourceVideos(params),
 	searchDouyin: (keyword: string) => apiClient.searchDouyin(keyword),
+	getTikTokStatus: () => apiClient.getTikTokStatus(),
+	importTikTokCookies: (cookies: string) => apiClient.importTikTokCookies(cookies),
+	getTikTokSourceVideos: (params: {
+		url?: string;
+		source_type: string;
+		page?: number;
+		page_size?: number;
+		keyword?: string;
+	}) => apiClient.getTikTokSourceVideos(params),
+	getTikTokPlaylists: (url: string) => apiClient.getTikTokPlaylists(url),
 	searchTikTok: (keyword: string) => apiClient.searchTikTok(keyword),
 	getTikTokSources: () => apiClient.getTikTokSources(),
 	createTikTokSource: (request: CreateYouTubeSourceRequest) =>

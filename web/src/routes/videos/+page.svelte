@@ -60,12 +60,13 @@
 	let videoSources: VideoSourcesResponse | null = null;
 	let youtubeSources: YouTubeSource[] = [];
 	let douyinSources: YouTubeSource[] = [];
+	let tiktokSources: YouTubeSource[] = [];
 	let loading = false;
 	let lastSearch: string | null = null;
 	const videosStream = createManagedEventSource();
 	let liveUpdateStatus: 'idle' | 'connecting' | 'connected' | 'error' = 'idle';
 	let pendingInsertedCount = 0;
-	let platformTab: 'bilibili' | 'youtube' | 'douyin' = 'bilibili';
+	let platformTab: 'bilibili' | 'youtube' | 'douyin' | 'tiktok' = 'bilibili';
 	const EXTERNAL_SOURCE_SECTIONS = {
 		youtube: [
 			{ sourceType: 'subscriptions', title: '订阅动态', icon: ActivityIcon },
@@ -81,6 +82,11 @@
 			{ sourceType: 'douyin_watch_later', title: '稍后再看', icon: HistoryIcon },
 			{ sourceType: 'douyin_theater', title: '放映厅', icon: ListVideoIcon },
 			{ sourceType: 'douyin_series', title: '短剧', icon: ListTreeIcon }
+		],
+		tiktok: [
+			{ sourceType: 'tiktok', title: '作者投稿', icon: UserIcon },
+			{ sourceType: 'tiktok_favorite', title: '我的喜欢', icon: HeartIcon },
+			{ sourceType: 'tiktok_collection', title: '收藏夹', icon: ListTreeIcon }
 		]
 	} as const;
 
@@ -99,7 +105,7 @@
 
 	// 筛选状态
 	let showFilters = false;
-	let selectedSourceType: VideoSourceType | 'youtube' | 'douyin' | '' = '';
+	let selectedSourceType: VideoSourceType | 'youtube' | 'douyin' | 'tiktok' | '' = '';
 	let selectedSourceId = '';
 	let showFailedOnly = false;
 	let currentSortBy: SortBy = 'id';
@@ -319,13 +325,15 @@
 
 	function getApiParams(searchParams: URLSearchParams) {
 		const requestedPlatform = searchParams.get('platform');
-		const platform: 'bilibili' | 'youtube' | 'douyin' =
+		const platform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok' =
 			requestedPlatform === 'youtube'
 				? 'youtube'
 				: requestedPlatform === 'douyin'
 					? 'douyin'
-					: 'bilibili';
-		let videoSource: { type: VideoSourceType | 'youtube' | 'douyin'; id: string } | null = null;
+					: requestedPlatform === 'tiktok'
+						? 'tiktok'
+						: 'bilibili';
+		let videoSource: { type: VideoSourceType | 'youtube' | 'douyin' | 'tiktok'; id: string } | null = null;
 		if (platform !== 'bilibili') {
 			const value = searchParams.get(platform);
 			if (value) {
@@ -566,7 +574,7 @@
 	}
 
 	async function loadVideoSources() {
-		const [result, youtubeResult, douyinResult] = await Promise.all([
+		const [result, youtubeResult, douyinResult, tiktokResult] = await Promise.all([
 			runRequest(() => api.getVideoSources(), {
 			showErrorToast: false,
 			onError: (error) => console.error('加载视频源失败:', error)
@@ -578,11 +586,16 @@
 			runRequest(() => api.getDouyinSources(), {
 				showErrorToast: false,
 				onError: (error) => console.error('加载抖音视频源失败:', error)
+			}),
+			runRequest(() => api.getTikTokSources(), {
+				showErrorToast: false,
+				onError: (error) => console.error('加载 TikTok 视频源失败:', error)
 			})
 		]);
 		if (result) videoSources = result.data;
 		if (youtubeResult) youtubeSources = youtubeResult.data;
 		if (douyinResult) douyinSources = douyinResult.data;
+		if (tiktokResult) tiktokSources = tiktokResult.data;
 	}
 
 	async function handlePageChange(pageNum: number) {
@@ -640,7 +653,7 @@
 		);
 	}
 
-	function switchPlatform(platform: 'bilibili' | 'youtube' | 'douyin') {
+	function switchPlatform(platform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok') {
 		if (platform === platformTab && $appStateStore.platform === platform) return;
 		platformTab = platform;
 		setPlatform(platform);
@@ -820,7 +833,7 @@
 		}
 	}
 
-	function handleSourceFilter(sourceType: VideoSourceType | 'youtube' | 'douyin', sourceId: string) {
+	function handleSourceFilter(sourceType: VideoSourceType | 'youtube' | 'douyin' | 'tiktok', sourceId: string) {
 		selectedSourceType = sourceType;
 		selectedSourceId = sourceId;
 		const range = getResolutionRange(selectedResolution);
@@ -1059,10 +1072,11 @@
 	/>
 
 	<Tabs.Root bind:value={platformTab}>
-		<Tabs.List class="grid w-full max-w-xl grid-cols-3">
+		<Tabs.List class="grid w-full max-w-xl grid-cols-4">
 				<Tabs.Trigger value="bilibili" onclick={() => switchPlatform('bilibili')}>B 站视频</Tabs.Trigger>
 			<Tabs.Trigger value="youtube" onclick={() => switchPlatform('youtube')}>YouTube 视频</Tabs.Trigger>
 			<Tabs.Trigger value="douyin" onclick={() => switchPlatform('douyin')}>抖音视频</Tabs.Trigger>
+			<Tabs.Trigger value="tiktok" onclick={() => switchPlatform('tiktok')}>TikTok 视频</Tabs.Trigger>
 		</Tabs.List>
 
 		<div class="mt-6 space-y-6">
@@ -1243,8 +1257,8 @@
 			</div>
 
 			<div class="space-y-3">
-				{#if platformTab === 'youtube' || platformTab === 'douyin'}
-					{@const externalSources = platformTab === 'douyin' ? douyinSources : youtubeSources}
+				{#if platformTab === 'youtube' || platformTab === 'douyin' || platformTab === 'tiktok'}
+					{@const externalSources = platformTab === 'tiktok' ? tiktokSources : platformTab === 'douyin' ? douyinSources : youtubeSources}
 					{#each EXTERNAL_SOURCE_SECTIONS[platformTab] as section (section.sourceType)}
 						{@const sources = externalSources.filter((source) => source.source_type === section.sourceType)}
 						{#if sources.length > 0}
@@ -1265,7 +1279,7 @@
 											class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
 											onclick={() =>
 												handleSourceFilter(
-													platformTab as 'youtube' | 'douyin',
+													platformTab as 'youtube' | 'douyin' | 'tiktok',
 													source.id.toString()
 												)}
 										>
@@ -1332,13 +1346,13 @@
 		<div class="flex flex-wrap items-center gap-2">
 			<span class="text-muted-foreground text-sm">当前筛选:</span>
 
-			{#if (selectedSourceType === 'youtube' || selectedSourceType === 'douyin') && selectedSourceId}
-				{@const currentSource = (selectedSourceType === 'douyin' ? douyinSources : youtubeSources).find(
+			{#if (selectedSourceType === 'youtube' || selectedSourceType === 'douyin' || selectedSourceType === 'tiktok') && selectedSourceId}
+				{@const currentSource = (selectedSourceType === 'tiktok' ? tiktokSources : selectedSourceType === 'douyin' ? douyinSources : youtubeSources).find(
 					(s) => s.id.toString() === selectedSourceId
 				)}
 				{#if currentSource}
 					<Badge variant="secondary" class="flex items-center gap-1">
-						{selectedSourceType === 'douyin' ? '抖音' : 'YouTube'} · {currentSource.name}
+						{selectedSourceType === 'tiktok' ? 'TikTok' : selectedSourceType === 'douyin' ? '抖音' : 'YouTube'} · {currentSource.name}
 						<button onclick={clearFilters} class="hover:bg-muted-foreground/20 ml-1 rounded">
 							<span class="sr-only">清除筛选</span>×
 						</button>

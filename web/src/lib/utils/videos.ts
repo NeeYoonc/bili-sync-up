@@ -23,7 +23,7 @@ export function buildVideosRequest({
 	maxHeight?: number | null;
 	sortBy?: SortBy;
 	sortOrder?: SortOrder;
-	platform?: 'bilibili' | 'youtube' | 'douyin';
+	platform?: 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
 }): VideosRequest {
 	const params: VideosRequest = {
 		page,
@@ -54,6 +54,7 @@ export function buildVideosRequest({
 			switch (videoSource.type) {
 				case 'youtube':
 				case 'douyin':
+				case 'tiktok':
 					params.youtube = sourceId;
 					break;
 				case 'collection':

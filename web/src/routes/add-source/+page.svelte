@@ -39,7 +39,8 @@
 		VideoCodec,
 		YouTubeSourceType,
 		YouTubeStatusResponse,
-		DouyinStatusResponse
+		DouyinStatusResponse,
+		TikTokStatusResponse
 	} from '$lib/types';
 	import {
 		Search,
@@ -48,7 +49,8 @@
 		Filter as FilterIcon,
 		Info as InfoIcon,
 		Languages as LanguagesIcon,
-		SlidersHorizontal as SlidersHorizontalIcon
+		SlidersHorizontal as SlidersHorizontalIcon,
+		FolderOpen
 	} from '@lucide/svelte';
 	import { onDestroy, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -105,6 +107,7 @@
 	let youtubeUrl = '';
 	let youtubeStatus: YouTubeStatusResponse | null = null;
 	let douyinStatus: DouyinStatusResponse | null = null;
+	let tiktokStatus: TikTokStatusResponse | null = null;
 	let lastSourceType: VideoCategory = sourceType; // 记录上一次的源类型，用于检测切换
 	let sourceId = '';
 	let upId = '';
@@ -338,7 +341,17 @@
 		{ value: 'douyin_series', label: '短剧', description: '搜索并选择短剧，按当前账号可见权限同步剧集' }
 	];
 	const tiktokSourceTypeOptions = [
-		{ value: 'tiktok', label: 'TikTok 作者', description: '同步指定 TikTok 作者主页发布的视频' }
+		{ value: 'tiktok', label: 'TikTok 作者', description: '同步指定 TikTok 作者主页发布的视频；公开内容无需登录' },
+		{
+			value: 'tiktok_favorite',
+			label: '我的喜欢',
+			description: '同步当前登录账号点赞的视频，需要在设置页导入 TikTok 登录状态'
+		},
+		{
+			value: 'tiktok_collection',
+			label: '收藏夹',
+			description: '同步当前账号创建的 TikTok 播放列表，需要在设置页导入 TikTok 登录状态'
+		}
 	];
 	const sourceTypeLabelMap: Record<string, string> = {
 		collection: '合集',
@@ -625,6 +638,15 @@
 		douyinStatus = response.data;
 	}
 
+	async function loadTikTokDefaults() {
+		const response = await runRequest(() => api.getTikTokStatus(), {
+			showErrorToast: false,
+			context: '加载 TikTok 登录状态失败'
+		});
+		if (!response) return;
+		tiktokStatus = response.data;
+	}
+
 	onMount(async () => {
 		const requestedPlatform = $page.url.searchParams.get('platform');
 		sourcePlatform =
@@ -661,6 +683,8 @@
 			await loadYouTubeDefaults();
 		} else if (sourcePlatform === 'douyin') {
 			await loadDouyinDefaults();
+		} else if (sourcePlatform === 'tiktok') {
+			await loadTikTokDefaults();
 		}
 	});
 
@@ -696,7 +720,9 @@
 
 	// 搜索B站内容
 	async function handleSearch(overrideSearchType?: string) {
-		if (!searchKeyword.trim()) {
+		const isTiktokCollectionSearch =
+			sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_collection';
+		if (!isTiktokCollectionSearch && !searchKeyword.trim()) {
 			toast.error('请输入搜索关键词');
 			return;
 		}
@@ -727,11 +753,19 @@
 		}
 
 		if (sourcePlatform === 'tiktok') {
+			const isPlaylistSearch = youtubeSourceType === 'tiktok_collection';
+			if (isPlaylistSearch && !youtubeUrl.trim()) {
+				toast.error('请先填写你的 TikTok 主页链接，如 https://www.tiktok.com/@用户名');
+				return;
+			}
 			const response = await runRequest(
-				() => api.searchTikTok(searchKeyword.trim()),
+				() =>
+					isPlaylistSearch
+						? api.getTikTokPlaylists(youtubeUrl.trim())
+						: api.searchTikTok(searchKeyword.trim()),
 				{
 					setLoading: (value) => (searchLoading = value),
-					context: '搜索 TikTok 作者失败'
+					context: isPlaylistSearch ? '获取 TikTok 播放列表失败' : '搜索 TikTok 作者失败'
 				}
 			);
 			if (!response) return;
@@ -739,9 +773,11 @@
 			searchTotalResults = response.data.total;
 			showSearchResults = true;
 			if (response.data.results.length > 0) {
-				toast.success(`搜索完成，共找到 ${response.data.results.length} 个 TikTok 作者`);
+				toast.success(
+					`${isPlaylistSearch ? '获取' : '搜索完成，共找到'} ${response.data.results.length} 个${isPlaylistSearch ? '播放列表' : ' TikTok 作者'}`
+				);
 			} else {
-				toast.info('未找到匹配的 TikTok 作者');
+				toast.info(isPlaylistSearch ? '未找到可用的播放列表' : '未找到匹配的 TikTok 作者');
 			}
 			return;
 		}
@@ -929,7 +965,9 @@
 			}
 			const sourceLabel =
 				sourcePlatform === 'tiktok'
-					? 'TikTok 作者'
+						? youtubeSourceType === 'tiktok_collection'
+							? 'TikTok 播放列表'
+							: 'TikTok 作者'
 					: sourcePlatform !== 'douyin'
 						? 'YouTube 来源'
 						: youtubeSourceType === 'douyin_theater'
@@ -1200,12 +1238,14 @@
 			return;
 		}
 
-		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin') {
+		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin' || sourcePlatform === 'tiktok') {
 			const isDouyin = sourcePlatform === 'douyin';
+			const isTiktokPlatform = sourcePlatform === 'tiktok';
 			if (
 				((isDouyin && douyinSourceNeedsSelection()) ||
 					youtubeSourceType === 'channel' ||
-					youtubeSourceType === 'playlist') &&
+					youtubeSourceType === 'playlist' ||
+					(isTiktokPlatform && youtubeSourceType === 'tiktok')) &&
 				!youtubeUrl.trim()
 			) {
 				toast.error(isDouyin ? '请先选择抖音来源' : '请输入 YouTube 链接', {
@@ -1237,6 +1277,26 @@
 			if (isDouyin && !douyinStatus?.logged_in) {
 				toast.error('尚未导入抖音 Cookie', { description: '请先在设置页导入抖音登录状态' });
 				return;
+			}
+			if (isTiktokPlatform && youtubeSourceType === 'tiktok_favorite' && !tiktokStatus?.logged_in) {
+				toast.error('尚未导入 TikTok Cookie', {
+					description: '“我的喜欢”需要登录状态，请先在设置页导入 TikTok cookies.txt'
+				});
+				return;
+			}
+			if (isTiktokPlatform && youtubeSourceType === 'tiktok_collection') {
+				if (!tiktokStatus?.logged_in) {
+					toast.error('尚未导入 TikTok Cookie', {
+						description: '“收藏夹”需要登录状态，请先在设置页导入 TikTok cookies.txt'
+					});
+					return;
+				}
+				if (!youtubeUrl.trim()) {
+					toast.error('请选择播放列表', {
+						description: '请在右侧点击“获取播放列表”后选择一个 TikTok 播放列表'
+					});
+					return;
+				}
 			}
 			if (youtubeSourceType === 'subscriptions' && selectedVideos.length === 0) {
 				toast.error('请选择订阅频道', {
@@ -2367,12 +2427,13 @@
 			return false;
 		}
 		return (
-			(sourcePlatform === 'douyin' ||
-				(sourcePlatform === 'youtube' &&
-					(youtubeSourceType === 'subscriptions' ||
-				youtubeSourceType === 'channel' ||
-				youtubeSourceType === 'playlist' ||
-						youtubeSourceType === 'liked')))
+			sourcePlatform === 'douyin' ||
+			(sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok') ||
+			(sourcePlatform === 'youtube' &&
+				(youtubeSourceType === 'subscriptions' ||
+					youtubeSourceType === 'channel' ||
+					youtubeSourceType === 'playlist' ||
+					youtubeSourceType === 'liked'))
 		);
 	}
 
@@ -2484,15 +2545,23 @@
 		const response = await runRequest(
 			() =>
 				isYouTubeHistorySource()
-					? sourcePlatform === 'douyin'
-						? api.getDouyinSourceVideos({
+					? sourcePlatform === 'tiktok'
+						? api.getTikTokSourceVideos({
 								url: youtubeUrl.trim(),
 								source_type: youtubeSourceType,
 								page: 1,
 								page_size: 100,
 								keyword: submissionSearchQuery.trim()
 							})
-						: api.getYouTubeSourceVideos({
+						: sourcePlatform === 'douyin'
+							? api.getDouyinSourceVideos({
+									url: youtubeUrl.trim(),
+									source_type: youtubeSourceType,
+									page: 1,
+									page_size: 100,
+									keyword: submissionSearchQuery.trim()
+								})
+							: api.getYouTubeSourceVideos({
 							url: youtubeUrl.trim() || undefined,
 							source_type: youtubeSourceType as
 								| 'subscriptions'
@@ -2593,14 +2662,21 @@
 			}
 
 			const response = isYouTubeHistorySource()
-				? sourcePlatform === 'douyin'
-					? await api.getDouyinSourceVideos({
+				? sourcePlatform === 'tiktok'
+					? await api.getTikTokSourceVideos({
 							url: youtubeUrl.trim(),
 							source_type: youtubeSourceType,
 							page,
 							page_size: pageSize
 						})
-					: await api.getYouTubeSourceVideos({
+					: sourcePlatform === 'douyin'
+						? await api.getDouyinSourceVideos({
+								url: youtubeUrl.trim(),
+								source_type: youtubeSourceType,
+								page,
+								page_size: pageSize
+							})
+						: await api.getYouTubeSourceVideos({
 						url: youtubeUrl.trim() || undefined,
 						source_type: youtubeSourceType as
 							| 'subscriptions'
@@ -3247,7 +3323,7 @@
 						: sourcePlatform === 'douyin'
 							? '沿用 B 站添加源表单，搜索作者、选择历史作品，并复用质量、路径和过滤设置。'
 							: sourcePlatform === 'tiktok'
-								? '粘贴 TikTok 作者主页链接，扫描并同步其发布的视频，公开内容无需登录。'
+								? '粘贴 TikTok 作者主页链接，扫描并同步其发布的视频；公开内容无需登录，导入登录状态后可同步私密/受限内容。'
 							: '搜索并配置收藏夹、合集、投稿、番剧或稍后再看等视频源。'}
 					titleClass="text-2xl font-bold"
 					descriptionClass="text-muted-foreground mt-1 text-sm"
@@ -3313,7 +3389,36 @@
 						</div>
 
 						{#if sourcePlatform === 'youtube' || sourcePlatform === 'douyin' || sourcePlatform === 'tiktok'}
-							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || sourcePlatform === 'tiktok'}
+							{#if sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_collection'}
+								<div
+									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
+								>
+									<div class="flex {isMobile ? 'flex-col gap-2' : 'items-center justify-between'} gap-2">
+										<div class="space-y-1">
+											<Label>获取 TikTok 播放列表</Label>
+											<p class="text-muted-foreground text-xs">
+												先在上方填写你的 TikTok 主页链接（如 https://www.tiktok.com/@用户名），点击按钮读取该账号的播放列表（收藏夹），在右侧选择后自动填充名称和链接。
+											</p>
+										</div>
+										<Button
+											type="button"
+											onclick={() => handleSearch()}
+											disabled={searchLoading || !youtubeUrl.trim()}
+											size="sm"
+											class={isMobile ? 'w-full' : ''}
+										>
+											{#if searchLoading}
+												获取中...
+											{:else}
+												<FolderOpen class="h-4 w-4" />
+												获取播放列表
+											{/if}
+										</Button>
+									</div>
+								</div>
+							{/if}
+							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && (youtubeSourceType === 'tiktok' || youtubeSourceType === 'tiktok_collection'))}
+{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok')}
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
 								>
@@ -3392,6 +3497,7 @@
 									</div>
 								</div>
 
+								{/if}
 								<div class="space-y-2">
 									<Label for="youtube-url">
 										{sourcePlatform === 'douyin'
@@ -3400,14 +3506,17 @@
 												: youtubeSourceType === 'douyin_series'
 													? '短剧详情链接'
 													: '抖音作者主页链接'
-											: sourcePlatform === 'tiktok' ? 'TikTok 作者链接，如 https://www.tiktok.com/@user' : youtubeSourceType === 'playlist' ? 'YouTube 播放列表链接' : 'YouTube 频道链接'}
+											: sourcePlatform === 'tiktok' ? (youtubeSourceType === 'tiktok_favorite' ? '无需填写链接' : youtubeSourceType === 'tiktok_collection' ? '你的 TikTok 主页链接（用于读取收藏夹）' : 'TikTok 作者链接，如 https://www.tiktok.com/@user') : youtubeSourceType === 'playlist' ? 'YouTube 播放列表链接' : 'YouTube 频道链接'}
 									</Label>
+									{#if !(sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_favorite')}
 									<Input
 										id="youtube-url"
 										bind:value={youtubeUrl}
 										oninput={scheduleYouTubeHistorySelection}
 										placeholder={sourcePlatform === 'tiktok'
-											? 'https://www.tiktok.com/@user'
+											? youtubeSourceType === 'tiktok_collection'
+												? 'https://www.tiktok.com/@用户名'
+												: 'https://www.tiktok.com/@user'
 											: sourcePlatform === 'douyin'
 												? youtubeSourceType === 'douyin_theater'
 													? 'https://www.douyin.com/lvdetail/...'
@@ -3419,9 +3528,17 @@
 												: 'https://www.youtube.com/playlist?list=...'}
 										required
 									/>
+									{/if}
+									{#if sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_favorite'}
+										<p class="text-muted-foreground text-xs">
+											同步当前登录账号点赞的视频。请先在“设置 → TikTok 登录状态”导入 cookies.txt；公开内容无需登录。
+										</p>
+									{/if}
 									<p class="text-muted-foreground text-xs">
 										{sourcePlatform === 'tiktok'
-											? '支持 https://www.tiktok.com/@user 作者主页链接，公开内容无需登录。'
+											? youtubeSourceType === 'tiktok_collection'
+												? '填写你的 TikTok 主页链接（如 https://www.tiktok.com/@用户名），点击“获取播放列表”读取收藏夹；需要导入 TikTok 登录状态。'
+												: '支持 https://www.tiktok.com/@user 作者主页链接，公开内容无需登录。'
 											: sourcePlatform === 'douyin'
 												? youtubeSourceType === 'douyin'
 													? '支持抖音作者主页链接和 v.douyin.com 分享链接；需要在设置中导入新鲜 Cookie。'
@@ -3449,7 +3566,7 @@
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
 								>
-									此来源使用“设置 → {sourcePlatform === 'douyin' ? '抖音' : 'YouTube'} 登录”中保存的账号状态，不需要另外填写链接。
+									此来源使用“设置 → {sourcePlatform === 'tiktok' ? 'TikTok 登录状态' : sourcePlatform === 'douyin' ? '抖音' : 'YouTube'} 登录”中保存的账号状态，不需要另外填写链接。
 								</div>
 							{/if}
 						{/if}
@@ -5036,6 +5153,8 @@
 																				? '抖音作者'
 																				: result.result_type === 'tiktok_user'
 																					? 'TikTok 作者'
+																			: result.result_type === 'tiktok_playlist'
+																				? 'TikTok 播放列表'
 																			: result.result_type === 'youtube_playlist'
 																				? 'YouTube 播放列表'
 																		: result.result_type === 'video'

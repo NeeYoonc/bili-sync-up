@@ -3085,7 +3085,7 @@ pub async fn get_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<VideosRequest>,
 ) -> Result<ApiResponse<VideosResponse>, ApiError> {
-    if matches!(params.platform.as_deref(), Some("youtube" | "douyin")) {
+    if matches!(params.platform.as_deref(), Some("youtube" | "douyin" | "tiktok")) {
         return Ok(ApiResponse::ok(
             crate::youtube::get_unified_youtube_videos(db.as_ref(), &params).await?,
         ));
@@ -7277,7 +7277,7 @@ async fn delete_orphaned_videos_from_db(
 fn is_supported_delete_video_source_type(source_type: &str) -> bool {
     matches!(
         source_type,
-        "collection" | "favorite" | "submission" | "watch_later" | "bangumi" | "youtube" | "douyin"
+        "collection" | "favorite" | "submission" | "watch_later" | "bangumi" | "youtube" | "douyin" | "tiktok"
     )
 }
 
@@ -7290,6 +7290,7 @@ fn delete_video_source_missing_message(source_type: &str) -> String {
         "bangumi" => "未找到指定的番剧".to_string(),
         "youtube" => "未找到指定的 YouTube 视频源".to_string(),
         "douyin" => "未找到指定的抖音视频源".to_string(),
+        "tiktok" => "未找到指定的 TikTok 视频源".to_string(),
         _ => format!("不支持的视频源类型: {}", source_type),
     }
 }
@@ -7301,12 +7302,14 @@ async fn delete_video_source_record_exists(db: &impl ConnectionTrait, source_typ
         "submission" => Ok(submission::Entity::find_by_id(id).one(db).await?.is_some()),
         "watch_later" => Ok(watch_later::Entity::find_by_id(id).one(db).await?.is_some()),
         "bangumi" => Ok(video_source::Entity::find_by_id(id).one(db).await?.is_some()),
-        "youtube" | "douyin" => {
+        "youtube" | "douyin" | "tiktok" => {
             let Some(source) = youtube_source::Entity::find_by_id(id).one(db).await? else {
                 return Ok(false);
             };
             let actual_platform = if source.source_type.starts_with("douyin") {
                 "douyin"
+            } else if source.source_type.starts_with("tiktok") {
+                "tiktok"
             } else {
                 "youtube"
             };
@@ -7499,7 +7502,7 @@ pub async fn delete_video_source_internal(
     let txn = crate::database::begin_traced_transaction(&db, "api.handler.delete_video_source").await?;
 
     if !delete_video_source_record_exists(&txn, source_type.as_str(), id).await? {
-        if matches!(source_type.as_str(), "youtube" | "douyin") {
+        if matches!(source_type.as_str(), "youtube" | "douyin" | "tiktok") {
             let response = crate::api::response::DeleteVideoSourceResponse {
                 success: true,
                 source_id: id,
@@ -7850,8 +7853,14 @@ pub async fn delete_video_source_internal(
                 message: format!("番剧 {} 已成功删除", bangumi.name),
             }
         }
-        "youtube" | "douyin" => {
-            let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
+        "youtube" | "douyin" | "tiktok" => {
+            let platform_label = if source_type == "douyin" {
+                "抖音"
+            } else if source_type == "tiktok" {
+                "TikTok"
+            } else {
+                "YouTube"
+            };
             let source = youtube_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -8407,14 +8416,22 @@ pub async fn update_video_source_scan_deleted_internal(
                 ),
             }
         }
-        "youtube" | "douyin" => {
-            let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
+        "youtube" | "douyin" | "tiktok" => {
+            let platform_label = if source_type == "douyin" {
+                "抖音"
+            } else if source_type == "tiktok" {
+                "TikTok"
+            } else {
+                "YouTube"
+            };
             let source = youtube_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
                 .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
             let actual_platform = if source.source_type.starts_with("douyin") {
                 "douyin"
+            } else if source.source_type.starts_with("tiktok") {
+                "tiktok"
             } else {
                 "youtube"
             };
@@ -9008,14 +9025,22 @@ pub async fn update_video_source_download_options_internal(
                 message: format!("番剧 {} 的下载选项已更新", video_source.name),
             }
         }
-        "youtube" | "douyin" => {
-            let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
+        "youtube" | "douyin" | "tiktok" => {
+            let platform_label = if source_type == "douyin" {
+                "抖音"
+            } else if source_type == "tiktok" {
+                "TikTok"
+            } else {
+                "YouTube"
+            };
             let source = youtube_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
                 .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
             let actual_platform = if source.source_type.starts_with("douyin") {
                 "douyin"
+            } else if source.source_type.starts_with("tiktok") {
+                "tiktok"
             } else {
                 "youtube"
             };
@@ -19792,13 +19817,18 @@ ORDER BY
         .filter(|source| source.source_type.starts_with("douyin"));
     let total_douyin_sources = douyin_only.clone().count() as u64;
     let enabled_douyin_sources = douyin_only.filter(|source| source.enabled).count() as u64;
+    let tiktok_only = youtube_sources
+        .iter()
+        .filter(|source| source.source_type.starts_with("tiktok"));
+    let total_tiktok_sources = tiktok_only.clone().count() as u64;
+    let enabled_tiktok_sources = tiktok_only.filter(|source| source.enabled).count() as u64;
     let youtube_only = youtube_sources
         .iter()
-        .filter(|source| !source.source_type.starts_with("douyin"));
+        .filter(|source| !source.source_type.starts_with("douyin") && source.source_type != "tiktok");
     let total_youtube_sources = youtube_only.clone().count() as u64;
     let enabled_youtube_sources = youtube_only.filter(|source| source.enabled).count() as u64;
-    let enabled_external_sources = enabled_youtube_sources + enabled_douyin_sources;
-    let total_external_sources = total_youtube_sources + total_douyin_sources;
+    let enabled_external_sources = enabled_youtube_sources + enabled_douyin_sources + enabled_tiktok_sources;
+    let total_external_sources = total_youtube_sources + total_douyin_sources + total_tiktok_sources;
 
     // 获取监听状态信息
     let active_sources = enabled_favorites
@@ -19858,6 +19888,8 @@ ORDER BY
         total_douyin_theaters,
         enabled_douyin_series,
         total_douyin_series,
+        enabled_tiktok_sources,
+        total_tiktok_sources,
         enabled_youtube_subscriptions,
         total_youtube_subscriptions,
         enabled_youtube_channels,
@@ -21350,8 +21382,14 @@ pub async fn ai_rename_history(
     // 构建 source_key
     let source_key = format!("{}_{}", source_type, id);
 
-    if matches!(source_type.as_str(), "youtube" | "douyin") {
-        let platform_label = if source_type == "douyin" { "抖音" } else { "YouTube" };
+    if matches!(source_type.as_str(), "youtube" | "douyin" | "tiktok") {
+        let platform_label = if source_type == "douyin" {
+                "抖音"
+            } else if source_type == "tiktok" {
+                "TikTok"
+            } else {
+                "YouTube"
+            };
         let source = youtube_source::Entity::find_by_id(id)
             .one(db.as_ref())
             .await?

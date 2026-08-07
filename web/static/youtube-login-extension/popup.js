@@ -12,6 +12,8 @@ const openButton = document.querySelector('#open-youtube');
 const transferButton = document.querySelector('#transfer');
 const openDouyinButton = document.querySelector('#open-douyin');
 const transferDouyinButton = document.querySelector('#transfer-douyin');
+const openTikTokButton = document.querySelector('#open-tiktok');
+const transferTikTokButton = document.querySelector('#transfer-tiktok');
 const statusBox = document.querySelector('#status');
 
 function showStatus(message, kind = '') {
@@ -25,6 +27,8 @@ function setBusy(busy) {
 	transferButton.disabled = busy;
 	openDouyinButton.disabled = busy;
 	transferDouyinButton.disabled = busy;
+	openTikTokButton.disabled = busy;
+	transferTikTokButton.disabled = busy;
 }
 
 async function saveConfig() {
@@ -112,10 +116,15 @@ openDouyinButton.addEventListener('click', async () => {
 	await chrome.tabs.create({ url: 'https://www.douyin.com/' });
 });
 
+openTikTokButton.addEventListener('click', async () => {
+	await chrome.tabs.create({ url: 'https://www.tiktok.com/' });
+});
+
 async function transfer(platform) {
 	setBusy(true);
 	const douyin = platform === 'douyin';
-	const label = douyin ? '抖音' : 'YouTube';
+	const tiktok = platform === 'tiktok';
+	const label = tiktok ? 'TikTok' : douyin ? '抖音' : 'YouTube';
 	showStatus(`正在读取并验证${label}登录状态…`);
 	try {
 		const serverUrl = normalizeServerUrl(serverInput.value);
@@ -127,15 +136,20 @@ async function transfer(platform) {
 		});
 		if (!granted) throw new Error('未授权连接 Bili Sync 地址，无法传输登录状态');
 
-		const cookies = douyin
+		const cookies = tiktok
 			? [
-					...(await chrome.cookies.getAll({ domain: 'douyin.com' })),
-					...(await chrome.cookies.getAll({ domain: 'bytedance.com' }))
+					...(await chrome.cookies.getAll({ domain: 'tiktok.com' })),
+					...(await chrome.cookies.getAll({ domain: 'tiktokcdn.com' }))
 				]
-			: [
-					...(await chrome.cookies.getAll({ domain: 'youtube.com' })),
-					...(await chrome.cookies.getAll({ domain: 'google.com' }))
-				];
+			: douyin
+				? [
+						...(await chrome.cookies.getAll({ domain: 'douyin.com' })),
+						...(await chrome.cookies.getAll({ domain: 'bytedance.com' }))
+					]
+				: [
+						...(await chrome.cookies.getAll({ domain: 'youtube.com' })),
+						...(await chrome.cookies.getAll({ domain: 'google.com' }))
+					];
 		const contents = buildNetscapeCookies(cookies, platform);
 		const douyinSessionParams = douyin ? await captureDouyinSessionParams() : {};
 		const response = await fetch(`${serverUrl}/api/${platform}/cookies`, {
@@ -167,6 +181,10 @@ transferButton.addEventListener('click', async () => {
 
 transferDouyinButton.addEventListener('click', async () => {
 	await transfer('douyin');
+});
+
+transferTikTokButton.addEventListener('click', async () => {
+	await transfer('tiktok');
 });
 
 loadConfig().catch((error) => {

@@ -13,7 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{Extension, Json, Path as AxumPath, Query};
 use chrono::{Local, NaiveDate, TimeZone};
 use futures::{stream, StreamExt};
-use regex::Regex;
+
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, Set, TransactionTrait,
@@ -57,13 +57,13 @@ const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
 
 static YTDLP_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn parse_video_id_set(value: Option<&str>) -> HashSet<String> {
+pub(crate) fn parse_video_id_set(value: Option<&str>) -> HashSet<String> {
     value
         .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
         .unwrap_or_default()
 }
 
-fn serialize_video_id_set(values: &HashSet<String>) -> Result<Option<String>> {
+pub(crate) fn serialize_video_id_set(values: &HashSet<String>) -> Result<Option<String>> {
     if values.is_empty() {
         return Ok(None);
     }
@@ -300,6 +300,7 @@ pub struct YouTubeLoginResponse {
     pub logged_in: bool,
     pub message: String,
 }
+
 
 pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiError> {
     // 与 aria2 一致：第一次进入设置页/添加源页时若本机没有 yt-dlp，
@@ -1100,6 +1101,8 @@ pub async fn import_youtube_cookie_file(
     }))
 }
 
+
+
 pub async fn get_youtube_sources(
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<Vec<YouTubeSourceResponse>>, ApiError> {
@@ -1112,7 +1115,7 @@ pub async fn get_douyin_sources(
     get_platform_sources(db.as_ref(), "douyin").await
 }
 
-async fn get_platform_sources(
+pub(crate) async fn get_platform_sources(
     db: &DatabaseConnection,
     platform: &str,
 ) -> Result<ApiResponse<Vec<YouTubeSourceResponse>>, ApiError> {
@@ -1130,7 +1133,7 @@ async fn get_platform_sources(
     Ok(ApiResponse::ok(response))
 }
 
-async fn require_source_platform(
+pub(crate) async fn require_source_platform(
     db: &DatabaseConnection,
     id: i32,
     platform: &str,
@@ -1182,300 +1185,7 @@ pub async fn create_douyin_source(
     create_youtube_source(Extension(db), Json(request)).await
 }
 
-const TIKWM_USER_SEARCH_API: &str = "https://www.tikwm.com/api/user/search";
-const TIKTOK_WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const TIKTOK_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
-const TIKTOK_SEARCH_CONCURRENCY: usize = 4;
 
-#[derive(Debug, Deserialize)]
-pub struct TikTokSearchRequest {
-    pub keyword: String,
-}
-
-/// 搜索 TikTok 作者。
-///
-/// TikTok 官方搜索接口（/api/search/user/full/）受 Akamai TLS 指纹和
-/// webmssdk 签名双重保护，纯服务端请求即使重放浏览器完整签名也会被拒
-/// （返回空 body），因此这里改用公开第三方搜索接口拿到候选作者，再通过
-/// TikTok 用户主页 SSR（__UNIVERSAL_DATA_FOR_REHYDRATION__）做官方校验
-/// 和资料补全，避免把未经验证的第三方数据直接展示给用户。
-pub async fn search_tiktok(
-    Query(request): Query<TikTokSearchRequest>,
-) -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
-    let keyword = request.keyword.trim();
-    if keyword.is_empty() {
-        return Err(ApiError::bad_request("请输入 TikTok 搜索关键词"));
-    }
-    let results = search_tiktok_profiles(keyword).await?;
-    let total = results.len();
-    Ok(ApiResponse::ok(YouTubeSearchResponse {
-        success: true,
-        results,
-        total,
-    }))
-}
-
-async fn search_tiktok_profiles(keyword: &str) -> Result<Vec<YouTubeSearchResult>> {
-    let client = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(TIKTOK_SEARCH_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()?;
-    let url = reqwest::Url::parse_with_params(
-        TIKWM_USER_SEARCH_API,
-        &[("keywords", keyword), ("count", "12")],
-    )?;
-    let response = client
-        .get(url)
-        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-        .send()
-        .await
-        .context("请求 TikTok 作者搜索失败")?;
-    if !response.status().is_success() {
-        bail!("TikTok 作者搜索返回 HTTP {}", response.status());
-    }
-    let payload: serde_json::Value = serde_json::from_str(&response.text().await?)
-        .context("解析 TikTok 作者搜索响应失败")?;
-    if payload.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
-        let message = payload
-            .get("msg")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("未知错误");
-        bail!("TikTok 作者搜索服务返回错误：{message}");
-    }
-    let Some(user_list) = payload
-        .pointer("/data/user_list")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return Ok(Vec::new());
-    };
-
-    let mut candidates = Vec::new();
-    let mut seen_unique_ids = HashSet::new();
-    for entry in user_list {
-        let Some(user) = entry.get("user") else {
-            continue;
-        };
-        let Some(unique_id) = user.get("uniqueId").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if unique_id.trim().is_empty() || !seen_unique_ids.insert(unique_id.to_ascii_lowercase()) {
-            continue;
-        }
-        let Some(result) = tiktok_user_to_search_result(user) else {
-            continue;
-        };
-        candidates.push((unique_id.to_string(), result));
-    }
-    // 用官方主页 SSR 校验并补全资料（昵称、头像、签名、粉丝数），并发限 4。
-    let mut results = stream::iter(candidates)
-        .map(|(unique_id, result)| async move {
-            match fetch_tiktok_ssr_profile(&unique_id).await {
-                Ok(Some(verified_user)) => tiktok_user_to_search_result(&verified_user).unwrap_or(result),
-                Ok(None) => result,
-                Err(error) => {
-                    warn!(error = %error, unique_id = %unique_id, "校验 TikTok 作者主页失败，保留第三方搜索结果");
-                    result
-                }
-            }
-        })
-        .buffer_unordered(TIKTOK_SEARCH_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
-
-    let normalized_keyword = normalized_search_keyword(keyword);
-    results.sort_by(|left, right| {
-        tiktok_result_match_score(right, &normalized_keyword)
-            .cmp(&tiktok_result_match_score(left, &normalized_keyword))
-            .then_with(|| {
-                right
-                    .follower
-                    .unwrap_or_default()
-                    .cmp(&left.follower.unwrap_or_default())
-            })
-    });
-    Ok(results)
-}
-
-fn tiktok_user_to_search_result(user: &serde_json::Value) -> Option<YouTubeSearchResult> {
-    let unique_id = user.get("uniqueId").and_then(serde_json::Value::as_str)?;
-    let unique_id = unique_id.trim();
-    if unique_id.is_empty() {
-        return None;
-    }
-    let title = user
-        .get("nickname")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(unique_id)
-        .to_string();
-    let cover = user
-        .get("avatarLarger")
-        .or_else(|| user.get("avatarMedium"))
-        .or_else(|| user.get("avatarThumb"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let description = user
-        .get("signature")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let channel_id = user
-        .get("secUid")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let follower = user
-        .pointer("/stats/followerCount")
-        .and_then(serde_json::Value::as_i64)
-        .or_else(|| {
-            user.pointer("/statsV2/followerCount")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|value| value.parse::<i64>().ok())
-        });
-    Some(YouTubeSearchResult {
-        result_type: "tiktok_user".to_string(),
-        title,
-        author: unique_id.to_string(),
-        youtube_url: format!("https://www.tiktok.com/@{unique_id}"),
-        channel_id,
-        cover,
-        description,
-        follower,
-    })
-}
-
-async fn fetch_tiktok_ssr_profile(unique_id: &str) -> Result<Option<serde_json::Value>> {
-    let client = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(TIKTOK_SEARCH_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()?;
-    let url = format!("https://www.tiktok.com/@{unique_id}");
-    let response = client
-        .get(&url)
-        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-        .send()
-        .await
-        .context("抓取 TikTok 用户主页失败")?;
-    if !response.status().is_success() {
-        return Ok(None);
-    }
-    let html = response.text().await?;
-    let regex = Regex::new(r#"<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>"#)?;
-    let Some(captures) = regex.captures(&html) else {
-        return Ok(None);
-    };
-    let Some(script) = captures.get(1) else {
-        return Ok(None);
-    };
-    let payload: serde_json::Value =
-        serde_json::from_str(script.as_str()).context("解析 TikTok 用户主页数据失败")?;
-    // stats 位于 userInfo 层（user 对象本身没有），合并进去以便统一映射粉丝数。
-    let Some(user_info) = payload
-        .pointer("/__DEFAULT_SCOPE__/webapp.user-detail/userInfo")
-    else {
-        return Ok(None);
-    };
-    let Some(user) = user_info.get("user") else {
-        return Ok(None);
-    };
-    let has_identity = user
-        .get("uniqueId")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|value| !value.is_empty());
-    if !has_identity {
-        return Ok(None);
-    }
-    let mut merged = user.clone();
-    if let Some(stats) = user_info.get("stats") {
-        merged["stats"] = stats.clone();
-    }
-    Ok(Some(merged))
-}
-
-fn normalized_search_keyword(keyword: &str) -> String {
-    keyword
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn tiktok_result_match_score(result: &YouTubeSearchResult, keyword: &str) -> u8 {
-    let title = normalized_search_keyword(&result.title);
-    let author = normalized_search_keyword(&result.author);
-    if title == keyword || author == keyword {
-        3
-    } else if title.contains(keyword) || author.contains(keyword) {
-        2
-    } else if keyword.contains(&title) || keyword.contains(&author) {
-        1
-    } else {
-        0
-    }
-}
-
-pub async fn get_tiktok_sources(
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-) -> Result<ApiResponse<Vec<YouTubeSourceResponse>>, ApiError> {
-    get_platform_sources(db.as_ref(), "tiktok").await
-}
-
-pub async fn create_tiktok_source(
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-    Json(request): Json<CreateYouTubeSourceRequest>,
-) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
-    if normalize_source_type(&request.source_type)? != "tiktok" {
-        return Err(ApiError::bad_request("请使用有效的 TikTok 来源类型"));
-    }
-    create_youtube_source(Extension(db), Json(request)).await
-}
-
-pub async fn update_tiktok_source_enabled(
-    AxumPath(id): AxumPath<i32>,
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-    Json(request): Json<UpdateYouTubeSourceEnabledRequest>,
-) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
-    require_source_platform(db.as_ref(), id, "tiktok").await?;
-    update_youtube_source_enabled(AxumPath(id), Extension(db), Json(request)).await
-}
-
-pub async fn update_tiktok_source(
-    AxumPath(id): AxumPath<i32>,
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-    Json(request): Json<UpdateYouTubeSourceRequest>,
-) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
-    require_source_platform(db.as_ref(), id, "tiktok").await?;
-    update_youtube_source(AxumPath(id), Extension(db), Json(request)).await
-}
-
-pub async fn delete_tiktok_source(
-    AxumPath(id): AxumPath<i32>,
-    Query(request): Query<DeleteYouTubeSourceRequest>,
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-) -> Result<ApiResponse<bool>, ApiError> {
-    require_source_platform(db.as_ref(), id, "tiktok").await?;
-    crate::api::handler::delete_video_source(
-        Extension(db),
-        AxumPath(("tiktok".to_string(), id)),
-        Query(crate::api::request::DeleteVideoSourceRequest {
-            delete_local_files: request.delete_local_files,
-        }),
-    )
-    .await?;
-    Ok(ApiResponse::ok(true))
-}
-
-pub async fn reset_tiktok_source_path(
-    AxumPath(id): AxumPath<i32>,
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-    Json(request): Json<ResetYouTubeSourcePathRequest>,
-) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
-    require_source_platform(db.as_ref(), id, "tiktok").await?;
-    reset_youtube_source_path(AxumPath(id), Extension(db), Json(request)).await
-}
 
 pub async fn create_youtube_source(
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
@@ -1486,8 +1196,14 @@ pub async fn create_youtube_source(
     if source_type == "douyin" {
         crate::douyin::resolve_sec_user_id(&url).await?;
     } else if source_type == "tiktok" {
-        if !is_tiktok_url(&url) {
+        if !crate::tiktok::is_tiktok_url(&url) {
             return Err(ApiError::from(anyhow!("TikTok 来源必须是有效的 tiktok.com 链接")));
+        }
+    } else if source_type == "tiktok_favorite" {
+        // “我的喜欢”由当前登录账号在扫描时通过官方接口拉取，无需填写链接。
+    } else if source_type == "tiktok_collection" {
+        if !crate::tiktok::is_tiktok_url(&url) {
+            return Err(ApiError::from(anyhow!("TikTok 播放列表必须是有效的 tiktok.com 链接")));
         }
     } else if !source_type.starts_with("douyin") && !is_youtube_url(&url) {
         return Err(ApiError::from(anyhow!("频道或播放列表必须是有效的 YouTube 链接")));
@@ -1968,14 +1684,11 @@ fn is_douyin_source(source: &youtube_source::Model) -> bool {
     source.source_type.starts_with("douyin")
 }
 
-fn is_tiktok_source(source: &youtube_source::Model) -> bool {
-    source.source_type == "tiktok"
-}
 
 fn source_platform(source: &youtube_source::Model) -> &'static str {
     if is_douyin_source(source) {
         "douyin"
-    } else if is_tiktok_source(source) {
+    } else if crate::tiktok::is_tiktok_source(source) {
         "tiktok"
     } else {
         "youtube"
@@ -1985,7 +1698,7 @@ fn source_platform(source: &youtube_source::Model) -> &'static str {
 fn source_platform_label(source: &youtube_source::Model) -> &'static str {
     if is_douyin_source(source) {
         "抖音"
-    } else if is_tiktok_source(source) {
+    } else if crate::tiktok::is_tiktok_source(source) {
         "TikTok"
     } else {
         "YouTube"
@@ -2596,12 +2309,21 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     if is_douyin_source(source) {
         return scan_douyin_source(db, source).await;
     }
-    let tiktok = is_tiktok_source(source);
+    if source.source_type == "tiktok_favorite" {
+        crate::tiktok::ensure_tiktok_session()?;
+        return crate::tiktok::scan_tiktok_favorite_source(db, source).await;
+    }
+    if source.source_type == "tiktok_collection" {
+        crate::tiktok::ensure_tiktok_session()?;
+        return crate::tiktok::scan_tiktok_collection_source(db, source).await;
+    }
+    let tiktok = crate::tiktok::is_tiktok_source(source);
     let mut command = ytdlp_command();
     command.args(["--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]);
     append_ytdlp_runtime(&mut command);
     if tiktok {
-        // TikTok 公开内容无需登录；YouTube cookies 不能用于 TikTok。
+        // 公开内容无需登录；仅在导入过 TikTok cookies 时携带，不混用 YouTube/抖音 Cookie。
+        crate::tiktok::append_tiktok_cookies(&mut command);
     } else {
         append_cookies(&mut command);
         append_ytdlp_tab_args(&mut command);
@@ -5050,7 +4772,7 @@ async fn remove_file_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-async fn source_response(db: &DatabaseConnection, source: youtube_source::Model) -> Result<YouTubeSourceResponse> {
+pub(crate) async fn source_response(db: &DatabaseConnection, source: youtube_source::Model) -> Result<YouTubeSourceResponse> {
     let count = |status: &str| {
         youtube_video::Entity::find()
             .filter(youtube_video::Column::SourceId.eq(source.id))
@@ -5134,7 +4856,7 @@ fn video_response(video: youtube_video::Model) -> YouTubeVideoResponse {
     }
 }
 
-fn normalize_source_type(value: &str) -> Result<&'static str> {
+pub(crate) fn normalize_source_type(value: &str) -> Result<&'static str> {
     match value.trim().to_ascii_lowercase().as_str() {
         "subscriptions" => Ok("subscriptions"),
         "channel" => Ok("channel"),
@@ -5143,6 +4865,8 @@ fn normalize_source_type(value: &str) -> Result<&'static str> {
         "watch_later" => Ok("watch_later"),
         "douyin" => Ok("douyin"),
         "tiktok" => Ok("tiktok"),
+        "tiktok_favorite" => Ok("tiktok_favorite"),
+        "tiktok_collection" => Ok("tiktok_collection"),
         "douyin_liked" => Ok("douyin_liked"),
         "douyin_collection" => Ok("douyin_collection"),
         "douyin_watch_later" => Ok("douyin_watch_later"),
@@ -5156,13 +4880,14 @@ fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
         "subscriptions" => Ok(SUBSCRIPTIONS_URL.to_string()),
         "liked" => Ok(LIKED_URL.to_string()),
         "watch_later" => Ok(WATCH_LATER_URL.to_string()),
-        "douyin" | "douyin_collection" | "douyin_theater" | "douyin_series" | "tiktok" => supplied
+        "douyin" | "douyin_collection" | "douyin_theater" | "douyin_series" | "tiktok" | "tiktok_collection" => supplied
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
-            .ok_or_else(|| anyhow!("该抖音来源必须选择或填写详情链接")),
+            .ok_or_else(|| anyhow!("该来源必须选择或填写详情链接")),
         "douyin_liked" => Ok("https://www.douyin.com/user/self?tab=like".to_string()),
         "douyin_watch_later" => Ok("https://www.douyin.com/?watch_later=1".to_string()),
+        "tiktok_favorite" => Ok("https://www.tiktok.com/self?tab=like".to_string()),
         _ => {
             let url = supplied
                 .map(str::trim)
@@ -5237,7 +4962,7 @@ async fn ytdlp_version_at(executable: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-async fn ensure_ytdlp_available() -> Result<()> {
+pub(crate) async fn ensure_ytdlp_available() -> Result<()> {
     if let Ok(configured) = std::env::var("BILI_SYNC_YTDLP_PATH") {
         let configured = PathBuf::from(configured);
         if ytdlp_version_at(&configured).await.is_some() {
@@ -5756,7 +5481,8 @@ fn append_cookies_for_url(command: &mut Command, url: &str) {
     if url.contains("douyin.com") {
         crate::douyin::append_cookies(command);
     } else if url.contains("tiktok.com") {
-        // TikTok 公开内容无需登录，避免误用 YouTube cookies。
+        // TikTok 公开内容无需登录；仅在导入过 TikTok cookies 时使用，避免误用 YouTube/抖音 Cookie。
+        crate::tiktok::append_tiktok_cookies(command);
     } else {
         append_cookies(command);
     }
@@ -5766,7 +5492,7 @@ fn configured_youtube_proxy() -> String {
     crate::config::with_config(|bundle| bundle.config.youtube_proxy.trim().to_string())
 }
 
-fn append_youtube_proxy(command: &mut Command) {
+pub(crate) fn append_youtube_proxy(command: &mut Command) {
     let proxy = configured_youtube_proxy();
     if !proxy.is_empty() {
         command.arg("--proxy").arg(proxy);
@@ -5780,7 +5506,7 @@ fn append_youtube_proxy_for_url(command: &mut Command, url: &str) {
 }
 
 fn should_proxy_ytdlp_url(url: &str) -> bool {
-    is_youtube_url(url) || is_tiktok_url(url)
+    is_youtube_url(url) || crate::tiktok::is_tiktok_url(url)
 }
 
 
@@ -5799,7 +5525,7 @@ fn append_ytdlp_tab_args(command: &mut Command) {
 /// 顺手尝试让 Python 以 UTF-8 输出错误消息；打包版 yt-dlp（PyInstaller）可能
 /// 忽略该环境变量，因此 `command_error` 里还有 GBK 回退解码兜底，保证 Windows
 /// 本地化错误文本（如“远程主机强迫关闭了一个现有的连接”）不乱码。
-fn ytdlp_command() -> Command {
+pub(crate) fn ytdlp_command() -> Command {
     let mut command = Command::new(ytdlp_executable());
     command.env("PYTHONUTF8", "1");
     command.env("PYTHONIOENCODING", "utf-8");
@@ -5833,7 +5559,7 @@ fn is_youtube_transient_error(error: &anyhow::Error) -> bool {
     .any(|needle| text.contains(needle))
 }
 
-fn append_ytdlp_runtime(command: &mut Command) {
+pub(crate) fn append_ytdlp_runtime(command: &mut Command) {
     if let Some((name, path)) = ytdlp_js_runtime() {
         command.arg("--js-runtimes").arg(format!("{name}:{}", path.display()));
     }
@@ -5950,15 +5676,6 @@ fn is_netscape_youtube_cookie_file(contents: &str) -> bool {
         })
 }
 
-fn is_tiktok_url(value: &str) -> bool {
-    let trimmed = value.trim().to_ascii_lowercase();
-    let host = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))
-        .and_then(|rest| rest.split(['/', '?', '#']).next());
-    host.is_some_and(|host| host == "tiktok.com" || host.ends_with(".tiktok.com"))
-}
-
 fn is_youtube_url(value: &str) -> bool {
     let Some(rest) = value
         .trim()
@@ -5980,7 +5697,7 @@ fn is_youtube_url(value: &str) -> bool {
         "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be" | "www.youtu.be"
     )
 }
-fn command_error(output: &std::process::Output) -> String {
+pub(crate) fn command_error(output: &std::process::Output) -> String {
     let stderr = decode_command_bytes(&output.stderr);
     let stdout = decode_command_bytes(&output.stdout);
     trim_output(if stderr.trim().is_empty() { &stdout } else { &stderr })

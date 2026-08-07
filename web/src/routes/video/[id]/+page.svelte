@@ -58,10 +58,11 @@
 	$: routeResourceId = $page.params.id ?? '';
 	$: isYouTube = routeResourceId.startsWith('youtube-');
 	$: isDouyin = routeResourceId.startsWith('douyin-');
-	$: isExternal = isYouTube || isDouyin;
-	let externalPlatform: 'bilibili' | 'youtube' | 'douyin' = 'bilibili';
-	$: externalPlatform = isDouyin ? 'douyin' : isYouTube ? 'youtube' : 'bilibili';
-	$: platformLabel = isDouyin ? '抖音' : isYouTube ? 'YouTube' : 'B站';
+	$: isTikTok = routeResourceId.startsWith('tiktok-');
+	$: isExternal = isYouTube || isDouyin || isTikTok;
+	let externalPlatform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok' = 'bilibili';
+	$: externalPlatform = isTikTok ? 'tiktok' : isDouyin ? 'douyin' : isYouTube ? 'youtube' : 'bilibili';
+	$: platformLabel = isTikTok ? 'TikTok' : isDouyin ? '抖音' : isYouTube ? 'YouTube' : 'B站';
 	$: imageUrls = videoData?.video.image_urls ?? [];
 	$: isImagePost = Boolean(videoData?.video.is_image_post);
 	$: safeImageIndex = imageUrls.length > 0 ? Math.min(Math.max(currentImageIndex, 0), imageUrls.length - 1) : 0;

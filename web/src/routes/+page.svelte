@@ -35,6 +35,7 @@
 	import FolderIcon from '@lucide/svelte/icons/folder';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import ClockIcon from '@lucide/svelte/icons/clock';
+	import CircleAlert from '@lucide/svelte/icons/circle-alert';
 	import VideoIcon from '@lucide/svelte/icons/video';
 	import TvIcon from '@lucide/svelte/icons/tv';
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
@@ -68,7 +69,7 @@
 	let showIngestSheet = false;
 	type IngestView = 'latest' | 'recent';
 	let ingestView: IngestView = 'latest';
-	type MonitoringPlatform = 'bilibili' | 'youtube' | 'douyin';
+	type MonitoringPlatform = 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
 	let monitoringPlatform: MonitoringPlatform = 'bilibili';
 	let unsubscribeSysInfo: (() => void) | null = null;
 	let unsubscribeTasks: (() => void) | null = null;
@@ -505,10 +506,11 @@
 
 								<!-- 按平台切换具体监听项统计 -->
 								<Tabs.Root bind:value={monitoringPlatform}>
-									<Tabs.List class="grid w-full max-w-lg grid-cols-3">
+									<Tabs.List class="grid w-full max-w-lg grid-cols-4">
 										<Tabs.Trigger value="bilibili">B 站视频源</Tabs.Trigger>
 										<Tabs.Trigger value="youtube">YouTube 视频源</Tabs.Trigger>
 										<Tabs.Trigger value="douyin">抖音视频源</Tabs.Trigger>
+										<Tabs.Trigger value="tiktok">TikTok 视频源</Tabs.Trigger>
 									</Tabs.List>
 
 									{#if monitoringPlatform === 'bilibili'}
@@ -611,7 +613,7 @@
 												</div>
 											</div>
 										</div>
-									{:else}
+									{:else if monitoringPlatform === 'douyin'}
 										<div class="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
 											<div class="flex items-center justify-between">
 												<div class="flex items-center gap-2">
@@ -658,7 +660,26 @@
 												<Badge variant="outline">{dashboardData.enabled_douyin_series} / {dashboardData.total_douyin_series}</Badge>
 											</div>
 										</div>
-									{/if}
+									{:else}
+										<div class="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<UserIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">作者投稿</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_tiktok_sources} / {dashboardData.total_tiktok_sources}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<CircleAlert class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">登录状态</span>
+												</div>
+												<Badge variant="outline">公开内容无需登录</Badge>
+											</div>
+										</div>
+{/if}
 								</Tabs.Root>
 							</div>
 						{:else}

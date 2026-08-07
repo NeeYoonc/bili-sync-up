@@ -18,6 +18,7 @@ mod http;
 mod ingest_log;
 mod initialization;
 mod task;
+mod tiktok;
 mod unified_downloader;
 mod utils;
 mod workflow;
