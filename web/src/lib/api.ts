@@ -328,6 +328,9 @@ class ApiClient {
 	async getTikTokPlaylists(url: string): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>(`/tiktok/playlists?url=${encodeURIComponent(url)}`);
 	}
+	async getTikTokFollowings(): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/tiktok/followings');
+	}
 	async getDouyinFollowings(): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/douyin/followings');
 	}
@@ -1521,6 +1524,7 @@ export const api = {
 		keyword?: string;
 	}) => apiClient.getTikTokSourceVideos(params),
 	getTikTokPlaylists: (url: string) => apiClient.getTikTokPlaylists(url),
+	getTikTokFollowings: () => apiClient.getTikTokFollowings(),
 	searchTikTok: (keyword: string) => apiClient.searchTikTok(keyword),
 	getTikTokSources: () => apiClient.getTikTokSources(),
 	createTikTokSource: (request: CreateYouTubeSourceRequest) =>

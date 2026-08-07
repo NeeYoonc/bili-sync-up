@@ -113,7 +113,8 @@ use crate::douyin::{
 };
 use crate::utils::model::queue_missing_video_file_size_backfill;
 use crate::tiktok::{
-    create_tiktok_source, delete_tiktok_source, get_tiktok_playlists, get_tiktok_source_videos,
+    create_tiktok_source, delete_tiktok_source, get_tiktok_followings, get_tiktok_playlists,
+    get_tiktok_source_videos,
     get_tiktok_sources, import_tiktok_cookie_file, reset_tiktok_source_path, search_tiktok,
     tiktok_status, update_tiktok_source, update_tiktok_source_enabled,
 };
@@ -324,6 +325,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/tiktok/status", get(tiktok_status))
         .route("/api/tiktok/source-videos", get(get_tiktok_source_videos))
         .route("/api/tiktok/playlists", get(get_tiktok_playlists))
+        .route("/api/tiktok/followings", get(get_tiktok_followings))
         .route("/api/tiktok/cookies", post(import_tiktok_cookie_file))
         .route("/api/tiktok/search", get(search_tiktok))
         .route("/api/tiktok/sources", get(get_tiktok_sources).post(create_tiktok_source))

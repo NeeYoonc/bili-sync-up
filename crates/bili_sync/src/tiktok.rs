@@ -688,9 +688,11 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
             break;
         }
         let payload = decode_tiktok_body(&body)?;
+        let mut page_has_items = false;
         if let Some(items) = payload.get("itemList").and_then(serde_json::Value::as_array) {
             for item in items {
                 if let Some(post) = parse_tiktok_item(item) {
+                    page_has_items = true;
                     if seen.insert(post.id.clone()) {
                         posts.push(post);
                     }
@@ -700,6 +702,12 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
         if posts.len() >= limit
             || !payload.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false)
         {
+            break;
+        }
+        if !page_has_items {
+            if posts.is_empty() {
+                bail!("TikTok 我的喜欢接口未返回视频列表（可能需要浏览器实时签名或登录态过期），请确认已导入最新 cookies.txt");
+            }
             break;
         }
         let next = payload
@@ -867,17 +875,25 @@ pub fn ensure_tiktok_session() -> Result<()> {
 
 // ---------- TikTok 作者历史作品选择（右侧面板，yt-dlp 扫描） ----------
 
-/// 选择面板的数据结构：扫描 TikTok 作者主页返回视频列表，供添加来源时
-/// 在右侧勾选历史作品（与抖音作者一致）。
+/// 选择面板的数据结构：TikTok 作者历史视频 / 我的喜欢视频列表，供添加来源时
+/// 在右侧勾选历史作品（与抖音一致）。
 pub async fn get_tiktok_source_videos(
     Query(request): Query<YouTubeSourceVideosRequest>,
 ) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
     let source_type = request.source_type.trim().to_ascii_lowercase();
-    if !matches!(source_type.as_str(), "tiktok") {
-        return Err(ApiError::from(anyhow!(
-            "仅 TikTok 作者支持历史作品选择"
-        )));
+    match source_type.as_str() {
+        "tiktok" => fetch_tiktok_author_videos(&request).await,
+        "tiktok_favorite" => fetch_tiktok_favorite_videos(&request).await,
+        _ => Err(ApiError::from(anyhow!(
+            "仅 TikTok 作者与我的喜欢支持历史作品选择"
+        ))),
     }
+}
+
+/// 拉取 TikTok 作者主页历史视频（yt-dlp 平铺），按页返回供右侧勾选。
+async fn fetch_tiktok_author_videos(
+    request: &YouTubeSourceVideosRequest,
+) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
     let raw_url = request.url.as_deref().unwrap_or("").trim();
     if raw_url.is_empty() || !is_tiktok_url(raw_url) {
         return Err(ApiError::from(anyhow!("请输入有效的 TikTok 作者主页链接")));
@@ -1008,6 +1024,170 @@ pub async fn get_tiktok_source_videos(
     }))
 }
 
+/// 拉取当前登录账号“我的喜欢”视频列表（官方 /api/favorite/item_list/），
+/// 按页返回供右侧勾选。
+async fn fetch_tiktok_favorite_videos(
+    request: &YouTubeSourceVideosRequest,
+) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
+    let page = request.page.unwrap_or(1).max(1);
+    let page_size = request.page_size.unwrap_or(100).clamp(1, 200);
+    let keyword = request
+        .keyword
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let mut posts = fetch_tiktok_favorites(usize::MAX).await.map_err(ApiError::from)?;
+    posts.sort_by_key(|post| post.timestamp.unwrap_or_default());
+    posts.reverse();
+    let mut videos = Vec::new();
+    for post in posts {
+        if keyword
+            .as_ref()
+            .is_some_and(|keyword| !post.title.to_ascii_lowercase().contains(keyword))
+        {
+            continue;
+        }
+        videos.push(SubmissionVideoInfo {
+            bvid: post.id.clone(),
+            title: post.title.clone(),
+            author: (!post.uploader.trim().is_empty()).then_some(post.uploader.clone()),
+            cover: post.thumbnail.clone().unwrap_or_default(),
+            pubtime: post.published_at.clone().unwrap_or_default(),
+            duration: post.duration_seconds.unwrap_or_default(),
+            view: 0,
+            danmaku: 0,
+            description: String::new(),
+        });
+    }
+    let total = videos.len() as i64;
+    let start = (page as usize - 1).saturating_mul(page_size as usize);
+    let page_videos = videos
+        .into_iter()
+        .skip(start)
+        .take(page_size as usize)
+        .collect::<Vec<_>>();
+    Ok(ApiResponse::ok(SubmissionVideosResponse {
+        videos: page_videos,
+        total,
+        page,
+        page_size,
+    }))
+}
+
+// ---------- TikTok 已关注作者（/api/user/list/ 官方接口） ----------
+
+const TIKTOK_USER_LIST_API: &str = "https://www.tiktok.com/api/user/list/";
+
+/// 当前登录账号的 odinId（来自 multi_sids cookie 的第一段）。
+fn tiktok_login_odin_id() -> Option<String> {
+    tiktok_cookie_values()
+        .get("multi_sids")
+        .and_then(|value| value.split('%').next())
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+}
+
+/// 获取当前登录账号已关注的 TikTok 作者列表。
+///
+/// 官方 /api/user/list/ 需要浏览器实时签名（X-Dynosaur/X-Gnarly/msToken），
+/// 服务端直连通常会返回空响应；这里按完整参数尽力请求，拿不到数据时给出明确提示。
+pub async fn get_tiktok_followings() -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
+    fetch_tiktok_followings().await.map_err(ApiError::from)
+}
+
+async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
+    let cookie = tiktok_cookie_header()?;
+    let odin_id = tiktok_login_odin_id().ok_or_else(|| {
+        anyhow!("无法从 TikTok cookies.txt 解析账号 ID（缺少 multi_sids），请重新导入登录状态")
+    })?;
+    let client = reqwest::Client::builder()
+        .user_agent(TIKTOK_WEB_UA)
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let device_id: u64 = rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
+    let params: Vec<(&str, String)> = vec![
+        ("aid", "1988".to_string()),
+        ("app_language", "zh-Hans".to_string()),
+        ("app_name", "tiktok_web".to_string()),
+        ("browser_language", "zh-CN".to_string()),
+        ("browser_name", "Mozilla".to_string()),
+        ("browser_online", "true".to_string()),
+        ("browser_platform", "Win32".to_string()),
+        ("browser_version", TIKTOK_WEB_UA.to_string()),
+        ("channel", "tiktok_web".to_string()),
+        ("cookie_enabled", "true".to_string()),
+        ("count", "50".to_string()),
+        ("data_collection_enabled", "true".to_string()),
+        ("device_id", device_id.to_string()),
+        ("device_platform", "web_pc".to_string()),
+        ("focus_state", "true".to_string()),
+        ("from_page", "user".to_string()),
+        ("history_len", "7".to_string()),
+        ("isNonPersonalized", "false".to_string()),
+        ("is_fullscreen", "false".to_string()),
+        ("is_page_visible", "true".to_string()),
+        ("maxCursor", "0".to_string()),
+        ("minCursor", "0".to_string()),
+        ("odinId", odin_id.clone()),
+        ("os", "windows".to_string()),
+        ("priority_region", "US".to_string()),
+        ("referer", "https://www.tiktok.com/".to_string()),
+        ("region", "US".to_string()),
+        ("root_referer", "https://www.tiktok.com/".to_string()),
+        ("scene", "151".to_string()),
+        ("screen_height", "1440".to_string()),
+        ("screen_width", "2560".to_string()),
+        ("targetUserId", odin_id.clone()),
+        ("tz_name", "Asia/Shanghai".to_string()),
+        ("user_is_login", "true".to_string()),
+        ("verifyFp", String::new()),
+        ("webcast_language", "zh-Hans".to_string()),
+        ("msToken", String::new()),
+        ("X-Bogus", "1".to_string()),
+        ("X-Dynosaur", format!("X-Dynosaur={}", rand::random::<u128>())),
+        ("X-Gnarly", format!("X-Gnarly={}", rand::random::<u128>())),
+    ];
+    let url = reqwest::Url::parse_with_params(TIKTOK_USER_LIST_API, &params)?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::COOKIE, &cookie)
+        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
+        .send()
+        .await
+        .context("请求 TikTok 关注列表失败")?;
+    if !response.status().is_success() {
+        bail!("TikTok 关注列表返回 HTTP {}", response.status());
+    }
+    let body = response.text().await?;
+    if body.trim().is_empty() {
+        bail!(
+            "TikTok 关注列表接口需要浏览器实时签名（X-Dynosaur/X-Gnarly/msToken），服务端暂无法直接获取；请直接搜索作者，或稍后由浏览器扩展导出关注列表"
+        );
+    }
+    let payload = decode_tiktok_body(&body)?;
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(user_list) = payload.get("userList").and_then(serde_json::Value::as_array) {
+        for item in user_list {
+            let Some(user) = item.get("user") else {
+                continue;
+            };
+            let Some(result) = tiktok_user_to_search_result(user) else {
+                continue;
+            };
+            if seen.insert(result.youtube_url.to_ascii_lowercase()) {
+                results.push(result);
+            }
+        }
+    }
+    let total = results.len();
+    Ok(ApiResponse::ok(YouTubeSearchResponse {
+        success: true,
+        results,
+        total,
+    }))
+}
 
 // ---------- TikTok 收藏夹（用户播放列表 Playlist） ----------
 

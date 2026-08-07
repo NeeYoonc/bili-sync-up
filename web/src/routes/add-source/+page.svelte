@@ -213,6 +213,7 @@
 	let loadingFollowings = false;
 	let douyinFollowings: SearchResultItem[] = [];
 	let loadingDouyinFollowings = false;
+	let loadingTikTokFollowings = false;
 	let douyinCatalog: SearchResultItem[] = [];
 	let loadingDouyinCatalog = false;
 	// YouTube “播放列表/收藏”：搜索 UP 主后展示其全部播放列表
@@ -395,7 +396,8 @@
 			youtubeSourceType === 'subscriptions' ||
 			youtubeSourceType === 'liked' ||
 			youtubeSourceType === 'douyin_liked' ||
-			youtubeSourceType === 'douyin_watch_later';
+			youtubeSourceType === 'douyin_watch_later' ||
+			youtubeSourceType === 'tiktok_favorite';
 		if (sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection') {
 			void loadDouyinCatalog();
 		}
@@ -2291,6 +2293,25 @@
 		});
 	}
 
+	async function fetchTikTokFollowings() {
+		if (sourcePlatform !== 'tiktok') return;
+		const result = await runRequest(() => api.getTikTokFollowings(), {
+			setLoading: (value) => (loadingTikTokFollowings = value),
+			context: '获取已关注 TikTok 作者失败'
+		});
+		if (!result) return;
+		searchResults = result.data.results;
+		searchTotalResults = result.data.total;
+		showSearchResults = true;
+		if (result.data.results.length > 0) {
+			toast.success('获取已关注 TikTok 作者成功', {
+				description: `共获取到 ${result.data.results.length} 个作者，点击即可选择`
+			});
+		} else {
+			toast.info('未获取到关注的 TikTok 作者');
+		}
+	}
+
 	// 选择关注的UP主
 	function selectFollowing(following: UserFollowing) {
 		clearSearchPanel();
@@ -2428,7 +2449,8 @@
 		}
 		return (
 			sourcePlatform === 'douyin' ||
-			(sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok') ||
+			(sourcePlatform === 'tiktok' &&
+				(youtubeSourceType === 'tiktok' || youtubeSourceType === 'tiktok_favorite')) ||
 			(sourcePlatform === 'youtube' &&
 				(youtubeSourceType === 'subscriptions' ||
 					youtubeSourceType === 'channel' ||
@@ -2454,6 +2476,10 @@
 				: youtubeSourceType === 'douyin_watch_later'
 					? '选择稍后再看作品'
 					: '选择历史作品'
+		: sourcePlatform === 'tiktok'
+			? youtubeSourceType === 'tiktok_favorite'
+				? '选择喜欢的作品'
+				: '选择历史视频'
 		: youtubeSourceType === 'liked'
 			? '选择喜欢的视频'
 			: '选择历史视频';
@@ -2461,6 +2487,10 @@
 		? '仅同步勾选频道以后发布的视频。'
 		: sourcePlatform === 'douyin'
 			? '首次仅下载勾选的现有作品，之后该来源新增的视频或图文会自动同步。统计数字为真实点赞数。'
+		: sourcePlatform === 'tiktok'
+			? youtubeSourceType === 'tiktok_favorite'
+				? '首次仅下载勾选的历史视频，之后新点赞的作品会自动同步。'
+				: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。'
 		: youtubeSourceType === 'liked'
 			? '首次仅下载勾选的历史视频，之后新加入“喜欢”的视频会自动同步。'
 			: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。';
@@ -2509,6 +2539,10 @@
 				['douyin_theater', 'douyin_series'].includes(currentType)
 			) {
 				void resolveDouyinCatalogLinkName(currentUrl, currentType);
+				return;
+			}
+			if (sourcePlatform === 'tiktok' && currentType === 'tiktok_collection') {
+				void handleSearch();
 				return;
 			}
 			openYouTubeHistorySelection();
@@ -2846,6 +2880,7 @@
 			(isYouTubeHistorySource() &&
 				(youtubeSourceType === 'subscriptions' ||
 					youtubeSourceType === 'liked' ||
+					youtubeSourceType === 'tiktok_favorite' ||
 					(sourcePlatform === 'douyin' && !douyinSourceNeedsSelection()) ||
 					youtubeUrl.trim())))
 	) {
@@ -3411,7 +3446,7 @@
 												获取中...
 											{:else}
 												<FolderOpen class="h-4 w-4" />
-												获取播放列表
+												获取自己的列表
 											{/if}
 										</Button>
 									</div>
@@ -3484,10 +3519,22 @@
 													{loadingDouyinFollowings ? '获取中...' : '获取关注'}
 												</Button>
 											{/if}
+												{#if sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok'}
+													<Button
+														type="button"
+														onclick={fetchTikTokFollowings}
+														disabled={loadingTikTokFollowings}
+														size="sm"
+														variant="outline"
+														class={isMobile ? 'w-full' : ''}
+													>
+														{loadingTikTokFollowings ? '获取中...' : '获取关注'}
+													</Button>
+												{/if}
 										</div>
 										<p class="text-muted-foreground text-xs">
 											{sourcePlatform === 'tiktok'
-												? '输入关键词搜索 TikTok 作者，选择结果后自动填充名称、链接和快捷路径模板。'
+												? '可搜索 TikTok 作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
 												: sourcePlatform === 'douyin'
 													? youtubeSourceType === 'douyin'
 														? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
