@@ -113,12 +113,14 @@ use crate::douyin::{
 };
 use crate::utils::model::queue_missing_video_file_size_backfill;
 use crate::youtube::{
-    create_douyin_source, create_youtube_source_checked, delete_douyin_source, delete_youtube_source_checked,
+    create_douyin_source, create_tiktok_source, create_youtube_source_checked, delete_douyin_source,
+    delete_tiktok_source, delete_youtube_source_checked,
     get_douyin_queue_status, get_douyin_sources, get_douyin_videos, get_youtube_queue_status,
-    get_youtube_channel_playlists, get_youtube_source_videos, get_youtube_sources, get_youtube_videos,
-    import_youtube_cookie_file,
-    reset_douyin_source_path, reset_youtube_source_path_checked, retry_douyin_video, retry_youtube_video_checked,
-    search_youtube, update_douyin_source, update_douyin_source_enabled, update_youtube_source_checked,
+    get_tiktok_sources, get_youtube_channel_playlists, get_youtube_source_videos, get_youtube_sources,
+    get_youtube_videos, import_youtube_cookie_file,
+    reset_douyin_source_path, reset_tiktok_source_path, reset_youtube_source_path_checked, retry_douyin_video,
+    retry_youtube_video_checked, search_tiktok, search_youtube, update_douyin_source, update_douyin_source_enabled,
+    update_tiktok_source, update_tiktok_source_enabled, update_youtube_source_checked,
     update_youtube_source_enabled_checked, youtube_status,
 };
 // CONFIG导入已移除 - 现在使用动态配置
@@ -316,6 +318,17 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route(
             "/api/douyin/sources/{id}/reset-path",
             post(reset_douyin_source_path),
+        )
+        .route("/api/tiktok/search", get(search_tiktok))
+        .route("/api/tiktok/sources", get(get_tiktok_sources).post(create_tiktok_source))
+        .route(
+            "/api/tiktok/sources/{id}",
+            put(update_tiktok_source).delete(delete_tiktok_source),
+        )
+        .route("/api/tiktok/sources/{id}/enabled", put(update_tiktok_source_enabled))
+        .route(
+            "/api/tiktok/sources/{id}/reset-path",
+            post(reset_tiktok_source_path),
         )
         .route("/api/douyin/videos", get(get_douyin_videos))
         .route("/api/douyin/videos/{id}/retry", post(retry_douyin_video))

@@ -4,6 +4,7 @@ import UserIcon from '@lucide/svelte/icons/user';
 import ClockIcon from '@lucide/svelte/icons/clock';
 import TvIcon from '@lucide/svelte/icons/tv';
 import YoutubeIcon from '@lucide/svelte/icons/youtube';
+import ClapperboardIcon from '@lucide/svelte/icons/clapperboard';
 
 export const VIDEO_SOURCES = {
 	FAVORITE: { type: 'favorite', title: '收藏夹', icon: HeartIcon },
@@ -12,7 +13,8 @@ export const VIDEO_SOURCES = {
 	WATCH_LATER: { type: 'watch_later', title: '稍后再看', icon: ClockIcon },
 	BANGUMI: { type: 'bangumi', title: '番剧', icon: TvIcon },
 	YOUTUBE: { type: 'youtube', title: 'YouTube 视频源', icon: YoutubeIcon },
-	DOUYIN: { type: 'douyin', title: '抖音视频源', icon: UserIcon }
+	DOUYIN: { type: 'douyin', title: '抖音视频源', icon: UserIcon },
+	TIKTOK: { type: 'tiktok', title: 'TikTok 视频源', icon: ClapperboardIcon }
 } as const;
 
 export const DANMAKU_SYNC_STAGE_LABELS: Record<number, string> = {

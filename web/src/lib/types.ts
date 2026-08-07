@@ -308,6 +308,7 @@ export interface VideoSourcesResponse {
 	bangumi: VideoSource[];
 	youtube: VideoSource[];
 	douyin: VideoSource[];
+	tiktok: VideoSource[];
 }
 
 // 视频信息类型

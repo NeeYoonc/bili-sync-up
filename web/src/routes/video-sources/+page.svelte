@@ -141,6 +141,14 @@
 			icon: HistoryIcon
 		}
 	} as const;
+	const TIKTOK_SOURCE_SECTIONS = {
+		TIKTOK_AUTHOR: {
+			type: 'tiktok',
+			youtubeSourceType: 'tiktok',
+			title: 'TikTok 作者',
+			icon: UserIcon
+		}
+	} as const;
 	const DOUYIN_SOURCE_SECTIONS = {
 		DOUYIN_AUTHOR: {
 			type: 'douyin',
@@ -181,7 +189,7 @@
 	} as const;
 
 	let loading = false;
-	let platformTab: 'youtube' | 'douyin' | 'bilibili' = 'bilibili';
+	let platformTab: 'youtube' | 'douyin' | 'tiktok' | 'bilibili' = 'bilibili';
 	let bulkUpdating = false;
 	const videoSourcesStream = createManagedEventSource();
 	let youtubeRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -361,16 +369,18 @@
 
 	async function loadVideoSources(silent = false) {
 		const response = await runRequest(async () => {
-			const [bilibili, youtube, douyin] = await Promise.all([
+			const [bilibili, youtube, douyin, tiktok] = await Promise.all([
 				api.getVideoSources(),
 				api.getYouTubeSources(),
-				api.getDouyinSources()
+				api.getDouyinSources(),
+				api.getTikTokSources()
 			]);
 			return {
 				data: {
 					...bilibili.data,
 					youtube: youtube.data.map(youtubeSourceToVideoSource),
-					douyin: douyin.data.map(youtubeSourceToVideoSource)
+					douyin: douyin.data.map(youtubeSourceToVideoSource),
+					tiktok: tiktok.data.map(youtubeSourceToVideoSource)
 				} satisfies VideoSourcesResponse
 			};
 		}, {
@@ -1503,11 +1513,11 @@
 		}
 	}
 
-	function isExternalSourceType(sourceType: string): sourceType is 'youtube' | 'douyin' {
-		return sourceType === 'youtube' || sourceType === 'douyin';
+	function isExternalSourceType(sourceType: string): sourceType is 'youtube' | 'douyin' | 'tiktok' {
+		return sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok';
 	}
 
-	function navigateToAddSource(platform: 'bilibili' | 'youtube' | 'douyin' = 'bilibili') {
+	function navigateToAddSource(platform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok' = 'bilibili') {
 		const path = resolve('/add-source');
 		goto(platform === 'bilibili' ? path : `${path}?platform=${platform}`);
 	}
@@ -1517,7 +1527,9 @@
 			? Object.entries(YOUTUBE_SOURCE_SECTIONS)
 			: platformTab === 'douyin'
 				? Object.entries(DOUYIN_SOURCE_SECTIONS)
-				: Object.entries(VIDEO_SOURCES).filter(([, source]) => !isExternalSourceType(source.type));
+				: platformTab === 'tiktok'
+					? Object.entries(TIKTOK_SOURCE_SECTIONS)
+					: Object.entries(VIDEO_SOURCES).filter(([, source]) => !isExternalSourceType(source.type));
 	}
 
 	function getSourcesForSection(sourceConfig: {
@@ -1535,7 +1547,9 @@
 			requestedPlatform === 'youtube'
 				? 'youtube'
 				: requestedPlatform === 'douyin'
-					? 'douyin'
+				? 'douyin'
+				: requestedPlatform === 'tiktok'
+					? 'tiktok'
 					: 'bilibili';
 		setBreadcrumb([{ label: '视频源管理' }]);
 		loadVideoSources();
@@ -1585,7 +1599,7 @@
 					<PlusIcon class="h-4 w-4" />
 					添加 YouTube 视频源
 				</Button>
-			{:else}
+			{:else if platformTab === 'douyin'}
 				<Button
 					onclick={() => navigateToAddSource('douyin')}
 					class="flex items-center gap-2 {isMobileQuery.current ? 'w-full' : 'w-auto'}"
@@ -1594,15 +1608,25 @@
 					<PlusIcon class="h-4 w-4" />
 					添加抖音视频源
 				</Button>
+			{:else}
+				<Button
+					onclick={() => navigateToAddSource('tiktok')}
+					class="flex items-center gap-2 {isMobileQuery.current ? 'w-full' : 'w-auto'}"
+					title="添加新的 TikTok 视频源"
+				>
+					<PlusIcon class="h-4 w-4" />
+					添加 TikTok 视频源
+				</Button>
 			{/if}
 		{/snippet}
 	</SectionHeader>
 
 	<Tabs.Root bind:value={platformTab}>
-		<Tabs.List class="grid w-full max-w-xl grid-cols-3">
+		<Tabs.List class="grid w-full max-w-xl grid-cols-4">
 			<Tabs.Trigger value="bilibili">B 站视频源</Tabs.Trigger>
 			<Tabs.Trigger value="youtube">YouTube 视频源</Tabs.Trigger>
 			<Tabs.Trigger value="douyin">抖音视频源</Tabs.Trigger>
+			<Tabs.Trigger value="tiktok">TikTok 视频源</Tabs.Trigger>
 		</Tabs.List>
 
 		<div class="mt-6">

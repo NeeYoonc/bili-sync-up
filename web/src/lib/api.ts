@@ -306,6 +306,9 @@ class ApiClient {
 	async searchDouyin(keyword: string): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/douyin/search', { keyword });
 	}
+	async searchTikTok(keyword: string): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/tiktok/search', { keyword });
+	}
 	async getDouyinFollowings(): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/douyin/followings');
 	}
@@ -346,6 +349,30 @@ class ApiClient {
 	}
 	async deleteDouyinSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
 		return this.delete<boolean>(`/douyin/sources/${id}?delete_local_files=${deleteLocalFiles}`);
+	}
+
+	async getTikTokSources(): Promise<ApiResponse<YouTubeSource[]>> {
+		return this.get<YouTubeSource[]>('/tiktok/sources');
+	}
+	async createTikTokSource(
+		request: CreateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.post<YouTubeSource>('/tiktok/sources', request);
+	}
+	async setTikTokSourceEnabled(id: number, enabled: boolean): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/tiktok/sources/${id}/enabled`, { enabled });
+	}
+	async updateTikTokSource(
+		id: number,
+		request: UpdateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/tiktok/sources/${id}`, request);
+	}
+	async resetTikTokSourcePath(id: number, new_path: string): Promise<ApiResponse<YouTubeSource>> {
+		return this.post<YouTubeSource>(`/tiktok/sources/${id}/reset-path`, { new_path });
+	}
+	async deleteTikTokSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
+		return this.delete<boolean>(`/tiktok/sources/${id}?delete_local_files=${deleteLocalFiles}`);
 	}
 
 	/**
@@ -1446,6 +1473,18 @@ export const api = {
 	getYouTubeSourceVideos: (params: YouTubeSourceVideosRequest) =>
 		apiClient.getYouTubeSourceVideos(params),
 	searchDouyin: (keyword: string) => apiClient.searchDouyin(keyword),
+	searchTikTok: (keyword: string) => apiClient.searchTikTok(keyword),
+	getTikTokSources: () => apiClient.getTikTokSources(),
+	createTikTokSource: (request: CreateYouTubeSourceRequest) =>
+		apiClient.createTikTokSource(request),
+	setTikTokSourceEnabled: (id: number, enabled: boolean) =>
+		apiClient.setTikTokSourceEnabled(id, enabled),
+	updateTikTokSource: (id: number, request: UpdateYouTubeSourceRequest) =>
+		apiClient.updateTikTokSource(id, request),
+	resetTikTokSourcePath: (id: number, new_path: string) =>
+		apiClient.resetTikTokSourcePath(id, new_path),
+	deleteTikTokSource: (id: number, deleteLocalFiles = false) =>
+		apiClient.deleteTikTokSource(id, deleteLocalFiles),
 	getDouyinSourceVideos: (params: {
 		url: string;
 		source_type?: string;

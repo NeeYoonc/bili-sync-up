@@ -100,7 +100,7 @@
 	};
 
 	let sourceType: VideoCategory = 'collection';
-	let sourcePlatform: 'bilibili' | 'youtube' | 'douyin' = 'bilibili';
+	let sourcePlatform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok' = 'bilibili';
 	let youtubeSourceType: YouTubeSourceType = 'subscriptions';
 	let youtubeUrl = '';
 	let youtubeStatus: YouTubeStatusResponse | null = null;
@@ -341,6 +341,9 @@
 		{ value: 'douyin_watch_later', label: '稍后再看', description: '同步当前登录账号的稍后再看列表' },
 		{ value: 'douyin_theater', label: '放映厅', description: '搜索并选择放映厅专辑，按当前账号可见权限同步' },
 		{ value: 'douyin_series', label: '短剧', description: '搜索并选择短剧，按当前账号可见权限同步剧集' }
+	];
+	const tiktokSourceTypeOptions = [
+		{ value: 'tiktok', label: 'TikTok 作者', description: '同步指定 TikTok 作者主页发布的视频' }
 	];
 	const sourceTypeLabelMap: Record<string, string> = {
 		collection: '合集',
@@ -634,11 +637,15 @@
 				? 'youtube'
 				: requestedPlatform === 'douyin'
 					? 'douyin'
-					: 'bilibili';
+					: requestedPlatform === 'tiktok'
+						? 'tiktok'
+						: 'bilibili';
 		if (sourcePlatform === 'youtube') {
 			handleYouTubeSourceTypeChange('subscriptions');
 		} else if (sourcePlatform === 'douyin') {
 			handleYouTubeSourceTypeChange('douyin');
+		} else if (sourcePlatform === 'tiktok') {
+			handleYouTubeSourceTypeChange('tiktok');
 		}
 		setBreadcrumb([
 			{ label: '主页', href: '/' },
@@ -648,7 +655,9 @@
 						? '添加 YouTube 视频源'
 						: sourcePlatform === 'douyin'
 							? '添加抖音视频源'
-							: '添加视频源',
+							: sourcePlatform === 'tiktok'
+								? '添加 TikTok 视频源'
+								: '添加视频源',
 				isActive: true
 			}
 		]);
@@ -718,6 +727,26 @@
 				);
 			} else {
 				toast.info(isCatalogSearch ? '未找到匹配内容' : '未找到匹配的抖音作者');
+			}
+			return;
+		}
+
+		if (sourcePlatform === 'tiktok') {
+			const response = await runRequest(
+				() => api.searchTikTok(searchKeyword.trim()),
+				{
+					setLoading: (value) => (searchLoading = value),
+					context: '搜索 TikTok 作者失败'
+				}
+			);
+			if (!response) return;
+			searchResults = response.data.results;
+			searchTotalResults = response.data.total;
+			showSearchResults = true;
+			if (response.data.results.length > 0) {
+				toast.success(`搜索完成，共找到 ${response.data.results.length} 个 TikTok 作者`);
+			} else {
+				toast.info('未找到匹配的 TikTok 作者');
 			}
 			return;
 		}
@@ -871,7 +900,7 @@
 	function selectSearchResult(result: SearchResultItem) {
 		clearFollowingsPanel();
 
-		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin') {
+		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin' || sourcePlatform === 'tiktok') {
 			// “播放列表/收藏”来源：先按 UP 主搜索频道，选择频道后加载其全部播放列表
 			if (
 				sourcePlatform === 'youtube' &&
@@ -904,9 +933,11 @@
 				showSubmissionSelection = false;
 			}
 			const sourceLabel =
-				sourcePlatform !== 'douyin'
-					? 'YouTube 来源'
-					: youtubeSourceType === 'douyin_theater'
+				sourcePlatform === 'tiktok'
+					? 'TikTok 作者'
+					: sourcePlatform !== 'douyin'
+						? 'YouTube 来源'
+						: youtubeSourceType === 'douyin_theater'
 						? '抖音放映厅'
 						: youtubeSourceType === 'douyin_series'
 							? '抖音短剧'
@@ -1223,7 +1254,11 @@
 				return;
 			}
 
-			const createExternalSource = isDouyin ? api.createDouyinSource : api.createYouTubeSource;
+			const createExternalSource = isDouyin
+				? api.createDouyinSource
+				: isTiktok
+					? api.createTikTokSource
+					: api.createYouTubeSource;
 			const result = await runRequest(
 				() =>
 					createExternalSource({
@@ -1268,13 +1303,13 @@
 					}),
 				{
 					setLoading: (value) => (loading = value),
-					context: `添加${isDouyin ? '抖音' : ' YouTube'}视频源失败`
+					context: `添加${isDouyin ? '抖音' : isTiktok ? 'TikTok' : ' YouTube'}视频源失败`
 				}
 			);
 			if (!result) return;
 
 			toast.success('添加成功', {
-				description: `${isDouyin ? '抖音' : 'YouTube'}视频源“${result.data.name}”已创建`
+				description: `${isDouyin ? '抖音' : isTiktok ? 'TikTok' : 'YouTube'}视频源“${result.data.name}”已创建`
 			});
 			goto(`/video-sources?platform=${sourcePlatform}`);
 			return;
@@ -1515,7 +1550,11 @@
 	// 根据类型显示不同的描述
 	$: currentTypeDescription =
 		sourcePlatform !== 'bilibili'
-			? (sourcePlatform === 'douyin' ? douyinSourceTypeOptions : youtubeSourceTypeOptions).find(
+			? (sourcePlatform === 'douyin'
+					? douyinSourceTypeOptions
+					: sourcePlatform === 'tiktok'
+						? tiktokSourceTypeOptions
+						: youtubeSourceTypeOptions).find(
 					(opt) => opt.value === youtubeSourceType
 				)?.description || ''
 			: sourceTypeOptions.find((opt) => opt.value === sourceType)?.description || '';
@@ -2351,6 +2390,7 @@
 	}
 
 	$: isDouyin = sourcePlatform === 'douyin';
+	$: isTiktok = sourcePlatform === 'tiktok';
 	$: youtubeChannelSelection =
 		sourcePlatform === 'youtube' && youtubeSourceType === 'subscriptions';
 	$: youtubeSelectionNounLabel = youtubeChannelSelection ? '频道' : '视频';
@@ -3195,7 +3235,9 @@
 			? '添加 YouTube 视频源'
 			: sourcePlatform === 'douyin'
 				? '添加抖音视频源'
-				: '添加视频源'} - Bili Sync</title>
+				: sourcePlatform === 'tiktok'
+					? '添加 TikTok 视频源'
+					: '添加视频源'} - Bili Sync</title>
 </svelte:head>
 
 <div class="py-2">
@@ -3208,12 +3250,16 @@
 						? '添加 YouTube 视频源'
 						: sourcePlatform === 'douyin'
 							? '添加抖音视频源'
-							: '添加新视频源'}
+							: sourcePlatform === 'tiktok'
+								? '添加 TikTok 视频源'
+								: '添加新视频源'}
 					description={sourcePlatform === 'youtube'
 						? '使用与 B 站添加源相同的完整表单配置频道、播放列表、订阅动态、喜欢的视频或稍后再看。'
 						: sourcePlatform === 'douyin'
 							? '沿用 B 站添加源表单，搜索作者、选择历史作品，并复用质量、路径和过滤设置。'
-						: '搜索并配置收藏夹、合集、投稿、番剧或稍后再看等视频源。'}
+							: sourcePlatform === 'tiktok'
+								? '粘贴 TikTok 作者主页链接，扫描并同步其发布的视频，公开内容无需登录。'
+							: '搜索并配置收藏夹、合集、投稿、番剧或稍后再看等视频源。'}
 					titleClass="text-2xl font-bold"
 					descriptionClass="text-muted-foreground mt-1 text-sm"
 					class="flex-1"
@@ -3261,7 +3307,9 @@
 								options={sourcePlatform !== 'bilibili'
 									? sourcePlatform === 'douyin'
 										? douyinSourceTypeOptions
-										: youtubeSourceTypeOptions
+										: sourcePlatform === 'tiktok'
+											? tiktokSourceTypeOptions
+											: youtubeSourceTypeOptions
 									: sourceTypeOptions}
 								onChange={(nextValue) => {
 									if (sourcePlatform !== 'bilibili') {
@@ -3275,15 +3323,17 @@
 							<p class="text-muted-foreground text-sm">{currentTypeDescription}</p>
 						</div>
 
-						{#if sourcePlatform === 'youtube' || sourcePlatform === 'douyin'}
-							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist'}
+						{#if sourcePlatform === 'youtube' || sourcePlatform === 'douyin' || sourcePlatform === 'tiktok'}
+							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || youtubeSourceType === 'tiktok'}
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
 								>
 									<div class="space-y-2">
 										<Label for="youtube-search">
-											{sourcePlatform === 'douyin'
-												? youtubeSourceType === 'douyin_theater'
+											{sourcePlatform === 'tiktok'
+												? '搜索 TikTok 作者'
+												: sourcePlatform === 'douyin'
+													? youtubeSourceType === 'douyin_theater'
 													? '搜索抖音放映厅'
 													: youtubeSourceType === 'douyin_series'
 														? '搜索抖音短剧'
@@ -3296,15 +3346,17 @@
 											<Input
 												id="youtube-search"
 												bind:value={searchKeyword}
-												placeholder={sourcePlatform === 'douyin'
-													? youtubeSourceType === 'douyin_theater'
-														? '输入放映厅名称、分类或作者...'
-														: youtubeSourceType === 'douyin_series'
-															? '输入短剧名称或作者...'
-															: '输入抖音作者昵称或抖音号...'
-													: youtubeSourceType === 'channel'
-													? '输入频道名称或 @用户名...'
-													: '输入播放列表名称...'}
+												placeholder={sourcePlatform === 'tiktok'
+													? '输入 TikTok 作者昵称或 @用户名...'
+													: sourcePlatform === 'douyin'
+														? youtubeSourceType === 'douyin_theater'
+															? '输入放映厅名称、分类或作者...'
+															: youtubeSourceType === 'douyin_series'
+																? '输入短剧名称或作者...'
+																: '输入抖音作者昵称或抖音号...'
+														: youtubeSourceType === 'channel'
+														? '输入频道名称或 @用户名...'
+														: '输入播放列表名称...'}
 												onkeydown={(event) => {
 													if (event.key === 'Enter') {
 														event.preventDefault();
@@ -3340,11 +3392,13 @@
 											{/if}
 										</div>
 										<p class="text-muted-foreground text-xs">
-											{sourcePlatform === 'douyin'
-												? youtubeSourceType === 'douyin'
-													? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
-													: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
-												: '搜索并选择结果后，将自动填充名称、链接和当前来源类型的快捷路径模板。'}
+											{sourcePlatform === 'tiktok'
+												? '输入关键词搜索 TikTok 作者，选择结果后自动填充名称、链接和快捷路径模板。'
+												: sourcePlatform === 'douyin'
+													? youtubeSourceType === 'douyin'
+														? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
+														: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
+													: '搜索并选择结果后，将自动填充名称、链接和当前来源类型的快捷路径模板。'}
 										</p>
 									</div>
 								</div>
@@ -3363,25 +3417,29 @@
 										id="youtube-url"
 										bind:value={youtubeUrl}
 										oninput={scheduleYouTubeHistorySelection}
-										placeholder={sourcePlatform === 'douyin'
-											? youtubeSourceType === 'douyin_theater'
-												? 'https://www.douyin.com/lvdetail/...'
-												: youtubeSourceType === 'douyin_series'
-													? 'https://www.douyin.com/series/...'
-													: 'https://www.douyin.com/user/...'
-											: youtubeSourceType === 'channel'
-											? 'https://www.youtube.com/@channel/videos'
-											: 'https://www.youtube.com/playlist?list=...'}
+										placeholder={sourcePlatform === 'tiktok'
+											? 'https://www.tiktok.com/@user'
+											: sourcePlatform === 'douyin'
+												? youtubeSourceType === 'douyin_theater'
+													? 'https://www.douyin.com/lvdetail/...'
+													: youtubeSourceType === 'douyin_series'
+														? 'https://www.douyin.com/series/...'
+														: 'https://www.douyin.com/user/...'
+												: youtubeSourceType === 'channel'
+												? 'https://www.youtube.com/@channel/videos'
+												: 'https://www.youtube.com/playlist?list=...'}
 										required
 									/>
 									<p class="text-muted-foreground text-xs">
-										{sourcePlatform === 'douyin'
-											? youtubeSourceType === 'douyin'
-												? '支持抖音作者主页链接和 v.douyin.com 分享链接；需要在设置中导入新鲜 Cookie。'
-												: '可以从搜索结果选择，也可以手动填写对应详情链接。'
-											: youtubeSourceType === 'channel'
-											? '支持频道主页、@用户名、/videos 等 YouTube 频道链接。'
-											: '请填写包含 list= 的 YouTube 播放列表链接。'}
+										{sourcePlatform === 'tiktok'
+											? '支持 https://www.tiktok.com/@user 作者主页链接，公开内容无需登录。'
+											: sourcePlatform === 'douyin'
+												? youtubeSourceType === 'douyin'
+													? '支持抖音作者主页链接和 v.douyin.com 分享链接；需要在设置中导入新鲜 Cookie。'
+													: '可以从搜索结果选择，也可以手动填写对应详情链接。'
+												: youtubeSourceType === 'channel'
+												? '支持频道主页、@用户名、/videos 等 YouTube 频道链接。'
+												: '请填写包含 list= 的 YouTube 播放列表链接。'}
 									</p>
 								</div>
 							{:else if sourcePlatform === 'douyin' && douyinSourceNeedsSelection()}
@@ -4843,6 +4901,8 @@
 										? '添加 YouTube 视频源'
 										: sourcePlatform === 'douyin'
 											? '添加抖音视频源'
+											: sourcePlatform === 'tiktok'
+												? '添加 TikTok 视频源'
 										: '添加'}
 							</Button>
 							<Button
@@ -4944,7 +5004,8 @@
 												src={result.cover}
 												alt={result.title}
 												class="{result.result_type === 'youtube_channel' ||
-												result.result_type === 'douyin_user'
+												result.result_type === 'douyin_user' ||
+												result.result_type === 'tiktok_user'
 													? 'h-14 w-14 rounded-full'
 													: sourceType === 'bangumi'
 													? 'h-20 w-14'
@@ -4966,7 +5027,8 @@
 																	? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
 																: result.result_type === 'bili_user' ||
 																		  result.result_type === 'youtube_channel' ||
-																		  result.result_type === 'douyin_user'
+																		  result.result_type === 'douyin_user' ||
+																		  result.result_type === 'tiktok_user'
 																		? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
 																		: result.result_type === 'video' ||
 																			  result.result_type === 'youtube_playlist'
@@ -4983,6 +5045,8 @@
 																			? 'YouTube 频道'
 																			: result.result_type === 'douyin_user'
 																				? '抖音作者'
+																				: result.result_type === 'tiktok_user'
+																					? 'TikTok 作者'
 																			: result.result_type === 'youtube_playlist'
 																				? 'YouTube 播放列表'
 																		: result.result_type === 'video'
@@ -5009,7 +5073,8 @@
 												<p class="text-muted-foreground truncate text-xs">
 											{result.author}{#if (result.result_type === 'bili_user' ||
 												result.result_type === 'youtube_channel' ||
-												result.result_type === 'douyin_user') &&
+												result.result_type === 'douyin_user' ||
+												result.result_type === 'tiktok_user') &&
 													result.follower !== undefined &&
 													result.follower !== null}
 														<span class="ml-2"
