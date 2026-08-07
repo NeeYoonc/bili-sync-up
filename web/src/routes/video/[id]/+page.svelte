@@ -949,6 +949,7 @@
 										is_charge_video: videoData.video.is_charge_video,
 										is_image_post: videoData.video.is_image_post
 									}}
+									resourceId={routeResourceId}
 									mode="page"
 									showActions={false}
 									customTitle="P{pageInfo.pid}: {pageInfo.name}"
