@@ -170,3 +170,16 @@ button:disabled {
     background: #292e3b;
   }
 }
+
+.hint {
+  margin: 6px 0 0;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hint {
+    color: #aab2c2;
+  }
+}

@@ -75,6 +75,10 @@
 						{#if status?.logged_in}<CheckCircle2 class="h-3.5 w-3.5" />{:else}<CircleAlert class="h-3.5 w-3.5" />{/if}
 						{status?.logged_in ? 'TikTok Cookie 可用' : '未导入 TikTok Cookie'}
 					</Badge>
+					<Badge variant={status?.browser_session ? 'default' : 'outline'} class="gap-1">
+						{#if status?.browser_session}<CheckCircle2 class="h-3.5 w-3.5" />{:else}<CircleAlert class="h-3.5 w-3.5" />{/if}
+						{status?.browser_session ? '浏览器会话已同步' : '未同步浏览器会话'}
+					</Badge>
 					<a
 						class="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-9 items-center rounded-md px-3 text-sm font-medium"
 						href="/youtube-login-helper.zip"
@@ -94,16 +98,23 @@
 					</Button>
 				</div>
 				<div class="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-100">
-					<p class="font-medium">电脑端登录后直接传输</p>
+					<p class="font-medium">电脑端登录后直接传输（推荐：同步浏览器会话）</p>
 					<ol class="mt-2 list-decimal space-y-1 pl-5">
 						<li>加载登录助手并连接当前 Bili Sync 设置页。</li>
 						<li>点击“打开 TikTok”，在同一电脑浏览器登录 TikTok。</li>
-						<li>点击“传输 TikTok 登录状态”。Docker 会直接收到 Cookie；也可用 Cookie 扩展导出 cookies.txt 手动导入。</li>
+						<li>点击“传输 TikTok 登录状态”，会同时传输 Cookie 与页面会话状态（localStorage）。</li>
+						<li>TikTok 的“我的喜欢/关注列表”依赖浏览器会话状态（webmssdk 的 msToken 等），仅导入 cookies.txt 会被判定为未登录。</li>
 					</ol>
+					{#if status?.browser_session}
+						<p class="mt-2 text-green-700 dark:text-green-400">
+							浏览器会话已同步：{status.browser_session_at ?? '未知时间'}，我的喜欢/关注列表将使用浏览器会话模拟获取。
+						</p>
+					{/if}
 				</div>
 				<p class="text-muted-foreground text-xs">
-					TikTok 喜欢列表等接口受一次性签名（X-Dynosaur）和风控保护，官方不开放公开调用；当前以作者主页同步为主。
-					保存位置：<code class="break-all">{status?.cookie_path ?? '加载中…'}</code>
+					TikTok 会话绑定浏览器环境（localStorage + Cookie + 出口链路）。已同步浏览器会话时，我的喜欢/关注列表通过本机
+					Chrome 会话模拟实时获取；未同步时仅支持作者主页公开内容同步。Cookie 保存位置：
+					<code class="break-all">{status?.cookie_path ?? '加载中…'}</code>
 				</p>
 			</div>
 		</CardContent>

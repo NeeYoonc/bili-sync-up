@@ -82,6 +82,38 @@ async function captureDouyinSessionParams() {
 	return result || {};
 }
 
+async function captureTikTokLocalStorage() {
+	const tabs = await chrome.tabs.query({
+		url: ['https://www.tiktok.com/*', 'https://*.tiktok.com/*']
+	});
+	const tab = tabs
+		.filter((item) => item.id)
+		.sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0))[0];
+	if (!tab?.id) {
+		showStatus('未找到 TikTok 标签页，请先点击“打开 TikTok”并登录后再同步', 'error');
+		return null;
+	}
+	try {
+		const [{ result }] = await chrome.scripting.executeScript({
+			target: { tabId: tab.id },
+			func: () => {
+				const out = {};
+				for (let i = 0; i < localStorage.length; i++) {
+					const key = localStorage.key(i);
+					try { out[key] = localStorage.getItem(key); } catch { /* 忽略无法读取的键 */ }
+				}
+				return out;
+			}
+		});
+		if (result && Object.keys(result).length) return result;
+		showStatus('TikTok 页面会话状态为空，请刷新 TikTok 页面后重试', 'error');
+		return null;
+	} catch (error) {
+		showStatus('读取 TikTok 页面会话失败：' + (error instanceof Error ? error.message : String(error)), 'error');
+		return null;
+	}
+}
+
 connectButton.addEventListener('click', async () => {
 	setBusy(true);
 	try {
@@ -152,13 +184,14 @@ async function transfer(platform) {
 					];
 		const contents = buildNetscapeCookies(cookies, platform);
 		const douyinSessionParams = douyin ? await captureDouyinSessionParams() : {};
+		const tiktokLocalStorage = tiktok ? await captureTikTokLocalStorage() : {};
 		const response = await fetch(`${serverUrl}/api/${platform}/cookies`, {
 			method: 'POST',
 			headers: {
 				Authorization: authToken,
 				'Content-Type': 'application/json'
 			},
-			body: JSON.stringify({ cookies: contents, ...douyinSessionParams })
+			body: JSON.stringify({ cookies: contents, ...douyinSessionParams, local_storage: tiktokLocalStorage })
 		});
 		const payload = await response.json().catch(() => null);
 		if (!response.ok) {

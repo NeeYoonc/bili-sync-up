@@ -58,6 +58,7 @@ strum = { workspace = true }
 sysinfo = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 # toml = { workspace = true } # 已移除：配置已迁移到数据库

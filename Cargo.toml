@@ -79,6 +79,7 @@ strum = { version = "0.27.1", features = ["derive"] }
 sysinfo = "0.36.0"
 thiserror = "2.0.12"
 tokio = { version = "1.45.0", features = ["full"] }
+tokio-tungstenite = "0.24.0"
 tokio-stream = { version = "0.1.16", features = ["sync"] }
 tokio-util = { version = "0.7.15", features = ["io", "rt"] }
 # toml = "0.8.22" # 已移除：配置已迁移到数据库

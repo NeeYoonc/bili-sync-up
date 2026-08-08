@@ -313,8 +313,11 @@ class ApiClient {
 	async getTikTokStatus(): Promise<ApiResponse<TikTokStatusResponse>> {
 		return this.get<TikTokStatusResponse>('/tiktok/status');
 	}
-	async importTikTokCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
-		return this.post<YouTubeLoginResponse>('/tiktok/cookies', { cookies });
+	async importTikTokCookies(
+		cookies: string,
+		localStorage?: Record<string, string>
+	): Promise<ApiResponse<YouTubeLoginResponse>> {
+		return this.post<YouTubeLoginResponse>('/tiktok/cookies', { cookies, local_storage: localStorage });
 	}
 	async getTikTokSourceVideos(params: {
 		url?: string;

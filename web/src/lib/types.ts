@@ -122,6 +122,10 @@ export interface DouyinStatusResponse {
 export interface TikTokStatusResponse {
 	logged_in: boolean;
 	cookie_path: string;
+	/** 是否已同步浏览器会话（localStorage），存在时可启用浏览器会话模拟 */
+	browser_session: boolean;
+	/** 浏览器会话同步时间 */
+	browser_session_at?: string;
 }
 
 export interface YouTubeSearchRequest {

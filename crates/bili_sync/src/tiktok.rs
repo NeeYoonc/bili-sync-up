@@ -89,12 +89,20 @@ pub struct TikTokSearchRequest {
 #[derive(Debug, Deserialize)]
 pub struct TikTokCookieImportRequest {
     pub cookies: String,
+    /// 浏览器扩展同步的 localStorage 会话状态（webmssdk 的 msToken/security-sdk 等）。
+    #[serde(default)]
+    pub local_storage: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TikTokStatusResponse {
     pub logged_in: bool,
     pub cookie_path: String,
+    /// 是否已同步浏览器会话（localStorage），存在时可启用浏览器会话模拟。
+    pub browser_session: bool,
+    /// 浏览器会话同步时间（ISO 时间字符串）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_session_at: Option<String>,
 }
 
 /// 搜索 TikTok 作者。
@@ -202,7 +210,7 @@ async fn search_tiktok_profiles(keyword: &str) -> Result<Vec<YouTubeSearchResult
     Ok(results)
 }
 
-fn tiktok_user_to_search_result(user: &serde_json::Value) -> Option<YouTubeSearchResult> {
+pub(crate) fn tiktok_user_to_search_result(user: &serde_json::Value) -> Option<YouTubeSearchResult> {
     let unique_id = user.get("uniqueId").and_then(serde_json::Value::as_str)?;
     let unique_id = unique_id.trim();
     if unique_id.is_empty() {
@@ -320,9 +328,26 @@ fn tiktok_result_match_score(result: &YouTubeSearchResult, keyword: &str) -> u8 
 /// 当前 TikTok 登录状态：仅检查配置目录中的 cookies.txt 是否可识别。
 pub async fn tiktok_status() -> Result<ApiResponse<TikTokStatusResponse>, ApiError> {
     let path = tiktok_cookie_path();
+    let browser_session = crate::tiktok_browser::has_tiktok_browser_session();
+    let browser_session_at = browser_session
+        .then(|| {
+            std::fs::metadata(crate::tiktok_browser::tiktok_localstorage_path())
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| {
+                    let duration = time
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    chrono::DateTime::from_timestamp(duration.as_secs() as i64, 0)
+                        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string())
+                })
+        })
+        .flatten();
     Ok(ApiResponse::ok(TikTokStatusResponse {
         logged_in: has_tiktok_session(&path),
         cookie_path: path.display().to_string(),
+        browser_session,
+        browser_session_at,
     }))
 }
 
@@ -358,12 +383,31 @@ pub async fn import_tiktok_cookie_file(
     clear_tiktok_login_state_files_except(Some(&temporary)).await;
     replace_cookie_file(&temporary, &path).await?;
 
+    // 浏览器扩展同步的 localStorage 会话状态（webmssdk 依赖它识别登录，仅 cookies 会被判定未登录）
+    if let Some(local_storage) = request.local_storage.as_ref() {
+        if !local_storage.is_empty() {
+            let ls_path = crate::tiktok_browser::tiktok_localstorage_path();
+            let ls_parent = ls_path.parent().context("无效的 TikTok 浏览器会话路径")?;
+            tokio::fs::create_dir_all(ls_parent).await?;
+            let ls_temporary = ls_path.with_extension("json.importing");
+            tokio::fs::write(&ls_temporary, serde_json::to_vec(local_storage)?)
+                .await
+                .context("写入 TikTok 浏览器会话失败")?;
+            tokio::fs::rename(&ls_temporary, &ls_path)
+                .await
+                .context("替换 TikTok 浏览器会话失败")?;
+        }
+    }
+
     // 导入后立即验证登录态：清除 secUid 缓存并请求官方接口，避免导入失效 Cookie 后
     // “我的喜欢/关注列表”等到真正使用时才报错。浏览器扩展无法导出有效会话时给出明确提示。
     if let Some(cached) = TIKTOK_LOGIN_SEC_UID.get() {
         *cached.lock().await = None;
     }
     let mut message = tiktok_import_message();
+    if crate::tiktok_browser::has_tiktok_browser_session() {
+        message.push_str("；已同步浏览器会话（localStorage），我的喜欢/关注列表将使用浏览器会话模拟");
+    }
     match tiktok_login_sec_uid().await {
         Ok(sec_uid) => {
             message.push_str(&format!("；登录态已验证 ✓（账号 secUid {}）", short_sec_uid(&sec_uid)));
@@ -719,7 +763,7 @@ fn build_tiktok_signed_url(base: &str, params: &[(&str, String)]) -> Result<reqw
     Ok(url)
 }
 
-fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> {
+pub(crate) fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> {
     let id = item.get("id").and_then(serde_json::Value::as_str)?.trim().to_string();
     if id.is_empty() {
         return None;
@@ -790,6 +834,21 @@ fn decode_tiktok_body(body: &str) -> Result<serde_json::Value> {
 }
 
 async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
+    // 浏览器会话模拟优先：TikTok 会话绑定 localStorage 状态（webmssdk 存储的
+    // msToken/security-sdk 数据），仅导入 cookies.txt 会被判定为非登录环境。
+    if crate::tiktok_browser::has_tiktok_browser_session() {
+        match crate::tiktok_browser::fetch_tiktok_browser_data(limit).await {
+            Ok(data) => {
+                let posts = crate::tiktok_browser::browser_items_to_posts(&data.favorite_items);
+                if !posts.is_empty() {
+                    info!(count = posts.len(), "通过浏览器会话模拟获取 TikTok 我的喜欢");
+                    return Ok(posts);
+                }
+                warn!("浏览器会话模拟返回的我的喜欢为空，回退服务端直连");
+            }
+            Err(error) => warn!(error = %error, "TikTok 浏览器会话模拟失败，回退服务端直连"),
+        }
+    }
     let cookie = tiktok_cookie_header()?;
     let sec_uid = tiktok_login_sec_uid().await?;
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
@@ -1271,6 +1330,25 @@ pub async fn get_tiktok_followings() -> Result<ApiResponse<YouTubeSearchResponse
 }
 
 async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
+    // 浏览器会话模拟优先：关注列表 /api/user/list/ 需要浏览器实时签名（headless 会 403）。
+    if crate::tiktok_browser::has_tiktok_browser_session() {
+        match crate::tiktok_browser::fetch_tiktok_browser_data(usize::MAX).await {
+            Ok(data) => {
+                let results = crate::tiktok_browser::browser_users_to_results(&data.following_users);
+                if !results.is_empty() {
+                    info!(count = results.len(), "通过浏览器会话模拟获取 TikTok 关注列表");
+                    let total = results.len();
+                    return Ok(ApiResponse::ok(YouTubeSearchResponse {
+                        success: true,
+                        results,
+                        total,
+                    }));
+                }
+                warn!("浏览器会话模拟返回的关注列表为空，回退服务端直连");
+            }
+            Err(error) => warn!(error = %error, "TikTok 浏览器会话模拟失败，回退服务端直连"),
+        }
+    }
     let cookie = tiktok_cookie_header()?;
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let odin_id = tiktok_login_odin_id().ok_or_else(|| {
