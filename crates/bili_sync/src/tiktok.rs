@@ -286,6 +286,16 @@ pub async fn tiktok_status() -> Result<ApiResponse<TikTokStatusResponse>, ApiErr
     }))
 }
 
+/// 生成 TikTok Cookie 导入结果提示；登录 Cookie 不完整时附加警告。
+fn tiktok_import_message() -> String {
+    let mut message =
+        "已导入 TikTok cookies.txt；作者扫描和媒体解析将使用此登录状态".to_string();
+    if !tiktok_cookie_has_login() {
+        message.push_str("；注意：未检测到 sessionid/sid_guard/uid_tt 等登录 Cookie，关注/喜欢列表可能不可用，请确认浏览器处于登录状态后重新导出 cookies.txt");
+    }
+    message
+}
+
 /// 导入电脑浏览器导出的 TikTok Netscape cookies.txt。
 /// TikTok 作者主页公开内容无需登录；导入后 yt-dlp 可同步作者主页中需要登录
 /// 才可见的私密/受限内容，避免混用 YouTube 或抖音的 Cookie。
@@ -309,7 +319,7 @@ pub async fn import_tiktok_cookie_file(
     replace_cookie_file(&temporary, &path).await?;
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
-        message: "已导入 TikTok cookies.txt；作者扫描和媒体解析将使用此登录状态".to_string(),
+        message: tiktok_import_message(),
     }))
 }
 
@@ -537,11 +547,42 @@ pub(crate) fn tiktok_cookie_header() -> Result<String> {
     if values.is_empty() {
         bail!("尚未导入 TikTok cookies.txt，请在设置页导入后使用“我的喜欢”");
     }
+
     Ok(values
         .into_iter()
         .map(|(name, value)| format!("{name}={value}"))
         .collect::<Vec<_>>()
         .join("; "))
+}
+
+/// TikTok 登录 verifyFp（来自 s_v_web_id cookie）。
+fn tiktok_login_verify_fp() -> Option<String> {
+    tiktok_cookie_values()
+        .get("s_v_web_id")
+        .filter(|value| value.starts_with("verify_"))
+        .cloned()
+}
+
+/// 导入的 cookies.txt 是否包含完整登录会话（而非仅游客 ttwid）。
+fn tiktok_cookie_has_login() -> bool {
+    let values = tiktok_cookie_values();
+    ["sessionid", "sessionid_ss", "sid_tt", "sid_guard", "uid_tt"]
+        .iter()
+        .any(|name| values.get(*name).is_some_and(|value| !value.is_empty()))
+}
+
+/// 构建带 X-Gnarly 签名的 TikTok API URL。
+///
+/// X-Gnarly 对“去掉 X-* 参数后的完整查询串”做 MD5 签名。这里先用参数拼出
+/// 最终 URL，取查询串调用 `tiktok_sign::x_gnarly`，再追加 X-Gnarly，保证
+/// 被签名的字符串与最终发出的查询串完全一致。当前线上 SDK 的外壳常量在
+/// VMP 内、与公开参考不同，待常量更新后仅需同步 `tiktok_sign` 即可。
+fn build_tiktok_signed_url(base: &str, params: &[(&str, String)]) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse_with_params(base, params)?;
+    let query = url.query().unwrap_or("").to_string();
+    let gnarly = crate::tiktok_sign::x_gnarly(&query, TIKTOK_WEB_UA, "", None);
+    url.query_pairs_mut().append_pair("X-Gnarly", &gnarly);
+    Ok(url)
 }
 
 fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> {
@@ -628,7 +669,7 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
             rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
         let odin_id: u64 =
             rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
-        let dynamic = format!("X-Dynosaur={}", rand::random::<u128>());
+        // 注意：X-Dynosaur 当前仍为占位（VMP 保护，待逆向后替换）。
         let params: Vec<(&str, String)> = vec![
             ("aid", "1988".to_string()),
             ("app_language", "zh-Hans".to_string()),
@@ -664,14 +705,14 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
             ("secUid", String::new()),
             ("tz_name", "Asia/Shanghai".to_string()),
             ("user_is_login", "true".to_string()),
-            ("verifyFp", String::new()),
+            ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
             ("video_encoding", "dash".to_string()),
             ("webcast_language", "zh-Hans".to_string()),
             ("msToken", String::new()),
             ("X-Bogus", "1".to_string()),
-            ("X-Gnarly", dynamic),
+            ("X-Dynosaur", format!("X-Dynosaur={}", rand::random::<u128>())),
         ];
-        let url = reqwest::Url::parse_with_params(TIKTOK_FAVORITE_API, &params)?;
+        let url = build_tiktok_signed_url(TIKTOK_FAVORITE_API, &params)?;
         let response = client
             .get(url)
             .header(reqwest::header::COOKIE, &cookie)
@@ -1141,14 +1182,13 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         ("targetUserId", odin_id.clone()),
         ("tz_name", "Asia/Shanghai".to_string()),
         ("user_is_login", "true".to_string()),
-        ("verifyFp", String::new()),
+        ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
         ("webcast_language", "zh-Hans".to_string()),
         ("msToken", String::new()),
         ("X-Bogus", "1".to_string()),
         ("X-Dynosaur", format!("X-Dynosaur={}", rand::random::<u128>())),
-        ("X-Gnarly", format!("X-Gnarly={}", rand::random::<u128>())),
     ];
-    let url = reqwest::Url::parse_with_params(TIKTOK_USER_LIST_API, &params)?;
+    let url = build_tiktok_signed_url(TIKTOK_USER_LIST_API, &params)?;
     let response = client
         .get(url)
         .header(reqwest::header::COOKIE, &cookie)
@@ -1314,14 +1354,13 @@ async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<You
         ("secUid", sec_uid.to_string()),
         ("tz_name", "Asia/Shanghai".to_string()),
         ("user_is_login", "true".to_string()),
-        ("verifyFp", String::new()),
+        ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
         ("webcast_language", "zh-Hans".to_string()),
         ("msToken", String::new()),
         ("X-Bogus", "1".to_string()),
         ("X-Dynosaur", format!("X-Dynosaur={}", rand::random::<u128>())),
-        ("X-Gnarly", format!("X-Gnarly={}", rand::random::<u128>())),
     ];
-    let url = reqwest::Url::parse_with_params(TIKTOK_USER_PLAYLIST_API, &params)?;
+    let url = build_tiktok_signed_url(TIKTOK_USER_PLAYLIST_API, &params)?;
     let response = client
         .get(url)
         .header(reqwest::header::COOKIE, &cookie)
@@ -1415,12 +1454,8 @@ async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result
             ("msToken", String::new()),
             ("X-Bogus", "1".to_string()),
             ("X-Dynosaur", format!("X-Dynosaur={}", rand::random::<u128>())),
-            ("X-Gnarly", format!("X-Gnarly={}", rand::random::<u128>())),
         ];
-        let url = reqwest::Url::parse_with_params(
-            &format!("{TIKTOK_PLAYLIST_API}{playlist_id}/"),
-            &params,
-        )?;
+        let url = build_tiktok_signed_url(&format!("{TIKTOK_PLAYLIST_API}{playlist_id}/"), &params)?;
         let response = client
             .get(url)
             .header(reqwest::header::COOKIE, &cookie)
