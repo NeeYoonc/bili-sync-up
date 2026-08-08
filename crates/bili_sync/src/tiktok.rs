@@ -38,6 +38,49 @@ const TIKTOK_WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebK
 const TIKTOK_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const TIKTOK_SEARCH_CONCURRENCY: usize = 4;
 
+/// 解析 TikTok 官网的 IPv6 地址。
+///
+/// TikTok 风控会把登录会话绑定到浏览器出口链路：用户浏览器经代理 TUN 的 IPv6
+/// fake-ip（如 fdfe:dcba:9876:: 段）访问 TikTok 时一切正常；服务端默认走 IPv4
+/// 出口会被判定为非登录环境（common-app-context 返回空 user、favorite/user-list
+/// 返回空列表）。这里解析出 IPv6 后由 `tiktok_web_client` 强制走同一链路。
+async fn resolve_tiktok_ipv6() -> Result<std::net::Ipv6Addr> {
+    let addresses = tokio::net::lookup_host(("www.tiktok.com", 443))
+        .await
+        .context("解析 TikTok IPv6 地址失败")?;
+    addresses
+        .into_iter()
+        .find_map(|address| match address {
+            std::net::SocketAddr::V6(v6) => Some(*v6.ip()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("未找到 TikTok 的 IPv6 地址（需要代理 TUN 的 IPv6 出口）"))
+}
+
+/// 构建面向 TikTok 官网的 HTTP 客户端：优先强制 IPv6 出口链路（与浏览器一致）。
+///
+/// 无 IPv6 时静默回退默认解析（IPv4），不破坏无 TUN 环境下的原有行为。
+async fn tiktok_web_client() -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(TIKTOK_WEB_UA)
+        .timeout(TIKTOK_SEARCH_TIMEOUT);
+    match resolve_tiktok_ipv6().await {
+        Ok(ipv6) => {
+            for port in [443u16, 80] {
+                builder = builder.resolve(
+                    "www.tiktok.com",
+                    std::net::SocketAddr::new(std::net::IpAddr::V6(ipv6), port),
+                );
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, "未启用 TikTok IPv6 出口链路，回退默认 IPv4 解析（可能被风控）");
+        }
+    }
+    Ok(builder.build()?)
+}
+
+
 #[derive(Debug, Deserialize)]
 pub struct TikTokSearchRequest {
     pub keyword: String,
@@ -209,11 +252,7 @@ fn tiktok_user_to_search_result(user: &serde_json::Value) -> Option<YouTubeSearc
 }
 
 async fn fetch_tiktok_ssr_profile(unique_id: &str) -> Result<Option<serde_json::Value>> {
-    let client = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(TIKTOK_SEARCH_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()?;
+    let client = tiktok_web_client().await?;
     let url = format!("https://www.tiktok.com/@{unique_id}");
     let response = client
         .get(&url)
@@ -318,10 +357,33 @@ pub async fn import_tiktok_cookie_file(
     // 与 YouTube/抖音一致：清理旧会话及其备份/临时快照，避免新旧 Cookie 混用。
     clear_tiktok_login_state_files_except(Some(&temporary)).await;
     replace_cookie_file(&temporary, &path).await?;
+
+    // 导入后立即验证登录态：清除 secUid 缓存并请求官方接口，避免导入失效 Cookie 后
+    // “我的喜欢/关注列表”等到真正使用时才报错。浏览器扩展无法导出有效会话时给出明确提示。
+    if let Some(cached) = TIKTOK_LOGIN_SEC_UID.get() {
+        *cached.lock().await = None;
+    }
+    let mut message = tiktok_import_message();
+    match tiktok_login_sec_uid().await {
+        Ok(sec_uid) => {
+            message.push_str(&format!("；登录态已验证 ✓（账号 secUid {}）", short_sec_uid(&sec_uid)));
+        }
+        Err(error) => {
+            message.push_str(&format!("；⚠ 登录态未通过 TikTok 服务端验证：{error}"));
+        }
+    }
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
-        message: tiktok_import_message(),
+        message,
     }))
+}
+
+fn short_sec_uid(sec_uid: &str) -> &str {
+    if sec_uid.len() > 24 {
+        &sec_uid[..24]
+    } else {
+        sec_uid
+    }
 }
 
 pub fn tiktok_cookie_path() -> PathBuf {
@@ -578,10 +640,7 @@ async fn tiktok_login_sec_uid() -> Result<String> {
         return Ok(sec_uid);
     }
     let cookie = tiktok_cookie_header()?;
-    let client = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(TIKTOK_SEARCH_TIMEOUT)
-        .build()?;
+    let client = tiktok_web_client().await?;
 
     let mut sec_uid: Option<String> = None;
     // 1) common-app-context
@@ -734,10 +793,7 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
     let cookie = tiktok_cookie_header()?;
     let sec_uid = tiktok_login_sec_uid().await?;
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
-    let client = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = tiktok_web_client().await?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
@@ -1220,10 +1276,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
     let odin_id = tiktok_login_odin_id().ok_or_else(|| {
         anyhow!("无法从 TikTok cookies.txt 解析账号 ID（缺少 multi_sids），请重新导入登录状态")
     })?;
-    let client = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = tiktok_web_client().await?;
     let device_id: u64 = rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
     let params: Vec<(&str, String)> = vec![
         ("aid", "1988".to_string()),
@@ -1273,7 +1326,10 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
         .send()
         .await
-        .context("请求 TikTok 关注列表失败")?;
+        .map_err(|error| {
+            warn!(error = ?error, "请求 TikTok 关注列表失败（底层网络错误，完整错误链）");
+            anyhow!("请求 TikTok 关注列表失败")
+        })?;
     if !response.status().is_success() {
         bail!("TikTok 关注列表返回 HTTP {}", response.status());
     }
@@ -1336,10 +1392,7 @@ async fn resolve_tiktok_sec_uid(url: &str) -> Result<String> {
         anyhow!("无法从链接中解析 TikTok 用户名：{url}，请填写形如 https://www.tiktok.com/@用户名 的主页链接")
     })?;
     let cookie = tiktok_cookie_header()?;
-    let client = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = tiktok_web_client().await?;
     let page_url = format!("https://www.tiktok.com/@{unique_id}");
     let response = client
         .get(&page_url)
@@ -1394,10 +1447,7 @@ pub async fn get_tiktok_playlists(
 async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let cookie = tiktok_cookie_header()?;
-    let client = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = tiktok_web_client().await?;
     let device_id: u64 = rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
     let odin_id: u64 = rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
     let params: Vec<(&str, String)> = vec![
@@ -1502,10 +1552,7 @@ async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<You
 async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result<Vec<TikTokPost>> {
     let cookie = tiktok_cookie_header()?;
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
-    let client = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = tiktok_web_client().await?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
