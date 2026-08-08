@@ -573,10 +573,12 @@ fn tiktok_cookie_has_login() -> bool {
 
 /// 构建带 X-Gnarly 签名的 TikTok API URL。
 ///
-/// X-Gnarly 对“去掉 X-* 参数后的完整查询串”做 MD5 签名。这里先用参数拼出
-/// 最终 URL，取查询串调用 `tiktok_sign::x_gnarly`，再追加 X-Gnarly，保证
-/// 被签名的字符串与最终发出的查询串完全一致。当前线上 SDK 的外壳常量在
-/// VMP 内、与公开参考不同，待常量更新后仅需同步 `tiktok_sign` 即可。
+/// X-Gnarly 对“去掉 X-* 参数后的完整查询串”做 MD5 签名并加密外壳。这里先用
+/// 参数拼出最终 URL，取查询串调用 `tiktok_sign::x_gnarly`，再追加 X-Gnarly，
+/// 保证被签名的字符串与最终发出的查询串完全一致。
+/// VMP v3（webmssdk 5.3.1 / scm 1.0.0.388）已完整逆向并逐字节复现，见
+/// `问题文件夹/VMP逆向分析.md` §13；端到端验证 statusCode=0。
+/// X-Dynosaur 非必需（实测仅带 X-Gnarly 即可通过），此处保留占位。
 fn build_tiktok_signed_url(base: &str, params: &[(&str, String)]) -> Result<reqwest::Url> {
     let mut url = reqwest::Url::parse_with_params(base, params)?;
     let query = url.query().unwrap_or("").to_string();
