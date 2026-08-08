@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -563,6 +564,78 @@ fn tiktok_login_verify_fp() -> Option<String> {
         .cloned()
 }
 
+/// 获取当前登录 TikTok 账号的 secUid（我的喜欢/收藏夹接口的必需参数）。
+///
+/// 依次尝试两个官方接口（都不需要签名参数）：
+///  1. `node-webapp/api/common-app-context?lang=zh-Hans` -> `user.secUid`
+///  2. `passport/web/account/info/?aid=1459&app_language=zh&app_name=tiktok_web` -> `data.sec_user_id`
+/// 结果按账号 cookie 做进程内缓存。
+static TIKTOK_LOGIN_SEC_UID: OnceLock<tokio::sync::Mutex<Option<String>>> = OnceLock::new();
+
+async fn tiktok_login_sec_uid() -> Result<String> {
+    let cached = TIKTOK_LOGIN_SEC_UID.get_or_init(|| tokio::sync::Mutex::new(None));
+    if let Some(sec_uid) = cached.lock().await.clone() {
+        return Ok(sec_uid);
+    }
+    let cookie = tiktok_cookie_header()?;
+    let client = reqwest::Client::builder()
+        .user_agent(TIKTOK_WEB_UA)
+        .timeout(TIKTOK_SEARCH_TIMEOUT)
+        .build()?;
+
+    let mut sec_uid: Option<String> = None;
+    // 1) common-app-context
+    match client
+        .get("https://www.tiktok.com/node-webapp/api/common-app-context?lang=zh-Hans")
+        .header(reqwest::header::COOKIE, &cookie)
+        .header(reqwest::header::REFERER, "https://www.tiktok.com/")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                sec_uid = json
+                    .pointer("/user/secUid")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+            }
+        }
+        Err(error) => warn!(error = %error, "获取 TikTok common-app-context 失败，回退 passport 接口"),
+    }
+    // 2) passport /account/info
+    if sec_uid.is_none() {
+        match client
+            .get("https://www.tiktok.com/passport/web/account/info/?aid=1459&app_language=zh&app_name=tiktok_web")
+            .header(reqwest::header::COOKIE, &cookie)
+            .header(reqwest::header::REFERER, "https://www.tiktok.com/")
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    sec_uid = json
+                        .pointer("/data/sec_user_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .filter(|value| !value.is_empty());
+                }
+            }
+            Err(error) => warn!(error = %error, "获取 TikTok passport 账号信息失败"),
+        }
+    }
+
+    match sec_uid {
+        Some(sec_uid) => {
+            *cached.lock().await = Some(sec_uid.clone());
+            Ok(sec_uid)
+        }
+        None => bail!(
+            "无法获取当前 TikTok 账号 secUid（登录态可能已失效）：请确认已导入最新 cookies.txt 后重试"
+        ),
+    }
+}
+
 /// 导入的 cookies.txt 是否包含完整登录会话（而非仅游客 ttwid）。
 fn tiktok_cookie_has_login() -> bool {
     let values = tiktok_cookie_values();
@@ -659,6 +732,8 @@ fn decode_tiktok_body(body: &str) -> Result<serde_json::Value> {
 
 async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
     let cookie = tiktok_cookie_header()?;
+    let sec_uid = tiktok_login_sec_uid().await?;
+    let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let client = reqwest::Client::builder()
         .user_agent(TIKTOK_WEB_UA)
         .timeout(Duration::from_secs(30))
@@ -704,15 +779,15 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
             ("root_referer", "https://www.tiktok.com/".to_string()),
             ("screen_height", "1440".to_string()),
             ("screen_width", "2560".to_string()),
-            ("secUid", String::new()),
+            ("secUid", sec_uid.clone()),
             ("tz_name", "Asia/Shanghai".to_string()),
             ("user_is_login", "true".to_string()),
             ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
             ("video_encoding", "dash".to_string()),
             ("webcast_language", "zh-Hans".to_string()),
-            ("msToken", String::new()),
+            ("msToken", ms_token.clone()),
             ("X-Bogus", "1".to_string()),
-            ("X-Dynosaur", format!("X-Dynosaur={}", rand::random::<u128>())),
+            ("X-Dynosaur", rand::random::<u128>().to_string()),
         ];
         let url = build_tiktok_signed_url(TIKTOK_FAVORITE_API, &params)?;
         let response = client
@@ -1141,6 +1216,7 @@ pub async fn get_tiktok_followings() -> Result<ApiResponse<YouTubeSearchResponse
 
 async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
     let cookie = tiktok_cookie_header()?;
+    let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let odin_id = tiktok_login_odin_id().ok_or_else(|| {
         anyhow!("无法从 TikTok cookies.txt 解析账号 ID（缺少 multi_sids），请重新导入登录状态")
     })?;
@@ -1186,9 +1262,9 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         ("user_is_login", "true".to_string()),
         ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
         ("webcast_language", "zh-Hans".to_string()),
-        ("msToken", String::new()),
+        ("msToken", ms_token.clone()),
         ("X-Bogus", "1".to_string()),
-        ("X-Dynosaur", format!("X-Dynosaur={}", rand::random::<u128>())),
+        ("X-Dynosaur", rand::random::<u128>().to_string()),
     ];
     let url = build_tiktok_signed_url(TIKTOK_USER_LIST_API, &params)?;
     let response = client
@@ -1204,7 +1280,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
     let body = response.text().await?;
     if body.trim().is_empty() {
         bail!(
-            "TikTok 关注列表接口需要浏览器实时签名（X-Dynosaur/X-Gnarly/msToken），服务端暂无法直接获取；请直接搜索作者，或稍后由浏览器扩展导出关注列表"
+            "TikTok 关注列表接口返回空响应：登录态可能已失效或 msToken 过期，请在设置页重新导入最新 cookies.txt 后重试"
         );
     }
     let payload = decode_tiktok_body(&body)?;
@@ -1316,6 +1392,7 @@ pub async fn get_tiktok_playlists(
 }
 
 async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
+    let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let cookie = tiktok_cookie_header()?;
     let client = reqwest::Client::builder()
         .user_agent(TIKTOK_WEB_UA)
@@ -1358,9 +1435,9 @@ async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<You
         ("user_is_login", "true".to_string()),
         ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
         ("webcast_language", "zh-Hans".to_string()),
-        ("msToken", String::new()),
+        ("msToken", ms_token.clone()),
         ("X-Bogus", "1".to_string()),
-        ("X-Dynosaur", format!("X-Dynosaur={}", rand::random::<u128>())),
+        ("X-Dynosaur", rand::random::<u128>().to_string()),
     ];
     let url = build_tiktok_signed_url(TIKTOK_USER_PLAYLIST_API, &params)?;
     let response = client
@@ -1424,6 +1501,7 @@ async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<You
 /// 拉取一个播放列表（收藏夹）内的全部视频。
 async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result<Vec<TikTokPost>> {
     let cookie = tiktok_cookie_header()?;
+    let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let client = reqwest::Client::builder()
         .user_agent(TIKTOK_WEB_UA)
         .timeout(Duration::from_secs(30))
@@ -1453,9 +1531,9 @@ async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result
             ("screen_height", "1440".to_string()),
             ("screen_width", "2560".to_string()),
             ("user_is_login", "true".to_string()),
-            ("msToken", String::new()),
+            ("msToken", ms_token.clone()),
             ("X-Bogus", "1".to_string()),
-            ("X-Dynosaur", format!("X-Dynosaur={}", rand::random::<u128>())),
+            ("X-Dynosaur", rand::random::<u128>().to_string()),
         ];
         let url = build_tiktok_signed_url(&format!("{TIKTOK_PLAYLIST_API}{playlist_id}/"), &params)?;
         let response = client
