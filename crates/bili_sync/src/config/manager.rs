@@ -72,6 +72,7 @@ pub(crate) fn describe_config_key(key: &str) -> &'static str {
         "ffmpeg_path" => "ffmpeg可执行文件或目录路径",
         "proxy" => "外源网络代理（YouTube/TikTok 等平台共用）",
         "youtube_proxy" => "旧版 YouTube 专用代理（已迁移到 proxy）",
+        "tiktok_browser_cdp_url" => "TikTok 远程 Chromium CDP 地址（浏览器会话模拟用）",
         "nfo_time_type" => "NFO时间类型（收藏/发布时间）",
         "nfo_config" => "NFO生成配置",
         "concurrent_limit" => "并发/限速/多线程配置",

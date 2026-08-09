@@ -162,6 +162,7 @@ pub struct UpdateConfigTask {
     pub split_chapters_after_download: Option<bool>,
     pub proxy: Option<String>,
     pub youtube_proxy: Option<String>,
+    pub tiktok_browser_cdp_url: Option<String>,
     pub ai_rename_rename_parent_dir: Option<bool>,
     pub task_id: String, // 唯一任务ID，用于追踪
 }
@@ -2450,6 +2451,7 @@ impl ConfigTaskQueue {
                 split_chapters_after_download: task.split_chapters_after_download,
                 proxy: task.proxy.clone(),
                 youtube_proxy: task.youtube_proxy.clone(),
+                tiktok_browser_cdp_url: task.tiktok_browser_cdp_url.clone(),
                 // 风控验证配置，任务队列中不使用
                 risk_control_enabled: None,
                 risk_control_mode: None,

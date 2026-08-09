@@ -211,6 +211,11 @@ pub struct Config {
     /// 兼容旧配置：早期仅供 YouTube 使用的代理字段，新值写入 `proxy`。
     #[serde(default)]
     pub youtube_proxy: String,
+    /// TikTok 浏览器会话模拟：远程 Chromium CDP 地址（如 http://127.0.0.1:9222）。
+    /// 配置后优先连接远程 Chromium（如 linuxserver/chromium 容器）代替本机 Chrome；
+    /// 留空则回退到本机 Chrome。适用于 Docker/群晖等无 Chrome 环境。
+    #[serde(default)]
+    pub tiktok_browser_cdp_url: String,
     #[serde(default)]
     pub nfo_time_type: NFOTimeType,
     #[serde(default)]
@@ -703,6 +708,7 @@ impl Clone for Config {
             split_chapters_after_download: self.split_chapters_after_download,
             proxy: self.proxy.clone(),
             youtube_proxy: self.youtube_proxy.clone(),
+            tiktok_browser_cdp_url: self.tiktok_browser_cdp_url.clone(),
             nfo_time_type: self.nfo_time_type.clone(),
             nfo_config: self.nfo_config.clone(),
             concurrent_limit: self.concurrent_limit.clone(),
@@ -755,6 +761,7 @@ impl Default for Config {
             split_chapters_after_download: default_split_chapters_after_download(),
             proxy: String::new(),
             youtube_proxy: String::new(),
+            tiktok_browser_cdp_url: String::new(),
             nfo_time_type: NFOTimeType::FavTime,
             nfo_config: NFOConfig::default(),
             concurrent_limit: ConcurrentLimit::default(),

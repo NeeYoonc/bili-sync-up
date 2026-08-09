@@ -10795,6 +10795,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         split_chapters_after_download: config.split_chapters_after_download,
         proxy: config.proxy.clone(),
         youtube_proxy: config.youtube_proxy.clone(),
+        tiktok_browser_cdp_url: config.tiktok_browser_cdp_url.clone(),
         // B站凭证信息
         credential: {
             let credential = config.credential.load();
@@ -11384,6 +11385,7 @@ pub async fn update_config(
             split_chapters_after_download: params.split_chapters_after_download,
             proxy: params.proxy.clone(),
             youtube_proxy: params.youtube_proxy.clone(),
+            tiktok_browser_cdp_url: params.tiktok_browser_cdp_url.clone(),
             ai_rename_rename_parent_dir: params.ai_rename_rename_parent_dir,
             task_id: task_id.clone(),
         };
@@ -11503,6 +11505,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "ffmpeg_path" => Some("ffmpeg路径"),
         "split_chapters_after_download" => Some("下载后按章节切分"),
         "youtube_proxy" => Some("YouTube专用代理"),
+        "tiktok_browser_cdp_url" => Some("TikTok远程Chromium CDP地址"),
         "bind_address" => Some("服务监听地址"),
         "risk_control.enabled" => Some("风控验证开关"),
         "risk_control.mode" => Some("风控验证模式"),
@@ -11859,6 +11862,28 @@ pub async fn update_config_internal(
         if proxy != config.proxy {
             config.proxy = proxy;
             updated_fields.push("proxy");
+        }
+    }
+
+    // TikTok 浏览器会话模拟：远程 Chromium CDP 地址（http://host:port，留空回退本机 Chrome）
+    if let Some(cdp_url) = params.tiktok_browser_cdp_url {
+        let cdp_url = cdp_url.trim().to_string();
+        if !cdp_url.is_empty() {
+            let parsed = reqwest::Url::parse(&cdp_url).map_err(|_| {
+                ApiError::from(anyhow!(
+                    "TikTok 远程 Chromium CDP 地址无效，请使用 http://host:port 形式的完整地址"
+                ))
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                return Err(anyhow!(
+                    "TikTok 远程 Chromium CDP 地址无效，请使用 http://host:port 形式的完整地址"
+                )
+                .into());
+            }
+        }
+        if cdp_url != config.tiktok_browser_cdp_url {
+            config.tiktok_browser_cdp_url = cdp_url;
+            updated_fields.push("tiktok_browser_cdp_url");
         }
     }
 
@@ -12970,6 +12995,14 @@ pub async fn update_config_internal(
                 "youtube_proxy" => {
                     manager
                         .update_config_item("youtube_proxy", serde_json::to_value(&config.youtube_proxy)?)
+                        .await
+                }
+                "tiktok_browser_cdp_url" => {
+                    manager
+                        .update_config_item(
+                            "tiktok_browser_cdp_url",
+                            serde_json::to_value(&config.tiktok_browser_cdp_url)?,
+                        )
                         .await
                 }
                 "bind_address" => {
@@ -20010,6 +20043,115 @@ pub async fn test_proxy_handler(
                 error: Some(detail),
             }))
         }
+    }
+}
+
+/// 测试 TikTok 远程 Chromium CDP 连接：验证地址可达、/json/version 可用并尝试创建/关闭一个测试标签页。
+#[utoipa::path(
+    post,
+    path = "/api/tiktok/browser/test",
+    request_body = crate::api::request::TestTikTokBrowserRequest,
+    responses(
+        (status = 200, description = "测试结果", body = ApiResponse<crate::api::response::TestTikTokBrowserResponse>),
+        (status = 500, description = "服务器内部错误", body = String)
+    )
+)]
+pub async fn test_tiktok_browser_handler(
+    axum::Json(request): axum::Json<crate::api::request::TestTikTokBrowserRequest>,
+) -> Result<ApiResponse<crate::api::response::TestTikTokBrowserResponse>, ApiError> {
+    // 优先使用请求内临时地址（测试尚未保存的配置）；为空时使用当前保存的配置。
+    let raw_url = request
+        .cdp_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::config::with_config(|bundle| bundle.config.tiktok_browser_cdp_url.trim().to_string())
+        });
+    if raw_url.is_empty() {
+        return Ok(ApiResponse::ok(crate::api::response::TestTikTokBrowserResponse {
+            success: false,
+            latency_ms: 0,
+            browser: None,
+            error: Some("未配置 TikTok 远程 Chromium CDP 地址".to_string()),
+        }));
+    }
+    let base_url = match crate::tiktok_browser::normalize_cdp_base_for_api(&raw_url) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(ApiResponse::ok(crate::api::response::TestTikTokBrowserResponse {
+                success: false,
+                latency_ms: 0,
+                browser: None,
+                error: Some(error.to_string()),
+            }))
+        }
+    };
+    let started = std::time::Instant::now();
+    let client = reqwest::Client::new();
+    let version_url = format!("{base_url}/json/version");
+    let version_result = async {
+        let response = client
+            .get(&version_url)
+            .send()
+            .await
+            .context("连接远程 Chromium 失败")?;
+        if !response.status().is_success() {
+            return Err(anyhow!("远程 Chromium {version_url} 返回 HTTP {}", response.status()).into());
+        }
+        let json: serde_json::Value = response.json().await.context("解析 /json/version 失败")?;
+        let browser = json
+            .get("Browser")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("未知版本")
+            .to_string();
+        // 再验证实际使用的标签页创建能力（浏览器会话模拟的第一步）
+        let new_url = format!("{base_url}/json/new?about:blank");
+        let mut created: Option<serde_json::Value> = None;
+        for method in ["PUT", "GET"] {
+            let resp = if method == "PUT" {
+                client.put(&new_url).send().await
+            } else {
+                client.get(&new_url).send().await
+            };
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    created = Some(r.json().await.context("解析 /json/new 失败")?);
+                    break;
+                }
+                Ok(r) => continue,
+                Err(_) => continue,
+            }
+        }
+        let target = created.ok_or_else(|| anyhow!("远程 Chromium 无法创建标签页：{base_url}"))?;
+        let target_id = target.get("id").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        let _ws = target.get("webSocketDebuggerUrl").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        if target_id.is_empty() {
+            return Err(anyhow!("远程 Chromium /json/new 未返回有效标签页：{target}").into());
+        }
+        // 尽力关闭测试标签页
+        let _ = client
+            .get(format!("{base_url}/json/close/{target_id}"))
+            .send()
+            .await;
+        Ok::<String, anyhow::Error>(browser)
+    }
+    .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match version_result {
+        Ok(browser) => Ok(ApiResponse::ok(crate::api::response::TestTikTokBrowserResponse {
+            success: true,
+            latency_ms,
+            browser: Some(browser),
+            error: None,
+        })),
+        Err(error) => Ok(ApiResponse::ok(crate::api::response::TestTikTokBrowserResponse {
+            success: false,
+            latency_ms,
+            browser: None,
+            error: Some(format!("{error:#}")),
+        })),
     }
 }
 

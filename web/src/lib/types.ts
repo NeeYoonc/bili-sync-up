@@ -541,6 +541,7 @@ export interface ConfigResponse {
 	split_chapters_after_download?: boolean;
 	proxy?: string;
 	youtube_proxy?: string;
+	tiktok_browser_cdp_url?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;
@@ -726,6 +727,7 @@ export interface UpdateConfigRequest {
 	split_chapters_after_download?: boolean;
 	proxy?: string;
 	youtube_proxy?: string;
+	tiktok_browser_cdp_url?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;
@@ -1430,5 +1432,13 @@ export interface TestProxyResponse {
 	success: boolean;
 	latency_ms: number;
 	status?: number | null;
+	error?: string | null;
+}
+
+// TikTok 远程 Chromium CDP 连通性测试结果
+export interface TestTikTokBrowserResponse {
+	success: boolean;
+	latency_ms: number;
+	browser?: string | null;
 	error?: string | null;
 }

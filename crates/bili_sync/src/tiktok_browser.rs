@@ -19,6 +19,8 @@
 //!   5. 页面内 fetch /api/favorite/item_list/（我的喜欢）。
 
 use std::collections::HashMap;
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -162,10 +164,109 @@ fn temp_profile_dir() -> PathBuf {
     std::env::temp_dir().join(format!("bili-sync-tiktok-{}-{nonce}", std::process::id()))
 }
 
-/// 启动 Chrome 并等待 DevTools 端口就绪，返回 (进程句柄, ws 地址, profile 目录)。
-async fn launch_chrome() -> Result<(Child, String, PathBuf)> {
+/// 远程 Chromium CDP 地址（如 http://127.0.0.1:9222，来自配置 tiktok_browser_cdp_url）。
+fn remote_cdp_url() -> Option<String> {
+    let url = crate::config::with_config(|bundle| bundle.config.tiktok_browser_cdp_url.trim().to_string());
+    if url.is_empty() { None } else { Some(url) }
+}
+
+/// 浏览器会话句柄：本机临时 Chrome 或远程 Chromium 标签页。
+enum BrowserSession {
+    Local { child: Child, profile: PathBuf },
+    Remote { base_url: String, target_id: String },
+}
+
+/// 规范化 CDP 地址：补全 http:// 前缀并去掉末尾斜杠（供测试 API 复用）。
+pub fn normalize_cdp_base_for_api(raw: &str) -> Result<String> {
+    normalize_cdp_base(raw)
+}
+
+/// 规范化 CDP 地址：补全 http:// 前缀并去掉末尾斜杠。
+fn normalize_cdp_base(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    let with_scheme = if raw.contains("://") { raw.to_string() } else { format!("http://{raw}") };
+    let parsed = reqwest::Url::parse(&with_scheme)
+        .with_context(|| format!("TikTok 远程 Chromium CDP 地址无效：{raw}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        bail!("TikTok 远程 Chromium CDP 地址无效，请使用 http://host:port 形式：{raw}");
+    }
+    Ok(with_scheme.trim_end_matches('/').to_string())
+}
+
+/// 连接远程 Chromium（linuxserver/chromium 等容器开启 --remote-debugging-port）：
+/// 创建新标签页并返回 (会话句柄, ws 地址)。
+async fn connect_remote_chrome(base_url: &str) -> Result<(BrowserSession, String)> {
+    let client = reqwest::Client::new();
+    let version_url = format!("{base_url}/json/version");
+    let version_resp = client
+        .get(&version_url)
+        .send()
+        .await
+        .with_context(|| format!("连接远程 Chromium 失败：{version_url}"))?;
+    if !version_resp.status().is_success() {
+        bail!("远程 Chromium {version_url} 返回 HTTP {}", version_resp.status());
+    }
+    let version_json: Value = version_resp
+        .json()
+        .await
+        .context("解析远程 Chromium /json/version 失败")?;
+    let browser_name = version_json
+        .get("Browser")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    info!(browser = browser_name, "TikTok 浏览器模拟：远程 Chromium 已连接");
+    // 创建新标签页（新版 Chromium 要求 PUT；旧版允许 GET，失败回退）
+    let new_url = format!("{base_url}/json/new?about:blank");
+    let mut created: Option<Value> = None;
+    for method in ["PUT", "GET"] {
+        let resp = if method == "PUT" {
+            client.put(&new_url).send().await
+        } else {
+            client.get(&new_url).send().await
+        };
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                created = Some(r.json().await.context("解析远程 Chromium /json/new 失败")?);
+                break;
+            }
+            Ok(r) => warn!(method, status = %r.status(), "远程 Chromium /json/new 未成功，尝试下一种方式"),
+            Err(e) => warn!(method, error = %e, "远程 Chromium /json/new 请求失败，尝试下一种方式"),
+        }
+    }
+    let target = created.ok_or_else(|| anyhow!("远程 Chromium 无法创建标签页：{base_url}"))?;
+    let target_id = target.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let ws_url = target.get("webSocketDebuggerUrl").and_then(Value::as_str).unwrap_or("").to_string();
+    if target_id.is_empty() || ws_url.is_empty() {
+        bail!("远程 Chromium /json/new 未返回有效标签页：{target}");
+    }
+    info!(ws_url = %ws_url, "TikTok 浏览器模拟：远程 Chromium 标签页已就绪");
+    Ok((BrowserSession::Remote { base_url: base_url.to_string(), target_id }, ws_url))
+}
+
+/// 启动浏览器并等待 DevTools 就绪，返回 (会话句柄, ws 地址)。
+/// 配置了远程 Chromium CDP 地址时优先使用远程（Docker/群晖无 Chrome 环境），
+/// 连接失败或未配置时回退本机 Chrome。
+async fn open_browser() -> Result<(BrowserSession, String)> {
+    if let Some(base_url) = remote_cdp_url() {
+        let base_url = match normalize_cdp_base(&base_url) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "TikTok 远程 Chromium CDP 配置无效，回退本机 Chrome");
+                return launch_local_chrome().await;
+            }
+        };
+        match connect_remote_chrome(&base_url).await {
+            Ok(session) => return Ok(session),
+            Err(e) => warn!(error = %e, "TikTok 远程 Chromium 连接失败，回退本机 Chrome"),
+        }
+    }
+    launch_local_chrome().await
+}
+
+/// 启动本机临时 Chrome 并等待 DevTools 端口就绪，返回 (会话句柄, ws 地址)。
+async fn launch_local_chrome() -> Result<(BrowserSession, String)> {
     let chrome = find_chrome()
-        .ok_or_else(|| anyhow!("未找到 Chrome，请安装 Chrome 后重试（TikTok 浏览器会话需要真实 Chrome）"))?;
+        .ok_or_else(|| anyhow!("未找到 Chrome，请安装 Chrome 或配置 TikTok 远程 Chromium CDP 地址后重试（TikTok 浏览器会话需要真实 Chromium）"))?;
     let port = pick_free_port();
     let profile = temp_profile_dir();
     info!(chrome = %chrome.display(), port, "TikTok 浏览器模拟：启动 Chrome");
@@ -205,7 +306,7 @@ async fn launch_chrome() -> Result<(Child, String, PathBuf)> {
                         if page.get("type").and_then(Value::as_str) == Some("page") {
                             if let Some(ws) = page.get("webSocketDebuggerUrl").and_then(Value::as_str) {
                                 info!(ws_url = %ws, "TikTok 浏览器模拟：DevTools 已就绪");
-                                return Ok((child, ws.to_string(), profile));
+                                return Ok((BrowserSession::Local { child, profile }, ws.to_string()));
                             }
                         }
                     }
@@ -217,6 +318,20 @@ async fn launch_chrome() -> Result<(Child, String, PathBuf)> {
     // 失败清理
     let _ = std::fs::remove_dir_all(&profile);
     Err(anyhow!("Chrome DevTools 端口未就绪"))
+}
+
+/// 关闭远程 Chromium 标签页（尽力而为，阻塞式 GET，失败忽略）。
+fn close_remote_target(base_url: &str, target_id: &str) {
+    let Ok(url) = reqwest::Url::parse(base_url) else { return };
+    let Some(host) = url.host_str().map(str::to_string) else { return };
+    let port = url.port().unwrap_or(80);
+    let path = format!("/json/close/{target_id}");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    if let Ok(mut stream) = TcpStream::connect((host.as_str(), port)) {
+        let _ = stream.write_all(request.as_bytes());
+        let mut buf = [0u8; 128];
+        let _ = stream.read(&mut buf);
+    }
 }
 
 /// 终止 Chrome 进程（Windows 用 taskkill 递归，其他平台直接 kill）。
@@ -451,9 +566,9 @@ pub async fn fetch_tiktok_browser_data(limit: usize) -> Result<TikTokBrowserResu
     let localstorage = read_localstorage()?;
 
     let result = tokio::time::timeout(BROWSER_OP_TIMEOUT, async {
-        let (child, ws_url, profile) = launch_chrome().await?;
-        let _guard = ChromeGuard { child: Some(child), profile: Some(profile.clone()) };
-        let (cdp, mut events) = Cdp::connect(&ws_url).await?;
+        let (session, ws_url) = open_browser().await?;
+        let _guard = ChromeGuard { session: Some(session) };
+        let (cdp, events) = Cdp::connect(&ws_url).await?;
         cdp.cmd("Runtime.enable", json!({})).await?;
         cdp.cmd("Page.enable", json!({})).await?;
         cdp.cmd("Network.enable", json!({})).await?;
@@ -553,19 +668,24 @@ pub async fn fetch_tiktok_browser_data(limit: usize) -> Result<TikTokBrowserResu
     }
 }
 
-/// Chrome 进程与临时目录守卫（作用域退出时清理）。
+/// 浏览器会话守卫（作用域退出时清理）：本机 Chrome 终止进程并删除临时 profile；
+/// 远程 Chromium 关闭创建的标签页。
 struct ChromeGuard {
-    child: Option<Child>,
-    profile: Option<PathBuf>,
+    session: Option<BrowserSession>,
 }
 
 impl Drop for ChromeGuard {
     fn drop(&mut self) {
-        if let Some(child) = self.child.take() {
-            kill_chrome(child);
-        }
-        if let Some(profile) = self.profile.take() {
-            let _ = std::fs::remove_dir_all(profile);
+        if let Some(session) = self.session.take() {
+            match session {
+                BrowserSession::Local { child, profile } => {
+                    kill_chrome(child);
+                    let _ = std::fs::remove_dir_all(profile);
+                }
+                BrowserSession::Remote { base_url, target_id } => {
+                    close_remote_target(&base_url, &target_id);
+                }
+            }
         }
     }
 }

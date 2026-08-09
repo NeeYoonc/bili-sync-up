@@ -1,3 +1,20 @@
+# 可选：TikTok「我的喜欢/关注列表」浏览器会话模拟用的远程 Chromium（Docker/群晖无本机 Chrome 时使用）。
+# 启动后在 设置 → TikTok 登录状态 → 远程 Chromium 浏览器模拟 填入 http://<本机IP>:9222 并保存。
+# chromium:
+#   image: lscr.io/linuxserver/chromium:latest
+#   container_name: chromium
+#   environment:
+#     - PUID=1000
+#     - PGID=1000
+#     - TZ=Asia/Shanghai
+#     - CHROME_CLI=--remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 --remote-allow-origins=*
+#   ports:
+#     - "9222:9222"
+#   volumes:
+#     - ./config/chromium:/config
+#   shm_size: "1gb"
+#   restart: unless-stopped
+
 services:
   bili-sync:
     # image: bili-sync:latest

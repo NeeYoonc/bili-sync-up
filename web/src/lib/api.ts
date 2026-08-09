@@ -60,6 +60,8 @@ import type {
 	DouyinStatusResponse,
 	TikTokSecUidStatusResponse,
 	TikTokStatusResponse,
+	TestProxyResponse,
+	TestTikTokBrowserResponse,
 	YouTubeSearchRequest,
 	YouTubeSearchResponse,
 	YouTubeSourceVideosRequest,
@@ -1390,6 +1392,16 @@ class ApiClient {
 	async testProxy(proxy?: string): Promise<ApiResponse<TestProxyResponse>> {
 		return this.post<TestProxyResponse>('/proxy/test', proxy !== undefined ? { proxy } : {});
 	}
+
+	/**
+	 * 测试 TikTok 远程 Chromium CDP 连接
+	 */
+	async testTikTokBrowser(cdpUrl?: string): Promise<ApiResponse<TestTikTokBrowserResponse>> {
+		return this.post<TestTikTokBrowserResponse>(
+			'/tiktok/browser/test',
+			cdpUrl !== undefined ? { cdp_url: cdpUrl } : {}
+		);
+	}
 }
 
 // 创建默认的 API 客户端实例
@@ -1534,6 +1546,8 @@ export const api = {
 		apiClient.getYouTubeSourceVideos(params),
 	searchDouyin: (keyword: string) => apiClient.searchDouyin(keyword),
 	getTikTokStatus: () => apiClient.getTikTokStatus(),
+	getTikTokSecUid: () => apiClient.getTikTokSecUid(),
+	setTikTokSecUid: (secUid: string) => apiClient.setTikTokSecUid(secUid),
 	importTikTokCookies: (cookies: string) => apiClient.importTikTokCookies(cookies),
 	getTikTokSourceVideos: (params: {
 		url?: string;
@@ -1889,6 +1903,7 @@ export const api = {
 		webhook_synology_chat_template?: string;
 	}) => apiClient.testNotification(params),
 	testProxy: (proxy?: string) => apiClient.testProxy(proxy),
+	testTikTokBrowser: (cdpUrl?: string) => apiClient.testTikTokBrowser(cdpUrl),
 
 	/**
 	 * 订阅系统信息WebSocket事件

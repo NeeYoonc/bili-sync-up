@@ -172,7 +172,7 @@
 		youtube_login: '通过电脑端登录助手或 cookies.txt 管理 yt-dlp 使用的 YouTube 登录状态。',
 		network_proxy: '外源网络代理：YouTube 与 TikTok 的搜索、扫描、直链解析和下载共用；B站与抖音不受影响。',
 		douyin_login: '通过同一个电脑端登录助手或 cookies.txt 管理抖音作者作品扫描和下载所需的 Cookie。',
-		tiktok_login: '管理 TikTok 作者扫描所用的 cookies.txt；TikTok 公开作者主页无需登录即可同步，导入后 yt-dlp 可访问需要登录的私密/受限内容。',
+		tiktok_login: '管理 TikTok 作者扫描所用的 cookies.txt；TikTok 公开作者主页无需登录即可同步，导入后 yt-dlp 可访问需要登录的私密/受限内容。也可配置远程 Chromium CDP 地址，用于无本机 Chrome 的 Docker/群晖环境下的我的喜欢/关注列表模拟。',
 		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
 		captcha: '设置遇到验证码风控时的处理模式、超时和自动识别参数。',
 		aria2: '配置外部 Aria2 的健康检查、自动重启和监控策略。',
@@ -384,6 +384,14 @@
 	let enableAria2AutoRestart = false;
 	let aria2HealthCheckInterval = 300;
 	let networkProxy = '';
+	let tiktokBrowserCdpUrl = '';
+	let tiktokBrowserTesting = false;
+	let tiktokBrowserTestResult: {
+		success: boolean;
+		latency_ms: number;
+		browser?: string | null;
+		error?: string | null;
+	} | null = null;
 	let proxyTesting = false;
 	let proxyTestResult: {
 		success: boolean;
@@ -774,6 +782,7 @@
 		enableAria2AutoRestart = config.enable_aria2_auto_restart ?? false;
 		aria2HealthCheckInterval = config.aria2_health_check_interval ?? 300;
 		networkProxy = config.proxy ?? config.youtube_proxy ?? '';
+		tiktokBrowserCdpUrl = config.tiktok_browser_cdp_url ?? '';
 
 		// 多P视频目录结构配置
 		multiPageUseSeasonStructure = config.multi_page_use_season_structure ?? false;
@@ -1042,6 +1051,26 @@
 		multiPageNameHasPath = hasPathSeparator(multiPageName);
 	}
 
+	async function handleTestTikTokBrowser() {
+		tiktokBrowserTesting = true;
+		tiktokBrowserTestResult = null;
+		try {
+			const cdpUrl = tiktokBrowserCdpUrl.trim();
+			const response = await runRequest(() => api.testTikTokBrowser(cdpUrl || undefined), {
+				context: '测试 TikTok 远程 Chromium 失败'
+			});
+			tiktokBrowserTestResult = response?.data ?? null;
+		} catch {
+			tiktokBrowserTestResult = {
+				success: false,
+				latency_ms: 0,
+				browser: null,
+				error: '测试请求失败'
+			};
+		} finally {
+			tiktokBrowserTesting = false;
+		}
+	}
 	async function handleTestProxy() {
 		proxyTesting = true;
 		proxyTestResult = null;
@@ -1271,6 +1300,7 @@
 			),
 			audio_only_use_low_qn_for_playurl: audioOnlyUseLowQnForPlayurl,
 			proxy: networkProxy.trim(),
+			tiktok_browser_cdp_url: tiktokBrowserCdpUrl.trim(),
 			// aria2监控配置
 			enable_aria2_health_check: enableAria2HealthCheck,
 			enable_aria2_auto_restart: enableAria2AutoRestart,
@@ -3246,6 +3276,46 @@
 		<TikTokLoginPanel />
 		<div class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200">
 			TikTok 作者主页公开内容无需登录即可同步；导入登录状态后，作者扫描会携带该 Cookie，可访问需要登录才可见的私密/受限内容，且不会与 YouTube、抖音的 Cookie 混用。
+		</div>
+		<div class="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+			<p class="font-medium">远程 Chromium 浏览器模拟（Docker / 群晖无本机 Chrome 时使用）</p>
+			<p class="mt-1 text-xs">
+				我的喜欢/关注列表依赖真实浏览器会话（webmssdk msToken）。在群晖等 Docker 环境可通过
+				<code class="rounded bg-black/10 px-1 font-mono dark:bg-white/10">linuxserver/chromium</code>
+				容器开启远程调试，然后把地址填到下方，服务端将连接远程 Chromium 代替本机 Chrome；留空则使用本机 Chrome。
+			</p>
+			<div class="mt-2 flex flex-wrap items-center gap-2">
+				<input
+					class="border-input bg-background min-w-0 flex-1 rounded-md border px-3 py-2 font-mono text-xs"
+					placeholder="http://192.168.1.100:9222"
+					bind:value={tiktokBrowserCdpUrl}
+					autocomplete="off"
+				/>
+				<Button type="button" size="sm" variant="default" onclick={saveConfig} disabled={saving}>
+					{saving ? '保存中...' : '保存远程浏览器地址'}
+				</Button>
+			</div>
+			<div class="mt-2 flex flex-wrap items-center gap-2">
+				<Button type="button" size="sm" variant="outline" disabled={tiktokBrowserTesting} onclick={handleTestTikTokBrowser}>
+					{tiktokBrowserTesting ? '测试中...' : '测试远程浏览器连接'}
+				</Button>
+				{#if tiktokBrowserTestResult}
+					{#if tiktokBrowserTestResult.success}
+						<span class="text-sm text-green-600 dark:text-green-400">
+							✓ 远程 Chromium 连接正常，耗时 {tiktokBrowserTestResult.latency_ms} ms{tiktokBrowserTestResult.browser
+								? `（${tiktokBrowserTestResult.browser}）`
+								: ''}
+						</span>
+					{:else}
+						<span class="text-sm text-red-600 dark:text-red-400">
+							✗ 远程 Chromium 连接失败{tiktokBrowserTestResult.error ? `：${tiktokBrowserTestResult.error}` : ''}
+						</span>
+					{/if}
+				{/if}
+			</div>
+			<code class="mt-2 block break-all rounded bg-black/10 p-2 font-mono text-xs dark:bg-white/10">
+				docker run -d --name chromium --restart unless-stopped -e CHROME_CLI="--remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 --remote-allow-origins=*" -p 9222:9222 lscr.io/linuxserver/chromium:latest
+			</code>
 		</div>
 	</div>
 </ResponsiveSheet>

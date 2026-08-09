@@ -51,6 +51,8 @@ export default defineConfig({
 					{ text: "配置说明", link: "/configuration" },
 					{ text: "视频源管理", link: "/video-source-management" },
 					{ text: "任务队列", link: "/QUEUE_FEATURE_SUMMARY" },
+					{ text: "YouTube 登录状态", link: "/youtube-login" },
+					{ text: "TikTok 登录状态", link: "/tiktok-login" },
 					{ text: "常见问题", link: "/faq" },
 				],
 			},

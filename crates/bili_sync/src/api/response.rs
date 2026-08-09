@@ -595,6 +595,8 @@ pub struct ConfigResponse {
     pub proxy: String,
     // 兼容旧配置：旧版仅 YouTube 使用的代理字段
     pub youtube_proxy: String,
+    // TikTok 浏览器会话模拟：远程 Chromium CDP 地址（如 http://127.0.0.1:9222），留空回退本机 Chrome
+    pub tiktok_browser_cdp_url: String,
     // B站凭证信息
     pub credential: Option<CredentialInfo>,
     // 推送通知配置
@@ -1289,6 +1291,19 @@ pub struct TestProxyResponse {
     pub latency_ms: u64,
     /// 目标站点返回的 HTTP 状态码（成功时）
     pub status: Option<u16>,
+    /// 失败原因
+    pub error: Option<String>,
+}
+
+/// TikTok 远程 Chromium CDP 连通性测试结果。
+#[derive(Serialize, ToSchema)]
+pub struct TestTikTokBrowserResponse {
+    /// 是否成功连接远程 Chromium 并创建标签页
+    pub success: bool,
+    /// 测试耗时（毫秒）
+    pub latency_ms: u64,
+    /// 远程 Chromium 版本（成功时）
+    pub browser: Option<String>,
     /// 失败原因
     pub error: Option<String>,
 }
