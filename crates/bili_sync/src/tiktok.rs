@@ -105,6 +105,26 @@ pub struct TikTokStatusResponse {
     pub browser_session_at: Option<String>,
 }
 
+/// 手动设置的 TikTok 账号 secUid 状态。
+#[derive(Debug, Serialize)]
+pub struct TikTokSecUidStatusResponse {
+    /// 手动填写并保存的账号 secUid；未设置时为 None。
+    pub manual_sec_uid: Option<String>,
+}
+
+/// 保存/清空手动 TikTok 账号 secUid 请求。
+#[derive(Debug, Deserialize)]
+pub struct UpdateTikTokSecUidRequest {
+    pub sec_uid: String,
+}
+
+/// 保存/清空手动 TikTok 账号 secUid 响应。
+#[derive(Debug, Serialize)]
+pub struct UpdateTikTokSecUidResponse {
+    pub success: bool,
+    pub message: String,
+}
+
 /// 搜索 TikTok 作者。
 ///
 /// TikTok 官方搜索接口（/api/search/user/full/）受 Akamai TLS 指纹和
@@ -408,9 +428,16 @@ pub async fn import_tiktok_cookie_file(
     if crate::tiktok_browser::has_tiktok_browser_session() {
         message.push_str("；已同步浏览器会话（localStorage），我的喜欢/关注列表将使用浏览器会话模拟");
     }
-    match tiktok_login_sec_uid().await {
-        Ok(sec_uid) => {
-            message.push_str(&format!("；登录态已验证 ✓（账号 secUid {}）", short_sec_uid(&sec_uid)));
+    match tiktok_login_sec_uid_with_source().await {
+        Ok((sec_uid, manual)) => {
+            if manual {
+                message.push_str(&format!(
+                    "；TikTok 服务端验证失败，已采用手动设置的账号 secUid {}（该值需与当前 Cookie 账号一致）",
+                    short_sec_uid(&sec_uid)
+                ));
+            } else {
+                message.push_str(&format!("；登录态已验证 ✓（账号 secUid {}）", short_sec_uid(&sec_uid)));
+            }
         }
         Err(error) => {
             message.push_str(&format!("；⚠ 登录态未通过 TikTok 服务端验证：{error}"));
@@ -670,18 +697,92 @@ fn tiktok_login_verify_fp() -> Option<String> {
         .cloned()
 }
 
+/// 手动设置的 TikTok 账号 secUid 文件路径（浏览器控制台执行 common-app-context 取得）。
+pub fn tiktok_secuid_path() -> PathBuf {
+    CONFIG_DIR.join("tiktok-secuid.txt")
+}
+
+/// 读取手动设置的账号 secUid。格式校验：URL 安全字符串且长度足够，
+/// 避免把明显无效的输入当作有效凭证。
+fn load_manual_tiktok_secuid() -> Option<String> {
+    let value = std::fs::read_to_string(tiktok_secuid_path()).ok()?;
+    let value = value.trim().to_string();
+    if value.len() >= 16
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn valid_manual_tiktok_secuid(value: &str) -> bool {
+    value.len() >= 16
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+/// 保存/清空手动 TikTok 账号 secUid（空值清空文件）。
+pub async fn save_tiktok_manual_secuid(value: &str) -> Result<()> {
+    let path = tiktok_secuid_path();
+    let value = value.trim();
+    if value.is_empty() {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Ok(());
+    }
+    tokio::fs::write(&path, format!("{value}\n"))
+        .await
+        .with_context(|| format!("写入 TikTok 手动 secUid 失败: {}", path.display()))?;
+    Ok(())
+}
+
+/// 当前手动 secUid 设置状态。
+pub async fn tiktok_secuid_status() -> Result<ApiResponse<TikTokSecUidStatusResponse>, ApiError> {
+    Ok(ApiResponse::ok(TikTokSecUidStatusResponse {
+        manual_sec_uid: load_manual_tiktok_secuid(),
+    }))
+}
+
+/// 保存/清空手动 TikTok 账号 secUid，并重置进程内 secUid 缓存。
+pub async fn update_tiktok_secuid(
+    Json(request): Json<UpdateTikTokSecUidRequest>,
+) -> Result<ApiResponse<UpdateTikTokSecUidResponse>, ApiError> {
+    let value = request.sec_uid.trim();
+    if !value.is_empty() && !valid_manual_tiktok_secuid(value) {
+        return Err(ApiError::from(anyhow!(
+            "secUid 格式无效：应为字母/数字/`-`/`_` 组成的至少 16 位字符串（形如 MS4wLjABAAAA...）"
+        )));
+    }
+    save_tiktok_manual_secuid(value).await?;
+    if let Some(cached) = TIKTOK_LOGIN_SEC_UID.get() {
+        *cached.lock().await = None;
+    }
+    Ok(ApiResponse::ok(UpdateTikTokSecUidResponse {
+        success: true,
+        message: if value.is_empty() {
+            "已清除手动 TikTok secUid".to_string()
+        } else {
+            format!("已保存手动 TikTok secUid（{}）", short_sec_uid(value))
+        },
+    }))
+}
+
 /// 获取当前登录 TikTok 账号的 secUid（我的喜欢/收藏夹接口的必需参数）。
 ///
 /// 依次尝试两个官方接口（都不需要签名参数）：
 ///  1. `node-webapp/api/common-app-context?lang=zh-Hans` -> `user.secUid`
 ///  2. `passport/web/account/info/?aid=1459&app_language=zh&app_name=tiktok_web` -> `data.sec_user_id`
-/// 结果按账号 cookie 做进程内缓存。
+/// 官方接口失败（常见于服务端出口被 TikTok 风控）时回退到手动设置的文件
+/// `tiktok-secuid.txt`，并返回是否使用了手动值。结果按账号 cookie 做进程内缓存。
 static TIKTOK_LOGIN_SEC_UID: OnceLock<tokio::sync::Mutex<Option<String>>> = OnceLock::new();
 
-async fn tiktok_login_sec_uid() -> Result<String> {
+async fn tiktok_login_sec_uid_with_source() -> Result<(String, bool)> {
     let cached = TIKTOK_LOGIN_SEC_UID.get_or_init(|| tokio::sync::Mutex::new(None));
     if let Some(sec_uid) = cached.lock().await.clone() {
-        return Ok(sec_uid);
+        return Ok((sec_uid, false));
     }
     let cookie = tiktok_cookie_header()?;
     let client = tiktok_web_client().await?;
@@ -731,12 +832,27 @@ async fn tiktok_login_sec_uid() -> Result<String> {
     match sec_uid {
         Some(sec_uid) => {
             *cached.lock().await = Some(sec_uid.clone());
-            Ok(sec_uid)
+            Ok((sec_uid, false))
         }
-        None => bail!(
-            "无法获取当前 TikTok 账号 secUid（登录态可能已失效）：请确认已导入最新 cookies.txt 后重试"
-        ),
+        None => {
+            if let Some(manual) = load_manual_tiktok_secuid() {
+                warn!(
+                    "TikTok 服务端验证失败，使用手动设置的账号 secUid（{}）",
+                    short_sec_uid(&manual)
+                );
+                *cached.lock().await = Some(manual.clone());
+                Ok((manual, true))
+            } else {
+                bail!(
+                    "无法获取当前 TikTok 账号 secUid（登录态可能已失效）：请确认已导入最新 cookies.txt 后重试；或在设置页手动填写账号 secUid"
+                )
+            }
+        }
     }
+}
+
+async fn tiktok_login_sec_uid() -> Result<String> {
+    Ok(tiktok_login_sec_uid_with_source().await?.0)
 }
 
 /// 导入的 cookies.txt 是否包含完整登录会话（而非仅游客 ttwid）。

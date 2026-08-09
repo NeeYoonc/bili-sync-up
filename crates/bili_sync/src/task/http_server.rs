@@ -117,7 +117,8 @@ use crate::tiktok::{
     create_tiktok_source, delete_tiktok_source, get_tiktok_followings, get_tiktok_playlists,
     get_tiktok_source_videos,
     get_tiktok_sources, import_tiktok_cookie_file, reset_tiktok_source_path, search_tiktok,
-    tiktok_status, update_tiktok_source, update_tiktok_source_enabled,
+    tiktok_secuid_status, tiktok_status, update_tiktok_secuid, update_tiktok_source,
+    update_tiktok_source_enabled,
 };
 use crate::youtube::{
     create_douyin_source, create_youtube_source_checked, delete_douyin_source, delete_youtube_source_checked,
@@ -328,6 +329,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/tiktok/playlists", get(get_tiktok_playlists))
         .route("/api/tiktok/followings", get(get_tiktok_followings))
         .route("/api/tiktok/cookies", post(import_tiktok_cookie_file))
+        .route("/api/tiktok/secuid", get(tiktok_secuid_status).put(update_tiktok_secuid))
         .route("/api/tiktok/search", get(search_tiktok))
         .route("/api/tiktok/sources", get(get_tiktok_sources).post(create_tiktok_source))
         .route(

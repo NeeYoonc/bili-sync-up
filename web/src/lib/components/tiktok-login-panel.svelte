@@ -22,6 +22,43 @@
 	let importing = false;
 	let collapsed = false;
 
+	let manualSecUid = '';
+	let manualSecUidLoaded = false;
+	let savingSecUid = false;
+
+	async function loadManualSecUid() {
+		try {
+			const data = (await api.getTikTokSecUid()).data;
+			manualSecUid = data.manual_sec_uid ?? '';
+		} catch (error) {
+			toast.error('加载手动 secUid 失败', {
+				description: error instanceof Error ? error.message : String(error)
+			});
+		} finally {
+			manualSecUidLoaded = true;
+		}
+	}
+
+	async function saveManualSecUid() {
+		savingSecUid = true;
+		try {
+			const result = (await api.setTikTokSecUid(manualSecUid.trim())).data;
+			toast.success(result.message);
+			await loadManualSecUid();
+		} catch (error) {
+			toast.error('保存手动 secUid 失败', {
+				description: error instanceof Error ? error.message : String(error)
+			});
+		} finally {
+			savingSecUid = false;
+		}
+	}
+
+	async function clearManualSecUid() {
+		manualSecUid = '';
+		await saveManualSecUid();
+	}
+
 	async function refresh() {
 		loading = true;
 		try {
@@ -53,7 +90,10 @@
 		}
 	}
 
-	onMount(refresh);
+	onMount(() => {
+		refresh();
+		loadManualSecUid();
+	});
 </script>
 
 <Card>
@@ -116,6 +156,36 @@
 					Chrome 会话模拟实时获取；未同步时仅支持作者主页公开内容同步。Cookie 保存位置：
 					<code class="break-all">{status?.cookie_path ?? '加载中…'}</code>
 				</p>
+
+				<div class="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+					<p class="font-medium">手动设置账号 secUid（服务端无法验证登录态时使用）</p>
+					<p class="mt-1 text-xs">
+						当服务端请求被 TikTok 风控、导入时提示“无法获取当前 TikTok 账号 secUid”时，可在已登录 TikTok 的浏览器控制台
+						（F12 → Console）执行以下命令取得 secUid，然后粘贴到下方保存：
+					</p>
+					<code class="mt-1 block break-all rounded bg-black/10 p-2 font-mono text-xs dark:bg-white/10">
+						fetch('https://www.tiktok.com/node-webapp/api/common-app-context?lang=zh-Hans').then(r=&gt;r.json()).then(d=&gt;console.log('secUid:', d.user?.secUid ?? '无'))
+					</code>
+					<div class="mt-2 flex flex-wrap items-center gap-2">
+						<input
+							class="border-input bg-background min-w-0 flex-1 rounded-md border px-3 py-2 font-mono text-xs"
+							placeholder="MS4wLjABAAAA..."
+							bind:value={manualSecUid}
+							disabled={savingSecUid}
+						/>
+						<Button size="sm" variant="default" onclick={saveManualSecUid} disabled={savingSecUid || !manualSecUidLoaded}>
+							{savingSecUid ? '保存中...' : '保存'}
+						</Button>
+						{#if manualSecUid}
+							<Button size="sm" variant="outline" onclick={clearManualSecUid} disabled={savingSecUid}>
+								清除
+							</Button>
+						{/if}
+					</div>
+					{#if manualSecUid}
+						<p class="mt-2 text-xs">已保存手动 secUid：导入 cookies 或使用“我的喜欢/关注列表”时，服务端自动获取失败会回退使用该值。</p>
+					{/if}
+				</div>
 			</div>
 		</CardContent>
 	{/if}

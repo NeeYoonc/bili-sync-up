@@ -128,6 +128,11 @@ export interface TikTokStatusResponse {
 	browser_session_at?: string;
 }
 
+export interface TikTokSecUidStatusResponse {
+	/** 手动设置并保存的账号 secUid；未设置时为 null */
+	manual_sec_uid: string | null;
+}
+
 export interface YouTubeSearchRequest {
 	keyword: string;
 	source_type: 'channel' | 'playlist';

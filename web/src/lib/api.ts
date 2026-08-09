@@ -58,6 +58,7 @@ import type {
 	YouTubeLoginResponse,
 	YouTubeStatusResponse,
 	DouyinStatusResponse,
+	TikTokSecUidStatusResponse,
 	TikTokStatusResponse,
 	YouTubeSearchRequest,
 	YouTubeSearchResponse,
@@ -318,6 +319,12 @@ class ApiClient {
 		localStorage?: Record<string, string>
 	): Promise<ApiResponse<YouTubeLoginResponse>> {
 		return this.post<YouTubeLoginResponse>('/tiktok/cookies', { cookies, local_storage: localStorage });
+	}
+	async getTikTokSecUid(): Promise<ApiResponse<TikTokSecUidStatusResponse>> {
+		return this.get<TikTokSecUidStatusResponse>('/tiktok/secuid');
+	}
+	async setTikTokSecUid(secUid: string): Promise<ApiResponse<{ success: boolean; message: string }>> {
+		return this.put<{ success: boolean; message: string }>('/tiktok/secuid', { sec_uid: secUid });
 	}
 	async getTikTokSourceVideos(params: {
 		url?: string;
