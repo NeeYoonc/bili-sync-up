@@ -1055,6 +1055,30 @@ impl Aria2Downloader {
             .await
     }
 
+    /// 同时应用平台 Referer、网页会话 Cookie 与本任务代理下载媒体（TikTok 等）。
+    pub async fn fetch_with_aria2_fallback_with_referer_and_cookie_and_proxy(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: &str,
+        cookie: &str,
+        proxy: &str,
+    ) -> Result<()> {
+        let proxy = proxy.trim();
+        if proxy.is_empty() {
+            return self
+                .fetch_with_aria2_fallback_with_referer_and_cookie(urls, path, referer, cookie)
+                .await;
+        }
+        let (referer_arg, cookie_arg) = if cookie.trim().is_empty() {
+            (Some(referer), None)
+        } else {
+            (Some(referer), Some(cookie))
+        };
+        self.fetch_with_aria2_fallback_and_optional_headers(urls, path, referer_arg, cookie_arg, Some(proxy))
+            .await
+    }
+
     async fn fetch_with_aria2_fallback_and_optional_headers(
         &self,
         urls: &[&str],

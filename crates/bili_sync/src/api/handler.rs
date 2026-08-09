@@ -4137,7 +4137,7 @@ pub async fn reset_all_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<crate::api::request::VideosRequest>,
 ) -> Result<ApiResponse<ResetAllVideosResponse>, ApiError> {
-    if matches!(params.platform.as_deref(), Some("youtube" | "douyin")) {
+    if matches!(params.platform.as_deref(), Some("youtube" | "douyin" | "tiktok")) {
         return Ok(ApiResponse::ok(
             crate::youtube::reset_all_unified_youtube_videos(db.as_ref(), &params).await?,
         ));
@@ -4406,7 +4406,7 @@ pub async fn reset_specific_tasks(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     axum::Json(request): axum::Json<crate::api::request::ResetSpecificTasksRequest>,
 ) -> Result<ApiResponse<ResetAllVideosResponse>, ApiError> {
-    if matches!(request.platform.as_deref(), Some("youtube" | "douyin")) {
+    if matches!(request.platform.as_deref(), Some("youtube" | "douyin" | "tiktok")) {
         return Ok(ApiResponse::ok(
             crate::youtube::reset_specific_unified_youtube_tasks(db.as_ref(), &request).await?,
         ));
@@ -10793,6 +10793,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         // ffmpeg 路径
         ffmpeg_path: config.ffmpeg_path.clone(),
         split_chapters_after_download: config.split_chapters_after_download,
+        proxy: config.proxy.clone(),
         youtube_proxy: config.youtube_proxy.clone(),
         // B站凭证信息
         credential: {
@@ -11381,6 +11382,7 @@ pub async fn update_config(
             // ffmpeg 路径
             ffmpeg_path: params.ffmpeg_path.clone(),
             split_chapters_after_download: params.split_chapters_after_download,
+            proxy: params.proxy.clone(),
             youtube_proxy: params.youtube_proxy.clone(),
             ai_rename_rename_parent_dir: params.ai_rename_rename_parent_dir,
             task_id: task_id.clone(),
@@ -11836,26 +11838,27 @@ pub async fn update_config_internal(
         }
     }
 
-    if let Some(youtube_proxy) = params.youtube_proxy {
-        let youtube_proxy = youtube_proxy.trim().to_string();
-        if !youtube_proxy.is_empty() {
-            let parsed = reqwest::Url::parse(&youtube_proxy).map_err(|_| {
+    // 外源网络代理：新配置写入 proxy，旧 youtube_proxy 参数仍兼容并迁移到 proxy。
+    if let Some(proxy) = params.proxy.as_deref().or(params.youtube_proxy.as_deref()) {
+        let proxy = proxy.trim().to_string();
+        if !proxy.is_empty() {
+            let parsed = reqwest::Url::parse(&proxy).map_err(|_| {
                 ApiError::from(anyhow!(
-                    "YouTube 代理地址无效，请使用 http://、https://、socks5:// 或 socks5h:// 开头的完整地址"
+                    "网络代理地址无效，请使用 http://、https://、socks5:// 或 socks5h:// 开头的完整地址"
                 ))
             })?;
             if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h") || parsed.host_str().is_none() {
                 return Err(anyhow!(
-                    "YouTube 代理地址无效，请使用 http://、https://、socks5:// 或 socks5h:// 开头的完整地址"
+                    "网络代理地址无效，请使用 http://、https://、socks5:// 或 socks5h:// 开头的完整地址"
                 )
                 .into());
             }
-            reqwest::Proxy::all(&youtube_proxy)
-                .map_err(|error| ApiError::from(anyhow!("YouTube 代理地址无效：{error}")))?;
+            reqwest::Proxy::all(&proxy)
+                .map_err(|error| ApiError::from(anyhow!("网络代理地址无效：{error}")))?;
         }
-        if youtube_proxy != config.youtube_proxy {
-            config.youtube_proxy = youtube_proxy;
-            updated_fields.push("youtube_proxy");
+        if proxy != config.proxy {
+            config.proxy = proxy;
+            updated_fields.push("proxy");
         }
     }
 
@@ -12957,6 +12960,11 @@ pub async fn update_config_internal(
                             "split_chapters_after_download",
                             serde_json::to_value(config.split_chapters_after_download)?,
                         )
+                        .await
+                }
+                "proxy" => {
+                    manager
+                        .update_config_item("proxy", serde_json::to_value(&config.proxy)?)
                         .await
                 }
                 "youtube_proxy" => {
@@ -15945,9 +15953,20 @@ pub async fn proxy_image(
     ]
     .iter()
     .any(|domain| host_matches(domain));
-    if !is_bilibili_image && !is_youtube_image && !is_douyin_image {
+    let is_tiktok_image = [
+        "tiktokcdn.com",
+        "tiktokcdn-us.com",
+        "tiktokcdn-eu.com",
+        "tiktokcdn-in.com",
+        "tiktokcdn-jp.com",
+        "tiktokcdn-global.com",
+        "tiktokv.com",
+    ]
+    .iter()
+    .any(|domain| host_matches(domain));
+    if !is_bilibili_image && !is_youtube_image && !is_douyin_image && !is_tiktok_image {
         debug!("图片代理拒绝非白名单 URL: {}", summarize_image_url(&url));
-        return Err(anyhow!("只支持 B 站、YouTube 和抖音图片 URL").into());
+        return Err(anyhow!("只支持 B 站、YouTube、抖音和 TikTok 图片 URL").into());
     }
 
     let now = Utc::now();
@@ -15978,12 +15997,19 @@ pub async fn proxy_image(
 
     // YouTube 图片使用专用代理；B 站图片仍然直连。
     let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(90));
-    if is_youtube_image {
-        let youtube_proxy = crate::config::with_config(|bundle| bundle.config.youtube_proxy.trim().to_string());
-        if !youtube_proxy.is_empty() {
+    if is_youtube_image || is_tiktok_image {
+        let external_proxy = crate::config::with_config(|bundle| {
+            let proxy = bundle.config.proxy.trim();
+            if !proxy.is_empty() {
+                proxy.to_string()
+            } else {
+                bundle.config.youtube_proxy.trim().to_string()
+            }
+        });
+        if !external_proxy.is_empty() {
             client_builder = client_builder
                 .no_proxy()
-                .proxy(reqwest::Proxy::all(&youtube_proxy).context("无效的 YouTube 代理地址")?);
+                .proxy(reqwest::Proxy::all(&external_proxy).context("无效的网络代理地址")?);
         }
     }
     let client = client_builder.build().context("创建图片 HTTP 客户端失败")?;
@@ -15996,6 +16022,11 @@ pub async fn proxy_image(
         image_headers.insert(
             reqwest::header::REFERER,
             reqwest::header::HeaderValue::from_static("https://www.youtube.com/"),
+        );
+    } else if is_tiktok_image {
+        image_headers.insert(
+            reqwest::header::REFERER,
+            reqwest::header::HeaderValue::from_static("https://www.tiktok.com/"),
         );
     } else if is_douyin_image {
         image_headers.insert(
@@ -19905,6 +19936,83 @@ ORDER BY
     }))
 }
 
+/// 测试外源网络代理到谷歌官网的连通性。
+#[utoipa::path(
+    post,
+    path = "/api/proxy/test",
+    request_body = crate::api::request::TestProxyRequest,
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::TestProxyResponse>),
+    )
+)]
+pub async fn test_proxy_handler(
+    axum::Json(request): axum::Json<crate::api::request::TestProxyRequest>,
+) -> Result<ApiResponse<crate::api::response::TestProxyResponse>, ApiError> {
+    // 优先使用请求内临时代理（测试尚未保存的地址）；为空时使用当前保存的外源代理。
+    let proxy = request
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::config::with_config(|bundle| {
+                let proxy = bundle.config.proxy.trim();
+                if !proxy.is_empty() {
+                    proxy.to_string()
+                } else {
+                    bundle.config.youtube_proxy.trim().to_string()
+                }
+            })
+        });
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
+    if !proxy.is_empty() {
+        builder = builder
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(&proxy).map_err(|error| {
+                ApiError::from(anyhow!("网络代理地址无效：{error}"))
+            })?);
+    }
+    let client = builder
+        .build()
+        .map_err(|error| ApiError::from(anyhow!("创建代理测试客户端失败：{error}")))?;
+    let started = std::time::Instant::now();
+    match client.get("https://www.google.com/").send().await {
+        Ok(response) => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            let status = response.status().as_u16();
+            let success = response.status().is_success() || response.status().is_redirection();
+            Ok(ApiResponse::ok(crate::api::response::TestProxyResponse {
+                success,
+                latency_ms,
+                status: Some(status),
+                error: if success {
+                    None
+                } else {
+                    Some(format!("谷歌官网返回 HTTP {status}"))
+                },
+            }))
+        }
+        Err(error) => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            // 展开错误原因链，便于定位是代理握手、DNS、超时还是出口受限。
+            let mut detail = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(next) = source {
+                detail.push_str(" -> ");
+                detail.push_str(&next.to_string());
+                source = std::error::Error::source(next);
+            }
+            Ok(ApiResponse::ok(crate::api::response::TestProxyResponse {
+                success: false,
+                latency_ms,
+                status: None,
+                error: Some(detail),
+            }))
+        }
+    }
+}
+
 /// 测试推送通知
 #[utoipa::path(
     post,
@@ -19916,6 +20024,7 @@ ORDER BY
         (status = 500, description = "服务器内部错误", body = String)
     )
 )]
+
 pub async fn test_notification_handler(
     axum::Json(request): axum::Json<crate::api::request::TestNotificationRequest>,
 ) -> Result<ApiResponse<crate::api::response::TestNotificationResponse>, ApiError> {

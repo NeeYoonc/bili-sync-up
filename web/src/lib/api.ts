@@ -1347,23 +1347,25 @@ class ApiClient {
 	/**
 	 * 测试推送通知
 	 */
-	async testNotification(params?: {
-		custom_message?: string;
-		active_channel?: string;
-		serverchan_key?: string;
-		serverchan3_uid?: string;
-		serverchan3_sendkey?: string;
-		wecom_webhook_url?: string;
-		wecom_msgtype?: string;
-		wecom_mention_all?: boolean;
-		wecom_mentioned_list?: string[];
-		webhook_url?: string;
-		webhook_bearer_token?: string;
-		webhook_custom_headers?: string;
-		webhook_format?: string;
-		webhook_custom_body?: string;
-		webhook_synology_chat_template?: string;
-	}): Promise<
+	async testNotification(
+		params?: {
+			custom_message?: string;
+			active_channel?: string;
+			serverchan_key?: string;
+			serverchan3_uid?: string;
+			serverchan3_sendkey?: string;
+			wecom_webhook_url?: string;
+			wecom_msgtype?: string;
+			wecom_mention_all?: boolean;
+			wecom_mentioned_list?: string[];
+			webhook_url?: string;
+			webhook_bearer_token?: string;
+			webhook_custom_headers?: string;
+			webhook_format?: string;
+			webhook_custom_body?: string;
+			webhook_synology_chat_template?: string;
+		}
+	): Promise<
 		ApiResponse<{
 			success: boolean;
 			message: string;
@@ -1373,6 +1375,13 @@ class ApiClient {
 			success: boolean;
 			message: string;
 		}>('/notification/test', params ?? {});
+	}
+
+	/**
+	 * 测试外源网络代理到谷歌官网的连通性
+	 */
+	async testProxy(proxy?: string): Promise<ApiResponse<TestProxyResponse>> {
+		return this.post<TestProxyResponse>('/proxy/test', proxy !== undefined ? { proxy } : {});
 	}
 }
 
@@ -1872,6 +1881,7 @@ export const api = {
 		webhook_custom_body?: string;
 		webhook_synology_chat_template?: string;
 	}) => apiClient.testNotification(params),
+	testProxy: (proxy?: string) => apiClient.testProxy(proxy),
 
 	/**
 	 * 订阅系统信息WebSocket事件

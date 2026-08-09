@@ -102,6 +102,12 @@
 			icon: YoutubeIcon
 		},
 		{
+			id: 'network_proxy',
+			title: '网络代理',
+			description: '外源网络代理（YouTube / TikTok）',
+			icon: SettingsIcon
+		},
+		{
 			id: 'douyin_login',
 			title: '抖音登录状态',
 			description: '从电脑端助手或 cookies.txt 导入',
@@ -164,6 +170,7 @@
 		danmaku: '配置弹幕文件的显示样式、布局参数和同步策略。',
 		credential: '填写 B 站登录凭证，影响会员画质、互动内容和受限接口访问。',
 		youtube_login: '通过电脑端登录助手或 cookies.txt 管理 yt-dlp 使用的 YouTube 登录状态。',
+		network_proxy: '外源网络代理：YouTube 与 TikTok 的搜索、扫描、直链解析和下载共用；B站与抖音不受影响。',
 		douyin_login: '通过同一个电脑端登录助手或 cookies.txt 管理抖音作者作品扫描和下载所需的 Cookie。',
 		tiktok_login: '管理 TikTok 作者扫描所用的 cookies.txt；TikTok 公开作者主页无需登录即可同步，导入后 yt-dlp 可访问需要登录的私密/受限内容。',
 		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
@@ -376,7 +383,14 @@
 	let enableAria2HealthCheck = false;
 	let enableAria2AutoRestart = false;
 	let aria2HealthCheckInterval = 300;
-	let youtubeProxy = '';
+	let networkProxy = '';
+	let proxyTesting = false;
+	let proxyTestResult: {
+		success: boolean;
+		latency_ms: number;
+		status?: number | null;
+		error?: string | null;
+	} | null = null;
 
 	// 多P视频目录结构配置
 	let multiPageUseSeasonStructure = false;
@@ -759,7 +773,7 @@
 		enableAria2HealthCheck = config.enable_aria2_health_check ?? false;
 		enableAria2AutoRestart = config.enable_aria2_auto_restart ?? false;
 		aria2HealthCheckInterval = config.aria2_health_check_interval ?? 300;
-		youtubeProxy = config.youtube_proxy ?? '';
+		networkProxy = config.proxy ?? config.youtube_proxy ?? '';
 
 		// 多P视频目录结构配置
 		multiPageUseSeasonStructure = config.multi_page_use_season_structure ?? false;
@@ -1028,6 +1042,21 @@
 		multiPageNameHasPath = hasPathSeparator(multiPageName);
 	}
 
+	async function handleTestProxy() {
+		proxyTesting = true;
+		proxyTestResult = null;
+		try {
+			const proxy = networkProxy.trim();
+			const response = await runRequest(() => api.testProxy(proxy || undefined), {
+				context: '测试代理失败'
+			});
+			if (!response) return;
+			proxyTestResult = response.data;
+		} finally {
+			proxyTesting = false;
+		}
+	}
+
 	async function saveConfig() {
 		// 保存前验证
 		if (!validatePageName(pageName)) {
@@ -1241,7 +1270,7 @@
 				DEFAULT_CONFIG_VALUES.largeSourcePlayurlDurationMs
 			),
 			audio_only_use_low_qn_for_playurl: audioOnlyUseLowQnForPlayurl,
-			youtube_proxy: youtubeProxy.trim(),
+			proxy: networkProxy.trim(),
 			// aria2监控配置
 			enable_aria2_health_check: enableAria2HealthCheck,
 			enable_aria2_auto_restart: enableAria2AutoRestart,
@@ -3114,18 +3143,6 @@
 >
 	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
 		<YouTubeLoginPanel />
-		<div class="mt-4 space-y-2 rounded-lg border p-4">
-			<Label for="youtube-proxy">YouTube 专用代理</Label>
-			<Input
-				id="youtube-proxy"
-				bind:value={youtubeProxy}
-				placeholder="例如：http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
-				autocomplete="off"
-			/>
-			<p class="text-muted-foreground text-sm">
-				仅 YouTube 搜索、订阅、扫描、直链解析、视频、音频、封面、头像、字幕和直播聊天使用；B站与抖音不会使用此代理。留空关闭。
-			</p>
-		</div>
 		<div
 			class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
 		>
@@ -3135,7 +3152,62 @@
 	</div>
 	<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t px-6 pt-4'}>
 		<Button type="button" disabled={saving} class="w-full" onclick={saveConfig}>
-			{saving ? '保存中...' : '保存 YouTube 代理'}
+			{saving ? '保存中...' : '保存'}
+		</Button>
+	</SheetFooter>
+</ResponsiveSheet>
+
+<!-- 网络代理设置抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'network_proxy'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="网络代理"
+	description="YouTube / TikTok 等外源平台共用的代理通道"
+	titleTooltip={getSettingTooltip('network_proxy')}
+	{isMobile}
+>
+	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+		<div class="space-y-2 rounded-lg border p-4">
+			<Label for="network-proxy">网络代理地址</Label>
+			<Input
+				id="network-proxy"
+				bind:value={networkProxy}
+				placeholder="例如：http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
+				autocomplete="off"
+			/>
+			<p class="text-muted-foreground text-sm">
+				YouTube 与 TikTok 的搜索、订阅、扫描、直链解析、视频/音频/封面/头像/字幕和直播聊天共用此代理；B站与抖音不会使用。留空关闭。
+			</p>
+			<div class="flex flex-wrap items-center gap-2 pt-1">
+				<Button type="button" size="sm" variant="outline" disabled={proxyTesting} onclick={handleTestProxy}>
+					{proxyTesting ? '测试中...' : '测试连通性'}
+				</Button>
+				{#if proxyTestResult}
+					{#if proxyTestResult.success}
+						<span class="text-sm text-green-600 dark:text-green-400">
+							✓ 谷歌官网连通正常，耗时 {proxyTestResult.latency_ms} ms{proxyTestResult.status
+								? `（HTTP ${proxyTestResult.status}）`
+								: ''}
+						</span>
+					{:else}
+						<span class="text-sm text-red-600 dark:text-red-400">
+							✗ 谷歌官网连接失败{proxyTestResult.error ? `：${proxyTestResult.error}` : ''}
+						</span>
+					{/if}
+				{/if}
+			</div>
+		</div>
+		<div
+			class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
+		>
+			后续接入其他外源平台时可直接复用此代理通道。
+		</div>
+	</div>
+	<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t px-6 pt-4'}>
+		<Button type="button" disabled={saving} class="w-full" onclick={saveConfig}>
+			{saving ? '保存中...' : '保存网络代理'}
 		</Button>
 	</SheetFooter>
 </ResponsiveSheet>

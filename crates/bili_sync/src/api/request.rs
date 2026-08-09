@@ -323,7 +323,9 @@ pub struct UpdateConfigRequest {
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: Option<String>,
     pub split_chapters_after_download: Option<bool>,
-    // 仅 YouTube 搜索、扫描、解析和下载使用的代理地址
+    // 外源网络代理（YouTube/TikTok 等平台共用）
+    pub proxy: Option<String>,
+    // 兼容旧配置：旧版仅 YouTube 使用的代理字段
     pub youtube_proxy: Option<String>,
     // 风控验证配置
     pub risk_control_enabled: Option<bool>,
@@ -593,4 +595,12 @@ pub struct ValidateRegexRequest {
 #[derive(Deserialize, IntoParams, ToSchema)]
 pub struct ConfigMigrationRequest {
     pub dry_run: Option<bool>,
+}
+
+
+/// 网络代理连通性测试请求：不传 proxy 时使用当前配置的外源代理。
+#[derive(Deserialize, ToSchema)]
+pub struct TestProxyRequest {
+    /// 待测试的代理地址（http/socks5）；为空时使用当前已保存配置。
+    pub proxy: Option<String>,
 }

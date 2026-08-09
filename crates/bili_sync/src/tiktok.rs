@@ -16,7 +16,7 @@ use regex::Regex;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use bili_sync_entity::{youtube_source, youtube_video};
 
@@ -1722,4 +1722,117 @@ fn numeric_playlist_id(value: &str) -> Option<&str> {
         .split(['?', '#', '/'])
         .rev()
         .find(|part| !part.is_empty() && part.chars().all(|character| character.is_ascii_digit()))
+}
+
+// ---------- TikTok 作者头像获取（creator/item_list Web API） ----------
+
+/// 进程内缓存的 TikTok Web API 设备 ID。
+///
+/// 实测 `api/creator/item_list/` 接受进程级随机 device_id（与 yt-dlp 行为一致），
+/// 但每次调用都换新值会被软风控，因此进程生命周期内保持稳定。
+static TIKTOK_WEB_DEVICE_ID: OnceLock<u64> = OnceLock::new();
+
+fn tiktok_web_device_id() -> u64 {
+    *TIKTOK_WEB_DEVICE_ID.get_or_init(|| rand::random::<u64>() % 9_000_000_000_000_000_000 + 1_000_000_000_000_000_000)
+}
+
+/// 通过 `api/creator/item_list/` 获取指定作者的公开头像地址。
+///
+/// 该接口是 yt-dlp 扫描 TikTok 用户作品所用的 Web API：带登录 Cookie + 随机
+/// verifyFp + 进程稳定 device_id 即可在服务端直接访问（不要求浏览器签名）。
+/// 头像为可选资源，任何失败都返回 `Ok(None)`，不影响主下载流程。
+pub(crate) async fn fetch_tiktok_author_avatar_url(sec_uid: &str) -> anyhow::Result<Option<String>> {
+    let cookie = tiktok_cookie_header()?;
+    let device_id = tiktok_web_device_id();
+    let verify_fp = format!(
+        "verify_{}",
+        (0..7).map(|_| format!("{:x}", rand::random::<u8>() % 16)).collect::<String>()
+    );
+    let cursor = chrono::Utc::now().timestamp_millis().to_string();
+    let params: Vec<(&str, String)> = vec![
+        ("aid", "1988".to_string()),
+        ("app_language", "en".to_string()),
+        ("app_name", "tiktok_web".to_string()),
+        ("browser_language", "en-US".to_string()),
+        ("browser_name", "Mozilla".to_string()),
+        ("browser_online", "true".to_string()),
+        ("browser_platform", "Win32".to_string()),
+        ("browser_version", "5.0 (Windows)".to_string()),
+        ("channel", "tiktok_web".to_string()),
+        ("cookie_enabled", "true".to_string()),
+        ("count", "5".to_string()),
+        ("cursor", cursor),
+        ("device_id", device_id.to_string()),
+        ("device_platform", "web_pc".to_string()),
+        ("focus_state", "true".to_string()),
+        ("from_page", "user".to_string()),
+        ("history_len", "2".to_string()),
+        ("is_fullscreen", "false".to_string()),
+        ("is_page_visible", "true".to_string()),
+        ("language", "en".to_string()),
+        ("os", "windows".to_string()),
+        ("priority_region", "".to_string()),
+        ("referer", "".to_string()),
+        ("region", "US".to_string()),
+        ("screen_height", "1080".to_string()),
+        ("screen_width", "1920".to_string()),
+        ("secUid", sec_uid.to_string()),
+        ("type", "1".to_string()),
+        ("tz_name", "UTC".to_string()),
+        ("verifyFp", verify_fp),
+        ("webcast_language", "en".to_string()),
+    ];
+    // 优先 IPv6 出口链路（与浏览器一致）。网络层失败时回退默认解析（IPv4），
+    // 避免 Clash 伪 IP/IPv6 隧道抖动导致头像子任务整段失败。
+    let ipv6_client = tiktok_web_client().await?;
+    let request_avatar = |client: &reqwest::Client| {
+        client
+            .get("https://www.tiktok.com/api/creator/item_list/")
+            .query(&params)
+            .header(reqwest::header::COOKIE, &cookie)
+            .header(reqwest::header::REFERER, format!("https://www.tiktok.com/@{sec_uid}"))
+            .send()
+    };
+    let response = match request_avatar(&ipv6_client).await {
+        Ok(response) => response,
+        Err(ipv6_error) => {
+            debug!(sec_uid, error = ?ipv6_error, "TikTok 作者作品接口经 IPv6 链路请求失败，回退默认解析重试");
+            let fallback_client = reqwest::Client::builder()
+                .user_agent(TIKTOK_WEB_UA)
+                .timeout(TIKTOK_SEARCH_TIMEOUT)
+                .build()?;
+            request_avatar(&fallback_client)
+                .await
+                .with_context(|| format!("请求 TikTok 作者作品接口失败（IPv6 链路：{ipv6_error:#}）"))?
+        }
+    };
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let payload: serde_json::Value = response.json().await.with_context(|| "解析 TikTok 作者作品响应失败")?;
+    let avatar = payload
+        .get("itemList")
+        .and_then(|items| items.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("author"))
+        .and_then(|author| {
+            author
+                .get("avatarLarger")
+                .or_else(|| author.get("avatarMedium"))
+                .or_else(|| author.get("avatarThumb"))
+        })
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .filter(|value| !value.trim().is_empty());
+    Ok(avatar)
+}
+
+/// 从 TikTok 主页链接提取 `@` 句柄（用户名或 secUid）。
+pub(crate) fn tiktok_handle_from_url(url: &str) -> Option<String> {
+    url.trim()
+        .split(['?', '#'])
+        .next()
+        .and_then(|path| path.rsplit('/').next())
+        .map(|segment| segment.trim().trim_start_matches('@').to_string())
+        .filter(|segment| !segment.is_empty())
 }

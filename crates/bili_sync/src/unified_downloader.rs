@@ -87,6 +87,29 @@ impl UnifiedDownloader {
         }
     }
 
+    /// 下载同时要求平台 Referer、网页会话 Cookie 和任务代理的媒体（TikTok 等）。
+    pub async fn fetch_with_fallback_with_referer_and_cookie_and_proxy(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: &str,
+        cookie: &str,
+        proxy: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Native(downloader) => {
+                downloader
+                    .fetch_with_fallback_with_referer_and_cookie_and_proxy(urls, path, referer, cookie, proxy)
+                    .await
+            }
+            Self::Aria2(downloader) => {
+                downloader
+                    .fetch_with_aria2_fallback_with_referer_and_cookie_and_proxy(urls, path, referer, cookie, proxy)
+                    .await
+            }
+        }
+    }
+
     /// 下载同时要求平台 Referer 和网页会话 Cookie 的媒体。
     pub async fn fetch_with_fallback_with_referer_and_cookie(
         &self,

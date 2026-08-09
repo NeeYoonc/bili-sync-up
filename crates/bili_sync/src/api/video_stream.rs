@@ -105,9 +105,10 @@ async fn stream_video_impl(video_id: String, headers: HeaderMap, db: Arc<Databas
 
     if file_size == 0 {
         let is_douyin = video_id.starts_with("douyin-");
+        let is_tiktok = video_id.starts_with("tiktok-");
         info!("检测到充电/付费视频占位文件，返回不可播放提示: {:?}", video_path);
         let mut response = Response::new(
-            if is_douyin { "付费视频未付费" } else { "充电视频未充电" }.into(),
+            if is_douyin || is_tiktok { "付费视频未付费" } else { "充电视频未充电" }.into(),
         );
         *response.status_mut() = StatusCode::FORBIDDEN;
         let headers = response.headers_mut();
@@ -199,7 +200,8 @@ async fn find_video_file(video_id: &str, db: &DatabaseConnection) -> Result<Path
     let external = video_id
         .strip_prefix("youtube-")
         .map(|value| ("YouTube", value))
-        .or_else(|| video_id.strip_prefix("douyin-").map(|value| ("抖音", value)));
+        .or_else(|| video_id.strip_prefix("douyin-").map(|value| ("抖音", value)))
+        .or_else(|| video_id.strip_prefix("tiktok-").map(|value| ("TikTok", value)));
     if let Some((platform, id)) =
         external.and_then(|(platform, value)| value.parse::<i32>().ok().map(|id| (platform, id)))
     {

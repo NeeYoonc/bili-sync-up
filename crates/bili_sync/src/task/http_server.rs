@@ -85,6 +85,7 @@ use crate::api::handler::{
     stream_videos,
     test_credential_refresh,
     test_notification_handler,
+    test_proxy_handler,
     test_risk_control_handler,
     update_config,
     update_config_item_internal,
@@ -365,6 +366,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/ingest/recent", get(get_recent_ingests))
         // 推送通知API
         .route("/api/notification/test", post(test_notification_handler))
+        .route("/api/proxy/test", post(test_proxy_handler))
         .route("/api/config/notification", get(get_notification_config))
         .route("/api/config/notification", post(update_notification_config))
         .route("/api/notification/status", get(get_notification_status))

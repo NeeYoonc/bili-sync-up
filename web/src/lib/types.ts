@@ -337,6 +337,7 @@ export interface VideoInfo {
 	is_image_post?: boolean;
 	image_urls?: string[];
 	bangumi_title?: string; // 番剧真实标题，用于番剧类型视频的显示
+	url?: string; // 平台原始视频地址（外部平台使用）
 }
 
 // 视频列表响应类型
@@ -533,6 +534,7 @@ export interface ConfigResponse {
 	parallel_download_threads: number;
 	parallel_download_use_aria2: boolean;
 	split_chapters_after_download?: boolean;
+	proxy?: string;
 	youtube_proxy?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
@@ -717,6 +719,7 @@ export interface UpdateConfigRequest {
 	parallel_download_threads?: number;
 	parallel_download_use_aria2?: boolean;
 	split_chapters_after_download?: boolean;
+	proxy?: string;
 	youtube_proxy?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
@@ -1416,3 +1419,11 @@ export interface BetaImageUpdateStatusResponse {
 	error?: string;
 }
 
+
+// 网络代理连通性测试结果
+export interface TestProxyResponse {
+	success: boolean;
+	latency_ms: number;
+	status?: number | null;
+	error?: string | null;
+}

@@ -7,7 +7,8 @@
 //! 实测：curl_cffi 各种 Chrome 指纹模拟、Playwright 全新 profile 均失败；
 //! 复制用户 localStorage（85 键）+ 真实 cookie + headed Chrome 后，
 //! common-app-context / favorite(item_list) / followings(user/list) 全部成功。
-//! 注意：user/list 接口在 headless 模式返回 403，必须 headed。
+//! 注意：旧版 headless（--headless）下 user/list 返回 403；新版 headless
+//! （--headless=new，Chrome 109+）指纹与有头模式一致，实测 user/list 200。
 //!
 //! ## 方案
 //! 浏览器扩展导出 cookies + localStorage 到 bili-sync；服务端用系统 Chrome：
@@ -169,18 +170,29 @@ async fn launch_chrome() -> Result<(Child, String, PathBuf)> {
     let profile = temp_profile_dir();
     info!(chrome = %chrome.display(), port, "TikTok 浏览器模拟：启动 Chrome");
     std::fs::create_dir_all(&profile).context("创建 Chrome 临时 profile 失败")?;
-    let child = Command::new(&chrome)
+    let mut command = Command::new(&chrome);
+    command
         .arg(format!("--remote-debugging-port={port}"))
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
-        .arg("--window-position=-3000,-3000")
         .arg("--disable-blink-features=AutomationControlled")
+        .arg("--remote-allow-origins=*")
+        // 新版 headless（--headless=new，Chrome 109+）指纹与有头模式一致，实测 user/list 200
+        .arg("--headless=new")
+        .arg("--hide-scrollbars")
+        .arg("--mute-audio")
+        .arg("--disable-gpu")
+        .arg("--no-sandbox")
         .arg("about:blank")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("启动 Chrome 失败：{chrome:?}"))?;
+        .stderr(Stdio::null());
+    #[cfg(not(windows))]
+    {
+        // Linux/容器无沙箱环境必须禁用 setuid sandbox 与共享内存
+        command.arg("--disable-dev-shm-usage");
+    }
+    let child = command.spawn().with_context(|| format!("启动 Chrome 失败：{chrome:?}"))?;
 
     let client = reqwest::Client::new();
     // 等待 DevTools 端口就绪

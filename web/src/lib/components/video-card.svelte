@@ -38,6 +38,7 @@
 
 	// 抖音短剧付费与 B 站充电视频是两套文案
 	$: isDouyin = /^douyin-/.test(String(resourceId ?? ''));
+	$: isTikTok = /^tiktok-/.test(String(resourceId ?? ''));
 	export let detailHref: string = ''; // 详情页地址；不传时沿用 B 站地址
 	let coverFailed = false;
 	let lastVideoId: number | null = null;
@@ -120,7 +121,7 @@
 		if (taskNames.length > 0) {
 			return taskNames[index] || `任务${index + 1}`;
 		}
-		if (/^(youtube|douyin)-/.test(String(resourceId ?? ''))) {
+		if (/^(youtube|douyin|tiktok)-/.test(String(resourceId ?? ''))) {
 			return ['视频封面', '视频信息', 'UP主头像', 'UP主信息', '视频下载'][index] || `任务${index + 1}`;
 		}
 
@@ -276,7 +277,7 @@
 	}
 
 	function getInitialCoverUrl(video: VideoInfo): string {
-		if (/^(youtube|douyin)-/.test(String(resourceId ?? ''))) {
+		if (/^(youtube|douyin|tiktok)-/.test(String(resourceId ?? ''))) {
 			return getLocalCoverUrl(video.id);
 		}
 		if (video.valid === false) {
@@ -287,7 +288,7 @@
 
 	function handleCoverImageError(event: Event) {
 		const target = event.currentTarget as HTMLImageElement;
-		const isExternalVideo = /^(youtube|douyin)-/.test(String(resourceId ?? ''));
+		const isExternalVideo = /^(youtube|douyin|tiktok)-/.test(String(resourceId ?? ''));
 		// 外部平台先试本地封面，本地不存在时只回源一次。旧逻辑会在
 		// local -> remote -> local 之间无限循环，导致未下载卡片闪烁并刷爆代理日志。
 		if (isExternalVideo && video.cover && !target.dataset.coverFallback) {
@@ -352,9 +353,9 @@
 					{#if video.is_charge_video}
 						<Badge
 							class="bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500"
-							title={isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
+							title={isDouyin || isTikTok ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
 						>
-							{isDouyin ? '付费' : '充电视频'}
+							{isDouyin || isTikTok ? '付费' : '充电视频'}
 						</Badge>
 					{/if}
 				</div>
@@ -400,9 +401,9 @@
 			{#if (coverFailed || mode !== 'default') && video.is_charge_video}
 				<Badge
 					class="mt-0.5 shrink-0 bg-amber-500 text-xs text-white hover:bg-amber-500"
-					title={isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
+					title={isDouyin || isTikTok ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
 				>
-					{isDouyin ? '付费' : '充电视频'}
+					{isDouyin || isTikTok ? '付费' : '充电视频'}
 				</Badge>
 			{/if}
 			<CardTitle

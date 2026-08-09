@@ -383,6 +383,8 @@ pub struct VideoInfo {
     pub image_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bangumi_title: Option<String>, // 番剧真实标题，用于番剧类型视频的显示
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>, // 平台原始视频地址（YouTube/抖音/TikTok 外部平台使用）
 }
 
 impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> for VideoInfo {
@@ -414,6 +416,7 @@ impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> f
             is_image_post: false,
             image_urls: Vec::new(),
             bangumi_title: None, // 默认为None，将在API层根据视频类型填充
+            url: None,
         }
     }
 }
@@ -588,7 +591,9 @@ pub struct ConfigResponse {
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: String,
     pub split_chapters_after_download: bool,
-    // 仅 YouTube 搜索、扫描、解析和下载使用的代理地址
+    // 外源网络代理（YouTube/TikTok 等平台共用）
+    pub proxy: String,
+    // 兼容旧配置：旧版仅 YouTube 使用的代理字段
     pub youtube_proxy: String,
     // B站凭证信息
     pub credential: Option<CredentialInfo>,
@@ -1272,4 +1277,18 @@ pub struct ConfigMigrationReportResponse {
     pub mapped_keys: Vec<String>,
     pub unmapped_keys: Vec<String>,
     pub notes: Vec<String>,
+}
+
+
+/// 网络代理连通性测试结果。
+#[derive(Serialize, ToSchema)]
+pub struct TestProxyResponse {
+    /// 是否成功连通谷歌官网
+    pub success: bool,
+    /// 测试耗时（毫秒）
+    pub latency_ms: u64,
+    /// 目标站点返回的 HTTP 状态码（成功时）
+    pub status: Option<u16>,
+    /// 失败原因
+    pub error: Option<String>,
 }

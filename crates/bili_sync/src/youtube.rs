@@ -792,7 +792,7 @@ async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::V
         .cookie_provider(cookie_jar)
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(Duration::from_secs(30));
-    let proxy = configured_youtube_proxy();
+    let proxy = configured_external_proxy();
     if !proxy.is_empty() {
         client_builder = client_builder.no_proxy().proxy(reqwest::Proxy::all(&proxy)?);
     }
@@ -1677,6 +1677,7 @@ pub fn unified_youtube_id(value: &str) -> Option<i32> {
     value
         .strip_prefix("youtube-")
         .or_else(|| value.strip_prefix("douyin-"))
+        .or_else(|| value.strip_prefix("tiktok-"))
         .and_then(|id| id.parse::<i32>().ok())
 }
 
@@ -1716,8 +1717,21 @@ async fn fetch_platform_asset(
         downloader
             .fetch_with_fallback_with_referer_and_cookie(urls, path, "https://www.douyin.com/", &cookie)
             .await
+    } else if crate::tiktok::is_tiktok_source(source) {
+        // TikTok 播放直链要求携带网页会话 Cookie（否则 403），并跟随外源代理通道。
+        let cookie = crate::tiktok::tiktok_cookie_header()?;
+        let proxy = configured_external_proxy();
+        downloader
+            .fetch_with_fallback_with_referer_and_cookie_and_proxy(
+                urls,
+                path,
+                "https://www.tiktok.com/",
+                &cookie,
+                &proxy,
+            )
+            .await
     } else {
-        let proxy = configured_youtube_proxy();
+        let proxy = configured_external_proxy();
         downloader.fetch_with_fallback_with_proxy(urls, path, &proxy).await
     }
 }
@@ -1854,6 +1868,7 @@ async fn unified_youtube_parts(
             is_image_post,
             image_urls,
             bangumi_title: None,
+            url: Some(video.url.clone()),
         },
         PageInfo {
             id: video.id,
@@ -2189,6 +2204,8 @@ pub async fn unified_youtube_image_path(
 /// 抖音源启动轮另有“最近扫过就跳过”保护，因此这里只保留避开启动风暴的短宽限，
 /// 不再让 YouTube 源无谓等待 60 秒。
 const STARTUP_EXTERNAL_SCAN_GRACE_SECONDS: u64 = 15;
+/// TikTok 对连续请求敏感（403/验证页风控），相邻视频下载间的固定间隔（秒）。
+const TIKTOK_DOWNLOAD_INTERVAL_SECONDS: u64 = 6;
 /// 进程启动后的首次外源扫描是否仍未执行（仅对启动轮生效）。
 static EXTERNAL_STARTUP_SCAN_PENDING: AtomicBool = AtomicBool::new(true);
 
@@ -2305,6 +2322,30 @@ pub async fn process_scheduled_sources(
     Ok(())
 }
 
+/// 从 yt-dlp 平铺列表项提取封面地址：优先顶层 `thumbnail`，否则回退到
+/// `thumbnails[]` 数组（TikTok 平铺项没有顶层 thumbnail，只提供 thumbnails）。
+fn ytdlp_flat_item_cover_url(item: &serde_json::Value) -> Option<String> {
+    if let Some(url) = item
+        .get("thumbnail")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(url.to_string());
+    }
+    item.get("thumbnails")
+        .and_then(|value| value.as_array())
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|thumb| thumb.get("id").and_then(|v| v.as_str()) == Some("cover"))
+                .or_else(|| items.first())
+        })
+        .and_then(|thumb| thumb.get("url"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
     if is_douyin_source(source) {
         return scan_douyin_source(db, source).await;
@@ -2390,14 +2431,24 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         {
             continue;
         }
-        let exists = youtube_video::Entity::find()
+        if let Some(existing) = youtube_video::Entity::find()
             .filter(youtube_video::Column::SourceId.eq(source.id))
             .filter(youtube_video::Column::YoutubeId.eq(youtube_id))
             .one(db)
             .await?
-            .is_some();
-        if exists {
+        {
             deleted_video_ids.remove(youtube_id);
+            // 回填早期扫描缺失的封面（TikTok 平铺项没有顶层 thumbnail 字段，
+            // 旧数据封面为空时在此补上，视频管理卡片即可显示平台封面）。
+            if existing.thumbnail.as_deref().is_none_or(str::is_empty) {
+                if let Some(cover) = ytdlp_flat_item_cover_url(&item) {
+                    let mut active: youtube_video::ActiveModel = existing.into();
+                    active.thumbnail = Set(Some(cover));
+                    active.updated_at = Set(now_standard_string());
+                    active.update(db).await?;
+                    notify_videos_changed();
+                }
+            }
             continue;
         }
         if was_deleted && !scan_deleted_videos {
@@ -2466,7 +2517,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string()),
-            thumbnail: Set(item.get("thumbnail").and_then(|v| v.as_str()).map(str::to_string)),
+            thumbnail: Set(ytdlp_flat_item_cover_url(&item)),
             published_at: Set(published_at),
             duration_seconds: Set(duration_seconds),
             download_status: Set("pending".to_string()),
@@ -2706,14 +2757,29 @@ async fn download_pending(
             .map(|source| (source.id, source_platform_label(&source)))
             .collect::<HashMap<_, _>>(),
     );
+    // TikTok 对连续 yt-dlp 解析请求非常敏感：标记出 TikTok 来源，视频间插入
+    // 固定间隔，降低被风控（403/验证页）的概率。
+    let tiktok_source_ids = Arc::new(
+        youtube_source::Entity::find()
+            .all(db)
+            .await?
+            .into_iter()
+            .filter(|source| crate::tiktok::is_tiktok_source(source))
+            .map(|source| source.id)
+            .collect::<std::collections::HashSet<_>>(),
+    );
     let db = db.clone();
     stream::iter(videos)
         .for_each_concurrent(concurrent_limit, move |video| {
             let db = db.clone();
             let downloader = downloader.clone();
             let platforms = platforms.clone();
+            let tiktok_source_ids = tiktok_source_ids.clone();
             async move {
                 let platform = platforms.get(&video.source_id).copied().unwrap_or("媒体");
+                if tiktok_source_ids.contains(&video.source_id) {
+                    tokio::time::sleep(Duration::from_secs(TIKTOK_DOWNLOAD_INTERVAL_SECONDS)).await;
+                }
                 if let Err(error) = download_video(&db, downloader.as_ref(), video).await {
                     warn!(error = %error, "下载{}视频失败", platform);
                 }
@@ -2861,7 +2927,13 @@ async fn download_video(
                 if exhausted || TASK_CONTROLLER.is_paused() {
                     return Ok(());
                 }
-                let retry_delay = Duration::from_secs((retry_count.max(1) as u64) * 5);
+                // TikTok 对短间隔重复请求会升级风控（403/验证页），重试退避显著拉长；
+                // 其它平台维持原有 5 秒/次退避。
+                let retry_delay = if crate::tiktok::is_tiktok_source(&source) {
+                    Duration::from_secs((retry_count.max(1) as u64) * 30)
+                } else {
+                    Duration::from_secs((retry_count.max(1) as u64) * 5)
+                };
                 info!(
                     platform = platform_label,
                     source_id = source.id,
@@ -4079,6 +4151,64 @@ async fn download_youtube_upper_face(
 ) -> Result<()> {
     let uploader = crate::utils::filenamify::filenamify(uploader);
     let platform = source_platform_label(source);
+    if crate::tiktok::is_tiktok_source(source) {
+        // TikTok 头像通过 `api/creator/item_list/` Web API 获取（带 Cookie + 随机
+        // verifyFp + 进程稳定 device_id 即可服务端直连）；人物 NFO 一并生成。
+        let upper_root = crate::config::reload_config().upper_path;
+        let bucket = uploader.chars().next().unwrap_or('_').to_string().to_lowercase();
+        let upper_dir = upper_root.join(bucket).join(&uploader);
+        let face_path = upper_dir.join("folder.jpg");
+        let person_nfo_path = upper_dir.join("person.nfo");
+        let face_exists = tokio::fs::metadata(&face_path)
+            .await
+            .is_ok_and(|metadata| metadata.len() >= 1024);
+        let person_nfo_exists = tokio::fs::metadata(&person_nfo_path)
+            .await
+            .is_ok_and(|metadata| metadata.len() > 0);
+        if face_exists && person_nfo_exists {
+            return Ok(());
+        }
+        tokio::fs::create_dir_all(&upper_dir)
+            .await
+            .with_context(|| format!("创建{platform} UP头像目录失败: {}", upper_dir.display()))?;
+
+        if !face_exists {
+            let sec_uid = profile_url.and_then(crate::tiktok::tiktok_handle_from_url).ok_or_else(|| {
+                anyhow!("TikTok 元数据没有频道主页地址，无法获取 UP 头像")
+            })?;
+            let avatar_url = crate::tiktok::fetch_tiktok_author_avatar_url(&sec_uid)
+                .await?
+                .ok_or_else(|| anyhow!("TikTok 作者作品接口没有返回头像地址"))?;
+            let temporary = upper_dir.join("folder.download");
+            if let Err(error) = fetch_platform_asset(downloader, source, &[avatar_url.as_str()], &temporary)
+                .await
+                .with_context(|| format!("使用项目统一下载器下载{platform} UP头像失败"))
+            {
+                let _ = remove_file_if_exists(&temporary).await;
+                return Err(error);
+            }
+            replace_file(&temporary, &face_path).await?;
+            info!(platform = source_platform_label(source), uploader, path = %face_path.display(), "{}视频源「{}」 UP头像「{}」下载完成", source_platform_label(source), source.name, uploader);
+        }
+
+        if !person_nfo_exists {
+            let channel_id = profile_url
+                .and_then(crate::tiktok::tiktok_handle_from_url)
+                .unwrap_or_else(|| uploader.clone());
+            let xml = generate_youtube_person_nfo(&uploader, &channel_id, "tiktok");
+            let temporary = upper_dir.join("person.nfo.download");
+            if let Err(error) = tokio::fs::write(&temporary, xml.as_bytes())
+                .await
+                .with_context(|| format!("写入{platform} UP主 NFO 临时文件失败: {}", temporary.display()))
+            {
+                let _ = remove_file_if_exists(&temporary).await;
+                return Err(error);
+            }
+            replace_file(&temporary, &person_nfo_path).await?;
+            info!(platform = source_platform_label(source), uploader, path = %person_nfo_path.display(), "{}视频源「{}」 UP主 person.nfo「{}」生成完成", source_platform_label(source), source.name, uploader);
+        }
+        return Ok(());
+    }
     if uploader.is_empty() {
         bail!("{platform} UP主名称为空");
     }
@@ -5488,12 +5618,21 @@ fn append_cookies_for_url(command: &mut Command, url: &str) {
     }
 }
 
-fn configured_youtube_proxy() -> String {
-    crate::config::with_config(|bundle| bundle.config.youtube_proxy.trim().to_string())
+/// 外源网络代理：YouTube/TikTok 等平台共用的 yt-dlp 与直链下载代理。
+/// 新配置写入 `proxy`；`youtube_proxy` 保留为旧配置兼容回退。
+fn configured_external_proxy() -> String {
+    crate::config::with_config(|bundle| {
+        let proxy = bundle.config.proxy.trim();
+        if !proxy.is_empty() {
+            proxy.to_string()
+        } else {
+            bundle.config.youtube_proxy.trim().to_string()
+        }
+    })
 }
 
 pub(crate) fn append_youtube_proxy(command: &mut Command) {
-    let proxy = configured_youtube_proxy();
+    let proxy = configured_external_proxy();
     if !proxy.is_empty() {
         command.arg("--proxy").arg(proxy);
     }

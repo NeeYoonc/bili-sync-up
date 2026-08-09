@@ -75,7 +75,7 @@
 		const noticeKey = `${currentVideoId}-${safePlayingPageIndex}-${mode}-charge-locked`;
 		if (lastPlaybackNoticeKey === noticeKey) return;
 		lastPlaybackNoticeKey = noticeKey;
-		toast.error(isDouyin ? '付费视频未付费' : '充电视频未充电');
+		toast.error(isDouyin || isTikTok ? '付费视频未付费' : '充电视频未充电');
 	}
 
 	function getCurrentPageInfo() {
@@ -91,6 +91,10 @@
 		}
 		if (isYouTube) {
 			return `https://www.youtube.com/embed/${encodeURIComponent(bvid)}?autoplay=1`;
+		}
+		if (isTikTok) {
+			// TikTok 官方内嵌播放器（无 @ 句柄要求）：https://www.tiktok.com/embed/v2/{id}
+			return `https://www.tiktok.com/embed/v2/${encodeURIComponent(bvid)}`;
 		}
 		const currentPage = getCurrentPageInfo();
 		const pageNumber = currentPage?.pid && currentPage.pid > 0 ? currentPage.pid : 1;
@@ -451,7 +455,7 @@
 
 	async function loadVideoDetail() {
 		const resourceId = $page.params.id ?? '';
-		const videoId = Number.parseInt(resourceId.replace(/^(youtube|douyin)-/, ''), 10);
+		const videoId = Number.parseInt(resourceId.replace(/^(youtube|douyin|tiktok)-/, ''), 10);
 		if (isNaN(videoId)) {
 			error = '无效的视频ID';
 			toast.error('无效的视频ID');
@@ -594,12 +598,14 @@
 			if (isExternal) {
 				const externalId = videoData?.video.bvid;
 				if (!externalId) throw new Error(`无法获取${platformLabel}视频标识`);
-				window.open(
-					isDouyin
+				const sourceUrl =
+					(isTikTok && videoData?.video.url) ||
+					(isTikTok
+						? `https://www.tiktok.com/video/${encodeURIComponent(externalId)}`
+						: isDouyin
 						? `https://www.douyin.com/video/${encodeURIComponent(externalId)}`
-						: `https://www.youtube.com/watch?v=${encodeURIComponent(externalId)}`,
-					'_blank'
-				);
+						: `https://www.youtube.com/watch?v=${encodeURIComponent(externalId)}`);
+				window.open(sourceUrl, '_blank');
 				return;
 			}
 			const videoId = getPlayVideoId();
@@ -956,7 +962,7 @@
 									customTitle="P{pageInfo.pid}: {pageInfo.name}"
 									customSubtitle=""
 									taskNames={isExternal
-										? ['视频封面', '视频内容', '视频 NFO', isDouyin ? '作品信息' : '直播聊天', '视频字幕']
+										? ['视频封面', '视频内容', '视频 NFO', isDouyin || isTikTok ? '作品信息' : '直播聊天', '视频字幕']
 										: ['视频封面', '视频内容', '视频信息', '视频弹幕', '视频字幕']}
 									showProgress={true}
 								/>
@@ -1023,10 +1029,10 @@
 								{:else}
 									<div class="bg-muted/40 rounded-lg border px-3 py-2 text-sm">
 										<div class="font-medium">
-											{isDouyin ? '抖音作品附属文件' : 'YouTube 字幕 / 直播聊天'}
+											{isDouyin ? '抖音作品附属文件' : isTikTok ? 'TikTok 作品附属文件' : 'YouTube 字幕 / 直播聊天'}
 										</div>
 										<div class="text-muted-foreground text-xs">
-											{isDouyin
+											{isDouyin || isTikTok
 												? '封面、NFO、作者头像和 person.nfo 与媒体一起由现有下载链路生成。'
 												: '源站提供字幕或直播聊天时使用项目统一下载器保存；普通视频无直播聊天、无字幕时显示为已跳过。'}
 										</div>
@@ -1142,7 +1148,7 @@
 									/>
 								{:else if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
 									<div class="flex h-64 items-center justify-center text-white">
-										<div>{isDouyin ? '付费视频未付费' : '充电视频未充电'}</div>
+										<div>{isDouyin || isTikTok ? '付费视频未付费' : '充电视频未充电'}</div>
 									</div>
 								{:else if onlinePlayMode}
 									{#if getEmbeddedPlayerUrl()}

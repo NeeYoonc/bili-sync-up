@@ -516,6 +516,27 @@ impl Downloader {
         downloader.fetch_with_fallback(urls, path).await
     }
 
+    /// 同时应用平台 Referer、网页会话 Cookie 与本任务代理下载媒体（TikTok 等）。
+    pub async fn fetch_with_fallback_with_referer_and_cookie_and_proxy(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: &str,
+        cookie: &str,
+        proxy: &str,
+    ) -> Result<()> {
+        let proxy = proxy.trim();
+        if proxy.is_empty() {
+            return self
+                .fetch_with_fallback_with_referer_and_cookie(urls, path, referer, cookie)
+                .await;
+        }
+        let downloader = Self::new(self.client.with_media_proxy(proxy)?);
+        downloader
+            .fetch_with_fallback_with_referer_and_cookie(urls, path, referer, cookie)
+            .await
+    }
+
     pub async fn fetch_with_fallback_with_referer(&self, urls: &[&str], path: &Path, referer: &str) -> Result<()> {
         self.fetch_with_fallback_and_optional_referer(urls, path, Some(referer))
             .await
