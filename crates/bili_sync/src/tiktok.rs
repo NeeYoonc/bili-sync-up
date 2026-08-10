@@ -25,7 +25,8 @@ use crate::config::CONFIG_DIR;
 use crate::utils::live_updates::{notify_queue_status_changed, notify_video_sources_changed, notify_videos_changed};
 use crate::utils::time_format::now_standard_string;
 use crate::youtube::{
-    append_ytdlp_runtime, append_youtube_proxy, command_error, create_youtube_source,
+    append_ytdlp_runtime, append_youtube_proxy, command_error, configured_external_proxy,
+    create_youtube_source,
     ensure_ytdlp_available, get_platform_sources, normalize_source_type, parse_video_id_set,
     require_source_platform, reset_youtube_source_path, serialize_video_id_set, update_youtube_source,
     update_youtube_source_enabled, ytdlp_command, YouTubeLoginResponse, YouTubeSearchResponse,
@@ -38,44 +39,18 @@ const TIKTOK_WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebK
 const TIKTOK_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const TIKTOK_SEARCH_CONCURRENCY: usize = 4;
 
-/// 解析 TikTok 官网的 IPv6 地址。
+/// 构建面向 TikTok 官网的 HTTP 客户端：不再固定 IPv6 直连出口，
+/// 统一走系统默认 DNS 解析；配置了外源代理（proxy/youtube_proxy）时经代理请求（与浏览器一致）。
 ///
-/// TikTok 风控会把登录会话绑定到浏览器出口链路：用户浏览器经代理 TUN 的 IPv6
-/// fake-ip（如 fdfe:dcba:9876:: 段）访问 TikTok 时一切正常；服务端默认走 IPv4
-/// 出口会被判定为非登录环境（common-app-context 返回空 user、favorite/user-list
-/// 返回空列表）。这里解析出 IPv6 后由 `tiktok_web_client` 强制走同一链路。
-async fn resolve_tiktok_ipv6() -> Result<std::net::Ipv6Addr> {
-    let addresses = tokio::net::lookup_host(("www.tiktok.com", 443))
-        .await
-        .context("解析 TikTok IPv6 地址失败")?;
-    addresses
-        .into_iter()
-        .find_map(|address| match address {
-            std::net::SocketAddr::V6(v6) => Some(*v6.ip()),
-            _ => None,
-        })
-        .ok_or_else(|| anyhow!("未找到 TikTok 的 IPv6 地址（需要代理 TUN 的 IPv6 出口）"))
-}
-
-/// 构建面向 TikTok 官网的 HTTP 客户端：优先强制 IPv6 出口链路（与浏览器一致）。
-///
-/// 无 IPv6 时静默回退默认解析（IPv4），不破坏无 TUN 环境下的原有行为。
+/// 早前强制 IPv6 出口链路依赖代理 TUN 的 IPv6 fake-ip，无 TUN 环境下会超时/失败，
+/// 已取消该行为；外源请求改走配置的代理。
 async fn tiktok_web_client() -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .user_agent(TIKTOK_WEB_UA)
         .timeout(TIKTOK_SEARCH_TIMEOUT);
-    match resolve_tiktok_ipv6().await {
-        Ok(ipv6) => {
-            for port in [443u16, 80] {
-                builder = builder.resolve(
-                    "www.tiktok.com",
-                    std::net::SocketAddr::new(std::net::IpAddr::V6(ipv6), port),
-                );
-            }
-        }
-        Err(error) => {
-            warn!(error = %error, "未启用 TikTok IPv6 出口链路，回退默认 IPv4 解析（可能被风控）");
-        }
+    let proxy = configured_external_proxy();
+    if !proxy.is_empty() {
+        builder = builder.no_proxy().proxy(reqwest::Proxy::all(&proxy)?);
     }
     Ok(builder.build()?)
 }

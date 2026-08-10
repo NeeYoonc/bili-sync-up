@@ -5620,7 +5620,7 @@ fn append_cookies_for_url(command: &mut Command, url: &str) {
 
 /// 外源网络代理：YouTube/TikTok 等平台共用的 yt-dlp 与直链下载代理。
 /// 新配置写入 `proxy`；`youtube_proxy` 保留为旧配置兼容回退。
-fn configured_external_proxy() -> String {
+pub(crate) fn configured_external_proxy() -> String {
     crate::config::with_config(|bundle| {
         let proxy = bundle.config.proxy.trim();
         if !proxy.is_empty() {
