@@ -35,7 +35,7 @@ use crate::youtube::{
 use crate::api::response::{SubmissionVideoInfo, SubmissionVideosResponse};
 
 const TIKWM_USER_SEARCH_API: &str = "https://www.tikwm.com/api/user/search";
-const TIKTOK_WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const TIKTOK_WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
 const TIKTOK_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const TIKTOK_SEARCH_CONCURRENCY: usize = 4;
 
@@ -2065,3 +2065,4 @@ pub(crate) fn tiktok_handle_from_url(url: &str) -> Option<String> {
         .map(|segment| segment.trim().trim_start_matches('@').to_string())
         .filter(|segment| !segment.is_empty())
 }
+

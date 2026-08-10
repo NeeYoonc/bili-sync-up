@@ -8,15 +8,10 @@ const VM_SOURCE = "(function(){\"use strict\";function n(t){return n=\"function\
 const fs = require('node:fs');
 const noop = () => {};
 const eventTarget = new EventTarget();
-const cfgDir = process.env.BILI_SYNC_CONFIG_DIR || (process.env.APPDATA ? process.env.APPDATA + '/bili-sync' : process.cwd());
-const cookiePath = process.argv.indexOf('--cookie') >= 0 ? process.argv[process.argv.indexOf('--cookie')+1] : cfgDir + '/tiktok-cookies.txt';
-const lsPath = process.argv.indexOf('--localstorage') >= 0 ? process.argv[process.argv.indexOf('--localstorage')+1] : cfgDir + '/tiktok-localstorage.json';
-if (!fs.existsSync(cookiePath)) { console.error('ERROR: 未找到 cookies.txt:', cookiePath); process.exit(2); }
-if (!fs.existsSync(lsPath)) { console.error('ERROR: 未找到 tiktok-localstorage.json:', lsPath); process.exit(2); }
-const realLS = JSON.parse(fs.readFileSync(lsPath, 'utf8'));
+const realLS = JSON.parse(fs.readFileSync('C:/Users/001/AppData/Roaming/bili-sync/tiktok-localstorage.json', 'utf8'));
 const storage = { _d: new Map(Object.entries(realLS).map(([k,v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)])),
   getItem(k){return this._d.has(k)?this._d.get(k):null;}, setItem(k,v){this._d.set(String(k),String(v));}, removeItem(k){this._d.delete(k);}, clear(){this._d.clear();}, key(i){return [...this._d.keys()][i]??null;}, get length(){return this._d.size;} };
-const cookieTxt = fs.readFileSync(cookiePath, 'utf8');
+const cookieTxt = fs.readFileSync('C:/Users/001/AppData/Roaming/bili-sync/tiktok-cookies.txt', 'utf8');
 const cookieStr = cookieTxt.split('\n').filter(l=>l.trim() && !l.startsWith('#')).map(l=>{const p=l.split('\t'); return p.length>=7 ? `${p[5]}=${p[6]}` : null;}).filter(Boolean).join('; ');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
 const documentShim = { cookie: cookieStr, readyState: 'complete', addEventListener:(t,f)=>eventTarget.addEventListener(t,f), removeEventListener:(t,f)=>eventTarget.removeEventListener(t,f), dispatchEvent:(e)=>eventTarget.dispatchEvent(e),
