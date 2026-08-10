@@ -400,8 +400,10 @@ pub async fn import_tiktok_cookie_file(
         *cached.lock().await = None;
     }
     let mut message = tiktok_import_message();
-    if crate::tiktok_browser::has_tiktok_browser_session() {
-        message.push_str("；已同步浏览器会话（localStorage），我的喜欢/关注列表将使用浏览器会话模拟");
+    if tiktok_browser_simulation_enabled() {
+        message.push_str("；已同步浏览器会话（localStorage）并配置远程 Chromium，我的喜欢/关注列表将使用浏览器会话模拟");
+    } else if crate::tiktok_browser::has_tiktok_browser_session() {
+        message.push_str("；已同步浏览器会话（localStorage），但未配置远程 Chromium CDP，我的喜欢/关注列表将使用服务端直连");
     }
     match tiktok_login_sec_uid_with_source().await {
         Ok((sec_uid, manual)) => {
@@ -745,6 +747,15 @@ pub async fn update_tiktok_secuid(
     }))
 }
 
+/// 浏览器会话模拟是否启用：需要已同步 localStorage 且配置了远程 Chromium CDP。
+///
+/// 未配置 CDP 时取消浏览器模拟（本机 Chrome 直连 TikTok 不稳定/易被墙、页面加载
+/// 超时），"我的喜欢/关注列表" 走服务端直连；配置远程 CDP 后自动恢复浏览器模拟。
+fn tiktok_browser_simulation_enabled() -> bool {
+    let cdp = crate::config::with_config(|bundle| bundle.config.tiktok_browser_cdp_url.trim().to_string());
+    !cdp.is_empty() && crate::tiktok_browser::has_tiktok_browser_session()
+}
+
 /// 获取当前登录 TikTok 账号的 secUid（我的喜欢/收藏夹接口的必需参数）。
 ///
 /// 依次尝试两个官方接口（都不需要签名参数）：
@@ -934,7 +945,7 @@ fn decode_tiktok_body(body: &str) -> Result<serde_json::Value> {
 async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
     // 浏览器会话模拟优先：TikTok 会话绑定 localStorage 状态（webmssdk 存储的
     // msToken/security-sdk 数据），仅导入 cookies.txt 会被判定为非登录环境。
-    if crate::tiktok_browser::has_tiktok_browser_session() {
+    if tiktok_browser_simulation_enabled() {
         match crate::tiktok_browser::fetch_tiktok_browser_data(limit).await {
             Ok(data) => {
                 let posts = crate::tiktok_browser::browser_items_to_posts(&data.favorite_items);
@@ -1391,8 +1402,8 @@ pub async fn get_tiktok_followings() -> Result<ApiResponse<YouTubeSearchResponse
 }
 
 async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
-    // 浏览器会话模拟优先：关注列表 /api/user/list/ 需要浏览器实时签名（headless 会 403）。
-    if crate::tiktok_browser::has_tiktok_browser_session() {
+    // 浏览器会话模拟优先（需配置远程 CDP）：关注列表 /api/user/list/ 需要浏览器实时签名（headless 会 403）。
+    if tiktok_browser_simulation_enabled() {
         match crate::tiktok_browser::fetch_tiktok_browser_data(usize::MAX).await {
             Ok(data) => {
                 let results = crate::tiktok_browser::browser_users_to_results(&data.following_users);
