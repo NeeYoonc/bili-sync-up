@@ -1486,7 +1486,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
     let body = response.text().await?;
     if body.trim().is_empty() {
         bail!(
-            "TikTok 关注列表接口返回空响应：登录态可能已失效或 msToken 过期，请在设置页重新导入最新 cookies.txt 后重试"
+            "TikTok 关注列表接口返回空响应：/api/user/list 需要浏览器实时签名（X-Dynosaur/X-Bogus），服务端直连通常拿不到；登录本身有效时可配置远程 Chromium 浏览器模拟获取"
         );
     }
     let payload = decode_tiktok_body(&body)?;
