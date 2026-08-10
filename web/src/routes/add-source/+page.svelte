@@ -756,10 +756,7 @@
 
 		if (sourcePlatform === 'tiktok') {
 			const isPlaylistSearch = youtubeSourceType === 'tiktok_collection';
-			if (isPlaylistSearch && !youtubeUrl.trim()) {
-				toast.error('请先填写你的 TikTok 主页链接，如 https://www.tiktok.com/@用户名');
-				return;
-			}
+			// 链接留空时后端读取当前登录账号自己的收藏夹，无需主页链接
 			const response = await runRequest(
 				() =>
 					isPlaylistSearch
@@ -1295,7 +1292,7 @@
 				}
 				if (!youtubeUrl.trim()) {
 					toast.error('请选择播放列表', {
-						description: '请在右侧点击“获取播放列表”后选择一个 TikTok 播放列表'
+						description: '请在右侧点击“获取自己的列表”后选择一个 TikTok 收藏夹'
 					});
 					return;
 				}
@@ -3432,13 +3429,13 @@
 										<div class="space-y-1">
 											<Label>获取 TikTok 播放列表</Label>
 											<p class="text-muted-foreground text-xs">
-												先在上方填写你的 TikTok 主页链接（如 https://www.tiktok.com/@用户名），点击按钮读取该账号的播放列表（收藏夹），在右侧选择后自动填充名称和链接。
+												无需链接：直接点击“获取自己的列表”读取当前登录账号的收藏夹；填写他人主页链接可读取其公开收藏夹。在右侧选择后自动填充名称和链接。
 											</p>
 										</div>
 										<Button
 											type="button"
 											onclick={() => handleSearch()}
-											disabled={searchLoading || !youtubeUrl.trim()}
+											disabled={searchLoading}
 											size="sm"
 											class={isMobile ? 'w-full' : ''}
 										>
@@ -3553,7 +3550,7 @@
 												: youtubeSourceType === 'douyin_series'
 													? '短剧详情链接'
 													: '抖音作者主页链接'
-											: sourcePlatform === 'tiktok' ? (youtubeSourceType === 'tiktok_favorite' ? '无需填写链接' : youtubeSourceType === 'tiktok_collection' ? '你的 TikTok 主页链接（用于读取收藏夹）' : 'TikTok 作者链接，如 https://www.tiktok.com/@user') : youtubeSourceType === 'playlist' ? 'YouTube 播放列表链接' : 'YouTube 频道链接'}
+											: sourcePlatform === 'tiktok' ? (youtubeSourceType === 'tiktok_favorite' ? '无需填写链接' : youtubeSourceType === 'tiktok_collection' ? 'TikTok 主页链接（可选，仅读取他人收藏夹时填写）' : 'TikTok 作者链接，如 https://www.tiktok.com/@user') : youtubeSourceType === 'playlist' ? 'YouTube 播放列表链接' : 'YouTube 频道链接'}
 									</Label>
 									{#if !(sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_favorite')}
 									<Input
@@ -3562,7 +3559,7 @@
 										oninput={scheduleYouTubeHistorySelection}
 										placeholder={sourcePlatform === 'tiktok'
 											? youtubeSourceType === 'tiktok_collection'
-												? 'https://www.tiktok.com/@用户名'
+												? '留空获取自己的收藏夹；或填他人主页链接'
 												: 'https://www.tiktok.com/@user'
 											: sourcePlatform === 'douyin'
 												? youtubeSourceType === 'douyin_theater'
@@ -3584,7 +3581,7 @@
 									<p class="text-muted-foreground text-xs">
 										{sourcePlatform === 'tiktok'
 											? youtubeSourceType === 'tiktok_collection'
-												? '填写你的 TikTok 主页链接（如 https://www.tiktok.com/@用户名），点击“获取播放列表”读取收藏夹；需要导入 TikTok 登录状态。'
+												? '无需填写链接，直接点击“获取自己的列表”读取当前登录账号的收藏夹；填写他人主页链接可读取其公开收藏夹。需要导入 TikTok 登录状态。'
 												: '支持 https://www.tiktok.com/@user 作者主页链接，公开内容无需登录。'
 											: sourcePlatform === 'douyin'
 												? youtubeSourceType === 'douyin'

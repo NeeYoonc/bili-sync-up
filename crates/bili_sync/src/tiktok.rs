@@ -348,38 +348,12 @@ pub async fn tiktok_status() -> Result<ApiResponse<TikTokStatusResponse>, ApiErr
     }))
 }
 
-/// 检查 TikTok 浏览器会话（localStorage）是否与当前 cookies.txt 同一时间同步。
-///
-/// 手动只导入 cookies.txt（不走登录助手“传输 TikTok 登录状态”）时，localStorage
-/// 会明显滞后。TikTok 的“我的喜欢”等接口按 webmssdk 会话状态校验请求（签名内
-/// 嵌入 localStorage 的 msToken/安全密钥），两个文件不同步会返回空列表。
-fn tiktok_browser_session_outdated() -> bool {
-    let ls_path = crate::tiktok_browser::tiktok_localstorage_path();
-    let Ok(ls_meta) = std::fs::metadata(&ls_path) else {
-        return true; // 未同步过 localStorage 视为过期
-    };
-    let Ok(cookie_meta) = std::fs::metadata(tiktok_cookie_path()) else {
-        return false;
-    };
-    let (Ok(cookie_time), Ok(ls_time)) = (cookie_meta.modified(), ls_meta.modified()) else {
-        return false;
-    };
-    // 登录助手同步时两个文件在同一请求内先后写入，容差 5 分钟；超过视为仅导入 cookies。
-    cookie_time
-        .duration_since(ls_time)
-        .map(|elapsed| elapsed.as_secs() > 300)
-        .unwrap_or(false)
-}
-
 /// 生成 TikTok Cookie 导入结果提示；登录 Cookie 不完整时附加警告。
 fn tiktok_import_message() -> String {
     let mut message =
         "已导入 TikTok cookies.txt；作者扫描和媒体解析将使用此登录状态".to_string();
     if !tiktok_cookie_has_login() {
         message.push_str("；注意：未检测到 sessionid/sid_guard/uid_tt 等登录 Cookie，关注/喜欢列表可能不可用，请确认浏览器处于登录状态后重新导出 cookies.txt");
-    }
-    if tiktok_browser_session_outdated() {
-        message.push_str("；⚠ 浏览器会话（localStorage）早于本次 Cookie 导出。我的喜欢仅需 cookies.txt 即可拉取，如返回空响应请确认出口 IP 未被 TikTok 风控，并在设置页配置外源代理（proxy/youtube_proxy）");
     }
     message
 }
@@ -406,33 +380,12 @@ pub async fn import_tiktok_cookie_file(
     clear_tiktok_login_state_files_except(Some(&temporary)).await;
     replace_cookie_file(&temporary, &path).await?;
 
-    // 浏览器扩展同步的 localStorage 会话状态（webmssdk 依赖它识别登录，仅 cookies 会被判定未登录）
-    if let Some(local_storage) = request.local_storage.as_ref() {
-        if !local_storage.is_empty() {
-            let ls_path = crate::tiktok_browser::tiktok_localstorage_path();
-            let ls_parent = ls_path.parent().context("无效的 TikTok 浏览器会话路径")?;
-            tokio::fs::create_dir_all(ls_parent).await?;
-            let ls_temporary = ls_path.with_extension("json.importing");
-            tokio::fs::write(&ls_temporary, serde_json::to_vec(local_storage)?)
-                .await
-                .context("写入 TikTok 浏览器会话失败")?;
-            tokio::fs::rename(&ls_temporary, &ls_path)
-                .await
-                .context("替换 TikTok 浏览器会话失败")?;
-        }
-    }
-
     // 导入后立即验证登录态：清除 secUid 缓存并请求官方接口，避免导入失效 Cookie 后
     // “我的喜欢/关注列表”等到真正使用时才报错。浏览器扩展无法导出有效会话时给出明确提示。
     if let Some(cached) = TIKTOK_LOGIN_SEC_UID.get() {
         *cached.lock().await = None;
     }
     let mut message = tiktok_import_message();
-    if tiktok_browser_simulation_enabled() {
-        message.push_str("；已同步浏览器会话（localStorage）并配置远程 Chromium，我的喜欢/关注列表将使用浏览器会话模拟");
-    } else if crate::tiktok_browser::has_tiktok_browser_session() {
-        message.push_str("；已同步浏览器会话（localStorage），但未配置远程 Chromium CDP，我的喜欢/关注列表将使用服务端直连");
-    }
     match tiktok_login_sec_uid_with_source().await {
         Ok((sec_uid, manual)) => {
             if manual {
@@ -773,15 +726,6 @@ pub async fn update_tiktok_secuid(
             format!("已保存手动 TikTok secUid（{}）", short_sec_uid(value))
         },
     }))
-}
-
-/// 浏览器会话模拟是否启用：需要已同步 localStorage 且配置了远程 Chromium CDP。
-///
-/// 未配置 CDP 时取消浏览器模拟（本机 Chrome 直连 TikTok 不稳定/易被墙、页面加载
-/// 超时），"我的喜欢/关注列表" 走服务端直连；配置远程 CDP 后自动恢复浏览器模拟。
-fn tiktok_browser_simulation_enabled() -> bool {
-    let cdp = crate::config::with_config(|bundle| bundle.config.tiktok_browser_cdp_url.trim().to_string());
-    !cdp.is_empty() && crate::tiktok_browser::has_tiktok_browser_session()
 }
 
 /// 获取当前登录 TikTok 账号的 secUid（我的喜欢/收藏夹接口的必需参数）。
@@ -1691,23 +1635,23 @@ async fn resolve_tiktok_sec_uid(url: &str) -> Result<String> {
     }
 }
 
-/// 获取指定 TikTok 用户（默认使用登录用户）的播放列表（收藏夹）。
+/// 获取 TikTok 播放列表（收藏夹）。
 ///
-/// 收藏夹需要真实的 secUid 才能通过服务端校验，因此需要用户填写自己的
-/// TikTok 主页链接，由后端抓取主页提取 secUid 后再请求官方播放列表接口。
+/// 链接为空时读取当前登录账号自己的播放列表（使用账号 secUid，无需填链接）；
+/// 填写主页链接时抓取该作者主页提取 secUid 后读取其公开播放列表。
 pub async fn get_tiktok_playlists(
     Query(request): Query<TikTokPlaylistsRequest>,
 ) -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
     let raw_url = request.url.as_deref().unwrap_or("").trim();
-    if raw_url.is_empty() {
-        return Err(ApiError::from(anyhow!(
-            "请填写你的 TikTok 主页链接（如 https://www.tiktok.com/@用户名），用于读取收藏夹"
-        )));
-    }
-    if !is_tiktok_url(raw_url) {
-        return Err(ApiError::from(anyhow!("请输入有效的 TikTok 主页链接")));
-    }
-    let sec_uid = resolve_tiktok_sec_uid(raw_url).await.map_err(ApiError::from)?;
+    let sec_uid = if raw_url.is_empty() {
+        // 获取自己的列表：使用登录账号的 secUid（自动/手动均可），无需主页链接。
+        tiktok_login_sec_uid().await.map_err(ApiError::from)?
+    } else {
+        if !is_tiktok_url(raw_url) {
+            return Err(ApiError::from(anyhow!("请输入有效的 TikTok 主页链接")));
+        }
+        resolve_tiktok_sec_uid(raw_url).await.map_err(ApiError::from)?
+    };
     let response = fetch_tiktok_playlists(&sec_uid).await.map_err(ApiError::from)?;
     Ok(response)
 }

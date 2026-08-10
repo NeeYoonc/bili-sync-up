@@ -138,22 +138,17 @@
 					</Button>
 				</div>
 				<div class="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-100">
-					<p class="font-medium">电脑端登录后直接传输（推荐：同步浏览器会话）</p>
+					<p class="font-medium">电脑端登录后直接传输（推荐）</p>
 					<ol class="mt-2 list-decimal space-y-1 pl-5">
 						<li>加载登录助手并连接当前 Bili Sync 设置页。</li>
 						<li>点击“打开 TikTok”，在同一电脑浏览器登录 TikTok。</li>
-						<li>点击“传输 TikTok 登录状态”，会同时传输 Cookie 与页面会话状态（localStorage）。</li>
-						<li>TikTok 的“我的喜欢/关注列表”依赖浏览器会话状态（webmssdk 的 msToken 等），仅导入 cookies.txt 会被判定为未登录。</li>
+						<li>点击“传输 TikTok 登录状态”，传输登录 Cookie（cookies.txt）。</li>
+						<li>我的喜欢/关注列表仅需 cookies.txt 即可拉取；如返回空响应，请更换干净的出口 IP 或在设置页配置外源代理。</li>
 					</ol>
-					{#if status?.browser_session}
-						<p class="mt-2 text-green-700 dark:text-green-400">
-							浏览器会话已同步：{status.browser_session_at ?? '未知时间'}，我的喜欢/关注列表将使用浏览器会话模拟获取。
-						</p>
-					{/if}
 				</div>
 				<p class="text-muted-foreground text-xs">
-					TikTok 会话绑定浏览器环境（localStorage + Cookie + 出口链路）。已同步浏览器会话时，我的喜欢/关注列表通过本机
-					Chrome 会话模拟实时获取；未同步时仅支持作者主页公开内容同步。Cookie 保存位置：
+					我的喜欢/关注列表仅需登录 Cookie（cookies.txt）即可服务端直连拉取；若返回空响应，通常是出口 IP 被 TikTok
+					风控，请更换干净的出口 IP 或配置外源代理。Cookie 保存位置：
 					<code class="break-all">{status?.cookie_path ?? '加载中…'}</code>
 				</p>
 

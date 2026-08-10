@@ -316,11 +316,8 @@ class ApiClient {
 	async getTikTokStatus(): Promise<ApiResponse<TikTokStatusResponse>> {
 		return this.get<TikTokStatusResponse>('/tiktok/status');
 	}
-	async importTikTokCookies(
-		cookies: string,
-		localStorage?: Record<string, string>
-	): Promise<ApiResponse<YouTubeLoginResponse>> {
-		return this.post<YouTubeLoginResponse>('/tiktok/cookies', { cookies, local_storage: localStorage });
+	async importTikTokCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
+		return this.post<YouTubeLoginResponse>('/tiktok/cookies', { cookies });
 	}
 	async getTikTokSecUid(): Promise<ApiResponse<TikTokSecUidStatusResponse>> {
 		return this.get<TikTokSecUidStatusResponse>('/tiktok/secuid');
@@ -338,7 +335,8 @@ class ApiClient {
 		return this.get<SubmissionVideosResponse>('/tiktok/source-videos', { ...params });
 	}
 	async getTikTokPlaylists(url: string): Promise<ApiResponse<YouTubeSearchResponse>> {
-		return this.get<YouTubeSearchResponse>(`/tiktok/playlists?url=${encodeURIComponent(url)}`);
+		// url 为空时后端读取当前登录账号自己的收藏夹，无需主页链接
+		return this.get<YouTubeSearchResponse>('/tiktok/playlists', { url: url.trim() || undefined });
 	}
 	async getTikTokFollowings(): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/tiktok/followings');

@@ -24,8 +24,8 @@ Edge：
 douyin.com、bytedance.com Cookie，或 tiktok.com、tiktokcdn.com Cookie；
 不读取或传输账号密码。
 
-TikTok 同步说明（1.3.0+）：
-- “同步 TikTok 会话”会同时传输 Cookie 与页面会话状态（localStorage）。
-- TikTok 的“我的喜欢/关注列表”接口依赖浏览器会话状态（webmssdk 的 msToken/security-sdk 等），
-  仅导入 cookies.txt 会被判定为未登录。
+TikTok 同步说明：
+- “同步 TikTok 登录状态”仅传输登录 Cookie（cookies.txt）。
+- TikTok 的“我的喜欢/关注列表”只需 cookies.txt 即可拉取；若返回空响应，
+  通常是当前出口 IP 被 TikTok 风控，请更换干净的出口 IP 或配置外源代理。
 - 同步前请保持 tiktok.com 页面打开且处于登录状态；若会话过期（登录态失效），刷新页面后重新同步。
