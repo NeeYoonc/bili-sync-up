@@ -163,10 +163,14 @@ async function transfer(platform) {
 		const authToken = tokenInput.value.trim();
 		if (!authToken) throw new Error('请先连接 Bili Sync 设置页或填写 API Token');
 
-		const granted = await chrome.permissions.request({
-			origins: [permissionPattern(serverUrl)]
-		});
-		if (!granted) throw new Error('未授权连接 Bili Sync 地址，无法传输登录状态');
+		// 请求连接权限；服务端已支持 CORS，未授权时跨域请求也能成功，因此不强制阻断
+		try {
+			await chrome.permissions.request({
+				origins: [permissionPattern(serverUrl)]
+			});
+		} catch {
+			// 忽略权限请求异常，继续尝试跨域传输
+		}
 
 		const cookies = tiktok
 			? [
@@ -185,14 +189,27 @@ async function transfer(platform) {
 		const contents = buildNetscapeCookies(cookies, platform);
 		const douyinSessionParams = douyin ? await captureDouyinSessionParams() : {};
 		const tiktokLocalStorage = tiktok ? await captureTikTokLocalStorage() : {};
-		const response = await fetch(`${serverUrl}/api/${platform}/cookies`, {
-			method: 'POST',
-			headers: {
-				Authorization: authToken,
-				'Content-Type': 'application/json'
-			},
-			body: JSON.stringify({ cookies: contents, ...douyinSessionParams, local_storage: tiktokLocalStorage })
-		});
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), 20000);
+		let response;
+		try {
+			response = await fetch(`${serverUrl}/api/${platform}/cookies`, {
+				method: 'POST',
+				headers: {
+					Authorization: authToken,
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({ cookies: contents, ...douyinSessionParams, local_storage: tiktokLocalStorage }),
+				signal: controller.signal
+			});
+		} catch (error) {
+			if (error && error.name === 'AbortError') {
+				throw new Error('传输超时（20 秒），请确认 Bili Sync 服务已启动后重试');
+			}
+			throw error;
+		} finally {
+			clearTimeout(timer);
+		}
 		const payload = await response.json().catch(() => null);
 		if (!response.ok) {
 			throw new Error(responseMessage(payload, `Bili Sync 返回 HTTP ${response.status}`));

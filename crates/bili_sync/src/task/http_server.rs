@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, Request};
-use axum::http::{header, Uri};
+use axum::http::{header, HeaderValue, Method, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{middleware, Extension, Router, ServiceExt};
@@ -14,6 +14,57 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
 use crate::api::auth;
+
+
+/// 浏览器扩展「外部平台登录助手」（chrome-extension:// 源）跨域调用本服务时的 CORS 处理。
+///
+/// 扩展在未授予 localhost host 权限时会先发 OPTIONS 预检（携带 Authorization 头），
+/// 若服务端不返回 CORS 头，浏览器会以 "Failed to fetch" 直接中断请求。这里统一：
+///  - 放行 OPTIONS 预检（204 + CORS 头，不经过认证中间件）；
+///  - 给所有响应附加 Access-Control-Allow-Origin 等头，保证扩展可直接跨域传输登录状态。
+pub(crate) async fn cors_middleware(
+    request: Request,
+    next: middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let is_preflight = request.method() == Method::OPTIONS
+        && request
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    if is_preflight {
+        let mut response = axum::response::Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(axum::body::Body::empty())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let headers = response.headers_mut();
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Authorization, Content-Type"),
+        );
+        headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
+        return Ok(response);
+    }
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Authorization, Content-Type"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("Content-Disposition"),
+    );
+    Ok(response)
+}
 use crate::api::handler::{
     add_video_source,
     ai_rename_history,
@@ -390,9 +441,13 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/captcha", get(serve_captcha_page))
         .route("/api/captcha/info", get(get_captcha_info))
         .route("/api/captcha/submit", post(submit_captcha_result))
-        // 先应用认证中间件
+        // 先应用认证中间件；CORS 在认证外层，保证扩展的 OPTIONS 预检可直达
         .layer(Extension(optimized_connection.clone()))
         .layer(middleware::from_fn(auth::auth))
+        // 扩展同步 TikTok localStorage（webmssdk 数据可达数 MB），放宽 body 上限
+        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+        // 浏览器扩展跨域调用所需的 CORS 头
+        .layer(middleware::from_fn(cors_middleware))
         // WebSocket API需要在认证中间件之后
         .merge(ws::router())
         .merge(

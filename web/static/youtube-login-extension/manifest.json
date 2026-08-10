@@ -1,9 +1,14 @@
 {
 	"manifest_version": 3,
 	"name": "Bili Sync 外部平台登录助手",
-	"version": "1.3.0",
+	"version": "1.4.0",
 	"description": "从电脑浏览器读取已登录的 YouTube/抖音/TikTok 状态（含 TikTok 页面会话 localStorage）并传输到 Bili Sync。",
-	"permissions": ["activeTab", "cookies", "scripting", "storage"],
+	"permissions": [
+		"activeTab",
+		"cookies",
+		"scripting",
+		"storage"
+	],
 	"host_permissions": [
 		"https://youtube.com/*",
 		"https://*.youtube.com/*",
@@ -18,7 +23,10 @@
 		"https://tiktokcdn.com/*",
 		"https://*.tiktokcdn.com/*"
 	],
-	"optional_host_permissions": ["http://*/*", "https://*/*"],
+	"optional_host_permissions": [
+		"http://*/*",
+		"https://*/*"
+	],
 	"action": {
 		"default_title": "Bili Sync 外部平台登录助手",
 		"default_popup": "popup.html"
