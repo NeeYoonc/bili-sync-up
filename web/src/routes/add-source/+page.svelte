@@ -776,7 +776,7 @@
 					`${isPlaylistSearch ? '获取' : '搜索完成，共找到'} ${response.data.results.length} 个${isPlaylistSearch ? '播放列表' : ' TikTok 作者'}`
 				);
 			} else {
-				toast.info(isPlaylistSearch ? '未找到可用的播放列表' : '未找到匹配的 TikTok 作者');
+				toast.info(isPlaylistSearch ? '未找到可用的播放列表（当前账号未创建收藏夹，或该作者未开放公开收藏夹）' : '未找到匹配的 TikTok 作者');
 			}
 			return;
 		}

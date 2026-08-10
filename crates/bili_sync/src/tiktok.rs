@@ -385,6 +385,9 @@ pub async fn import_tiktok_cookie_file(
     if let Some(cached) = TIKTOK_LOGIN_SEC_UID.get() {
         *cached.lock().await = None;
     }
+    if let Some(cached) = TIKTOK_LOGIN_UNIQUE_ID.get() {
+        *cached.lock().await = None;
+    }
     let mut message = tiktok_import_message();
     match tiktok_login_sec_uid_with_source().await {
         Ok((sec_uid, manual)) => {
@@ -1590,6 +1593,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
 // ---------- TikTok 收藏夹（用户播放列表 Playlist） ----------
 
 const TIKTOK_USER_PLAYLIST_API: &str = "https://www.tiktok.com/api/user/playlist/";
+const TIKTOK_USER_DETAIL_API: &str = "https://www.tiktok.com/api/user/detail/";
 const TIKTOK_PLAYLIST_API: &str = "https://www.tiktok.com/api/playlist/";
 
 #[derive(Debug, Deserialize)]
@@ -1610,29 +1614,177 @@ fn tiktok_unique_id_from_url(value: &str) -> Option<String> {
 
 static TIKTOK_SEC_UID_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
 
-/// 抓取 TikTok 用户主页 HTML 提取 secUid（收藏夹/播放列表接口的前置凭证）。
+/// 当前登录 TikTok 账号的 uniqueId（common-app-context，进程内缓存）。
+///
+/// 用于判断填写的作者主页链接是否就是登录账号本人：是则直接复用登录
+/// secUid，避免抓取主页 HTML 被 TikTok 403 风控拦截。接口失败返回 None，
+/// 不影响后续走 user/detail 或主页 HTML 兜底流程。
+static TIKTOK_LOGIN_UNIQUE_ID: std::sync::OnceLock<tokio::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+async fn tiktok_login_account_unique_id() -> Option<String> {
+    let cached = TIKTOK_LOGIN_UNIQUE_ID.get_or_init(|| tokio::sync::Mutex::new(None));
+    if let Some(value) = cached.lock().await.clone() {
+        return Some(value);
+    }
+    let cookie = match tiktok_cookie_header() {
+        Ok(cookie) => cookie,
+        Err(_) => return None,
+    };
+    match tiktok_impersonated_get(
+        "https://www.tiktok.com/node-webapp/api/common-app-context?lang=zh-Hans",
+        &cookie,
+    )
+    .await
+    {
+        Ok((status, body)) if status == 200 => {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                let unique_id = json
+                    .pointer("/user/uniqueId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .map(|value| value.trim().trim_start_matches('@').to_string())
+                    .filter(|value| !value.is_empty());
+                if let Some(value) = unique_id {
+                    *cached.lock().await = Some(value.clone());
+                    return Some(value);
+                }
+            }
+        }
+        Ok((status, _)) => warn!(
+            status,
+            "获取 TikTok common-app-context 返回非 200（用于判断是否为本人主页）"
+        ),
+        Err(error) => warn!(
+            error = %error,
+            "获取 TikTok common-app-context 失败（用于判断是否为本人主页）"
+        ),
+    }
+    None
+}
+
+/// 通过官方 `user/detail` 接口解析任意作者的 secUid（完整浏览器参数 + 现场签名）。
+///
+/// Akamai 对该接口风控较严（部分出口返回 HTTP 200 空 body / 429），失败返回
+/// None，由上层继续尝试主页 HTML 兜底。
+async fn fetch_tiktok_user_detail_sec_uid(unique_id: &str, cookie: &str) -> Result<Option<String>> {
+    let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
+    let verify_fp = tiktok_login_verify_fp().unwrap_or_default();
+    let device_id = tiktok_web_device_id().to_string();
+    let odin_id = tiktok_web_device_id().to_string();
+    let referer = format!("https://www.tiktok.com/@{unique_id}");
+    let params: Vec<(&str, String)> = vec![
+        ("WebIdLastTime", (chrono::Utc::now().timestamp() - 900).to_string()),
+        ("abTestVersion", "[object Object]".to_string()),
+        ("aid", "1988".to_string()),
+        ("appType", "m".to_string()),
+        ("app_language", "zh-Hans".to_string()),
+        ("app_name", "tiktok_web".to_string()),
+        ("browser_language", "zh-CN".to_string()),
+        ("browser_name", "Mozilla".to_string()),
+        ("browser_online", "true".to_string()),
+        ("browser_platform", "Win32".to_string()),
+        ("browser_version", TIKTOK_WEB_UA.to_string()),
+        ("channel", "tiktok_web".to_string()),
+        ("cookie_enabled", "true".to_string()),
+        ("data_collection_enabled", "true".to_string()),
+        ("device_id", device_id.clone()),
+        ("device_platform", "web_pc".to_string()),
+        ("focus_state", "true".to_string()),
+        ("from_page", "user".to_string()),
+        ("history_len", "7".to_string()),
+        ("is_fullscreen", "false".to_string()),
+        ("is_page_visible", "true".to_string()),
+        ("language", "zh-Hans".to_string()),
+        ("needAudienceControl", "false".to_string()),
+        ("odinId", odin_id.clone()),
+        ("os", "windows".to_string()),
+        ("priority_region", "US".to_string()),
+        ("referer", referer.clone()),
+        ("region", "US".to_string()),
+        ("root_referer", referer.clone()),
+        ("screen_height", "1440".to_string()),
+        ("screen_width", "2560".to_string()),
+        ("secUid", String::new()),
+        ("tz_name", "Asia/Shanghai".to_string()),
+        ("uniqueId", unique_id.to_string()),
+        ("user", "[object Object]".to_string()),
+        ("user_is_login", "true".to_string()),
+        ("verifyFp", verify_fp),
+        ("webcast_language", "zh-Hans".to_string()),
+        ("msToken", ms_token),
+    ];
+    let unsigned = reqwest::Url::parse_with_params(TIKTOK_USER_DETAIL_API, &params)?;
+    let url = match sign_tiktok_url(unsigned.as_str()).await {
+        Ok(signed) => signed,
+        Err(error) => {
+            warn!(error = %error, "TikTok 现场签名不可用，回退旧签名逻辑（user/detail 接口）");
+            build_tiktok_signed_url(TIKTOK_USER_DETAIL_API, &params)?.to_string()
+        }
+    };
+    let (status, body) = tiktok_impersonated_get(&url, cookie).await?;
+    if status != 200 {
+        return Ok(None);
+    }
+    if body.trim().is_empty() {
+        return Ok(None);
+    }
+    let payload = decode_tiktok_body(&body)?;
+    let sec_uid = payload
+        .pointer("/userInfo/user/secUid")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+    Ok(sec_uid)
+}
+
+/// 解析 TikTok 作者 secUid（收藏夹/播放列表接口的前置凭证）。
+///
+/// 优先级：
+///  1. 链接是当前登录账号本人（common-app-context 的 uniqueId 一致）→ 直接用登录
+///     secUid，避免抓主页 HTML 被 403 风控拦截；
+///  2. `user/detail` 官方接口（完整浏览器参数 + 签名）解析其他作者；
+///  3. 抓取作者主页 HTML 提取（旧方案兜底，部分网络环境可用）；
+///  4. 全部失败时给出可操作的错误提示。
 async fn resolve_tiktok_sec_uid(url: &str) -> Result<String> {
     let unique_id = tiktok_unique_id_from_url(url).ok_or_else(|| {
         anyhow!("无法从链接中解析 TikTok 用户名：{url}，请填写形如 https://www.tiktok.com/@用户名 的主页链接")
     })?;
+
+    // 1) 本人主页：直接使用登录账号 secUid，无需抓取
+    if let Some(login_unique_id) = tiktok_login_account_unique_id().await {
+        if login_unique_id.eq_ignore_ascii_case(&unique_id) {
+            return tiktok_login_sec_uid().await;
+        }
+    }
+
     let cookie = tiktok_cookie_header()?;
+
+    // 2) user/detail 官方接口
+    if let Some(sec_uid) = fetch_tiktok_user_detail_sec_uid(&unique_id, &cookie).await? {
+        return Ok(sec_uid);
+    }
+
+    // 3) 主页 HTML 兜底
     let page_url = format!("https://www.tiktok.com/@{unique_id}");
     let (status, body) = tiktok_impersonated_get(&page_url, &cookie).await?;
-    if status != 200 {
-        bail!("TikTok 用户主页返回 HTTP {}", status);
+    if status == 200 {
+        let regex = TIKTOK_SEC_UID_RE.get_or_init(|| {
+            Regex::new(r#""secUid":"([^"]+)"#).expect("invalid secUid regex")
+        });
+        if let Some(sec_uid) = regex
+            .captures(&body)
+            .and_then(|captures| captures.get(1))
+            .map(|matched| matched.as_str().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(sec_uid);
+        }
     }
-    let regex = TIKTOK_SEC_UID_RE.get_or_init(|| {
-        Regex::new(r#""secUid":"([^"]+)"#).expect("invalid secUid regex")
-    });
-    let sec_uid = regex
-        .captures(&body)
-        .and_then(|captures| captures.get(1))
-        .map(|matched| matched.as_str().to_string())
-        .filter(|value| !value.is_empty());
-    match sec_uid {
-        Some(sec_uid) => Ok(sec_uid),
-        None => bail!("从主页提取 secUid 失败：请确认链接有效且已导入 TikTok 登录状态"),
-    }
+
+    bail!(
+        "无法解析 TikTok 作者 @{unique_id} 的 secUid：主页与详情接口均被 TikTok 风控拦截。若这是你的账号，请直接不填链接点击“获取自己的列表”；其他作者请稍后重试或更换外源代理"
+    )
 }
 
 /// 获取 TikTok 播放列表（收藏夹）。
