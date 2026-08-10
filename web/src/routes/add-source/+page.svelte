@@ -379,6 +379,11 @@
 		selectedVideos = [];
 		resetSubmissionState();
 		clearSearchPanel({ clearKeyword: true });
+		// 切换源类型时关闭各平台的“已关注作者”面板，避免上一类型的列表残留
+		clearFollowingsPanel();
+		douyinFollowings = [];
+		loadingDouyinFollowings = false;
+		loadingTikTokFollowings = false;
 		name =
 			youtubeSourceType === 'douyin_liked'
 				? '我的喜欢'
