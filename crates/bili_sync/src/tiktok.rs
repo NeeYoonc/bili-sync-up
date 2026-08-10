@@ -16,7 +16,7 @@ use regex::Regex;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use bili_sync_entity::{youtube_source, youtube_video};
 
@@ -25,7 +25,7 @@ use crate::config::CONFIG_DIR;
 use crate::utils::live_updates::{notify_queue_status_changed, notify_video_sources_changed, notify_videos_changed};
 use crate::utils::time_format::now_standard_string;
 use crate::youtube::{
-    append_ytdlp_runtime, append_youtube_proxy, command_error, configured_external_proxy,
+    append_ytdlp_runtime, append_youtube_proxy, command_error,
     create_youtube_source,
     ensure_ytdlp_available, get_platform_sources, normalize_source_type, parse_video_id_set,
     require_source_platform, reset_youtube_source_path, serialize_video_id_set, update_youtube_source,
@@ -39,20 +39,50 @@ const TIKTOK_WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebK
 const TIKTOK_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const TIKTOK_SEARCH_CONCURRENCY: usize = 4;
 
-/// 构建面向 TikTok 官网的 HTTP 客户端：不再固定 IPv6 直连出口，
-/// 统一走系统默认 DNS 解析；配置了外源代理（proxy/youtube_proxy）时经代理请求（与浏览器一致）。
-///
-/// 早前强制 IPv6 出口链路依赖代理 TUN 的 IPv6 fake-ip，无 TUN 环境下会超时/失败，
-/// 已取消该行为；外源请求改走配置的代理。
-async fn tiktok_web_client() -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder()
-        .user_agent(TIKTOK_WEB_UA)
-        .timeout(TIKTOK_SEARCH_TIMEOUT);
-    let proxy = configured_external_proxy();
-    if !proxy.is_empty() {
-        builder = builder.no_proxy().proxy(reqwest::Proxy::all(&proxy)?);
+/// 用 curl-impersonate（Chrome TLS 指纹）请求 TikTok 官方接口，
+/// 返回 (HTTP 状态码, 响应文本)。TikTok 的 Akamai 风控按 TLS/JA3 与 HTTP/2
+/// 指纹拒绝 reqwest/OpenSSL 客户端（即使签名与 Cookie 完整也返回空 body）；
+/// curl-impersonate 使用与浏览器一致的 Chrome 指纹，可正常拉取关注/我的喜欢等会话接口。
+async fn tiktok_impersonated_get(url: &str, cookie: &str) -> Result<(u16, String)> {
+    // user-agent 必须与签名器/签名计算使用的 UA 完全一致（webmssdk 签名内嵌
+    // md5(UA)，请求 UA 不一致会被 Akamai 判定为伪签名而返回空 body）。
+    let mut headers: Vec<(&str, &str)> = vec![
+        ("user-agent", TIKTOK_WEB_UA),
+        ("accept", "*/*"),
+        ("accept-language", "zh-CN,zh;q=0.9,en;q=0.8"),
+        ("referer", "https://www.tiktok.com/"),
+    ];
+    if !cookie.is_empty() {
+        headers.push(("cookie", cookie));
     }
-    Ok(builder.build()?)
+    let (status, body) = crate::tiktok_impersonate::tiktok_impersonated_get(
+        url,
+        &headers,
+        crate::tiktok_impersonate::TIKTOK_IMPERSONATE_TIMEOUT,
+    )
+    .await?;
+    Ok((status, String::from_utf8_lossy(&body).to_string()))
+}
+
+/// 当前时间秒（用于 WebIdLastTime 等时间戳参数）。
+fn tiktok_web_id_last_time() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(1)
+        .to_string()
+}
+
+/// 从已同步的 localStorage 会话中读取 webid（ttwid），供会话绑定接口使用；
+/// 读取失败时返回 None，调用方回退随机 device_id。
+fn tiktok_session_webid() -> Option<String> {
+    let path = crate::tiktok_browser::tiktok_localstorage_path();
+    let raw = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    json.get("ttwid")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
 }
 
 
@@ -255,18 +285,11 @@ pub(crate) fn tiktok_user_to_search_result(user: &serde_json::Value) -> Option<Y
 }
 
 async fn fetch_tiktok_ssr_profile(unique_id: &str) -> Result<Option<serde_json::Value>> {
-    let client = tiktok_web_client().await?;
     let url = format!("https://www.tiktok.com/@{unique_id}");
-    let response = client
-        .get(&url)
-        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-        .send()
-        .await
-        .context("抓取 TikTok 用户主页失败")?;
-    if !response.status().is_success() {
+    let (status, html) = tiktok_impersonated_get(&url, "").await?;
+    if status != 200 {
         return Ok(None);
     }
-    let html = response.text().await?;
     let regex = Regex::new(r#"<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>"#)?;
     let Some(captures) = regex.captures(&html) else {
         return Ok(None);
@@ -346,12 +369,38 @@ pub async fn tiktok_status() -> Result<ApiResponse<TikTokStatusResponse>, ApiErr
     }))
 }
 
+/// 检查 TikTok 浏览器会话（localStorage）是否与当前 cookies.txt 同一时间同步。
+///
+/// 手动只导入 cookies.txt（不走登录助手“传输 TikTok 登录状态”）时，localStorage
+/// 会明显滞后。TikTok 的“我的喜欢”等接口按 webmssdk 会话状态校验请求（签名内
+/// 嵌入 localStorage 的 msToken/安全密钥），两个文件不同步会返回空列表。
+fn tiktok_browser_session_outdated() -> bool {
+    let ls_path = crate::tiktok_browser::tiktok_localstorage_path();
+    let Ok(ls_meta) = std::fs::metadata(&ls_path) else {
+        return true; // 未同步过 localStorage 视为过期
+    };
+    let Ok(cookie_meta) = std::fs::metadata(tiktok_cookie_path()) else {
+        return false;
+    };
+    let (Ok(cookie_time), Ok(ls_time)) = (cookie_meta.modified(), ls_meta.modified()) else {
+        return false;
+    };
+    // 登录助手同步时两个文件在同一请求内先后写入，容差 5 分钟；超过视为仅导入 cookies。
+    cookie_time
+        .duration_since(ls_time)
+        .map(|elapsed| elapsed.as_secs() > 300)
+        .unwrap_or(false)
+}
+
 /// 生成 TikTok Cookie 导入结果提示；登录 Cookie 不完整时附加警告。
 fn tiktok_import_message() -> String {
     let mut message =
         "已导入 TikTok cookies.txt；作者扫描和媒体解析将使用此登录状态".to_string();
     if !tiktok_cookie_has_login() {
         message.push_str("；注意：未检测到 sessionid/sid_guard/uid_tt 等登录 Cookie，关注/喜欢列表可能不可用，请确认浏览器处于登录状态后重新导出 cookies.txt");
+    }
+    if tiktok_browser_session_outdated() {
+        message.push_str("；⚠ 浏览器会话（localStorage）早于本次 Cookie 导出，TikTok 我的喜欢可能返回空列表。请使用电脑端登录助手的“传输 TikTok 登录状态”同时同步 Cookie 与页面会话（localStorage），不要单独导入 cookies.txt");
     }
     message
 }
@@ -778,44 +827,49 @@ async fn tiktok_login_sec_uid_with_source() -> Result<(String, bool)> {
         return Ok((sec_uid, true));
     }
     let cookie = tiktok_cookie_header()?;
-    let client = tiktok_web_client().await?;
 
     let mut sec_uid: Option<String> = None;
     // 1) common-app-context
-    match client
-        .get("https://www.tiktok.com/node-webapp/api/common-app-context?lang=zh-Hans")
-        .header(reqwest::header::COOKIE, &cookie)
-        .header(reqwest::header::REFERER, "https://www.tiktok.com/")
-        .send()
-        .await
+    match tiktok_impersonated_get(
+        "https://www.tiktok.com/node-webapp/api/common-app-context?lang=zh-Hans",
+        &cookie,
+    )
+    .await
     {
-        Ok(resp) => {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                sec_uid = json
-                    .pointer("/user/secUid")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-                    .filter(|value| !value.is_empty());
+        Ok((status, body)) => {
+            if status == 200 {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    sec_uid = json
+                        .pointer("/user/secUid")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .filter(|value| !value.is_empty());
+                }
+            } else {
+                warn!(status, "获取 TikTok common-app-context 返回非 200，回退 passport 接口");
             }
         }
         Err(error) => warn!(error = %error, "获取 TikTok common-app-context 失败，回退 passport 接口"),
     }
     // 2) passport /account/info
     if sec_uid.is_none() {
-        match client
-            .get("https://www.tiktok.com/passport/web/account/info/?aid=1459&app_language=zh&app_name=tiktok_web")
-            .header(reqwest::header::COOKIE, &cookie)
-            .header(reqwest::header::REFERER, "https://www.tiktok.com/")
-            .send()
-            .await
+        match tiktok_impersonated_get(
+            "https://www.tiktok.com/passport/web/account/info/?aid=1459&app_language=zh&app_name=tiktok_web",
+            &cookie,
+        )
+        .await
         {
-            Ok(resp) => {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    sec_uid = json
-                        .pointer("/data/sec_user_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .filter(|value| !value.is_empty());
+            Ok((status, body)) => {
+                if status == 200 {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        sec_uid = json
+                            .pointer("/data/sec_user_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .filter(|value| !value.is_empty());
+                    }
+                } else {
+                    warn!(status, "获取 TikTok passport 账号信息返回非 200");
                 }
             }
             Err(error) => warn!(error = %error, "获取 TikTok passport 账号信息失败"),
@@ -960,34 +1014,68 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
     }
     let cookie = tiktok_cookie_header()?;
     let sec_uid = tiktok_login_sec_uid().await?;
-    let client = tiktok_web_client().await?;
+    let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
     for _ in 0..500 {
-        // 极简请求参数（与实测可用的 tiktok_personal_lists.py 一致）：不携带
-        // X-Bogus/X-Dynosaur 占位签名与冗余浏览器参数，避免触发风控返回空响应；
-        // 依赖 cookies.txt 中完整登录态（sessionid + msToken）即可拉取“我的喜欢”。
+        // 与浏览器一致的完整参数 + webmssdk 现场签名：favorite/item_list 对会话
+        // 绑定敏感，极简参数即使 TLS 指纹正确也会被判为非浏览器返回空 body。
+        let device_id = tiktok_session_webid().unwrap_or_else(|| tiktok_web_device_id().to_string());
         let params: Vec<(&str, String)> = vec![
+            ("WebIdLastTime", tiktok_web_id_last_time()),
             ("aid", "1988".to_string()),
+            ("app_language", "zh-Hans".to_string()),
             ("app_name", "tiktok_web".to_string()),
-            ("device_platform", "web_pc".to_string()),
+            ("browser_language", "zh-CN".to_string()),
+            ("browser_name", "Mozilla".to_string()),
+            ("browser_online", "true".to_string()),
+            ("browser_platform", "Win32".to_string()),
+            ("browser_version", TIKTOK_WEB_UA.to_string()),
+            ("channel", "tiktok_web".to_string()),
+            ("cookie_enabled", "true".to_string()),
             ("count", "30".to_string()),
             ("cursor", cursor.to_string()),
+            ("data_collection_enabled", "true".to_string()),
+            ("device_id", device_id),
+            ("device_platform", "web_pc".to_string()),
+            ("focus_state", "true".to_string()),
+            ("from_page", "user".to_string()),
+            ("history_len", "7".to_string()),
+            ("is_fullscreen", "false".to_string()),
+            ("is_page_visible", "true".to_string()),
+            ("language", "zh-Hans".to_string()),
+            ("needPinnedItemIds", "true".to_string()),
+            ("odinId", tiktok_login_odin_id().unwrap_or_default()),
+            ("os", "windows".to_string()),
+            ("post_item_list_request_type", "0".to_string()),
+            ("priority_region", "US".to_string()),
+            ("referer", "https://www.tiktok.com/".to_string()),
+            ("region", "US".to_string()),
+            ("root_referer", "https://www.tiktok.com/".to_string()),
+            ("screen_height", "1440".to_string()),
+            ("screen_width", "2560".to_string()),
             ("secUid", sec_uid.clone()),
+            ("tz_name", "Asia/Shanghai".to_string()),
+            ("user_is_login", "true".to_string()),
+            ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
+            ("video_encoding", "dash".to_string()),
+            ("webcast_language", "zh-Hans".to_string()),
+            ("msToken", ms_token.clone()),
+            ("X-Bogus", "1".to_string()),
         ];
-        let url = reqwest::Url::parse_with_params(TIKTOK_FAVORITE_API, params)?;
-        let response = client
-            .get(url)
-            .header(reqwest::header::COOKIE, &cookie)
-            .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
-            .send()
-            .await
-            .context("请求 TikTok 我的喜欢失败")?;
-        if !response.status().is_success() {
-            bail!("TikTok 我的喜欢返回 HTTP {}", response.status());
+        let unsigned = reqwest::Url::parse_with_params(TIKTOK_FAVORITE_API, &params)?;
+        let url = match sign_tiktok_url(unsigned.as_str()).await {
+            Ok(signed) => signed,
+            Err(error) => {
+                warn!(error = %error, "TikTok 我的喜欢现场签名不可用，回退旧签名逻辑");
+                build_tiktok_signed_url(TIKTOK_FAVORITE_API, &params)?.to_string()
+            }
+        };
+        let (status, body) = tiktok_impersonated_get(&url, &cookie).await?;
+        if status != 200 {
+            bail!("TikTok 我的喜欢返回 HTTP {}", status);
         }
-        let body = response.text().await?;
         if body.trim().is_empty() {
             warn!(cursor, "TikTok 我的喜欢返回空响应，可能登录态过期或触发了风控");
             break;
@@ -1011,7 +1099,9 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
         }
         if !page_has_items {
             if posts.is_empty() {
-                bail!("TikTok 我的喜欢接口未返回视频列表（可能需要浏览器实时签名或登录态过期），请确认已导入最新 cookies.txt");
+                bail!(
+                    "TikTok 我的喜欢接口未返回视频列表：当前 Cookie 与浏览器会话（localStorage）可能不是同一时间导出的。请使用电脑端登录助手的“传输 TikTok 登录状态”同时同步 Cookie 与页面会话后重试"
+                );
             }
             break;
         }
@@ -1559,8 +1649,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
     let odin_id = tiktok_login_odin_id().ok_or_else(|| {
         anyhow!("无法从 TikTok cookies.txt 解析账号 ID（缺少 multi_sids），请重新导入登录状态")
     })?;
-    let client = tiktok_web_client().await?;
-    let device_id: u64 = rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
+    let device_id = tiktok_web_device_id().to_string();
     let params: Vec<(&str, String)> = vec![
         ("aid", "1988".to_string()),
         ("app_language", "zh-Hans".to_string()),
@@ -1614,23 +1703,13 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
             build_tiktok_signed_url(TIKTOK_USER_LIST_API, &params)?.to_string()
         }
     };
-    let response = client
-        .get(url)
-        .header(reqwest::header::COOKIE, &cookie)
-        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
-        .send()
-        .await
-        .map_err(|error| {
-            warn!(error = ?error, "请求 TikTok 关注列表失败（底层网络错误，完整错误链）");
-            anyhow!("请求 TikTok 关注列表失败")
-        })?;
-    if !response.status().is_success() {
-        bail!("TikTok 关注列表返回 HTTP {}", response.status());
+    let (status, body) = tiktok_impersonated_get(&url, &cookie).await?;
+    if status != 200 {
+        bail!("TikTok 关注列表返回 HTTP {}", status);
     }
-    let body = response.text().await?;
     if body.trim().is_empty() {
         bail!(
-            "TikTok 关注列表接口返回空响应：服务端直连需要 Node.js 现场签名（webmssdk X-Dynosaur）与有效登录会话。请确认已安装 Node.js、已通过浏览器扩展同步 TikTok 会话（tiktok-cookies.txt + tiktok-localstorage.json），且当前出口网络未被 TikTok 风控"
+            "TikTok 关注列表接口返回空响应：请通过浏览器扩展重新同步 TikTok 会话（tiktok-cookies.txt 与 tiktok-localstorage.json 需为同一时间导出的最新版本），并确认当前出口网络未被 TikTok 风控"
         );
     }
     let payload = decode_tiktok_body(&body)?;
@@ -1686,23 +1765,11 @@ async fn resolve_tiktok_sec_uid(url: &str) -> Result<String> {
         anyhow!("无法从链接中解析 TikTok 用户名：{url}，请填写形如 https://www.tiktok.com/@用户名 的主页链接")
     })?;
     let cookie = tiktok_cookie_header()?;
-    let client = tiktok_web_client().await?;
     let page_url = format!("https://www.tiktok.com/@{unique_id}");
-    let response = client
-        .get(&page_url)
-        .header(reqwest::header::COOKIE, &cookie)
-        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
-        .header(
-            reqwest::header::ACCEPT,
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
-        .send()
-        .await
-        .context("请求 TikTok 用户主页失败")?;
-    if !response.status().is_success() {
-        bail!("TikTok 用户主页返回 HTTP {}", response.status());
+    let (status, body) = tiktok_impersonated_get(&page_url, &cookie).await?;
+    if status != 200 {
+        bail!("TikTok 用户主页返回 HTTP {}", status);
     }
-    let body = response.text().await?;
     let regex = TIKTOK_SEC_UID_RE.get_or_init(|| {
         Regex::new(r#""secUid":"([^"]+)"#).expect("invalid secUid regex")
     });
@@ -1741,9 +1808,8 @@ pub async fn get_tiktok_playlists(
 async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let cookie = tiktok_cookie_header()?;
-    let client = tiktok_web_client().await?;
-    let device_id: u64 = rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
-    let odin_id: u64 = rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
+    let device_id = tiktok_web_device_id().to_string();
+    let odin_id = tiktok_web_device_id().to_string();
     let params: Vec<(&str, String)> = vec![
         ("aid", "1988".to_string()),
         ("app_language", "zh-Hans".to_string()),
@@ -1790,17 +1856,10 @@ async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<You
             build_tiktok_signed_url(TIKTOK_USER_PLAYLIST_API, &params)?.to_string()
         }
     };
-    let response = client
-        .get(url)
-        .header(reqwest::header::COOKIE, &cookie)
-        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
-        .send()
-        .await
-        .context("请求 TikTok 播放列表失败")?;
-    if !response.status().is_success() {
-        bail!("TikTok 播放列表返回 HTTP {}", response.status());
+    let (status, body) = tiktok_impersonated_get(&url, &cookie).await?;
+    if status != 200 {
+        bail!("TikTok 播放列表返回 HTTP {}", status);
     }
-    let body = response.text().await?;
     if body.trim().is_empty() {
         bail!("TikTok 播放列表返回空响应，可能登录态过期或触发了风控");
     }
@@ -1852,7 +1911,6 @@ async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<You
 async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result<Vec<TikTokPost>> {
     let cookie = tiktok_cookie_header()?;
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
-    let client = tiktok_web_client().await?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
@@ -1890,17 +1948,10 @@ async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result
                 build_tiktok_signed_url(&format!("{TIKTOK_PLAYLIST_API}{playlist_id}/"), &params)?.to_string()
             }
         };
-        let response = client
-            .get(url)
-            .header(reqwest::header::COOKIE, &cookie)
-            .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
-            .send()
-            .await
-            .context("请求 TikTok 播放列表视频失败")?;
-        if !response.status().is_success() {
-            bail!("TikTok 播放列表视频返回 HTTP {}", response.status());
+        let (status, body) = tiktok_impersonated_get(&url, &cookie).await?;
+        if status != 200 {
+            bail!("TikTok 播放列表视频返回 HTTP {}", status);
         }
-        let body = response.text().await?;
         if body.trim().is_empty() {
             warn!(playlist_id, cursor, "TikTok 播放列表视频返回空响应，可能登录态过期或触发了风控");
             break;
@@ -2011,34 +2062,13 @@ pub(crate) async fn fetch_tiktok_author_avatar_url(sec_uid: &str) -> anyhow::Res
         ("verifyFp", verify_fp),
         ("webcast_language", "en".to_string()),
     ];
-    // 优先 IPv6 出口链路（与浏览器一致）。网络层失败时回退默认解析（IPv4），
-    // 避免 Clash 伪 IP/IPv6 隧道抖动导致头像子任务整段失败。
-    let ipv6_client = tiktok_web_client().await?;
-    let request_avatar = |client: &reqwest::Client| {
-        client
-            .get("https://www.tiktok.com/api/creator/item_list/")
-            .query(&params)
-            .header(reqwest::header::COOKIE, &cookie)
-            .header(reqwest::header::REFERER, format!("https://www.tiktok.com/@{sec_uid}"))
-            .send()
-    };
-    let response = match request_avatar(&ipv6_client).await {
-        Ok(response) => response,
-        Err(ipv6_error) => {
-            debug!(sec_uid, error = ?ipv6_error, "TikTok 作者作品接口经 IPv6 链路请求失败，回退默认解析重试");
-            let fallback_client = reqwest::Client::builder()
-                .user_agent(TIKTOK_WEB_UA)
-                .timeout(TIKTOK_SEARCH_TIMEOUT)
-                .build()?;
-            request_avatar(&fallback_client)
-                .await
-                .with_context(|| format!("请求 TikTok 作者作品接口失败（IPv6 链路：{ipv6_error:#}）"))?
-        }
-    };
-    if !response.status().is_success() {
+    let url = reqwest::Url::parse_with_params("https://www.tiktok.com/api/creator/item_list/", &params)?;
+    let (status, body) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+    if status != 200 {
         return Ok(None);
     }
-    let payload: serde_json::Value = response.json().await.with_context(|| "解析 TikTok 作者作品响应失败")?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&body).with_context(|| "解析 TikTok 作者作品响应失败")?;
     let avatar = payload
         .get("itemList")
         .and_then(|items| items.as_array())

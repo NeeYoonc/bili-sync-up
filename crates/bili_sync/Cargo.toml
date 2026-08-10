@@ -72,6 +72,8 @@ utoipa-swagger-ui = { workspace = true }
 uuid = { workspace = true }
 webbrowser = { workspace = true }
 zip = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
 encoding_rs = "0.8.35"
 
 [target.'cfg(not(target_arch = "arm"))'.dependencies]
