@@ -759,6 +759,13 @@ async fn tiktok_login_sec_uid_with_source() -> Result<(String, bool)> {
     if let Some(sec_uid) = cached.lock().await.clone() {
         return Ok((sec_uid, false));
     }
+    // 手动设置的 secUid 优先使用：common-app-context/passport 网络探测在部分
+    // 代理出口下会卡满超时（约 30s×2），而手动值本身是账号级权威值，可直接用。
+    if let Some(manual) = load_manual_tiktok_secuid() {
+        let sec_uid = manual.clone();
+        *cached.lock().await = Some(sec_uid.clone());
+        return Ok((sec_uid, true));
+    }
     let cookie = tiktok_cookie_header()?;
     let client = tiktok_web_client().await?;
 
@@ -942,60 +949,23 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
     }
     let cookie = tiktok_cookie_header()?;
     let sec_uid = tiktok_login_sec_uid().await?;
-    let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let client = tiktok_web_client().await?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
     for _ in 0..500 {
-        let device_id: u64 =
-            rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
-        let odin_id: u64 =
-            rand::random::<u64>() % 9000000000000000000 + 1000000000000000000;
-        // 注意：X-Dynosaur 当前仍为占位（VMP 保护，待逆向后替换）。
+        // 极简请求参数（与实测可用的 tiktok_personal_lists.py 一致）：不携带
+        // X-Bogus/X-Dynosaur 占位签名与冗余浏览器参数，避免触发风控返回空响应；
+        // 依赖 cookies.txt 中完整登录态（sessionid + msToken）即可拉取“我的喜欢”。
         let params: Vec<(&str, String)> = vec![
             ("aid", "1988".to_string()),
-            ("app_language", "zh-Hans".to_string()),
             ("app_name", "tiktok_web".to_string()),
-            ("browser_language", "zh-CN".to_string()),
-            ("browser_name", "Mozilla".to_string()),
-            ("browser_online", "true".to_string()),
-            ("browser_platform", "Win32".to_string()),
-            ("browser_version", TIKTOK_WEB_UA.to_string()),
-            ("channel", "tiktok_web".to_string()),
-            ("cookie_enabled", "true".to_string()),
+            ("device_platform", "web_pc".to_string()),
             ("count", "30".to_string()),
             ("cursor", cursor.to_string()),
-            ("data_collection_enabled", "true".to_string()),
-            ("device_id", device_id.to_string()),
-            ("device_platform", "web_pc".to_string()),
-            ("focus_state", "true".to_string()),
-            ("from_page", "user".to_string()),
-            ("history_len", "7".to_string()),
-            ("is_fullscreen", "false".to_string()),
-            ("is_page_visible", "true".to_string()),
-            ("language", "zh-Hans".to_string()),
-            ("needPinnedItemIds", "true".to_string()),
-            ("odinId", odin_id.to_string()),
-            ("os", "windows".to_string()),
-            ("post_item_list_request_type", "0".to_string()),
-            ("priority_region", "US".to_string()),
-            ("referer", "https://www.tiktok.com/".to_string()),
-            ("region", "US".to_string()),
-            ("root_referer", "https://www.tiktok.com/".to_string()),
-            ("screen_height", "1440".to_string()),
-            ("screen_width", "2560".to_string()),
             ("secUid", sec_uid.clone()),
-            ("tz_name", "Asia/Shanghai".to_string()),
-            ("user_is_login", "true".to_string()),
-            ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
-            ("video_encoding", "dash".to_string()),
-            ("webcast_language", "zh-Hans".to_string()),
-            ("msToken", ms_token.clone()),
-            ("X-Bogus", "1".to_string()),
-            ("X-Dynosaur", rand::random::<u128>().to_string()),
         ];
-        let url = build_tiktok_signed_url(TIKTOK_FAVORITE_API, &params)?;
+        let url = reqwest::Url::parse_with_params(TIKTOK_FAVORITE_API, params)?;
         let response = client
             .get(url)
             .header(reqwest::header::COOKIE, &cookie)
