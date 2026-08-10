@@ -122,10 +122,6 @@ export interface DouyinStatusResponse {
 export interface TikTokStatusResponse {
 	logged_in: boolean;
 	cookie_path: string;
-	/** 是否已同步浏览器会话（localStorage），存在时可启用浏览器会话模拟 */
-	browser_session: boolean;
-	/** 浏览器会话同步时间 */
-	browser_session_at?: string;
 }
 
 export interface TikTokSecUidStatusResponse {
@@ -541,7 +537,6 @@ export interface ConfigResponse {
 	split_chapters_after_download?: boolean;
 	proxy?: string;
 	youtube_proxy?: string;
-	tiktok_browser_cdp_url?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;
@@ -727,7 +722,6 @@ export interface UpdateConfigRequest {
 	split_chapters_after_download?: boolean;
 	proxy?: string;
 	youtube_proxy?: string;
-	tiktok_browser_cdp_url?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;
@@ -1432,13 +1426,5 @@ export interface TestProxyResponse {
 	success: boolean;
 	latency_ms: number;
 	status?: number | null;
-	error?: string | null;
-}
-
-// TikTok 远程 Chromium CDP 连通性测试结果
-export interface TestTikTokBrowserResponse {
-	success: boolean;
-	latency_ms: number;
-	browser?: string | null;
 	error?: string | null;
 }

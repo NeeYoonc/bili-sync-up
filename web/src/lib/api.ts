@@ -61,7 +61,6 @@ import type {
 	TikTokSecUidStatusResponse,
 	TikTokStatusResponse,
 	TestProxyResponse,
-	TestTikTokBrowserResponse,
 	YouTubeSearchRequest,
 	YouTubeSearchResponse,
 	YouTubeSourceVideosRequest,
@@ -1391,15 +1390,6 @@ class ApiClient {
 		return this.post<TestProxyResponse>('/proxy/test', proxy !== undefined ? { proxy } : {});
 	}
 
-	/**
-	 * 测试 TikTok 远程 Chromium CDP 连接
-	 */
-	async testTikTokBrowser(cdpUrl?: string): Promise<ApiResponse<TestTikTokBrowserResponse>> {
-		return this.post<TestTikTokBrowserResponse>(
-			'/tiktok/browser/test',
-			cdpUrl !== undefined ? { cdp_url: cdpUrl } : {}
-		);
-	}
 }
 
 // 创建默认的 API 客户端实例
@@ -1901,8 +1891,6 @@ export const api = {
 		webhook_synology_chat_template?: string;
 	}) => apiClient.testNotification(params),
 	testProxy: (proxy?: string) => apiClient.testProxy(proxy),
-	testTikTokBrowser: (cdpUrl?: string) => apiClient.testTikTokBrowser(cdpUrl),
-
 	/**
 	 * 订阅系统信息WebSocket事件
 	 */

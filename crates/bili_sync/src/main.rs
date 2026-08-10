@@ -19,7 +19,6 @@ mod ingest_log;
 mod initialization;
 mod task;
 mod tiktok;
-mod tiktok_browser;
 mod tiktok_impersonate;
 mod tiktok_sign;
 mod unified_downloader;

@@ -327,8 +327,6 @@ pub struct UpdateConfigRequest {
     pub proxy: Option<String>,
     // 兼容旧配置：旧版仅 YouTube 使用的代理字段
     pub youtube_proxy: Option<String>,
-    // TikTok 浏览器会话模拟：远程 Chromium CDP 地址（如 http://127.0.0.1:9222），留空回退本机 Chrome
-    pub tiktok_browser_cdp_url: Option<String>,
     // 风控验证配置
     pub risk_control_enabled: Option<bool>,
     pub risk_control_mode: Option<String>,
@@ -605,11 +603,4 @@ pub struct ConfigMigrationRequest {
 pub struct TestProxyRequest {
     /// 待测试的代理地址（http/socks5）；为空时使用当前已保存配置。
     pub proxy: Option<String>,
-}
-
-/// TikTok 远程 Chromium CDP 连通性测试请求：不传 cdp_url 时使用当前已保存配置。
-#[derive(Deserialize, ToSchema)]
-pub struct TestTikTokBrowserRequest {
-    /// 待测试的远程 Chromium CDP 地址（http://host:port）；为空时使用当前已保存配置。
-    pub cdp_url: Option<String>,
 }

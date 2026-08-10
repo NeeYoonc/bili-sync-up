@@ -83,11 +83,6 @@ pub struct TikTokCookieImportRequest {
 pub struct TikTokStatusResponse {
     pub logged_in: bool,
     pub cookie_path: String,
-    /// 是否已同步浏览器会话（localStorage），存在时可启用浏览器会话模拟。
-    pub browser_session: bool,
-    /// 浏览器会话同步时间（ISO 时间字符串）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub browser_session_at: Option<String>,
 }
 
 /// 手动设置的 TikTok 账号 secUid 状态。
@@ -326,26 +321,9 @@ fn tiktok_result_match_score(result: &YouTubeSearchResult, keyword: &str) -> u8 
 /// 当前 TikTok 登录状态：仅检查配置目录中的 cookies.txt 是否可识别。
 pub async fn tiktok_status() -> Result<ApiResponse<TikTokStatusResponse>, ApiError> {
     let path = tiktok_cookie_path();
-    let browser_session = crate::tiktok_browser::has_tiktok_browser_session();
-    let browser_session_at = browser_session
-        .then(|| {
-            std::fs::metadata(crate::tiktok_browser::tiktok_localstorage_path())
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|time| {
-                    let duration = time
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default();
-                    chrono::DateTime::from_timestamp(duration.as_secs() as i64, 0)
-                        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string())
-                })
-        })
-        .flatten();
     Ok(ApiResponse::ok(TikTokStatusResponse {
         logged_in: has_tiktok_session(&path),
         cookie_path: path.display().to_string(),
-        browser_session,
-        browser_session_at,
     }))
 }
 
@@ -1511,8 +1489,8 @@ async fn fetch_tiktok_favorite_videos(
 // webmssdk 按“登录会话 + 本地浏览器指纹状态”实时生成、有时效。纯服务端伪造
 // 或重放旧签名均会被 TikTok 风控拒绝（实测返回 HTTP 200 但空 body）。
 // 最终解：用 Node 直接执行内嵌的 webmssdk（VMP 字节码 + 运行时 shim），结合
-// 已导入的浏览器会话状态（tiktok-cookies.txt + tiktok-localstorage.json）在
-// 服务端现场生成有效签名，不依赖任何浏览器。经真实接口验证 statusCode=0。
+// 已导入的 cookies.txt 登录态在服务端现场生成有效签名，不依赖任何浏览器。
+// 经真实接口验证 statusCode=0。
 
 /// 内嵌的自包含 webmssdk 签名器（含 VM 字节码与运行时 shim，Node 可直接执行）。
 const TIKTOK_SIGNER_JS: &str = include_str!("../../../scripts/tiktok-signer.cjs");
@@ -1595,8 +1573,7 @@ fn find_tiktok_node() -> Option<PathBuf> {
 
 /// 用 webmssdk 现场签名 TikTok API URL，返回签名后的完整 URL。
 ///
-/// 需要 Node.js 与已同步的浏览器会话（CONFIG_DIR/tiktok-cookies.txt +
-/// tiktok-localstorage.json，后者由浏览器扩展“同步 TikTok 会话”写入）。
+/// 需要 Node.js 与已导入的 TikTok cookies.txt（CONFIG_DIR/tiktok-cookies.txt）。
 async fn sign_tiktok_url(url: &str) -> Result<String> {
     let signer = ensure_tiktok_signer().await?;
     let node = find_tiktok_node().ok_or_else(|| {
@@ -1661,86 +1638,116 @@ pub async fn get_tiktok_followings() -> Result<ApiResponse<YouTubeSearchResponse
 
 async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
     // 服务端直连：curl-impersonate（Chrome TLS 指纹）+ Node webmssdk 现场签名。
+    // 关注接口用 scene=21（Web UI 实际场景值）才能返回真实关注；按 maxCursor
+    // 自动翻页，避免关注超过单页数量（count=30）时被截断。
     let cookie = tiktok_cookie_header()?;
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let odin_id = tiktok_login_odin_id().ok_or_else(|| {
         anyhow!("无法从 TikTok cookies.txt 解析账号 ID（缺少 multi_sids），请重新导入登录状态")
     })?;
     let device_id = tiktok_web_device_id().to_string();
-    let params: Vec<(&str, String)> = vec![
-        ("aid", "1988".to_string()),
-        ("app_language", "zh-Hans".to_string()),
-        ("app_name", "tiktok_web".to_string()),
-        ("browser_language", "zh-CN".to_string()),
-        ("browser_name", "Mozilla".to_string()),
-        ("browser_online", "true".to_string()),
-        ("browser_platform", "Win32".to_string()),
-        ("browser_version", TIKTOK_WEB_UA.to_string()),
-        ("channel", "tiktok_web".to_string()),
-        ("cookie_enabled", "true".to_string()),
-        ("count", "30".to_string()),
-        ("data_collection_enabled", "false".to_string()),
-        ("device_id", device_id.to_string()),
-        ("device_platform", "web_pc".to_string()),
-        ("focus_state", "true".to_string()),
-        ("from_page", "user".to_string()),
-        ("history_len", "4".to_string()),
-        ("isNonPersonalized", "false".to_string()),
-        ("is_fullscreen", "false".to_string()),
-        ("is_page_visible", "true".to_string()),
-        ("maxCursor", "0".to_string()),
-        ("minCursor", "0".to_string()),
-        ("odinId", odin_id.clone()),
-        ("os", "windows".to_string()),
-        ("priority_region", String::new()),
-        ("referer", "https://www.tiktok.com/".to_string()),
-        ("region", "SG".to_string()),
-        ("root_referer", "https://www.tiktok.com/".to_string()),
-        ("scene", "21".to_string()),
-        ("screen_height", "1440".to_string()),
-        ("screen_width", "2560".to_string()),
-        ("targetUserId", odin_id.clone()),
-        ("tz_name", "Asia/Shanghai".to_string()),
-        ("user_is_login", "true".to_string()),
-        ("WebIdLastTime", (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(1))
-        .to_string()),
-        ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
-        ("webcast_language", "zh-Hans".to_string()),
-        ("msToken", ms_token.clone()),
-        ("X-Bogus", "1".to_string()),
-    ];
-    let (status, body) =
-        tiktok_signed_get_with_retry(TIKTOK_USER_LIST_API, &params, &cookie, "关注列表").await?;
-    if status != 200 {
-        bail!(
-            "TikTok 关注列表返回 HTTP {}{}",
-            status,
-            tiktok_risk_status_hint(status)
-        );
-    }
-    if body.trim().is_empty() {
-        bail!(
-            "TikTok 关注列表接口返回空响应（已自动重新签名一次仍失败）：请确认当前出口网络未被 TikTok 风控，稍后重试或更换外源代理（proxy/youtube_proxy），或重新导入最新 cookies.txt"
-        );
-    }
-    let payload = decode_tiktok_body(&body)?;
+    let mut cursor = "0".to_string();
     let mut results = Vec::new();
     let mut seen = HashSet::new();
-    if let Some(user_list) = payload.get("userList").and_then(serde_json::Value::as_array) {
-        for item in user_list {
-            let Some(user) = item.get("user") else {
-                continue;
-            };
-            let Some(result) = tiktok_user_to_search_result(user) else {
-                continue;
-            };
-            if seen.insert(result.youtube_url.to_ascii_lowercase()) {
-                results.push(result);
+    for _ in 0..50 {
+        let params: Vec<(&str, String)> = vec![
+            ("aid", "1988".to_string()),
+            ("app_language", "zh-Hans".to_string()),
+            ("app_name", "tiktok_web".to_string()),
+            ("browser_language", "zh-CN".to_string()),
+            ("browser_name", "Mozilla".to_string()),
+            ("browser_online", "true".to_string()),
+            ("browser_platform", "Win32".to_string()),
+            ("browser_version", TIKTOK_WEB_UA.to_string()),
+            ("channel", "tiktok_web".to_string()),
+            ("cookie_enabled", "true".to_string()),
+            ("count", "30".to_string()),
+            ("data_collection_enabled", "false".to_string()),
+            ("device_id", device_id.to_string()),
+            ("device_platform", "web_pc".to_string()),
+            ("focus_state", "true".to_string()),
+            ("from_page", "user".to_string()),
+            ("history_len", "4".to_string()),
+            ("isNonPersonalized", "false".to_string()),
+            ("is_fullscreen", "false".to_string()),
+            ("is_page_visible", "true".to_string()),
+            ("maxCursor", cursor.clone()),
+            ("minCursor", "0".to_string()),
+            ("odinId", odin_id.clone()),
+            ("os", "windows".to_string()),
+            ("priority_region", String::new()),
+            ("referer", "https://www.tiktok.com/".to_string()),
+            ("region", "SG".to_string()),
+            ("root_referer", "https://www.tiktok.com/".to_string()),
+            ("scene", "21".to_string()),
+            ("screen_height", "1440".to_string()),
+            ("screen_width", "2560".to_string()),
+            ("targetUserId", odin_id.clone()),
+            ("tz_name", "Asia/Shanghai".to_string()),
+            ("user_is_login", "true".to_string()),
+            ("WebIdLastTime", (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(1))
+            .to_string()),
+            ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
+            ("webcast_language", "zh-Hans".to_string()),
+            ("msToken", ms_token.clone()),
+            ("X-Bogus", "1".to_string()),
+        ];
+        let (status, body) = tiktok_signed_get_with_retry(
+            TIKTOK_USER_LIST_API,
+            &params,
+            &cookie,
+            "关注列表",
+        )
+        .await?;
+        if status != 200 {
+            bail!(
+                "TikTok 关注列表返回 HTTP {}{}",
+                status,
+                tiktok_risk_status_hint(status)
+            );
+        }
+        if body.trim().is_empty() {
+            bail!(
+                "TikTok 关注列表接口返回空响应（已自动重新签名一次仍失败）：请确认当前出口网络未被 TikTok 风控，稍后重试或更换外源代理（proxy/youtube_proxy），或重新导入最新 cookies.txt"
+            );
+        }
+        let payload = decode_tiktok_body(&body)?;
+        if let Some(user_list) = payload.get("userList").and_then(serde_json::Value::as_array) {
+            for item in user_list {
+                let Some(user) = item.get("user") else {
+                    continue;
+                };
+                let Some(result) = tiktok_user_to_search_result(user) else {
+                    continue;
+                };
+                if seen.insert(result.youtube_url.to_ascii_lowercase()) {
+                    results.push(result);
+                }
             }
         }
+        let has_more = payload
+            .get("hasMore")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let next = payload
+            .get("maxCursor")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                payload
+                    .get("maxCursor")
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|value| value.to_string())
+            })
+            .unwrap_or_else(|| cursor.clone());
+        if !has_more || next == cursor {
+            break;
+        }
+        cursor = next;
+        tokio::time::sleep(tiktok_page_delay().await).await;
     }
     let total = results.len();
     Ok(ApiResponse::ok(YouTubeSearchResponse {

@@ -115,10 +115,6 @@
 						{#if status?.logged_in}<CheckCircle2 class="h-3.5 w-3.5" />{:else}<CircleAlert class="h-3.5 w-3.5" />{/if}
 						{status?.logged_in ? 'TikTok Cookie 可用' : '未导入 TikTok Cookie'}
 					</Badge>
-					<Badge variant={status?.browser_session ? 'default' : 'outline'} class="gap-1">
-						{#if status?.browser_session}<CheckCircle2 class="h-3.5 w-3.5" />{:else}<CircleAlert class="h-3.5 w-3.5" />{/if}
-						{status?.browser_session ? '浏览器会话已同步' : '未同步浏览器会话'}
-					</Badge>
 					<a
 						class="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-9 items-center rounded-md px-3 text-sm font-medium"
 						href="/youtube-login-helper.zip"
