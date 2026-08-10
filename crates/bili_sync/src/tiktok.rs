@@ -719,6 +719,36 @@ async fn tiktok_impersonated_get_with_retry(
     }
 }
 
+/// 带“空正文重签重试”的 TikTok 签名接口请求（关注/播放列表等）。
+///
+/// 签名接口偶尔返回 HTTP 200 空正文（临时风控/抖动），重新签名生成新的
+/// X-Gnarly/X-Dynosaur 后再请求一次往往能恢复（与社区协议实现一致）。
+async fn tiktok_signed_get_with_retry(
+    base: &str,
+    params: &[(&str, String)],
+    cookie: &str,
+    label: &str,
+) -> Result<(u16, String)> {
+    let mut attempt = 0usize;
+    loop {
+        let unsigned = reqwest::Url::parse_with_params(base, params)?;
+        let url = match sign_tiktok_url(unsigned.as_str()).await {
+            Ok(signed) => signed,
+            Err(error) => {
+                warn!(error = %error, label = %label, "TikTok 现场签名不可用，回退旧签名逻辑");
+                build_tiktok_signed_url(base, params)?.to_string()
+            }
+        };
+        let (status, body) = tiktok_impersonated_get(&url, cookie).await?;
+        if status == 200 && body.trim().is_empty() && attempt == 0 {
+            warn!(label = %label, "TikTok 签名接口返回空正文，重新签名后重试一次");
+            attempt += 1;
+            continue;
+        }
+        return Ok((status, body));
+    }
+}
+
 // ---------- TikTok 我的喜欢（favorite/item_list 官方接口） ----------
 
 /// 抖音喜欢列表在 TikTok 上对应 `/api/favorite/item_list/`。该接口在真实
@@ -1666,7 +1696,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         ("referer", "https://www.tiktok.com/".to_string()),
         ("region", "SG".to_string()),
         ("root_referer", "https://www.tiktok.com/".to_string()),
-        ("scene", "151".to_string()),
+        ("scene", "21".to_string()),
         ("screen_height", "1440".to_string()),
         ("screen_width", "2560".to_string()),
         ("targetUserId", odin_id.clone()),
@@ -1682,21 +1712,18 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         ("msToken", ms_token.clone()),
         ("X-Bogus", "1".to_string()),
     ];
-    let unsigned = reqwest::Url::parse_with_params(TIKTOK_USER_LIST_API, &params)?;
-    let url = match sign_tiktok_url(unsigned.as_str()).await {
-        Ok(signed) => signed,
-        Err(error) => {
-            warn!(error = %error, "TikTok 现场签名不可用，回退旧签名逻辑（关注列表大概率仍返回空响应）");
-            build_tiktok_signed_url(TIKTOK_USER_LIST_API, &params)?.to_string()
-        }
-    };
-    let (status, body) = tiktok_impersonated_get(&url, &cookie).await?;
+    let (status, body) =
+        tiktok_signed_get_with_retry(TIKTOK_USER_LIST_API, &params, &cookie, "关注列表").await?;
     if status != 200 {
-        bail!("TikTok 关注列表返回 HTTP {}", status);
+        bail!(
+            "TikTok 关注列表返回 HTTP {}{}",
+            status,
+            tiktok_risk_status_hint(status)
+        );
     }
     if body.trim().is_empty() {
         bail!(
-            "TikTok 关注列表接口返回空响应：请确认已通过浏览器扩展同步 TikTok 会话（tiktok-cookies.txt + tiktok-localstorage.json），并确认当前出口网络未被 TikTok 风控"
+            "TikTok 关注列表接口返回空响应（已自动重新签名一次仍失败）：请确认当前出口网络未被 TikTok 风控，稍后重试或更换外源代理（proxy/youtube_proxy），或重新导入最新 cookies.txt"
         );
     }
     let payload = decode_tiktok_body(&body)?;
@@ -1994,20 +2021,19 @@ async fn fetch_tiktok_public_playlists(sec_uid: &str) -> anyhow::Result<Vec<YouT
         ("msToken", ms_token.clone()),
         ("X-Bogus", "1".to_string()),
     ];
-    let unsigned = reqwest::Url::parse_with_params(TIKTOK_USER_PLAYLIST_API, &params)?;
-    let url = match sign_tiktok_url(unsigned.as_str()).await {
-        Ok(signed) => signed,
-        Err(error) => {
-            warn!(error = %error, "TikTok 现场签名不可用，回退旧签名逻辑（播放列表接口）");
-            build_tiktok_signed_url(TIKTOK_USER_PLAYLIST_API, &params)?.to_string()
-        }
-    };
-    let (status, body) = tiktok_impersonated_get(&url, &cookie).await?;
+    let (status, body) =
+        tiktok_signed_get_with_retry(TIKTOK_USER_PLAYLIST_API, &params, &cookie, "播放列表").await?;
     if status != 200 {
-        bail!("TikTok 播放列表返回 HTTP {}", status);
+        bail!(
+            "TikTok 播放列表返回 HTTP {}{}",
+            status,
+            tiktok_risk_status_hint(status)
+        );
     }
     if body.trim().is_empty() {
-        bail!("TikTok 播放列表返回空响应，可能登录态过期或触发了风控");
+        bail!(
+            "TikTok 播放列表返回空响应（已自动重新签名一次仍失败）：可能登录态过期或触发了风控，请稍后重试或更换外源代理"
+        );
     }
     let payload = decode_tiktok_body(&body)?;
     let mut results = Vec::new();
@@ -2218,21 +2244,18 @@ async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result
             ("msToken", ms_token.clone()),
             ("X-Bogus", "1".to_string()),
         ];
-        let unsigned =
-            reqwest::Url::parse_with_params(&format!("{TIKTOK_PLAYLIST_API}{playlist_id}/"), &params)?;
-        let url = match sign_tiktok_url(unsigned.as_str()).await {
-            Ok(signed) => signed,
-            Err(error) => {
-                warn!(error = %error, "TikTok 现场签名不可用，回退旧签名逻辑（播放列表视频接口）");
-                build_tiktok_signed_url(&format!("{TIKTOK_PLAYLIST_API}{playlist_id}/"), &params)?.to_string()
-            }
-        };
-        let (status, body) = tiktok_impersonated_get(&url, &cookie).await?;
+        let base = format!("{TIKTOK_PLAYLIST_API}{playlist_id}/");
+        let (status, body) =
+            tiktok_signed_get_with_retry(&base, &params, &cookie, "播放列表视频").await?;
         if status != 200 {
-            bail!("TikTok 播放列表视频返回 HTTP {}", status);
+            bail!(
+                "TikTok 播放列表视频返回 HTTP {}{}",
+                status,
+                tiktok_risk_status_hint(status)
+            );
         }
         if body.trim().is_empty() {
-            warn!(playlist_id, cursor, "TikTok 播放列表视频返回空响应，可能登录态过期或触发了风控");
+            warn!(playlist_id, cursor, "TikTok 播放列表视频返回空响应（已自动重新签名一次仍失败），可能登录态过期或触发了风控");
             break;
         }
         let payload = decode_tiktok_body(&body)?;
