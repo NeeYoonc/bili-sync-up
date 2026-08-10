@@ -1575,6 +1575,12 @@ fn find_tiktok_node() -> Option<PathBuf> {
 ///
 /// 需要 Node.js 与已导入的 TikTok cookies.txt（CONFIG_DIR/tiktok-cookies.txt）。
 async fn sign_tiktok_url(url: &str) -> Result<String> {
+    sign_tiktok_url_with_sdk(url, None).await
+}
+
+/// 与 `sign_tiktok_url` 相同，但可强制指定 SDK 候选版本（`--sdk <runtime_id>`），
+/// 供 SDK 自动更新任务对候选做真实关注接口 Canary 时使用。
+async fn sign_tiktok_url_with_sdk(url: &str, sdk: Option<&str>) -> Result<String> {
     let signer = ensure_tiktok_signer().await?;
     let node = find_tiktok_node().ok_or_else(|| {
         anyhow!(
@@ -1587,6 +1593,9 @@ async fn sign_tiktok_url(url: &str) -> Result<String> {
         .arg(url)
         .env("BILI_SYNC_CONFIG_DIR", CONFIG_DIR.as_os_str())
         .kill_on_drop(true);
+    if let Some(runtime_id) = sdk {
+        command.arg("--sdk").arg(runtime_id);
+    }
     let output = tokio::time::timeout(Duration::from_secs(90), command.output())
         .await
         .map_err(|_| anyhow!("TikTok 签名器执行超时（90s）"))?
@@ -2411,3 +2420,337 @@ pub(crate) fn tiktok_handle_from_url(url: &str) -> Option<String> {
         .filter(|segment| !segment.is_empty())
 }
 
+
+// ---------- TikTok webmssdk SDK 自动发现/激活（定时任务） ----------
+
+/// 内嵌的 SDK 管理器脚本（发现候选、结构测试、远程验证、激活/回滚）。
+/// 与签名器一样随二进制发布到 CONFIG_DIR/tools/，由 Node.js 执行。
+const TIKTOK_SDK_MANAGER_JS: &str = include_str!("../../../scripts/tiktok-sdk-manager.cjs");
+
+/// SDK 管理器落盘位置（首次使用时从二进制内嵌资源释放）。
+fn tiktok_sdk_manager_path() -> PathBuf {
+    CONFIG_DIR.join("tools").join("tiktok-sdk-manager.cjs")
+}
+
+/// 确保 SDK 管理器脚本已写入磁盘（缺失或长度不符时重新释放）。
+async fn ensure_tiktok_sdk_manager() -> Result<PathBuf> {
+    let path = tiktok_sdk_manager_path();
+    let parent = path.parent().expect("TikTok SDK 管理器路径缺少父目录");
+    tokio::fs::create_dir_all(parent)
+        .await
+        .context("创建 TikTok SDK 管理器目录失败")?;
+    let needs_write = match tokio::fs::metadata(&path).await {
+        Ok(meta) => meta.len() != TIKTOK_SDK_MANAGER_JS.len() as u64,
+        Err(_) => true,
+    };
+    if needs_write {
+        tokio::fs::write(&path, TIKTOK_SDK_MANAGER_JS)
+            .await
+            .context("写入 TikTok SDK 管理器失败")?;
+        info!(path = %path.display(), "已释放 TikTok webmssdk SDK 管理器");
+    }
+    Ok(path)
+}
+
+/// TikTok webmssdk 自动更新的全局开关（默认开启）。
+/// 环境变量 `BILI_SYNC_TIKTOK_SDK_AUTOUPDATE=0`（或 false/off/no）关闭。
+fn tiktok_sdk_autoupdate_enabled() -> bool {
+    match std::env::var("BILI_SYNC_TIKTOK_SDK_AUTOUPDATE") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// 启动后首次检查的宽限（秒）：避开启动阶段其它 TikTok 请求叠加触发风控。
+const TIKTOK_SDK_AUTOUPDATE_STARTUP_DELAY: Duration = Duration::from_secs(30);
+/// 自动更新检查间隔：与登录状态守护一致，每 6 小时一次。
+const TIKTOK_SDK_AUTOUPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// 单次 Node 子进程（discover/test/verify/activate/rollback）超时。
+const TIKTOK_SDK_MANAGER_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 运行 TikTok SDK 管理器子命令，返回 (退出码, stdout, stderr)。
+async fn run_tiktok_sdk_manager(
+    manager: &Path,
+    args: &[&str],
+) -> Result<(i32, String, String)> {
+    let node = find_tiktok_node().ok_or_else(|| {
+        anyhow!(
+            "未找到 Node.js 运行时：TikTok webmssdk SDK 自动更新需要 Node.js。请安装 Node.js，或通过环境变量 BILI_SYNC_TIKTOK_NODE 指定 node 路径"
+        )
+    })?;
+    let mut command = Command::new(&node);
+    command
+        .arg(manager)
+        .args(args)
+        .env("BILI_SYNC_CONFIG_DIR", CONFIG_DIR.as_os_str())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(
+        TIKTOK_SDK_MANAGER_TIMEOUT + Duration::from_secs(10),
+        command.output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "TikTok SDK 管理器执行超时（{}s）",
+            TIKTOK_SDK_MANAGER_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|error| anyhow!("启动 TikTok SDK 管理器失败（Node 运行时不完整？）：{error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let code = output.status.code().unwrap_or(-1);
+    Ok((code, stdout, stderr))
+}
+
+/// 读取当前激活的 SDK 候选 runtime_id（无 active.json 或未激活时返回 None）。
+fn tiktok_sdk_active_runtime_id() -> Option<String> {
+    let path = CONFIG_DIR.join("tiktok-sdk").join("active.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("runtime_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// 对指定 SDK 候选做真实关注接口 Canary：
+/// 签名 `/api/user/list/`（scene=21, count=1）后用 curl-impersonate 请求，
+/// 要求 HTTP 200 且 userList 非空才算通过，返回实际返回的 userList 数量。
+async fn tiktok_sdk_canary(sdk_id: &str) -> Result<usize> {
+    let cookie = tiktok_cookie_header()?;
+    let ms_token = tiktok_cookie_values()
+        .get("msToken")
+        .cloned()
+        .unwrap_or_default();
+    let odin_id = tiktok_login_odin_id().ok_or_else(|| {
+        anyhow!(
+            "无法从 TikTok cookies.txt 解析账号 ID（缺少 multi_sids），请重新导入登录状态"
+        )
+    })?;
+    let device_id = tiktok_web_device_id().to_string();
+    let params: Vec<(&str, String)> = vec![
+        ("aid", "1988".to_string()),
+        ("app_language", "zh-Hans".to_string()),
+        ("app_name", "tiktok_web".to_string()),
+        ("browser_language", "zh-CN".to_string()),
+        ("browser_name", "Mozilla".to_string()),
+        ("browser_online", "true".to_string()),
+        ("browser_platform", "Win32".to_string()),
+        ("browser_version", TIKTOK_WEB_UA.to_string()),
+        ("channel", "tiktok_web".to_string()),
+        ("cookie_enabled", "true".to_string()),
+        ("count", "1".to_string()),
+        ("data_collection_enabled", "false".to_string()),
+        ("device_id", device_id),
+        ("device_platform", "web_pc".to_string()),
+        ("focus_state", "true".to_string()),
+        ("from_page", "user".to_string()),
+        ("history_len", "4".to_string()),
+        ("isNonPersonalized", "false".to_string()),
+        ("is_fullscreen", "false".to_string()),
+        ("is_page_visible", "true".to_string()),
+        ("maxCursor", "0".to_string()),
+        ("minCursor", "0".to_string()),
+        ("odinId", odin_id.clone()),
+        ("os", "windows".to_string()),
+        ("priority_region", String::new()),
+        ("referer", "https://www.tiktok.com/".to_string()),
+        ("region", "SG".to_string()),
+        ("root_referer", "https://www.tiktok.com/".to_string()),
+        ("scene", "21".to_string()),
+        ("screen_height", "1440".to_string()),
+        ("screen_width", "2560".to_string()),
+        ("targetUserId", odin_id),
+        ("tz_name", "Asia/Shanghai".to_string()),
+        ("user_is_login", "true".to_string()),
+        (
+            "WebIdLastTime",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(1)
+                .to_string(),
+        ),
+        ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
+        ("webcast_language", "zh-Hans".to_string()),
+        ("msToken", ms_token),
+        ("X-Bogus", "1".to_string()),
+    ];
+    let unsigned = reqwest::Url::parse_with_params(TIKTOK_USER_LIST_API, &params)?;
+    let signed = sign_tiktok_url_with_sdk(unsigned.as_str(), Some(sdk_id)).await?;
+    let (status, body) = tiktok_impersonated_get(&signed, &cookie).await?;
+    if status != 200 {
+        bail!(
+            "TikTok 关注接口返回 HTTP {}{}",
+            status,
+            tiktok_risk_status_hint(status)
+        );
+    }
+    if body.trim().is_empty() {
+        bail!("TikTok 关注接口返回空响应（登录态或出口网络问题）");
+    }
+    let payload = decode_tiktok_body(&body)?;
+    let count = payload
+        .get("userList")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| list.len())
+        .unwrap_or(0);
+    if count == 0 {
+        bail!("TikTok 关注接口返回空 userList（当前出口 IP 可能被风控）");
+    }
+    Ok(count)
+}
+
+/// TikTok webmssdk SDK 自动更新调度器：启动后延迟检查一次，之后每 6 小时一次。
+///
+/// 流程：discover 发现官方新候选 → 逐个结构测试 → 真实关注接口 Canary →
+/// 标记 remote_verified → 激活（先验证后激活，避免换上不可用的 SDK）；
+/// 若所有候选均不可用且当前激活版本 Canary 失败，则回滚到上一版本。
+pub async fn tiktok_sdk_scheduler() {
+    info!(
+        "TikTok webmssdk SDK 自动更新任务已启动：启动后延迟 {} 秒首次检查，之后每 {} 小时自动发现官方候选并做真实关注接口 Canary 后激活（环境变量 BILI_SYNC_TIKTOK_SDK_AUTOUPDATE=0 可关闭）",
+        TIKTOK_SDK_AUTOUPDATE_STARTUP_DELAY.as_secs(),
+        TIKTOK_SDK_AUTOUPDATE_INTERVAL.as_secs() / 3600
+    );
+    tokio::time::sleep(TIKTOK_SDK_AUTOUPDATE_STARTUP_DELAY).await;
+    loop {
+        let started = Instant::now();
+        if let Err(error) = refresh_tiktok_sdk_runtime().await {
+            warn!(error = %error, "TikTok webmssdk SDK 自动更新检查失败（当前签名不受影响）");
+        }
+        let elapsed = started.elapsed();
+        if elapsed < TIKTOK_SDK_AUTOUPDATE_INTERVAL {
+            tokio::time::sleep(TIKTOK_SDK_AUTOUPDATE_INTERVAL - elapsed).await;
+        }
+    }
+}
+
+/// 单轮 TikTok webmssdk SDK 自动更新。
+async fn refresh_tiktok_sdk_runtime() -> Result<()> {
+    if !tiktok_sdk_autoupdate_enabled() {
+        debug!("TikTok webmssdk SDK 自动更新已通过环境变量关闭");
+        return Ok(());
+    }
+    // Canary 需要登录 Cookie；未导入时跳过自动更新。
+    if !tiktok_cookie_values().contains_key("sessionid") {
+        debug!("未导入 TikTok 登录 Cookie，跳过 webmssdk SDK 自动更新");
+        return Ok(());
+    }
+    let manager = ensure_tiktok_sdk_manager().await?;
+
+    // 1) 发现官方新候选（含持久化地址兜底）。
+    let (code, stdout, stderr) = run_tiktok_sdk_manager(&manager, &["discover"]).await?;
+    if code != 0 {
+        bail!(
+            "TikTok webmssdk discover 失败（退出码 {code}）：{}",
+            if stderr.is_empty() { stdout } else { stderr }
+        );
+    }
+    let discovered: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("webmssdk-"))
+        .map(str::to_string)
+        .collect();
+    info!(
+        candidates = discovered.len(),
+        "TikTok webmssdk 候选发现完成，开始结构测试与真实关注接口 Canary"
+    );
+
+    // 2) 逐个候选：结构测试 → Canary → remote_verified → 激活（第一个通过者生效）。
+    let mut any_verified = false;
+    let mut activated = false;
+    for runtime_id in &discovered {
+        let (test_code, test_stdout, test_stderr) =
+            run_tiktok_sdk_manager(&manager, &["test", runtime_id]).await?;
+        if test_code != 0 {
+            warn!(
+                runtime_id = %runtime_id,
+                "TikTok webmssdk 候选结构测试失败：{}",
+                if test_stderr.is_empty() { test_stdout } else { test_stderr }
+            );
+            continue;
+        }
+        match tiktok_sdk_canary(runtime_id).await {
+            Ok(count) => {
+                any_verified = true;
+                let (verify_code, verify_stdout, verify_stderr) =
+                    run_tiktok_sdk_manager(&manager, &["verify", runtime_id, &count.to_string()])
+                        .await?;
+                if verify_code != 0 {
+                    warn!(
+                        runtime_id = %runtime_id,
+                        "TikTok webmssdk 候选标记 remote_verified 失败：{}",
+                        if verify_stderr.is_empty() { verify_stdout } else { verify_stderr }
+                    );
+                    continue;
+                }
+                let (activate_code, activate_stdout, activate_stderr) =
+                    run_tiktok_sdk_manager(&manager, &["activate", runtime_id]).await?;
+                if activate_code == 0 {
+                    info!(
+                        runtime_id = %runtime_id,
+                        user_list_count = count,
+                        "TikTok webmssdk 已通过真实关注接口 Canary 并自动激活"
+                    );
+                    activated = true;
+                    break;
+                }
+                warn!(
+                    runtime_id = %runtime_id,
+                    "TikTok webmssdk 候选激活失败：{}",
+                    if activate_stderr.is_empty() { activate_stdout } else { activate_stderr }
+                );
+            }
+            Err(error) => {
+                warn!(
+                    runtime_id = %runtime_id,
+                    error = %error,
+                    "TikTok webmssdk 候选真实关注接口 Canary 失败"
+                );
+            }
+        }
+    }
+    if activated || any_verified {
+        return Ok(());
+    }
+
+    // 3) 没有任何候选通过时：复验当前激活版本，失败则回滚到上一版本。
+    let Some(active_id) = tiktok_sdk_active_runtime_id() else {
+        return Ok(());
+    };
+    match tiktok_sdk_canary(&active_id).await {
+        Ok(count) => {
+            info!(
+                runtime_id = %active_id,
+                user_list_count = count,
+                "TikTok webmssdk 当前激活版本 Canary 正常，保持现状"
+            );
+        }
+        Err(error) => {
+            warn!(
+                runtime_id = %active_id,
+                error = %error,
+                "TikTok webmssdk 当前激活版本 Canary 失败，尝试回滚到上一版本"
+            );
+            let (rollback_code, rollback_stdout, rollback_stderr) =
+                run_tiktok_sdk_manager(&manager, &["rollback"]).await?;
+            if rollback_code != 0 {
+                warn!(
+                    "TikTok webmssdk 回滚失败：{}",
+                    if rollback_stderr.is_empty() {
+                        rollback_stdout
+                    } else {
+                        rollback_stderr
+                    }
+                );
+            } else {
+                info!("TikTok webmssdk 已回滚到上一版本");
+            }
+        }
+    }
+    Ok(())
+}

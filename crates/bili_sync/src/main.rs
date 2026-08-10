@@ -183,6 +183,12 @@ async fn async_main() -> Result<()> {
         &tracker,
         token.clone(),
     );
+    spawn_task(
+        "TikTok SDK 自动更新",
+        tiktok::tiktok_sdk_scheduler(),
+        &tracker,
+        token.clone(),
+    );
 
     tracker.close();
     handle_shutdown(tracker, token).await;
