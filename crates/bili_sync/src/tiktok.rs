@@ -6,7 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{Extension, Json, Path as AxumPath, Query};
@@ -595,6 +596,129 @@ pub async fn reset_tiktok_source_path(
 }
 
 
+// ---------- TikTok 风控/限流退避 ----------
+
+/// 风控事件后的退避保持窗口：窗口内所有 TikTok 会话接口请求间隔都会被放大。
+const TIKTOK_RISK_BACKOFF_WINDOW: Duration = Duration::from_secs(120);
+/// 风控/限流状态码（403/429/5xx）的最大重试次数（每次按 3 秒 × 次数退避）。
+const TIKTOK_RISK_RETRY_ATTEMPTS: usize = 3;
+
+struct TikTokRiskState {
+    /// 最近一次风控/限流事件发生时刻。
+    last_risk_at: Option<Instant>,
+    /// 风控事件连续计数（窗口内累加，用于阶梯放大退避）。
+    risk_streak: u64,
+}
+
+fn tiktok_risk_state() -> &'static RwLock<TikTokRiskState> {
+    static STATE: OnceLock<RwLock<TikTokRiskState>> = OnceLock::new();
+    STATE.get_or_init(|| RwLock::new(TikTokRiskState {
+        last_risk_at: None,
+        risk_streak: 0,
+    }))
+}
+
+/// 记录一次 TikTok 风控/限流事件；窗口内的连续事件会阶梯放大后续请求间隔。
+async fn record_tiktok_risk_event() {
+    let mut state = tiktok_risk_state().write().await;
+    let now = Instant::now();
+    state.risk_streak = match state.last_risk_at {
+        Some(previous) if now.duration_since(previous) < TIKTOK_RISK_BACKOFF_WINDOW => {
+            state.risk_streak.saturating_add(1)
+        }
+        _ => 1,
+    };
+    state.last_risk_at = Some(now);
+}
+
+/// TikTok 会话接口翻页请求之间的人工延迟，避免短时间连续请求触发频率风控
+/// （HTTP 429/403）。基础间隔复用全局风控配置（默认 1000ms，最小 800ms）；
+/// 自动退避开启且处于风控保持窗口内时，放大到 auto_backoff_base_seconds × 连续次数。
+async fn tiktok_page_delay() -> Duration {
+    let config = crate::config::reload_config().submission_risk_control;
+    let base = Duration::from_millis(config.base_request_delay.max(800));
+    if !config.enable_auto_backoff {
+        return base;
+    }
+    let state = tiktok_risk_state().read().await;
+    let Some(last_risk_at) = state.last_risk_at else {
+        return base;
+    };
+    if last_risk_at.elapsed() >= TIKTOK_RISK_BACKOFF_WINDOW {
+        return base;
+    }
+    let max_multiplier = config.auto_backoff_max_multiplier.max(1);
+    let multiplier = state.risk_streak.clamp(1, max_multiplier);
+    let backoff =
+        Duration::from_secs(config.auto_backoff_base_seconds.max(1).saturating_mul(multiplier));
+    base.max(backoff)
+}
+
+/// 是否为可自动退避重试的风控/限流状态码（403/429/5xx）。
+fn is_tiktok_risk_status(status: u16) -> bool {
+    status == 403 || status == 429 || status >= 500
+}
+
+/// 风控/限流状态码的补充提示（用于最终失败时的错误信息）。
+fn tiktok_risk_status_hint(status: u16) -> &'static str {
+    match status {
+        429 => "（触发 TikTok 限流，请稍后重试或更换外源代理）",
+        403 | 500..=599 => "（疑似触发 TikTok 风控，请稍后重试或更换外源代理）",
+        _ => "",
+    }
+}
+
+/// 带风控退避重试的 TikTok 会话接口请求（我的喜欢/收藏等极简参数接口）。
+///
+/// 对 403/429/5xx 记录风控事件并按 3 秒 × 尝试次数退避重试；重试耗尽后把
+/// 最后一次状态码交回调用方（由调用方给出带接口名的友好错误）。
+async fn tiktok_impersonated_get_with_retry(
+    api: &str,
+    sec_uid: &str,
+    cursor: i64,
+    count: usize,
+) -> Result<(u16, String)> {
+    let cookie = tiktok_cookie_header()?;
+    let mut attempt = 0usize;
+    loop {
+        if attempt > 0 {
+            tokio::time::sleep(tiktok_page_delay().await).await;
+        }
+        let cursor_str = cursor.to_string();
+        let count_str = count.to_string();
+        let params = vec![
+            ("aid", "1988"),
+            ("app_name", "tiktok_web"),
+            ("device_platform", "web_pc"),
+            ("count", count_str.as_str()),
+            ("cursor", cursor_str.as_str()),
+            ("secUid", sec_uid),
+        ];
+        let url = reqwest::Url::parse_with_params(api, &params)?;
+        let (status, body) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+        if status == 200 {
+            return Ok((status, body));
+        }
+        let risk_limited = is_tiktok_risk_status(status);
+        if risk_limited {
+            record_tiktok_risk_event().await;
+        }
+        if !risk_limited || attempt >= TIKTOK_RISK_RETRY_ATTEMPTS {
+            return Ok((status, body));
+        }
+        let wait = Duration::from_secs(3 * (attempt as u64 + 1));
+        warn!(
+            target: "bili_sync_rs::tiktok",
+            status,
+            attempt = attempt + 1,
+            wait_secs = wait.as_secs(),
+            "TikTok Web API 触发风控或限流，延迟后重试"
+        );
+        tokio::time::sleep(wait).await;
+        attempt += 1;
+    }
+}
+
 // ---------- TikTok 我的喜欢（favorite/item_list 官方接口） ----------
 
 /// 抖音喜欢列表在 TikTok 上对应 `/api/favorite/item_list/`。该接口在真实
@@ -941,25 +1065,20 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
     // + secUid，不携带签名与浏览器参数。关键前提是出口 IP 未被 TikTok 风控：
     // 本机直连 IP 被标记时该接口返回 HTTP 200 空 body，配置外源代理
     // （proxy/youtube_proxy，如 http://192.168.2.3:7893）后即可正常拉取（实测 18 条）。
-    let cookie = tiktok_cookie_header()?;
+    // 429/403/5xx 自动退避重试，短时限流不会直接失败。
     let sec_uid = tiktok_login_sec_uid().await?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
     for _ in 0..500 {
-        let cursor_str = cursor.to_string();
-        let params = vec![
-            ("aid", "1988"),
-            ("app_name", "tiktok_web"),
-            ("device_platform", "web_pc"),
-            ("count", "30"),
-            ("cursor", cursor_str.as_str()),
-            ("secUid", sec_uid.as_str()),
-        ];
-        let url = reqwest::Url::parse_with_params(TIKTOK_FAVORITE_API, &params)?;
-        let (status, body) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+        let (status, body) =
+            tiktok_impersonated_get_with_retry(TIKTOK_FAVORITE_API, &sec_uid, cursor, 30).await?;
         if status != 200 {
-            bail!("TikTok 我的喜欢返回 HTTP {}", status);
+            bail!(
+                "TikTok 我的喜欢返回 HTTP {}{}",
+                status,
+                tiktok_risk_status_hint(status)
+            );
         }
         if body.trim().is_empty() {
             bail!(
@@ -1001,7 +1120,7 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
             break;
         }
         cursor = next;
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        tokio::time::sleep(tiktok_page_delay().await).await;
     }
     Ok(posts)
 }
@@ -1971,18 +2090,9 @@ async fn fetch_tiktok_playlists(sec_uid: &str, own: bool) -> anyhow::Result<ApiR
 /// 单页拉取“收藏”预览：返回 (视频总数, 第一张封面)，供收藏夹列表兜底入口展示。
 /// 任何失败都返回 Ok(None)，由上层决定是否继续展示空的播放列表结果。
 async fn fetch_tiktok_collect_preview() -> Result<Option<(i64, String)>> {
-    let cookie = tiktok_cookie_header()?;
     let sec_uid = tiktok_login_sec_uid().await?;
-    let params = vec![
-        ("aid", "1988"),
-        ("app_name", "tiktok_web"),
-        ("device_platform", "web_pc"),
-        ("count", "30"),
-        ("cursor", "0"),
-        ("secUid", sec_uid.as_str()),
-    ];
-    let url = reqwest::Url::parse_with_params(TIKTOK_USER_COLLECT_API, &params)?;
-    let (status, body) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+    let (status, body) =
+        tiktok_impersonated_get_with_retry(TIKTOK_USER_COLLECT_API, &sec_uid, 0, 30).await?;
     if status != 200 || body.trim().is_empty() {
         return Ok(None);
     }
@@ -2017,25 +2127,19 @@ async fn fetch_tiktok_collect_preview() -> Result<Option<(i64, String)>> {
 /// 与“我的喜欢”（/api/favorite/item_list/）一致：极简参数 + cookies.txt 登录态
 /// 即可服务端直连（实测无需浏览器签名），前提是出口 IP 未被 TikTok 风控。
 async fn fetch_tiktok_collect_videos(limit: usize) -> Result<Vec<TikTokPost>> {
-    let cookie = tiktok_cookie_header()?;
     let sec_uid = tiktok_login_sec_uid().await?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
     for _ in 0..500 {
-        let cursor_str = cursor.to_string();
-        let params = vec![
-            ("aid", "1988"),
-            ("app_name", "tiktok_web"),
-            ("device_platform", "web_pc"),
-            ("count", "30"),
-            ("cursor", cursor_str.as_str()),
-            ("secUid", sec_uid.as_str()),
-        ];
-        let url = reqwest::Url::parse_with_params(TIKTOK_USER_COLLECT_API, &params)?;
-        let (status, body) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+        let (status, body) =
+            tiktok_impersonated_get_with_retry(TIKTOK_USER_COLLECT_API, &sec_uid, cursor, 30).await?;
         if status != 200 {
-            bail!("TikTok 收藏返回 HTTP {}", status);
+            bail!(
+                "TikTok 收藏返回 HTTP {}{}",
+                status,
+                tiktok_risk_status_hint(status)
+            );
         }
         if body.trim().is_empty() {
             bail!(
@@ -2077,7 +2181,7 @@ async fn fetch_tiktok_collect_videos(limit: usize) -> Result<Vec<TikTokPost>> {
             break;
         }
         cursor = next;
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        tokio::time::sleep(tiktok_page_delay().await).await;
     }
     Ok(posts)
 }
@@ -2156,7 +2260,7 @@ async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result
             break;
         }
         cursor = next;
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        tokio::time::sleep(tiktok_page_delay().await).await;
     }
     Ok(posts)
 }
