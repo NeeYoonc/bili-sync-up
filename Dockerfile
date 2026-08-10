@@ -9,7 +9,8 @@ RUN apk update && apk add --no-cache \
     ca-certificates \
     tzdata \
     ffmpeg \
-    quickjs
+    quickjs \
+    nodejs
 
 # 复制所有Linux二进制文件
 COPY ./bili-sync-rs-Linux-*.tar.gz ./
@@ -48,3 +49,4 @@ COPY --from=base / /
 ENTRYPOINT [ "/app/bili-sync-rs" ]
 
 VOLUME [ "/app/.config/bili-sync" ]
+

@@ -1380,6 +1380,139 @@ async fn fetch_tiktok_favorite_videos(
     }))
 }
 
+// ---------- TikTok webmssdk 现场签名（Node 子进程） ----------
+//
+// /api/user/list（关注列表）等接口要求 X-Dynosaur 签名，而该签名由浏览器内
+// webmssdk 按“登录会话 + 本地浏览器指纹状态”实时生成、有时效。纯服务端伪造
+// 或重放旧签名均会被 TikTok 风控拒绝（实测返回 HTTP 200 但空 body）。
+// 最终解：用 Node 直接执行内嵌的 webmssdk（VMP 字节码 + 运行时 shim），结合
+// 已导入的浏览器会话状态（tiktok-cookies.txt + tiktok-localstorage.json）在
+// 服务端现场生成有效签名，不依赖任何浏览器。经真实接口验证 statusCode=0。
+
+/// 内嵌的自包含 webmssdk 签名器（含 VM 字节码与运行时 shim，Node 可直接执行）。
+const TIKTOK_SIGNER_JS: &str = include_str!("../../../scripts/tiktok-signer.cjs");
+
+/// 签名器落盘位置（首次使用时从二进制内嵌资源释放）。
+fn tiktok_signer_path() -> PathBuf {
+    CONFIG_DIR.join("tools").join("tiktok-signer.cjs")
+}
+
+/// 确保签名器脚本已写入磁盘（缺失或长度不符时重新释放）。
+async fn ensure_tiktok_signer() -> Result<PathBuf> {
+    let path = tiktok_signer_path();
+    let parent = path.parent().expect("签名器路径缺少父目录");
+    tokio::fs::create_dir_all(parent)
+        .await
+        .context("创建 TikTok 签名器目录失败")?;
+    let needs_write = match tokio::fs::metadata(&path).await {
+        Ok(meta) => meta.len() != TIKTOK_SIGNER_JS.len() as u64,
+        Err(_) => true,
+    };
+    if needs_write {
+        tokio::fs::write(&path, TIKTOK_SIGNER_JS)
+            .await
+            .context("写入 TikTok 签名器失败")?;
+        info!(path = %path.display(), "已释放 TikTok webmssdk 签名器");
+    }
+    Ok(path)
+}
+
+/// 把签名器子进程输出截断为可读文本（UTF-8）。
+fn signer_output_text(stderr: &[u8], stdout: &[u8]) -> String {
+    let stderr_text = String::from_utf8_lossy(stderr).to_string();
+    let text = if stderr_text.trim().is_empty() {
+        String::from_utf8_lossy(stdout).to_string()
+    } else {
+        stderr_text
+    };
+    let text = text.trim();
+    if text.chars().count() > 300 {
+        let tail: String = text.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
+        format!("…{tail}")
+    } else {
+        text.to_string()
+    }
+}
+
+/// 查找 Node.js 运行时：优先环境变量 BILI_SYNC_TIKTOK_NODE（可指定可执行文件
+/// 或所在目录），其次常见安装路径与 CONFIG_DIR/tools，最后系统 PATH。
+fn find_tiktok_node() -> Option<PathBuf> {
+    if let Ok(configured) = std::env::var("BILI_SYNC_TIKTOK_NODE") {
+        let path = PathBuf::from(configured);
+        let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+        if path.is_file() {
+            return Some(path);
+        }
+        let candidate = if path.is_dir() { path.join(node_name) } else { path };
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let candidates = [
+            PathBuf::from(r"C:\Program Files\nodejs\node.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\nodejs\node.exe"),
+            CONFIG_DIR.join("bin").join("node.exe"),
+            CONFIG_DIR.join("tools").join("node.exe"),
+        ];
+        if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+            return Some(path);
+        }
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(node_name))
+            .find(|path| path.is_file())
+    })
+}
+
+/// 用 webmssdk 现场签名 TikTok API URL，返回签名后的完整 URL。
+///
+/// 需要 Node.js 与已同步的浏览器会话（CONFIG_DIR/tiktok-cookies.txt +
+/// tiktok-localstorage.json，后者由浏览器扩展“同步 TikTok 会话”写入）。
+async fn sign_tiktok_url(url: &str) -> Result<String> {
+    let signer = ensure_tiktok_signer().await?;
+    let node = find_tiktok_node().ok_or_else(|| {
+        anyhow!(
+            "未找到 Node.js 运行时：TikTok 关注/收藏夹接口需要 Node.js 执行 webmssdk 现场签名。请安装 Node.js，或通过环境变量 BILI_SYNC_TIKTOK_NODE 指定 node 路径"
+        )
+    })?;
+    let mut command = Command::new(&node);
+    command
+        .arg(&signer)
+        .arg(url)
+        .env("BILI_SYNC_CONFIG_DIR", CONFIG_DIR.as_os_str())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(90), command.output())
+        .await
+        .map_err(|_| anyhow!("TikTok 签名器执行超时（90s）"))?
+        .map_err(|error| anyhow!("启动 TikTok 签名器失败（Node 运行时不完整？）：{error}"))?;
+    if !output.status.success() {
+        bail!(
+            "TikTok 签名器执行失败（退出码 {}）：{}",
+            output.status.code().unwrap_or(-1),
+            signer_output_text(&output.stderr, &output.stdout)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let signed = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .last()
+        .unwrap_or("")
+        .to_string();
+    if !signed.starts_with("https://") {
+        bail!(
+            "TikTok 签名器未返回有效签名 URL：{}",
+            signer_output_text(&output.stderr, &output.stdout)
+        );
+    }
+    Ok(signed)
+}
+
 // ---------- TikTok 已关注作者（/api/user/list/ 官方接口） ----------
 
 const TIKTOK_USER_LIST_API: &str = "https://www.tiktok.com/api/user/list/";
@@ -1439,13 +1572,13 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         ("browser_version", TIKTOK_WEB_UA.to_string()),
         ("channel", "tiktok_web".to_string()),
         ("cookie_enabled", "true".to_string()),
-        ("count", "50".to_string()),
-        ("data_collection_enabled", "true".to_string()),
+        ("count", "30".to_string()),
+        ("data_collection_enabled", "false".to_string()),
         ("device_id", device_id.to_string()),
         ("device_platform", "web_pc".to_string()),
         ("focus_state", "true".to_string()),
         ("from_page", "user".to_string()),
-        ("history_len", "7".to_string()),
+        ("history_len", "4".to_string()),
         ("isNonPersonalized", "false".to_string()),
         ("is_fullscreen", "false".to_string()),
         ("is_page_visible", "true".to_string()),
@@ -1453,9 +1586,9 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         ("minCursor", "0".to_string()),
         ("odinId", odin_id.clone()),
         ("os", "windows".to_string()),
-        ("priority_region", "US".to_string()),
+        ("priority_region", String::new()),
         ("referer", "https://www.tiktok.com/".to_string()),
-        ("region", "US".to_string()),
+        ("region", "SG".to_string()),
         ("root_referer", "https://www.tiktok.com/".to_string()),
         ("scene", "151".to_string()),
         ("screen_height", "1440".to_string()),
@@ -1463,13 +1596,24 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         ("targetUserId", odin_id.clone()),
         ("tz_name", "Asia/Shanghai".to_string()),
         ("user_is_login", "true".to_string()),
+        ("WebIdLastTime", (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(1))
+        .to_string()),
         ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
         ("webcast_language", "zh-Hans".to_string()),
         ("msToken", ms_token.clone()),
         ("X-Bogus", "1".to_string()),
-        ("X-Dynosaur", rand::random::<u128>().to_string()),
     ];
-    let url = build_tiktok_signed_url(TIKTOK_USER_LIST_API, &params)?;
+    let unsigned = reqwest::Url::parse_with_params(TIKTOK_USER_LIST_API, &params)?;
+    let url = match sign_tiktok_url(unsigned.as_str()).await {
+        Ok(signed) => signed,
+        Err(error) => {
+            warn!(error = %error, "TikTok 现场签名不可用，回退旧签名逻辑（关注列表大概率仍返回空响应）");
+            build_tiktok_signed_url(TIKTOK_USER_LIST_API, &params)?.to_string()
+        }
+    };
     let response = client
         .get(url)
         .header(reqwest::header::COOKIE, &cookie)
@@ -1486,7 +1630,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
     let body = response.text().await?;
     if body.trim().is_empty() {
         bail!(
-            "TikTok 关注列表接口返回空响应：/api/user/list 需要浏览器实时签名（X-Dynosaur/X-Bogus），服务端直连通常拿不到；登录本身有效时可配置远程 Chromium 浏览器模拟获取"
+            "TikTok 关注列表接口返回空响应：服务端直连需要 Node.js 现场签名（webmssdk X-Dynosaur）与有效登录会话。请确认已安装 Node.js、已通过浏览器扩展同步 TikTok 会话（tiktok-cookies.txt + tiktok-localstorage.json），且当前出口网络未被 TikTok 风控"
         );
     }
     let payload = decode_tiktok_body(&body)?;
@@ -1637,9 +1781,15 @@ async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<You
         ("webcast_language", "zh-Hans".to_string()),
         ("msToken", ms_token.clone()),
         ("X-Bogus", "1".to_string()),
-        ("X-Dynosaur", rand::random::<u128>().to_string()),
     ];
-    let url = build_tiktok_signed_url(TIKTOK_USER_PLAYLIST_API, &params)?;
+    let unsigned = reqwest::Url::parse_with_params(TIKTOK_USER_PLAYLIST_API, &params)?;
+    let url = match sign_tiktok_url(unsigned.as_str()).await {
+        Ok(signed) => signed,
+        Err(error) => {
+            warn!(error = %error, "TikTok 现场签名不可用，回退旧签名逻辑（播放列表接口）");
+            build_tiktok_signed_url(TIKTOK_USER_PLAYLIST_API, &params)?.to_string()
+        }
+    };
     let response = client
         .get(url)
         .header(reqwest::header::COOKIE, &cookie)
@@ -1730,9 +1880,16 @@ async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result
             ("user_is_login", "true".to_string()),
             ("msToken", ms_token.clone()),
             ("X-Bogus", "1".to_string()),
-            ("X-Dynosaur", rand::random::<u128>().to_string()),
         ];
-        let url = build_tiktok_signed_url(&format!("{TIKTOK_PLAYLIST_API}{playlist_id}/"), &params)?;
+        let unsigned =
+            reqwest::Url::parse_with_params(&format!("{TIKTOK_PLAYLIST_API}{playlist_id}/"), &params)?;
+        let url = match sign_tiktok_url(unsigned.as_str()).await {
+            Ok(signed) => signed,
+            Err(error) => {
+                warn!(error = %error, "TikTok 现场签名不可用，回退旧签名逻辑（播放列表视频接口）");
+                build_tiktok_signed_url(&format!("{TIKTOK_PLAYLIST_API}{playlist_id}/"), &params)?.to_string()
+            }
+        };
         let response = client
             .get(url)
             .header(reqwest::header::COOKIE, &cookie)
