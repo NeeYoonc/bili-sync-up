@@ -11,6 +11,7 @@
 //! 登录 Cookie，可正常拉取关注列表（userList=31）；同参数换 reqwest 则空响应。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -317,14 +318,23 @@ async fn impersonate_binary_usable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 使用 curl-impersonate（Chrome TLS 指纹）发起 GET，返回 (HTTP 状态码, 响应体)。
+/// 使用 curl-impersonate（Chrome TLS 指纹）发起 GET，返回
+/// (HTTP 状态码, 响应体, 响应头)。响应头以 (小写名称, 值) 列表返回，
+/// 供调用方提取 TikTok 运行时续约信号（x-ms-token / Set-Cookie 中的 msToken）。
 ///
 /// 所有 TikTok 官方敏感接口都应走这个入口；普通第三方接口仍用 reqwest。
 pub(crate) async fn tiktok_impersonated_get(
     url: &str,
     headers: &[(&str, &str)],
     timeout: Duration,
-) -> Result<(u16, Vec<u8>)> {
+) -> Result<(u16, Vec<u8>, Vec<(String, String)>)> {
+    // 唯一临时头文件：并发调用互不覆盖。
+    static HEADER_DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let header_dump = std::env::temp_dir().join(format!(
+        "bili-sync-curl-headers-{}-{}.txt",
+        std::process::id(),
+        HEADER_DUMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let binary = ensure_tiktok_impersonate().await?;
     let mut command = Command::new(&binary);
     command
@@ -336,6 +346,8 @@ pub(crate) async fn tiktok_impersonated_get(
         .arg(timeout.as_secs().to_string())
         .arg("--write-out")
         .arg(format!("{STATUS_MARKER}%{{http_code}}"))
+        .arg("--dump-header")
+        .arg(&header_dump)
         .kill_on_drop(true);
 
     // CA 证书：优先随二进制安装的 cacert.pem（Windows 必须），其次环境变量指定，
@@ -385,6 +397,7 @@ pub(crate) async fn tiktok_impersonated_get(
         .map_err(|_| anyhow!("curl-impersonate 请求超时：{url}"))?
         .map_err(|error| anyhow!("启动 curl-impersonate 失败（{error}）：{url}"))?;
     if !output.status.success() {
+        let _ = std::fs::remove_file(&header_dump);
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         bail!(
             "curl-impersonate 请求失败（退出码 {}）：{}{}",
@@ -394,7 +407,33 @@ pub(crate) async fn tiktok_impersonated_get(
         );
     }
     let (status, body) = parse_status_body(&output.stdout)?;
-    Ok((status, body))
+    let response_headers = parse_dump_headers(&header_dump);
+    let _ = std::fs::remove_file(&header_dump);
+    Ok((status, body, response_headers))
+}
+
+/// 解析 curl --dump-header 输出中的响应头，返回 (小写名称, 值) 列表。
+/// 跳过状态行（HTTP/...）与空行；代理下的 CONNECT 响应头也会被忽略。
+fn parse_dump_headers(path: &Path) -> Vec<(String, String)> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut headers = Vec::new();
+    for line in content.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with("HTTP/") {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim().to_string();
+        if !name.is_empty() && !value.is_empty() {
+            headers.push((name, value));
+        }
+    }
+    headers
 }
 
 /// 校验并格式化 HTTP 请求头，拒绝包含换行的非法头。

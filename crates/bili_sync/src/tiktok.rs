@@ -41,10 +41,16 @@ const TIKTOK_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const TIKTOK_SEARCH_CONCURRENCY: usize = 4;
 
 /// 用 curl-impersonate（Chrome TLS 指纹）请求 TikTok 官方接口，
-/// 返回 (HTTP 状态码, 响应文本)。TikTok 的 Akamai 风控按 TLS/JA3 与 HTTP/2
-/// 指纹拒绝 reqwest/OpenSSL 客户端（即使签名与 Cookie 完整也返回空 body）；
-/// curl-impersonate 使用与浏览器一致的 Chrome 指纹，可正常拉取关注/我的喜欢等会话接口。
-async fn tiktok_impersonated_get(url: &str, cookie: &str) -> Result<(u16, String)> {
+/// 返回 (HTTP 状态码, 响应文本, 新下发的 msToken)。TikTok 的 Akamai 风控按
+/// TLS/JA3 与 HTTP/2 指纹拒绝 reqwest/OpenSSL 客户端（即使签名与 Cookie 完整也
+/// 返回空 body）；curl-impersonate 使用与浏览器一致的 Chrome 指纹，可正常拉取
+/// 关注/我的喜欢等会话接口。
+///
+/// TikTok 对会话接口（尤其 /api/user/list）会在响应里通过 `x-ms-token` /
+/// `Set-Cookie: msToken=` 下发新的 msToken：真实浏览器会处理续约，服务端必须
+/// 跟进，否则持续请求会一直返回 HTTP 200 空 body。这里统一提取并合并回
+/// cookies.txt，调用方重试时带上新 msToken 即可恢复（与参考协议实现一致）。
+async fn tiktok_impersonated_get(url: &str, cookie: &str) -> Result<(u16, String, Option<String>)> {
     // user-agent 必须与签名器/签名计算使用的 UA 完全一致（webmssdk 签名内嵌
     // md5(UA)，请求 UA 不一致会被 Akamai 判定为伪签名而返回空 body）。
     let mut headers: Vec<(&str, &str)> = vec![
@@ -56,13 +62,81 @@ async fn tiktok_impersonated_get(url: &str, cookie: &str) -> Result<(u16, String
     if !cookie.is_empty() {
         headers.push(("cookie", cookie));
     }
-    let (status, body) = crate::tiktok_impersonate::tiktok_impersonated_get(
+    let (status, body, response_headers) = crate::tiktok_impersonate::tiktok_impersonated_get(
         url,
         &headers,
         crate::tiktok_impersonate::TIKTOK_IMPERSONATE_TIMEOUT,
     )
     .await?;
-    Ok((status, String::from_utf8_lossy(&body).to_string()))
+    let fresh_ms_token = extract_fresh_ms_token(&response_headers);
+    if let Some(token) = &fresh_ms_token {
+        persist_tiktok_ms_token(token);
+    }
+    Ok((status, String::from_utf8_lossy(&body).to_string(), fresh_ms_token))
+}
+
+/// 从响应头提取 TikTok 新下发的 msToken：`x-ms-token` 为权威信号（SDK 专用），
+/// 其次回退到 `Set-Cookie: msToken=...`。
+fn extract_fresh_ms_token(headers: &[(String, String)]) -> Option<String> {
+    for (name, value) in headers {
+        if name == "x-ms-token" && !value.trim().is_empty() {
+            return Some(value.trim().to_string());
+        }
+    }
+    for (name, value) in headers {
+        if name != "set-cookie" {
+            continue;
+        }
+        let token = value
+            .split(';')
+            .next()
+            .and_then(|pair| {
+                let (key, val) = pair.trim().split_once('=')?;
+                key.trim()
+                    .eq_ignore_ascii_case("msToken")
+                    .then(|| val.trim().to_string())
+            })
+            .filter(|val| !val.is_empty());
+        if token.is_some() {
+            return token;
+        }
+    }
+    None
+}
+
+/// 把 TikTok 新下发的 msToken 合并回 cookies.txt（原子写：临时文件 + rename）。
+/// 仅当值变化时才写盘，避免每次请求都产生无意义的文件写。
+fn persist_tiktok_ms_token(token: &str) {
+    let path = tiktok_cookie_path();
+    let current = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
+    if current == token {
+        return;
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let mut replaced = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() >= 7 && cols[5].eq_ignore_ascii_case("msToken") {
+            let mut new_cols: Vec<&str> = cols[..6].to_vec();
+            new_cols.push(token);
+            new_cols.extend_from_slice(&cols[7..]);
+            out.push(new_cols.join("\t"));
+            replaced = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !replaced {
+        return;
+    }
+    let tmp = path.with_extension("msToken.tmp");
+    if std::fs::write(&tmp, out.join("\n") + "\n").is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+        debug!("已把 TikTok 新下发的 msToken 合并回 cookies.txt");
+    }
 }
 
 
@@ -261,7 +335,7 @@ pub(crate) fn tiktok_user_to_search_result(user: &serde_json::Value) -> Option<Y
 
 async fn fetch_tiktok_ssr_profile(unique_id: &str) -> Result<Option<serde_json::Value>> {
     let url = format!("https://www.tiktok.com/@{unique_id}");
-    let (status, html) = tiktok_impersonated_get(&url, "").await?;
+    let (status, html, _) = tiktok_impersonated_get(&url, "").await?;
     if status != 200 {
         return Ok(None);
     }
@@ -656,12 +730,14 @@ async fn tiktok_impersonated_get_with_retry(
     cursor: i64,
     count: usize,
 ) -> Result<(u16, String)> {
-    let cookie = tiktok_cookie_header()?;
     let mut attempt = 0usize;
     loop {
         if attempt > 0 {
             tokio::time::sleep(tiktok_page_delay().await).await;
         }
+        // 每次尝试重新读取 Cookie：TikTok 会在响应里下发新的 msToken，
+        // tiktok_impersonated_get 已把它合并回 cookies.txt，重试必须带上新值。
+        let cookie = tiktok_cookie_header()?;
         let cursor_str = cursor.to_string();
         let count_str = count.to_string();
         let params = vec![
@@ -673,7 +749,7 @@ async fn tiktok_impersonated_get_with_retry(
             ("secUid", sec_uid),
         ];
         let url = reqwest::Url::parse_with_params(api, &params)?;
-        let (status, body) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+        let (status, body, _) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
         if status == 200 {
             return Ok((status, body));
         }
@@ -709,6 +785,14 @@ async fn tiktok_signed_get_with_retry(
 ) -> Result<(u16, String)> {
     let mut attempt = 0usize;
     loop {
+        // 每次尝试重新读取 Cookie：空正文响应会携带新下发的 msToken
+        //（x-ms-token / Set-Cookie），tiktok_impersonated_get 已把它合并回
+        // cookies.txt，重试必须带上新值，否则会一直被判定为“未处理续约”。
+        let current_cookie = if attempt == 0 {
+            cookie.to_string()
+        } else {
+            tiktok_cookie_header().unwrap_or_else(|_| cookie.to_string())
+        };
         let unsigned = reqwest::Url::parse_with_params(base, params)?;
         let url = match sign_tiktok_url(unsigned.as_str()).await {
             Ok(signed) => signed,
@@ -717,9 +801,13 @@ async fn tiktok_signed_get_with_retry(
                 build_tiktok_signed_url(base, params)?.to_string()
             }
         };
-        let (status, body) = tiktok_impersonated_get(&url, cookie).await?;
-        if status == 200 && body.trim().is_empty() && attempt == 0 {
-            warn!(label = %label, "TikTok 签名接口返回空正文，重新签名后重试一次");
+        let (status, body, _) = tiktok_impersonated_get(&url, &current_cookie).await?;
+        if status == 200 && body.trim().is_empty() && attempt < 2 {
+            warn!(
+                label = %label,
+                attempt = attempt + 1,
+                "TikTok 签名接口返回空正文，已合并新下发的 msToken，重新签名后重试"
+            );
             attempt += 1;
             continue;
         }
@@ -894,7 +982,7 @@ async fn tiktok_login_sec_uid_with_source() -> Result<(String, bool)> {
     )
     .await
     {
-        Ok((status, body)) => {
+        Ok((status, body, _)) => {
             if status == 200 {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                     sec_uid = json
@@ -917,7 +1005,7 @@ async fn tiktok_login_sec_uid_with_source() -> Result<(String, bool)> {
         )
         .await
         {
-            Ok((status, body)) => {
+            Ok((status, body, _)) => {
                 if status == 200 {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                         sec_uid = json
@@ -1720,7 +1808,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         }
         if body.trim().is_empty() {
             bail!(
-                "TikTok 关注列表接口返回空响应（已自动重新签名一次仍失败）：请确认当前出口网络未被 TikTok 风控，稍后重试或更换外源代理（proxy/youtube_proxy），或重新导入最新 cookies.txt"
+                "TikTok 关注列表接口返回空响应（已自动重新签名并续约 msToken 多次仍失败）：请确认当前出口网络未被 TikTok 风控，稍后重试或更换外源代理（proxy/youtube_proxy），或重新导入最新 cookies.txt"
             );
         }
         let payload = decode_tiktok_body(&body)?;
@@ -1818,7 +1906,7 @@ async fn tiktok_login_account_unique_id() -> Option<String> {
     )
     .await
     {
-        Ok((status, body)) if status == 200 => {
+        Ok((status, body, _)) if status == 200 => {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                 let unique_id = json
                     .pointer("/user/uniqueId")
@@ -1832,7 +1920,7 @@ async fn tiktok_login_account_unique_id() -> Option<String> {
                 }
             }
         }
-        Ok((status, _)) => warn!(
+        Ok((status, _, _)) => warn!(
             status,
             "获取 TikTok common-app-context 返回非 200（用于判断是否为本人主页）"
         ),
@@ -1903,7 +1991,7 @@ async fn fetch_tiktok_user_detail_sec_uid(unique_id: &str, cookie: &str) -> Resu
             build_tiktok_signed_url(TIKTOK_USER_DETAIL_API, &params)?.to_string()
         }
     };
-    let (status, body) = tiktok_impersonated_get(&url, cookie).await?;
+    let (status, body, _) = tiktok_impersonated_get(&url, cookie).await?;
     if status != 200 {
         return Ok(None);
     }
@@ -1948,7 +2036,7 @@ async fn resolve_tiktok_sec_uid(url: &str) -> Result<String> {
 
     // 3) 主页 HTML 兜底
     let page_url = format!("https://www.tiktok.com/@{unique_id}");
-    let (status, body) = tiktok_impersonated_get(&page_url, &cookie).await?;
+    let (status, body, _) = tiktok_impersonated_get(&page_url, &cookie).await?;
     if status == 200 {
         let regex = TIKTOK_SEC_UID_RE.get_or_init(|| {
             Regex::new(r#""secUid":"([^"]+)"#).expect("invalid secUid regex")
@@ -2387,7 +2475,7 @@ pub(crate) async fn fetch_tiktok_author_avatar_url(sec_uid: &str) -> anyhow::Res
         ("webcast_language", "en".to_string()),
     ];
     let url = reqwest::Url::parse_with_params("https://www.tiktok.com/api/creator/item_list/", &params)?;
-    let (status, body) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+    let (status, body, _) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
     if status != 200 {
         return Ok(None);
     }
@@ -2581,7 +2669,7 @@ async fn tiktok_sdk_canary(sdk_id: &str) -> Result<usize> {
     ];
     let unsigned = reqwest::Url::parse_with_params(TIKTOK_USER_LIST_API, &params)?;
     let signed = sign_tiktok_url_with_sdk(unsigned.as_str(), Some(sdk_id)).await?;
-    let (status, body) = tiktok_impersonated_get(&signed, &cookie).await?;
+    let (status, body, _) = tiktok_impersonated_get(&signed, &cookie).await?;
     if status != 200 {
         bail!(
             "TikTok 关注接口返回 HTTP {}{}",
