@@ -852,6 +852,20 @@ fn build_tiktok_signed_url(base: &str, params: &[(&str, String)]) -> Result<reqw
     Ok(url)
 }
 
+/// 从 TikTok 作品项中提取封面 URL。
+///
+/// 实测官方接口返回的 `video.cover` / `video.originCover` 是**直接字符串 URL**
+/// （个别接口为 `{ "url_list": [...] }` 对象），两种结构都兼容。
+fn tiktok_cover_url(value: &serde_json::Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .get("url_list")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|list| list.first())
+            .and_then(serde_json::Value::as_str)
+    })
+}
+
 pub(crate) fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> {
     let id = item.get("id").and_then(serde_json::Value::as_str)?.trim().to_string();
     if id.is_empty() {
@@ -873,9 +887,9 @@ pub(crate) fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> 
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     let thumbnail = item
-        .pointer("/video/cover/url_list/0")
-        .or_else(|| item.pointer("/video/originCover/url_list/0"))
-        .and_then(serde_json::Value::as_str)
+        .pointer("/video/cover")
+        .or_else(|| item.pointer("/video/originCover"))
+        .and_then(tiktok_cover_url)
         .map(str::to_string);
     let duration_seconds = item
         .pointer("/video/duration")
@@ -1595,6 +1609,11 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
 const TIKTOK_USER_PLAYLIST_API: &str = "https://www.tiktok.com/api/user/playlist/";
 const TIKTOK_USER_DETAIL_API: &str = "https://www.tiktok.com/api/user/detail/";
 const TIKTOK_PLAYLIST_API: &str = "https://www.tiktok.com/api/playlist/";
+/// 当前登录账号“收藏”（收藏夹中的全部视频）官方接口。
+///
+/// 与“我的喜欢”（/api/favorite/item_list/）一致：极简参数 + cookies.txt 登录态
+/// 即可服务端直连（实测无需浏览器签名），前提是出口 IP 未被 TikTok 风控。
+const TIKTOK_USER_COLLECT_API: &str = "https://www.tiktok.com/api/user/collect/item_list/";
 
 #[derive(Debug, Deserialize)]
 pub struct TikTokPlaylistsRequest {
@@ -1795,7 +1814,8 @@ pub async fn get_tiktok_playlists(
     Query(request): Query<TikTokPlaylistsRequest>,
 ) -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
     let raw_url = request.url.as_deref().unwrap_or("").trim();
-    let sec_uid = if raw_url.is_empty() {
+    let own = raw_url.is_empty();
+    let sec_uid = if own {
         // 获取自己的列表：使用登录账号的 secUid（自动/手动均可），无需主页链接。
         tiktok_login_sec_uid().await.map_err(ApiError::from)?
     } else {
@@ -1804,11 +1824,15 @@ pub async fn get_tiktok_playlists(
         }
         resolve_tiktok_sec_uid(raw_url).await.map_err(ApiError::from)?
     };
-    let response = fetch_tiktok_playlists(&sec_uid).await.map_err(ApiError::from)?;
+    let response = fetch_tiktok_playlists(&sec_uid, own).await.map_err(ApiError::from)?;
     Ok(response)
 }
 
-async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
+/// 拉取指定作者（或当前登录账号）的公开播放列表。
+///
+/// 仅返回 /api/user/playlist/ 的公开播放列表；自有账号的私有“收藏”由上层
+/// “全部收藏”兜底入口补齐。
+async fn fetch_tiktok_public_playlists(sec_uid: &str) -> anyhow::Result<Vec<YouTubeSearchResult>> {
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let cookie = tiktok_cookie_header()?;
     let device_id = tiktok_web_device_id().to_string();
@@ -1902,12 +1926,160 @@ async fn fetch_tiktok_playlists(sec_uid: &str) -> anyhow::Result<ApiResponse<You
             });
         }
     }
+    Ok(results)
+}
+
+async fn fetch_tiktok_playlists(sec_uid: &str, own: bool) -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
+    // 公开播放列表：仅对自有账号失败时降级（很多账号根本没有公开播放列表，
+    // 接口被风控打回不影响“全部收藏”兜底）。
+    let mut results = match fetch_tiktok_public_playlists(sec_uid).await {
+        Ok(results) => results,
+        Err(error) if own => {
+            warn!(error = %error, "TikTok 公开播放列表获取失败，回退“全部收藏”");
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    // 自己的账号：/api/user/playlist/ 只返回公开播放列表，多数账号的“收藏夹”
+    // 其实是私有收藏（/api/user/collection_list/ 在服务端被风控隐藏列表，只回
+    // total 不回明细）。这里用“全部收藏”（/api/user/collect/item_list/）兜底，
+    // 保证“获取自己的列表”始终能拿到一个可添加的入口。
+    if own {
+        if let Some((total, cover)) = fetch_tiktok_collect_preview().await? {
+            if total > 0 {
+                results.push(YouTubeSearchResult {
+                    result_type: "tiktok_playlist".to_string(),
+                    title: "全部收藏".to_string(),
+                    author: format!("{total} 个视频"),
+                    youtube_url: "https://www.tiktok.com/collect/favorites".to_string(),
+                    channel_id: Some("favorites".to_string()),
+                    cover,
+                    description: "当前账号收藏夹中的全部视频".to_string(),
+                    follower: None,
+                });
+            }
+        }
+    }
     let total = results.len();
     Ok(ApiResponse::ok(YouTubeSearchResponse {
         success: true,
         results,
         total,
     }))
+}
+
+/// 单页拉取“收藏”预览：返回 (视频总数, 第一张封面)，供收藏夹列表兜底入口展示。
+/// 任何失败都返回 Ok(None)，由上层决定是否继续展示空的播放列表结果。
+async fn fetch_tiktok_collect_preview() -> Result<Option<(i64, String)>> {
+    let cookie = tiktok_cookie_header()?;
+    let sec_uid = tiktok_login_sec_uid().await?;
+    let params = vec![
+        ("aid", "1988"),
+        ("app_name", "tiktok_web"),
+        ("device_platform", "web_pc"),
+        ("count", "30"),
+        ("cursor", "0"),
+        ("secUid", sec_uid.as_str()),
+    ];
+    let url = reqwest::Url::parse_with_params(TIKTOK_USER_COLLECT_API, &params)?;
+    let (status, body) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+    if status != 200 || body.trim().is_empty() {
+        return Ok(None);
+    }
+    let payload = decode_tiktok_body(&body)?;
+    let total = payload
+        .get("total")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_else(|| {
+            payload
+                .get("itemList")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| items.len() as i64)
+                .unwrap_or(0)
+        });
+    let cover = payload
+        .get("itemList")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| {
+            item.pointer("/video/cover")
+                .or_else(|| item.pointer("/video/originCover"))
+                .or_else(|| item.pointer("/video/dynamicCover"))
+        })
+        .and_then(tiktok_cover_url)
+        .unwrap_or_default()
+        .to_string();
+    Ok(Some((total, cover)))
+}
+
+/// 拉取当前登录账号“收藏”中的全部视频（官方 /api/user/collect/item_list/）。
+///
+/// 与“我的喜欢”（/api/favorite/item_list/）一致：极简参数 + cookies.txt 登录态
+/// 即可服务端直连（实测无需浏览器签名），前提是出口 IP 未被 TikTok 风控。
+async fn fetch_tiktok_collect_videos(limit: usize) -> Result<Vec<TikTokPost>> {
+    let cookie = tiktok_cookie_header()?;
+    let sec_uid = tiktok_login_sec_uid().await?;
+    let mut cursor = 0i64;
+    let mut posts = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..500 {
+        let cursor_str = cursor.to_string();
+        let params = vec![
+            ("aid", "1988"),
+            ("app_name", "tiktok_web"),
+            ("device_platform", "web_pc"),
+            ("count", "30"),
+            ("cursor", cursor_str.as_str()),
+            ("secUid", sec_uid.as_str()),
+        ];
+        let url = reqwest::Url::parse_with_params(TIKTOK_USER_COLLECT_API, &params)?;
+        let (status, body) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+        if status != 200 {
+            bail!("TikTok 收藏返回 HTTP {}", status);
+        }
+        if body.trim().is_empty() {
+            bail!(
+                "TikTok 收藏返回空响应：当前出口 IP 可能被 TikTok 风控。请在设置页配置外源代理（proxy/youtube_proxy）后重试"
+            );
+        }
+        let payload = decode_tiktok_body(&body)?;
+        let mut page_has_items = false;
+        if let Some(items) = payload.get("itemList").and_then(serde_json::Value::as_array) {
+            for item in items {
+                if let Some(post) = parse_tiktok_item(item) {
+                    page_has_items = true;
+                    if seen.insert(post.id.clone()) {
+                        posts.push(post);
+                    }
+                }
+            }
+        }
+        if posts.len() >= limit
+            || !payload.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false)
+        {
+            break;
+        }
+        if !page_has_items {
+            if posts.is_empty() {
+                bail!(
+                    "TikTok 收藏接口未返回视频列表：请确认已导入最新 cookies.txt 且账号 secUid 正确；若出口 IP 被 TikTok 风控，请在设置页配置外源代理（proxy/youtube_proxy）后重试"
+                );
+            }
+            break;
+        }
+        let next = payload
+            .get("cursor")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse::<i64>().ok())
+            .or_else(|| payload.get("cursor").and_then(serde_json::Value::as_i64))
+            .unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    }
+    Ok(posts)
 }
 
 /// 拉取一个播放列表（收藏夹）内的全部视频。
@@ -1994,9 +2166,15 @@ pub async fn scan_tiktok_collection_source(
     db: &DatabaseConnection,
     source: &youtube_source::Model,
 ) -> Result<u64> {
-    let playlist_id = numeric_playlist_id(&source.url)
-        .context("无法从 TikTok 播放列表链接识别播放列表 ID")?;
-    let posts = fetch_tiktok_playlist_videos(playlist_id, usize::MAX).await?;
+    // “全部收藏”兜底入口（get_tiktok_playlists 对自有账号返回的标记链接）：
+    // 直接走 /api/user/collect/item_list/ 拉取当前账号收藏的全部视频。
+    let posts = if source.url.to_ascii_lowercase().contains("/collect/favorites") {
+        fetch_tiktok_collect_videos(usize::MAX).await?
+    } else {
+        let playlist_id = numeric_playlist_id(&source.url)
+            .context("无法从 TikTok 播放列表链接识别播放列表 ID")?;
+        fetch_tiktok_playlist_videos(playlist_id, usize::MAX).await?
+    };
     persist_tiktok_posts(db, source, posts).await
 }
 

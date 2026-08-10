@@ -351,7 +351,7 @@
 		{
 			value: 'tiktok_collection',
 			label: '收藏夹',
-			description: '同步当前账号创建的 TikTok 播放列表，需要在设置页导入 TikTok 登录状态'
+			description: '同步当前账号收藏夹中的视频（收藏），需要在设置页导入 TikTok 登录状态'
 		}
 	];
 	const sourceTypeLabelMap: Record<string, string> = {
@@ -764,7 +764,7 @@
 						: api.searchTikTok(searchKeyword.trim()),
 				{
 					setLoading: (value) => (searchLoading = value),
-					context: isPlaylistSearch ? '获取 TikTok 播放列表失败' : '搜索 TikTok 作者失败'
+					context: isPlaylistSearch ? '获取 TikTok 收藏夹失败' : '搜索 TikTok 作者失败'
 				}
 			);
 			if (!response) return;
@@ -773,7 +773,7 @@
 			showSearchResults = true;
 			if (response.data.results.length > 0) {
 				toast.success(
-					`${isPlaylistSearch ? '获取' : '搜索完成，共找到'} ${response.data.results.length} 个${isPlaylistSearch ? '播放列表' : ' TikTok 作者'}`
+					`${isPlaylistSearch ? '获取' : '搜索完成，共找到'} ${response.data.results.length} 个${isPlaylistSearch ? '收藏夹' : ' TikTok 作者'}`
 				);
 			} else {
 				toast.info(isPlaylistSearch ? '未找到可用的播放列表（当前账号未创建收藏夹，或该作者未开放公开收藏夹）' : '未找到匹配的 TikTok 作者');
@@ -965,7 +965,7 @@
 			const sourceLabel =
 				sourcePlatform === 'tiktok'
 						? youtubeSourceType === 'tiktok_collection'
-							? 'TikTok 播放列表'
+							? 'TikTok 收藏夹'
 							: 'TikTok 作者'
 					: sourcePlatform !== 'douyin'
 						? 'YouTube 来源'
@@ -3427,7 +3427,7 @@
 								>
 									<div class="flex {isMobile ? 'flex-col gap-2' : 'items-center justify-between'} gap-2">
 										<div class="space-y-1">
-											<Label>获取 TikTok 播放列表</Label>
+											<Label>获取 TikTok 收藏夹</Label>
 											<p class="text-muted-foreground text-xs">
 												无需链接：直接点击“获取自己的列表”读取当前登录账号的收藏夹；填写他人主页链接可读取其公开收藏夹。在右侧选择后自动填充名称和链接。
 											</p>
@@ -5198,7 +5198,7 @@
 																				: result.result_type === 'tiktok_user'
 																					? 'TikTok 作者'
 																			: result.result_type === 'tiktok_playlist'
-																				? 'TikTok 播放列表'
+																				? 'TikTok 收藏夹'
 																			: result.result_type === 'youtube_playlist'
 																				? 'YouTube 播放列表'
 																		: result.result_type === 'video'
