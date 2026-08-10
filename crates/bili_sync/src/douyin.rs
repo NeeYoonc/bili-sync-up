@@ -1351,7 +1351,7 @@ async fn fetch_liked_posts(limit: usize) -> Result<Vec<DouyinPost>> {
             ("cut_version", "1".to_string()),
             ("count", page_size.to_string()),
         ]);
-        let response = signed_get(DOUYIN_FAVORITE_API, pairs).await?;
+        let response = signed_get_without_webid(DOUYIN_FAVORITE_API, pairs).await?;
         ensure_douyin_status_ok(&response, "获取我的喜欢")?;
         append_awemes(&response, "aweme_list", &mut posts, &mut seen);
         if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
@@ -1931,13 +1931,34 @@ fn common_query_pairs() -> Vec<(&'static str, String)> {
     pairs
 }
 
-async fn signed_get(base_url: &str, mut pairs: Vec<(&str, String)>) -> Result<serde_json::Value> {
+async fn signed_get(base_url: &str, pairs: Vec<(&str, String)>) -> Result<serde_json::Value> {
+    signed_get_impl(base_url, pairs, true).await
+}
+
+/// 我的喜欢接口会严格校验 webid 必须绑定当前登录会话，而浏览器导出的
+/// cookies.txt 不包含 webid，项目自生成的 webid 与该会话不匹配，导致
+/// favorite 接口返回 HTTP 200 空响应。实测移除 webid 后该接口恢复正常，
+/// 因此为它提供不带 webid 的变体（a_bogus 按实际参数重新生成）。
+async fn signed_get_without_webid(
+    base_url: &str,
+    pairs: Vec<(&str, String)>,
+) -> Result<serde_json::Value> {
+    signed_get_impl(base_url, pairs, false).await
+}
+
+async fn signed_get_impl(
+    base_url: &str,
+    mut pairs: Vec<(&str, String)>,
+    with_webid: bool,
+) -> Result<serde_json::Value> {
     // 抓包中的所有受保护 Web API 都会把同一浏览器会话的 webid、verifyFp/fp
     // 和 msToken 一并纳入 a_bogus。关注列表对这些字段相对宽松，但作品详情、
     // 放映厅和短剧接口会严格校验，不能因为登录 Cookie 可用就省略设备参数。
     ensure_search_ms_token(false).await?;
     let cookies = cookie_values();
-    pairs.push(("webid", stable_webid().await?));
+    if with_webid {
+        pairs.push(("webid", stable_webid().await?));
+    }
     if let Some(uifid) = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP")) {
         pairs.push(("uifid", uifid.clone()));
     }
