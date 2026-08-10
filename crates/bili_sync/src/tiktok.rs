@@ -400,7 +400,7 @@ fn tiktok_import_message() -> String {
         message.push_str("；注意：未检测到 sessionid/sid_guard/uid_tt 等登录 Cookie，关注/喜欢列表可能不可用，请确认浏览器处于登录状态后重新导出 cookies.txt");
     }
     if tiktok_browser_session_outdated() {
-        message.push_str("；⚠ 浏览器会话（localStorage）早于本次 Cookie 导出，TikTok 我的喜欢可能返回空列表。请使用电脑端登录助手的“传输 TikTok 登录状态”同时同步 Cookie 与页面会话（localStorage），不要单独导入 cookies.txt");
+        message.push_str("；⚠ 浏览器会话（localStorage）早于本次 Cookie 导出，且未配置 TikTok 远程 Chromium CDP 时我的喜欢无法拉取。请使用电脑端登录助手的“传输 TikTok 登录状态”同时同步 Cookie 与页面会话，并在设置页配置 tiktok_browser_cdp_url");
     }
     message
 }
@@ -1100,7 +1100,7 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
         if !page_has_items {
             if posts.is_empty() {
                 bail!(
-                    "TikTok 我的喜欢接口未返回视频列表：当前 Cookie 与浏览器会话（localStorage）可能不是同一时间导出的。请使用电脑端登录助手的“传输 TikTok 登录状态”同时同步 Cookie 与页面会话后重试"
+                    "TikTok 我的喜欢接口未返回视频列表：该接口绑定浏览器 webmssdk 会话，服务端直连（即使完整签名+Chrome 指纹）也无法拉取。请在设置页配置 TikTok 远程 Chromium CDP（tiktok_browser_cdp_url，指向已登录 TikTok 的 Chrome/Chromium），并已通过登录助手同步 tiktok-cookies.txt + tiktok-localstorage.json 后重试"
                 );
             }
             break;
@@ -1625,7 +1625,11 @@ pub async fn get_tiktok_followings() -> Result<ApiResponse<YouTubeSearchResponse
 }
 
 async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
-    // 浏览器会话模拟优先（需配置远程 CDP）：关注列表 /api/user/list/ 需要浏览器实时签名（headless 会 403）。
+    // 服务端直连优先：curl-impersonate + webmssdk 现场签名可完整拉取关注列表；
+    // 直连失败（出口被风控等）时回退浏览器会话模拟。
+    if let Ok(response) = fetch_tiktok_followings_direct().await {
+        return Ok(response);
+    }
     if tiktok_browser_simulation_enabled() {
         match crate::tiktok_browser::fetch_tiktok_browser_data(usize::MAX).await {
             Ok(data) => {
@@ -1639,11 +1643,16 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
                         total,
                     }));
                 }
-                warn!("浏览器会话模拟返回的关注列表为空，回退服务端直连");
+                warn!("浏览器会话模拟返回的关注列表为空");
             }
-            Err(error) => warn!(error = %error, "TikTok 浏览器会话模拟失败，回退服务端直连"),
+            Err(error) => warn!(error = %error, "TikTok 浏览器会话模拟失败"),
         }
     }
+    bail!("TikTok 关注列表获取失败：请确认已通过浏览器扩展同步 TikTok 会话（tiktok-cookies.txt + tiktok-localstorage.json），或配置 tiktok_browser_cdp_url 走浏览器会话模拟")
+}
+
+/// 服务端直连拉取关注列表：curl-impersonate（Chrome TLS 指纹）+ Node webmssdk 现场签名。
+async fn fetch_tiktok_followings_direct() -> anyhow::Result<ApiResponse<YouTubeSearchResponse>> {
     let cookie = tiktok_cookie_header()?;
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let odin_id = tiktok_login_odin_id().ok_or_else(|| {
@@ -1709,7 +1718,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
     }
     if body.trim().is_empty() {
         bail!(
-            "TikTok 关注列表接口返回空响应：请通过浏览器扩展重新同步 TikTok 会话（tiktok-cookies.txt 与 tiktok-localstorage.json 需为同一时间导出的最新版本），并确认当前出口网络未被 TikTok 风控"
+            "TikTok 关注列表接口返回空响应：请确认已通过浏览器扩展同步 TikTok 会话（tiktok-cookies.txt + tiktok-localstorage.json），或在设置页配置 tiktok_browser_cdp_url 走浏览器会话模拟"
         );
     }
     let payload = decode_tiktok_body(&body)?;
