@@ -63,6 +63,12 @@
 	let externalPlatform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok' = 'bilibili';
 	$: externalPlatform = isTikTok ? 'tiktok' : isDouyin ? 'douyin' : isYouTube ? 'youtube' : 'bilibili';
 	$: platformLabel = isTikTok ? 'TikTok' : isDouyin ? '抖音' : isYouTube ? 'YouTube' : 'B站';
+	// 内嵌播放器尺寸：抖音/TikTok 竖屏 9:16，按高度约束并居中；B站/YouTube 16:9 横屏铺满。
+	$: embeddedFrameStyle = isTikTok
+		? 'width: min(100%, 360px); height: 740px; margin-inline: auto;'
+		: isDouyin
+		? 'aspect-ratio: 9/16; height: min(70vh, 640px, calc(100vw * 16 / 9)); max-width: 100%; margin-inline: auto;'
+		: 'aspect-ratio: 16/9; max-height: 70vh;';
 	$: imageUrls = videoData?.video.image_urls ?? [];
 	$: isImagePost = Boolean(videoData?.video.is_image_post);
 	$: safeImageIndex = imageUrls.length > 0 ? Math.min(Math.max(currentImageIndex, 0), imageUrls.length - 1) : 0;
@@ -75,7 +81,7 @@
 		const noticeKey = `${currentVideoId}-${safePlayingPageIndex}-${mode}-charge-locked`;
 		if (lastPlaybackNoticeKey === noticeKey) return;
 		lastPlaybackNoticeKey = noticeKey;
-		toast.error(isDouyin || isTikTok ? '付费视频未付费' : '充电视频未充电');
+		toast.error(isTikTok ? '无法下载视频' : isDouyin ? '付费视频未付费' : '充电视频未充电');
 	}
 
 	function getCurrentPageInfo() {
@@ -1148,14 +1154,14 @@
 									/>
 								{:else if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
 									<div class="flex h-64 items-center justify-center text-white">
-										<div>{isDouyin || isTikTok ? '付费视频未付费' : '充电视频未充电'}</div>
+										<div>{isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频未付费' : '充电视频未充电'}</div>
 									</div>
 								{:else if onlinePlayMode}
 									{#if getEmbeddedPlayerUrl()}
 										{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
 											<iframe
-												class="embedded-player-frame block h-auto w-full border-0"
-												style="aspect-ratio: 16/9; max-height: 70vh;"
+												class="embedded-player-frame block border-0 {isDouyin || isTikTok ? 'mx-auto w-auto' : 'h-auto w-full'}"
+												style={embeddedFrameStyle}
 												src={getEmbeddedPlayerUrl() ?? undefined}
 												title={getEmbeddedPlayerTitle()}
 												allow="autoplay; fullscreen"

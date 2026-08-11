@@ -352,10 +352,10 @@
 					{/if}
 					{#if video.is_charge_video}
 						<Badge
-							class="bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500"
-							title={isDouyin || isTikTok ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
+							class="{isTikTok ? 'bg-yellow-500 text-xs text-white shadow-md hover:bg-yellow-500' : 'bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500'}"
+							title={isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
 						>
-							{isDouyin || isTikTok ? '付费' : '充电视频'}
+							{isTikTok ? '无法下载视频' : isDouyin ? '付费' : '充电视频'}
 						</Badge>
 					{/if}
 				</div>
@@ -400,10 +400,10 @@
 			{/if}
 			{#if (coverFailed || mode !== 'default') && video.is_charge_video}
 				<Badge
-					class="mt-0.5 shrink-0 bg-amber-500 text-xs text-white hover:bg-amber-500"
-					title={isDouyin || isTikTok ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
+					class="mt-0.5 shrink-0 {isTikTok ? 'bg-yellow-500 text-xs text-white hover:bg-yellow-500' : 'bg-amber-500 text-xs text-white hover:bg-amber-500'}"
+					title={isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
 				>
-					{isDouyin || isTikTok ? '付费' : '充电视频'}
+					{isTikTok ? '无法下载视频' : isDouyin ? '付费' : '充电视频'}
 				</Badge>
 			{/if}
 			<CardTitle

@@ -1823,6 +1823,11 @@ async fn youtube_artifact_status(video: &youtube_video::Model, source: &youtube_
     };
     let warning = video.error_message.as_deref().unwrap_or("");
 
+    // 占位（付费/加密/明确不可下载）视频：与 B 站充电视频占位一致，任务整体视为已完成，
+    // 不再对封面/NFO/头像等子任务显示“未开始”。
+    if charge_locked {
+        return ([7, 7, 7, 7, 7], [7, 7, 7, 7, 7]);
+    }
     let video_status = [
         status(cover_ok),
         status(nfo_ok),
@@ -3299,7 +3304,75 @@ async fn download_youtube_media(
     video: &youtube_video::Model,
 ) -> Result<DownloadedYouTubeMedia> {
     let platform = source_platform_label(source);
-    let metadata = extract_youtube_metadata(&video.url, Some(source)).await?;
+    let metadata = match extract_youtube_metadata(&video.url, Some(source)).await {
+        Ok(metadata) => metadata,
+        Err(error) if crate::tiktok::is_tiktok_unavailable_error(&error) => {
+            // TikTok 明确不可下载（地区/内容不可用，statusCode≠0）：与付费/加密占位
+            // 方案一致，生成占位文件并标记为不可下载，避免反复重试。
+            warn!(
+                platform,
+                source_id = source.id,
+                youtube_id = %video.youtube_id,
+                %error,
+                "{}视频「{}」明确无法下载（地区/内容不可用），生成占位并停止重试",
+                platform,
+                video.title
+            );
+            let fallback_metadata = ExternalMediaMetadata {
+                id: video.youtube_id.clone(),
+                title: Some(video.title.clone()),
+                uploader: Some(source.name.clone()),
+                uploader_url: None,
+                channel: None,
+                channel_id: None,
+                channel_url: None,
+                thumbnail: video.thumbnail.clone(),
+                description: None,
+                language: None,
+                upload_date: video.published_at.clone(),
+                duration: video.duration_seconds.map(|value| value as f64),
+                formats: Vec::new(),
+                subtitles: HashMap::new(),
+                automatic_captions: HashMap::new(),
+                images: Vec::new(),
+                music_urls: Vec::new(),
+            };
+            let placeholder_title = video.title.clone();
+            let placeholder_uploader = if video.uploader.trim().is_empty() {
+                source.name.clone()
+            } else {
+                video.uploader.clone()
+            };
+            let output_path =
+                youtube_output_path(source, video, &fallback_metadata, &placeholder_title, &placeholder_uploader)?;
+            crate::douyin::create_paid_placeholder(&output_path).await?;
+            // 尽力把封面下载到本地（TikTok 封面 CDN 同样要求 Chrome 指纹，走
+            // curl-impersonate），这样卡片有真实本地封面而不是只能依赖远程代理。
+            if let Err(error) = download_youtube_cover(downloader, &fallback_metadata, &output_path, source).await {
+                warn!(
+                    platform,
+                    source_id = source.id,
+                    youtube_id = %video.youtube_id,
+                    %error,
+                    "{}视频「{}」占位封面下载失败（不影响占位标记）",
+                    platform,
+                    video.title
+                );
+            }
+            return Ok(DownloadedYouTubeMedia {
+                output_path,
+                title: placeholder_title,
+                uploader: placeholder_uploader,
+                thumbnail: video.thumbnail.clone(),
+                published_at: video.published_at.clone(),
+                duration_seconds: video.duration_seconds,
+                is_image_post: false,
+                warning_message: Some("无法下载视频：你所在国家或地区无法下载此视频".to_string()),
+                paid_content: true,
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let title = metadata.title.clone().unwrap_or_else(|| video.title.clone());
     let uploader = metadata
         .uploader
@@ -3649,9 +3722,13 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
         match extract_ytdlp_metadata(url, "TikTok").await {
             Ok(metadata) => return Ok(metadata),
             Err(ytdlp_error) => {
-                warn!(error = %ytdlp_error, url = %url, "yt-dlp 解析 TikTok 媒体直链失败，尝试 API 兜底（item/detail）");
+                debug!(error = %ytdlp_error, url = %url, "yt-dlp 解析 TikTok 媒体直链失败，尝试 API 兜底（item/detail）");
                 return match crate::tiktok::extract_tiktok_media_detail(url).await {
                     Ok(metadata) => Ok(metadata),
+                    Err(api_error) if crate::tiktok::is_tiktok_unavailable_error(&api_error) => {
+                        // 明确不可下载（地区/内容不可用）：直接透传，不再追加风控提示。
+                        Err(api_error)
+                    }
                     Err(api_error) => bail!(
                         "yt-dlp 解析 TikTok 媒体直链失败：{ytdlp_error}；API 兜底也失败：{api_error}（通常是当前出口 IP 被 TikTok 风控，请更换外源代理节点后重试）"
                     ),

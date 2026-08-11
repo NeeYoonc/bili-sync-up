@@ -15995,76 +15995,134 @@ pub async fn proxy_image(
         );
     }
 
-    // YouTube 图片使用专用代理；B 站图片仍然直连。
-    let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(90));
-    if is_youtube_image || is_tiktok_image {
-        let external_proxy = crate::config::with_config(|bundle| {
-            let proxy = bundle.config.proxy.trim();
-            if !proxy.is_empty() {
-                proxy.to_string()
-            } else {
-                bundle.config.youtube_proxy.trim().to_string()
-            }
-        });
-        if !external_proxy.is_empty() {
-            client_builder = client_builder
-                .no_proxy()
-                .proxy(reqwest::Proxy::all(&external_proxy).context("无效的网络代理地址")?);
-        }
-    }
-    let client = client_builder.build().context("创建图片 HTTP 客户端失败")?;
-
-    // 请求图片，添加必要的请求头
+    // 图片回源下载：TikTok 图片 CDN（tiktokcdn）按 TLS/JA3 指纹拒绝普通 HTTP
+    // 客户端（403 Access Denied），必须走 curl-impersonate（Chrome 指纹）；
+    // YouTube 走外源代理，B 站/抖音仍用 reqwest。
     tracing::debug!("图片缓存未命中，开始回源下载: {}", summarize_image_url(&url));
 
-    let mut image_headers = create_image_headers();
-    if is_youtube_image {
-        image_headers.insert(
-            reqwest::header::REFERER,
-            reqwest::header::HeaderValue::from_static("https://www.youtube.com/"),
-        );
-    } else if is_tiktok_image {
-        image_headers.insert(
-            reqwest::header::REFERER,
-            reqwest::header::HeaderValue::from_static("https://www.tiktok.com/"),
-        );
-    } else if is_douyin_image {
-        image_headers.insert(
-            reqwest::header::REFERER,
-            reqwest::header::HeaderValue::from_static("https://www.douyin.com/"),
-        );
-    }
-    let request = client.get(parsed_url).headers(image_headers);
-
-    // 图片下载请求头日志已在建造器时设置
-
-    let response = request.send().await;
-    let response = match response {
-        Ok(resp) => {
-            tracing::debug!("图片下载请求成功 - 状态码: {}, URL: {}", resp.status(), resp.url());
-            resp
+    let (content_type, image_data) = if is_tiktok_image {
+        let headers: Vec<(&str, &str)> = vec![
+            ("user-agent", crate::tiktok::TIKTOK_WEB_UA),
+            ("accept", "*/*"),
+            ("accept-language", "zh-CN,zh;q=0.9,en;q=0.8"),
+            ("referer", "https://www.tiktok.com/"),
+        ];
+        // 第一次直接请求；403（直链签名过期）时通过 item/detail 刷新直链再试一次。
+        let mut target = url.clone();
+        let mut refreshed = false;
+        loop {
+            match crate::tiktok_impersonate::tiktok_impersonated_get(
+                &target,
+                &headers,
+                Duration::from_secs(45),
+            )
+            .await
+            {
+                Ok((200, body, response_headers)) => {
+                    let content_type = response_headers
+                        .iter()
+                        .find(|(name, _)| name == "content-type")
+                        .map(|(_, value)| value.clone())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| "image/jpeg".to_string());
+                    break (content_type, body);
+                }
+                Ok((status, _, _)) if status == 403 && !refreshed => {
+                    refreshed = true;
+                    match crate::tiktok::refresh_tiktok_cover_url(db.as_ref(), &url).await {
+                        Ok(Some(fresh)) if fresh != url => {
+                            debug!(
+                                "TikTok 图片直链签名过期，已刷新直链重试: {}",
+                                summarize_image_url(&url)
+                            );
+                            target = fresh;
+                            continue;
+                        }
+                        Ok(_) => {
+                            tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, status);
+                            return Err(anyhow!("图片请求失败: {}", status).into());
+                        }
+                        Err(error) => {
+                            warn!(error = %error, "刷新 TikTok 图片直链失败，返回原状态码");
+                            tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, status);
+                            return Err(anyhow!("图片请求失败: {}", status).into());
+                        }
+                    }
+                }
+                Ok((status, _, _)) => {
+                    tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, status);
+                    return Err(anyhow!("图片请求失败: {}", status).into());
+                }
+                Err(error) => {
+                    return Err(anyhow!("使用 Chrome 指纹下载 TikTok 图片失败: {error:#}").into());
+                }
+            }
         }
-        Err(e) => {
-            tracing::error!("图片下载请求失败 - URL: {}, 错误: {}", url, e);
-            return Err(anyhow!("请求图片失败: {}", e).into());
+    } else {
+        let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(90));
+        if is_youtube_image {
+            let external_proxy = crate::config::with_config(|bundle| {
+                let proxy = bundle.config.proxy.trim();
+                if !proxy.is_empty() {
+                    proxy.to_string()
+                } else {
+                    bundle.config.youtube_proxy.trim().to_string()
+                }
+            });
+            if !external_proxy.is_empty() {
+                client_builder = client_builder
+                    .no_proxy()
+                    .proxy(reqwest::Proxy::all(&external_proxy).context("无效的网络代理地址")?);
+            }
         }
+        let client = client_builder.build().context("创建图片 HTTP 客户端失败")?;
+
+        let mut image_headers = create_image_headers();
+        if is_youtube_image {
+            image_headers.insert(
+                reqwest::header::REFERER,
+                reqwest::header::HeaderValue::from_static("https://www.youtube.com/"),
+            );
+        } else if is_douyin_image {
+            image_headers.insert(
+                reqwest::header::REFERER,
+                reqwest::header::HeaderValue::from_static("https://www.douyin.com/"),
+            );
+        }
+        let request = client.get(parsed_url).headers(image_headers);
+
+        let response = match request.send().await {
+            Ok(resp) => {
+                tracing::debug!("图片下载请求成功 - 状态码: {}, URL: {}", resp.status(), resp.url());
+                resp
+            }
+            Err(e) => {
+                tracing::error!("图片下载请求失败 - URL: {}, 错误: {}", url, e);
+                return Err(anyhow!("请求图片失败: {}", e).into());
+            }
+        };
+
+        if !response.status().is_success() {
+            tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, response.status());
+            return Err(anyhow!("图片请求失败: {}", response.status()).into());
+        }
+
+        // 获取内容类型
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .to_string();
+
+        // 获取图片数据（统一为 Vec<u8>，与 TikTok curl-impersonate 分支一致）
+        let image_data = response
+            .bytes()
+            .await
+            .map_err(|e| anyhow!("读取图片数据失败: {}", e))?
+            .to_vec();
+        (content_type, image_data)
     };
-
-    if !response.status().is_success() {
-        tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, response.status());
-        return Err(anyhow!("图片请求失败: {}", response.status()).into());
-    }
-
-    // 获取内容类型
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
-
-    // 获取图片数据
-    let image_data = response.bytes().await.map_err(|e| anyhow!("读取图片数据失败: {}", e))?;
     let etag = proxy_image_etag(&image_data);
     debug!(
         "图片回源下载完成: url={}, content_type={}, bytes={}, etag={}",

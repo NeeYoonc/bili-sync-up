@@ -37,7 +37,7 @@ use crate::youtube::{
 use crate::api::response::{SubmissionVideoInfo, SubmissionVideosResponse};
 
 const TIKWM_USER_SEARCH_API: &str = "https://www.tikwm.com/api/user/search";
-const TIKTOK_WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
+pub(crate) const TIKTOK_WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
 const TIKTOK_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const TIKTOK_SEARCH_CONCURRENCY: usize = 4;
 
@@ -2731,7 +2731,7 @@ pub async fn tiktok_sdk_scheduler() {
     loop {
         let started = Instant::now();
         if let Err(error) = refresh_tiktok_sdk_runtime().await {
-            warn!(error = %error, "TikTok webmssdk SDK 自动更新检查失败（当前签名不受影响）");
+            debug!(error = %error, "TikTok webmssdk SDK 自动更新检查失败（当前签名不受影响）");
         }
         let elapsed = started.elapsed();
         if elapsed < TIKTOK_SDK_AUTOUPDATE_INTERVAL {
@@ -2779,7 +2779,7 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
         let (test_code, test_stdout, test_stderr) =
             run_tiktok_sdk_manager(&manager, &["test", runtime_id]).await?;
         if test_code != 0 {
-            warn!(
+            debug!(
                 runtime_id = %runtime_id,
                 "TikTok webmssdk 候选结构测试失败：{}",
                 if test_stderr.is_empty() { test_stdout } else { test_stderr }
@@ -2793,7 +2793,7 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
                     run_tiktok_sdk_manager(&manager, &["verify", runtime_id, &count.to_string()])
                         .await?;
                 if verify_code != 0 {
-                    warn!(
+                    debug!(
                         runtime_id = %runtime_id,
                         "TikTok webmssdk 候选标记 remote_verified 失败：{}",
                         if verify_stderr.is_empty() { verify_stdout } else { verify_stderr }
@@ -2811,14 +2811,14 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
                     activated = true;
                     break;
                 }
-                warn!(
+                debug!(
                     runtime_id = %runtime_id,
                     "TikTok webmssdk 候选激活失败：{}",
                     if activate_stderr.is_empty() { activate_stdout } else { activate_stderr }
                 );
             }
             Err(error) => {
-                warn!(
+                debug!(
                     runtime_id = %runtime_id,
                     error = %error,
                     "TikTok webmssdk 候选真实关注接口 Canary 失败"
@@ -2843,7 +2843,7 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
             );
         }
         Err(error) => {
-            warn!(
+            debug!(
                 runtime_id = %active_id,
                 error = %error,
                 "TikTok webmssdk 当前激活版本 Canary 失败，尝试回滚到上一版本"
@@ -2851,7 +2851,7 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
             let (rollback_code, rollback_stdout, rollback_stderr) =
                 run_tiktok_sdk_manager(&manager, &["rollback"]).await?;
             if rollback_code != 0 {
-                warn!(
+                debug!(
                     "TikTok webmssdk 回滚失败：{}",
                     if rollback_stderr.is_empty() {
                         rollback_stdout
@@ -2988,7 +2988,7 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
         .ok_or_else(|| {
             if status_code != 0 {
                 anyhow!(
-                    "TikTok 视频详情返回状态码 {status_code}（视频可能已删除、设为私密或当前区域不可用）"
+                    "TikTok视频无法下载：你所在国家或地区无法下载此视频（statusCode {status_code}）"
                 )
             } else {
                 anyhow!("TikTok 视频详情响应缺少 item 信息")
@@ -3169,6 +3169,47 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
 /// TikTok 媒体直链下载：Akamai CDN 按 TLS/JA3 与 HTTP/2 指纹拒绝
 /// reqwest/OpenSSL 客户端（对 playAddr 返回 HTTP 403 Access Denied），
 /// 必须用 curl-impersonate（Chrome 指纹）拉取。按备用直链顺序逐个尝试。
+/// 判断是否为 TikTok 明确不可下载（地区/内容不可用）错误。
+/// 这类视频在 TikTok 服务端已确认不可访问（statusCode 非 0，如 10231），
+/// 任何出口/签名都无法拿到直链，应标记为“无法下载”而不是普通失败重试。
+pub(crate) fn is_tiktok_unavailable_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("TikTok视频无法下载"))
+}
+
+/// TikTok 封面直链签名过期（CDN 返回 403）时，通过 item/detail 刷新最新封面直链。
+/// 命中数据库记录后重新解析元数据，更新 thumbnail 字段并返回新地址。
+pub(crate) async fn refresh_tiktok_cover_url(
+    db: &DatabaseConnection,
+    stale_url: &str,
+) -> Result<Option<String>> {
+    let video = youtube_video::Entity::find()
+        .filter(youtube_video::Column::Thumbnail.eq(stale_url))
+        .one(db)
+        .await?;
+    let Some(video) = video else {
+        return Ok(None);
+    };
+    let video_id = video.id;
+    let video_url = video.url.clone();
+    let metadata = extract_tiktok_media_detail(&video_url).await?;
+    let Some(fresh) = metadata.thumbnail.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if fresh != stale_url {
+        let mut active: youtube_video::ActiveModel = video.into();
+        active.thumbnail = Set(Some(fresh.clone()));
+        active.updated_at = Set(now_standard_string());
+        active.update(db).await?;
+        info!(
+            video_id,
+            "TikTok 视频封面直链已刷新（原直链签名过期）"
+        );
+    }
+    Ok(Some(fresh))
+}
+
 pub(crate) async fn fetch_tiktok_media_with_impersonation(urls: &[&str], path: &Path) -> Result<()> {
     let cookie = tiktok_cookie_header()?;
     let headers: Vec<(&str, &str)> = vec![
