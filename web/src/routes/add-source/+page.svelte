@@ -964,6 +964,9 @@
 			const shouldSelectHistory = isYouTubeHistorySource();
 			if (shouldSelectHistory) {
 				openYouTubeHistorySelection();
+				// 显式重置并重新加载历史选择列表，避免切换来源时残留上一个来源的视频与总数
+				resetSubmissionState();
+				void loadSubmissionVideos();
 			} else {
 				showSubmissionSelection = false;
 			}
@@ -2653,6 +2656,8 @@
 
 		submissionError = null;
 		submissionVideos = [];
+		// 重置总数，避免切换来源后 Math.max(旧总数, 新total) 残留旧值导致“历史选择”显示错误数量
+		submissionTotalCount = 0;
 		currentLoadedPage = 0;
 		hasMoreVideos = true;
 		showLoadMoreButton = false;
