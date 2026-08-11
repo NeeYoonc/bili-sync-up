@@ -2419,14 +2419,37 @@ fn numeric_playlist_id(value: &str) -> Option<&str> {
 
 // ---------- TikTok 作者头像获取（creator/item_list Web API） ----------
 
+/// 手动设置的 TikTok 设备 ID（webid）文件路径。
+/// 浏览器控制台执行 `localStorage.getItem('ttwid')` 或查看 `ttwid` 得到 19 位数字，
+/// 写入该文件后即可用真实设备身份请求 `/api/item/detail/`，否则 CDN 会对
+/// playAddr 直链返回 HTTP 403（签名绑定设备，随机 device_id 生成的直链不可下载）。
+pub fn tiktok_webid_path() -> PathBuf {
+    CONFIG_DIR.join("tiktok-webid.txt")
+}
+
+/// 读取手动设置的 TikTok 设备 ID。校验：纯数字且长度 16-20 位。
+fn load_manual_tiktok_webid() -> Option<u64> {
+    let value = std::fs::read_to_string(tiktok_webid_path()).ok()?;
+    let value = value.trim().to_string();
+    (value.len() >= 16 && value.len() <= 20 && value.chars().all(|character| character.is_ascii_digit()))
+        .then(|| value.parse::<u64>().ok())
+        .flatten()
+}
+
 /// 进程内缓存的 TikTok Web API 设备 ID。
 ///
-/// 实测 `api/creator/item_list/` 接受进程级随机 device_id（与 yt-dlp 行为一致），
-/// 但每次调用都换新值会被软风控，因此进程生命周期内保持稳定。
+/// 优先使用 `tiktok-webid.txt` 中的真实浏览器 webid（下载直链签名绑定该值，
+/// 随机 device_id 会导致 playAddr 下载返回 HTTP 403）；未配置时回退到
+/// 进程级随机 device_id（实测 `api/creator/item_list/` 接受随机值，但每次调用
+/// 都换新值会被软风控，因此进程生命周期内保持稳定）。
 static TIKTOK_WEB_DEVICE_ID: OnceLock<u64> = OnceLock::new();
 
 fn tiktok_web_device_id() -> u64 {
-    *TIKTOK_WEB_DEVICE_ID.get_or_init(|| rand::random::<u64>() % 9_000_000_000_000_000_000 + 1_000_000_000_000_000_000)
+    *TIKTOK_WEB_DEVICE_ID.get_or_init(|| {
+        load_manual_tiktok_webid().unwrap_or_else(|| {
+            rand::random::<u64>() % 9_000_000_000_000_000_000 + 1_000_000_000_000_000_000
+        })
+    })
 }
 
 /// 通过 `api/creator/item_list/` 获取指定作者的公开头像地址。
@@ -2951,23 +2974,101 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
     }
     let payload = decode_tiktok_body(&last_body)?;
     let item = payload
-        .pointer("/itemInfo/item")
+        .pointer("/itemInfo/itemStruct")
+        .or_else(|| payload.pointer("/itemInfo/item"))
         .or_else(|| payload.get("item"))
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| anyhow!("TikTok 视频详情响应缺少 item 信息"))?;
     let video = item.get("video").and_then(serde_json::Value::as_object);
-    let url_list = video
-        .and_then(|v| v.get("playAddr"))
-        .and_then(|v| v.get("UrlList"))
-        .and_then(serde_json::Value::as_array)
-        .map(|list| {
-            list.iter()
-                .filter_map(serde_json::Value::as_str)
-                .filter(|value| value.starts_with("http"))
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+
+    // 新版详情接口结构：playAddr 直接是带签名参数的完整直链字符串，
+    // 旧版是 { UrlList: [...] }；另提供 bitrateInfo 各档位。按码率
+    // 降序收集候选，并记住最高码率档的编解码/码率用于流选择。
+    let mut url_list: Vec<String> = Vec::new();
+    let mut best_bitrate = 0i64;
+    let mut best_codec: Option<String> = None;
+    if let Some(video) = video {
+        if let Some(bitrate_info) = video.get("bitrateInfo").and_then(serde_json::Value::as_array) {
+            let mut ranked: Vec<(i64, Option<String>, Vec<String>)> = bitrate_info
+                .iter()
+                .filter_map(|entry| {
+                    let bitrate = entry
+                        .get("Bitrate")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    let codec = entry
+                        .get("CodecType")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|value| {
+                            if value.starts_with("h264") || value.starts_with("avc") {
+                                "h264".to_string()
+                            } else if value.starts_with("h265")
+                                || value.starts_with("hvc")
+                                || value.starts_with("hev")
+                            {
+                                "h265".to_string()
+                            } else if value.starts_with("av1") || value.starts_with("av01") {
+                                "av1".to_string()
+                            } else {
+                                value.to_string()
+                            }
+                        });
+                    let urls = entry
+                        .get("PlayAddr")
+                        .and_then(|play_addr| play_addr.get("UrlList"))
+                        .and_then(serde_json::Value::as_array)
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .filter(|value| value.starts_with("http"))
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    (!urls.is_empty()).then(|| (bitrate, codec, urls))
+                })
+                .collect::<Vec<_>>();
+            ranked.sort_by_key(|(bitrate, _, _)| *bitrate);
+            if let Some((bitrate, codec, urls)) = ranked.last() {
+                best_bitrate = *bitrate;
+                best_codec = codec.clone();
+            }
+            for (_, _, urls) in ranked.into_iter().rev() {
+                url_list.extend(urls);
+            }
+        }
+        if url_list.is_empty() {
+            if let Some(url) = video.get("playAddr").and_then(serde_json::Value::as_str) {
+                if url.starts_with("http") {
+                    url_list.push(url.to_string());
+                }
+            }
+        }
+        if url_list.is_empty() {
+            if let Some(url) = video.get("downloadAddr").and_then(serde_json::Value::as_str) {
+                if url.starts_with("http") {
+                    url_list.push(url.to_string());
+                }
+            }
+        }
+        if url_list.is_empty() {
+            if let Some(list) = video
+                .get("playAddr")
+                .and_then(|play_addr| play_addr.get("UrlList"))
+                .and_then(serde_json::Value::as_array)
+            {
+                url_list.extend(
+                    list.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .filter(|value| value.starts_with("http"))
+                        .map(str::to_string),
+                );
+            }
+        }
+    }
+    // 去重保序，避免同一 CDN 地址在多档位重复出现。
+    let mut seen = std::collections::HashSet::new();
+    url_list.retain(|url| seen.insert(url.clone()));
     if url_list.is_empty() {
         bail!("TikTok 视频详情响应缺少可下载的媒体直链（playAddr）");
     }
@@ -2976,24 +3077,44 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
         .and_then(serde_json::Value::as_str)
         .unwrap_or(&item_id)
         .to_string();
-    let unique_id = item
-        .get("author")
-        .and_then(serde_json::Value::as_object)
+    // 新版详情接口的 author 通常只返回 nickname，不返回 uniqueId；
+    // 依次回退到昵称与链接中的作者句柄。
+    let author = item.get("author").and_then(serde_json::Value::as_object);
+    let unique_id = author
         .and_then(|author| author.get("uniqueId"))
         .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            author
+                .and_then(|author| author.get("nickname"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| (!handle.is_empty()).then(|| handle.clone()))
+        .unwrap_or_default();
+    // TikTok MP4 为 H.264/H.265 + AAC 混合流；vcodec/acodec 缺失会导致
+    // 统一下载器的流选择器判定为“无视频/无音频”而拒绝（TikTok没有可下载的视频格式）。
+    let vcodec = best_codec.clone().unwrap_or_else(|| "h264".to_string());
+    let total_bitrate_kbps = (best_bitrate / 1000).clamp(0, i32::MAX as i64) as i32;
     let format = ExternalMediaFormat {
         format_id: Some("http-1080".to_string()),
         url: url_list.first().cloned(),
         protocol: Some("https".to_string()),
         ext: Some("mp4".to_string()),
-        vcodec: None,
-        acodec: None,
-        width: None,
-        height: None,
+        vcodec: Some(vcodec),
+        acodec: Some("aac".to_string()),
+        width: video
+            .and_then(|v| v.get("width"))
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok()),
+        height: video
+            .and_then(|v| v.get("height"))
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok()),
         fps: None,
-        tbr: None,
+        tbr: (total_bitrate_kbps > 0).then_some(total_bitrate_kbps as f64),
         vbr: None,
         abr: None,
         dynamic_range: None,
@@ -3028,4 +3149,36 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
         images: Vec::new(),
         music_urls: Vec::new(),
     })
+}
+
+/// TikTok 媒体直链下载：Akamai CDN 按 TLS/JA3 与 HTTP/2 指纹拒绝
+/// reqwest/OpenSSL 客户端（对 playAddr 返回 HTTP 403 Access Denied），
+/// 必须用 curl-impersonate（Chrome 指纹）拉取。按备用直链顺序逐个尝试。
+pub(crate) async fn fetch_tiktok_media_with_impersonation(urls: &[&str], path: &Path) -> Result<()> {
+    let cookie = tiktok_cookie_header()?;
+    let headers: Vec<(&str, &str)> = vec![
+        ("user-agent", TIKTOK_WEB_UA),
+        ("accept", "*/*"),
+        ("accept-language", "zh-CN,zh;q=0.9,en;q=0.8"),
+        ("referer", "https://www.tiktok.com/"),
+        ("cookie", cookie.as_str()),
+    ];
+    let mut last_error: Option<anyhow::Error> = None;
+    for url in urls {
+        match crate::tiktok_impersonate::tiktok_impersonated_download(
+            url,
+            path,
+            &headers,
+            Duration::from_secs(900),
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                warn!(url = %url, error = %error, "TikTok 媒体直链下载失败，尝试备用直链");
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("TikTok 媒体直链列表为空")))
 }

@@ -1743,18 +1743,9 @@ async fn fetch_platform_asset(
             .fetch_with_fallback_with_referer_and_cookie(urls, path, "https://www.douyin.com/", &cookie)
             .await
     } else if crate::tiktok::is_tiktok_source(source) {
-        // TikTok 播放直链要求携带网页会话 Cookie（否则 403），并跟随外源代理通道。
-        let cookie = crate::tiktok::tiktok_cookie_header()?;
-        let proxy = configured_external_proxy();
-        downloader
-            .fetch_with_fallback_with_referer_and_cookie_and_proxy(
-                urls,
-                path,
-                "https://www.tiktok.com/",
-                &cookie,
-                &proxy,
-            )
-            .await
+        // TikTok 播放直链要求 Chrome TLS 指纹 + 网页会话 Cookie，否则 Akamai CDN
+        // 返回 HTTP 403 Access Denied；必须走 curl-impersonate 下载（跟随外源代理）。
+        crate::tiktok::fetch_tiktok_media_with_impersonation(urls, path).await
     } else {
         let proxy = configured_external_proxy();
         downloader.fetch_with_fallback_with_proxy(urls, path, &proxy).await

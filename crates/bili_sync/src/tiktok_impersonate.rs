@@ -412,6 +412,90 @@ pub(crate) async fn tiktok_impersonated_get(
     Ok((status, body, response_headers))
 }
 
+/// 使用 curl-impersonate（Chrome TLS 指纹）下载 TikTok 媒体文件到本地。
+/// TikTok 的 Akamai CDN 会按 TLS/JA3 与 HTTP/2 指纹拒绝 reqwest/OpenSSL
+/// 客户端（对 playAddr 返回 HTTP 403 Access Denied），必须走 curl-impersonate
+/// 才能取到视频直链。支持断点续传（-C -），失败时抛错由调用方切换备用直链。
+pub(crate) async fn tiktok_impersonated_download(
+    url: &str,
+    output_path: &Path,
+    headers: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<()> {
+    let binary = ensure_tiktok_impersonate().await?;
+    let mut command = Command::new(&binary);
+    command
+        .arg("--impersonate")
+        .arg("chrome131")
+        .arg("-s")
+        .arg("-L")
+        .arg("--compressed")
+        .arg("-f")
+        .arg("-C")
+        .arg("-")
+        .arg("--connect-timeout")
+        .arg("30")
+        .arg("--max-time")
+        .arg(timeout.as_secs().to_string())
+        .arg("--output")
+        .arg(output_path)
+        .kill_on_drop(true);
+
+    let package = current_package();
+    let mut cacert_used = false;
+    if let Some(package) = &package {
+        let managed_cacert = cacert_path_for(package);
+        if managed_cacert.is_file() {
+            command.arg("--cacert").arg(&managed_cacert);
+            cacert_used = true;
+        }
+    }
+    if !cacert_used {
+        if let Ok(configured) = std::env::var("BILI_SYNC_CURL_IMPERSONATE_CACERT") {
+            let configured = PathBuf::from(configured);
+            if configured.is_file() {
+                command.arg("--cacert").arg(&configured);
+                cacert_used = true;
+            }
+        }
+    }
+    if !cacert_used {
+        #[cfg(target_os = "linux")]
+        if Path::new("/etc/ssl/certs/ca-certificates.crt").is_file() {
+            command.arg("--cacert").arg("/etc/ssl/certs/ca-certificates.crt");
+            cacert_used = true;
+        }
+        if !cacert_used {
+            warn!("未找到 curl-impersonate 可用的 CA 证书，TikTok 媒体下载可能因 TLS 校验失败");
+        }
+    }
+
+    let proxy = configured_external_proxy();
+    if !proxy.is_empty() {
+        command.arg("--proxy").arg(&proxy);
+    }
+    for (name, value) in headers {
+        if let Ok(header_line) = format_header(name, value) {
+            command.arg("-H").arg(header_line);
+        }
+    }
+    command.arg(url);
+
+    let cmd_output = tokio::time::timeout(timeout + Duration::from_secs(30), command.output())
+        .await
+        .map_err(|_| anyhow!("curl-impersonate 媒体下载超时：{url}"))?
+        .map_err(|error| anyhow!("启动 curl-impersonate 媒体下载失败（{error}）：{url}"))?;
+    if !cmd_output.status.success() {
+        let stderr = String::from_utf8_lossy(&cmd_output.stderr).trim().to_string();
+        bail!(
+            "curl-impersonate 媒体下载失败（退出码 {}）{}：{url}",
+            cmd_output.status.code().unwrap_or(-1),
+            if stderr.is_empty() { String::new() } else { format!("：{stderr}") }
+        );
+    }
+    Ok(())
+}
+
 /// 解析 curl --dump-header 输出中的响应头，返回 (小写名称, 值) 列表。
 /// 跳过状态行（HTTP/...）与空行；代理下的 CONNECT 响应头也会被忽略。
 fn parse_dump_headers(path: &Path) -> Vec<(String, String)> {
