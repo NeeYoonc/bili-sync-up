@@ -1065,6 +1065,7 @@
 											title="播放已下载视频"
 											onclick={() => {
 												currentPlayingPageIndex = index;
+												imageViewMode = false;
 												onlinePlayMode = false;
 												chargeLockedDisplayMode = null;
 												showVideoPlayer = true;
@@ -1082,6 +1083,7 @@
 										title="{platformLabel}内嵌播放（清晰度由平台控制）"
 										onclick={() => {
 											currentPlayingPageIndex = index;
+											imageViewMode = false;
 											onlinePlayMode = true;
 											chargeLockedDisplayMode = null;
 											showVideoPlayer = true;
