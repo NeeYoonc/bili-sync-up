@@ -41,7 +41,7 @@
 	let statusEditorLoading = false;
 	let showVideoPlayer = false;
 	let currentPlayingPageIndex = 0;
-	let onlinePlayMode = false; // false: 本地播放, true: B站内嵌播放
+	let onlinePlayMode = false; // false: 本地播放, true: 平台内嵌播放（抖音已取消在线播放）
 	let imageViewMode = false;
 	let currentImageIndex = 0;
 	let imageUrls: string[] = [];
@@ -63,11 +63,9 @@
 	let externalPlatform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok' = 'bilibili';
 	$: externalPlatform = isTikTok ? 'tiktok' : isDouyin ? 'douyin' : isYouTube ? 'youtube' : 'bilibili';
 	$: platformLabel = isTikTok ? 'TikTok' : isDouyin ? '抖音' : isYouTube ? 'YouTube' : 'B站';
-	// 内嵌播放器尺寸：抖音/TikTok 竖屏 9:16，按高度约束并居中；B站/YouTube 16:9 横屏铺满。
+	// 内嵌播放器尺寸：TikTok 竖屏固定尺寸居中；B站/YouTube 16:9 横屏铺满。抖音已取消在线播放。
 	$: embeddedFrameStyle = isTikTok
 		? 'width: min(100%, 360px); height: 740px; margin-inline: auto;'
-		: isDouyin
-		? 'width: min(100%, 324px); height: 672px; margin-inline: auto;'
 		: 'aspect-ratio: 16/9; max-height: 70vh;';
 	$: imageUrls = videoData?.video.image_urls ?? [];
 	$: isImagePost = Boolean(videoData?.video.is_image_post);
@@ -92,9 +90,8 @@
 	function getEmbeddedPlayerUrl() {
 		const bvid = videoData?.video.bvid;
 		if (!bvid) return null;
-		if (isDouyin) {
-			return `https://open.douyin.com/player/video?vid=${encodeURIComponent(bvid)}&autoplay=1`;
-		}
+		// 抖音官方内嵌播放器强制显示底部作者信息条，无法隐藏，已取消抖音在线播放（仅保留本地播放）
+		if (isDouyin) return null;
 		if (isYouTube) {
 			return `https://www.youtube.com/embed/${encodeURIComponent(bvid)}?autoplay=1`;
 		}
