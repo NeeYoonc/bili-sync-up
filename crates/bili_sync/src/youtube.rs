@@ -1153,11 +1153,34 @@ pub(crate) async fn require_source_platform(
 }
 
 async fn require_video_platform(db: &DatabaseConnection, id: i32, platform: &str) -> Result<(), ApiError> {
-    let platform_label = if platform == "douyin" { "抖音" } else { "YouTube" };
+    let platform_label = match platform {
+        "douyin" => "抖音",
+        "tiktok" => "TikTok",
+        _ => "YouTube",
+    };
     let Some(video) = youtube_video::Entity::find_by_id(id).one(db).await? else {
         return Err(ApiError::from(anyhow!("{platform_label}下载任务不存在")));
     };
     require_source_platform(db, video.source_id, platform).await?;
+    Ok(())
+}
+
+/// 校验外源（YouTube/抖音/TikTok）下载任务可重试：外源统一存在 `youtube_video` 表，
+/// 重试逻辑与来源平台无关。返回 400 时给出明确平台提示。
+async fn require_external_video_platform(
+    db: &DatabaseConnection,
+    id: i32,
+) -> Result<(), ApiError> {
+    let Some(video) = youtube_video::Entity::find_by_id(id).one(db).await? else {
+        return Err(ApiError::from(anyhow!("外源下载任务不存在")));
+    };
+    let Some(source) = youtube_source::Entity::find_by_id(video.source_id).one(db).await? else {
+        return Err(ApiError::from(anyhow!("外源下载任务所属视频源不存在")));
+    };
+    let source_type = source.source_type.as_str();
+    if source_type.is_empty() {
+        return Err(ApiError::from(anyhow!("外源下载任务所属视频源类型无效")));
+    }
     Ok(())
 }
 
@@ -1561,7 +1584,9 @@ pub async fn retry_youtube_video_checked(
     AxumPath(id): AxumPath<i32>,
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<bool>, ApiError> {
-    require_video_platform(db.as_ref(), id, "youtube").await?;
+    // YouTube/抖音/TikTok 外源共用 youtube_video 表与重试逻辑，全部放行；
+    // 该接口被 YouTube/抖音/TikTok 视频管理页共用。
+    require_external_video_platform(db.as_ref(), id).await?;
     retry_youtube_video(AxumPath(id), Extension(db)).await
 }
 
@@ -3630,7 +3655,18 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
         return crate::douyin::extract_metadata(aweme_id, source).await;
     }
     if url.contains("tiktok.com") {
-        return extract_ytdlp_metadata(url, "TikTok").await;
+        match extract_ytdlp_metadata(url, "TikTok").await {
+            Ok(metadata) => return Ok(metadata),
+            Err(ytdlp_error) => {
+                warn!(error = %ytdlp_error, url = %url, "yt-dlp 解析 TikTok 媒体直链失败，尝试 API 兜底（item/detail）");
+                return match crate::tiktok::extract_tiktok_media_detail(url).await {
+                    Ok(metadata) => Ok(metadata),
+                    Err(api_error) => bail!(
+                        "yt-dlp 解析 TikTok 媒体直链失败：{ytdlp_error}；API 兜底也失败：{api_error}（通常是当前出口 IP 被 TikTok 风控，请更换外源代理节点后重试）"
+                    ),
+                };
+            }
+        }
     }
     extract_ytdlp_metadata(url, "YouTube").await
 }

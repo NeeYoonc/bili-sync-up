@@ -20,6 +20,7 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use bili_sync_entity::{youtube_source, youtube_video};
+use crate::external_media::{ExternalMediaFormat, ExternalMediaMetadata};
 
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::config::CONFIG_DIR;
@@ -2841,4 +2842,190 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------- TikTok 媒体直链 API 兜底（yt-dlp 网页解析失败时） ----------
+
+/// 从 TikTok 视频链接提取视频 ID（`https://www.tiktok.com/@user/video/<id>`）。
+fn tiktok_video_id(url: &str) -> Option<String> {
+    let path = url.trim().split(['?', '#']).next()?;
+    let segment = path.rsplit('/').next()?;
+    segment
+        .chars()
+        .all(|c| c.is_ascii_digit())
+        .then(|| segment.to_string())
+}
+
+/// yt-dlp 网页解析失败（TikTok WAF 风控 / 页面改版）时的 API 兜底：
+/// 用 webmssdk 现场签名 + curl-impersonate 请求 `/api/item/detail/`，
+/// 从 `itemInfo.item.video.playAddr` 取媒体直链交给统一下载器。
+///
+/// 空响应时 TikTok 会下发新的 msToken（x-ms-token / Set-Cookie），
+/// `tiktok_impersonated_get` 已自动合并回 cookies.txt，这里最多重试 2 次。
+pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMediaMetadata> {
+    let item_id =
+        tiktok_video_id(url).ok_or_else(|| anyhow!("无法从 TikTok 链接识别视频 ID：{url}"))?;
+    let cookie = tiktok_cookie_header()?;
+    let ms_token = tiktok_cookie_values()
+        .get("msToken")
+        .cloned()
+        .unwrap_or_default();
+    let odin_id = tiktok_login_odin_id().unwrap_or_default();
+    let verify_fp = tiktok_login_verify_fp().unwrap_or_default();
+    let device_id = tiktok_web_device_id().to_string();
+    let handle = tiktok_handle_from_url(url).unwrap_or_default();
+    let profile = if handle.is_empty() {
+        "https://www.tiktok.com/".to_string()
+    } else {
+        format!("https://www.tiktok.com/@{handle}")
+    };
+    let params: Vec<(&str, String)> = vec![
+        ("aid", "1988".to_string()),
+        ("app_language", "zh-Hans".to_string()),
+        ("app_name", "tiktok_web".to_string()),
+        ("browser_language", "zh-CN".to_string()),
+        ("browser_name", "Mozilla".to_string()),
+        ("browser_online", "true".to_string()),
+        ("browser_platform", "Win32".to_string()),
+        ("browser_version", TIKTOK_WEB_UA.to_string()),
+        ("channel", "tiktok_web".to_string()),
+        ("cookie_enabled", "true".to_string()),
+        ("data_collection_enabled", "false".to_string()),
+        ("device_id", device_id),
+        ("device_platform", "web_pc".to_string()),
+        ("focus_state", "true".to_string()),
+        ("from_page", "video".to_string()),
+        ("history_len", "16".to_string()),
+        ("isNonPersonalized", "false".to_string()),
+        ("is_fullscreen", "false".to_string()),
+        ("is_page_visible", "true".to_string()),
+        ("itemId", item_id.clone()),
+        ("odinId", odin_id),
+        ("os", "windows".to_string()),
+        ("priority_region", "KR".to_string()),
+        ("referer", profile.clone()),
+        ("region", "SG".to_string()),
+        ("root_referer", profile),
+        ("screen_height", "1440".to_string()),
+        ("screen_width", "2560".to_string()),
+        ("tz_name", "Asia/Shanghai".to_string()),
+        ("user_is_login", "true".to_string()),
+        (
+            "WebIdLastTime",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(1)
+                .to_string(),
+        ),
+        ("verifyFp", verify_fp),
+        ("webcast_language", "zh-Hans".to_string()),
+        ("msToken", ms_token),
+        ("X-Bogus", "1".to_string()),
+    ];
+    let unsigned =
+        reqwest::Url::parse_with_params("https://www.tiktok.com/api/item/detail/", &params)?;
+
+    let mut last_body = String::new();
+    for attempt in 0..3 {
+        let current_cookie = if attempt == 0 {
+            cookie.clone()
+        } else {
+            tiktok_cookie_header().unwrap_or_else(|_| cookie.clone())
+        };
+        let signed = sign_tiktok_url_with_sdk(unsigned.as_str(), None).await?;
+        let (status, body, _) = tiktok_impersonated_get(&signed, &current_cookie).await?;
+        if status != 200 {
+            bail!(
+                "TikTok 视频详情返回 HTTP {status}{}",
+                tiktok_risk_status_hint(status)
+            );
+        }
+        last_body = body;
+        if !last_body.trim().is_empty() {
+            break;
+        }
+    }
+    if last_body.trim().is_empty() {
+        bail!("TikTok 视频详情接口返回空响应（当前出口可能被 TikTok 风控，请更换外源代理节点后重试）");
+    }
+    let payload = decode_tiktok_body(&last_body)?;
+    let item = payload
+        .pointer("/itemInfo/item")
+        .or_else(|| payload.get("item"))
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| anyhow!("TikTok 视频详情响应缺少 item 信息"))?;
+    let video = item.get("video").and_then(serde_json::Value::as_object);
+    let url_list = video
+        .and_then(|v| v.get("playAddr"))
+        .and_then(|v| v.get("UrlList"))
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|value| value.starts_with("http"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if url_list.is_empty() {
+        bail!("TikTok 视频详情响应缺少可下载的媒体直链（playAddr）");
+    }
+    let id = item
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&item_id)
+        .to_string();
+    let unique_id = item
+        .get("author")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|author| author.get("uniqueId"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let format = ExternalMediaFormat {
+        format_id: Some("http-1080".to_string()),
+        url: url_list.first().cloned(),
+        protocol: Some("https".to_string()),
+        ext: Some("mp4".to_string()),
+        vcodec: None,
+        acodec: None,
+        width: None,
+        height: None,
+        fps: None,
+        tbr: None,
+        vbr: None,
+        abr: None,
+        dynamic_range: None,
+        decryption_key: None,
+        fallback_urls: url_list[1..].to_vec(),
+    };
+    Ok(ExternalMediaMetadata {
+        id,
+        title: item
+            .get("desc")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        uploader: (!unique_id.is_empty()).then(|| unique_id.clone()),
+        uploader_url: (!unique_id.is_empty())
+            .then(|| format!("https://www.tiktok.com/@{unique_id}")),
+        channel: None,
+        channel_id: None,
+        channel_url: None,
+        thumbnail: video
+            .and_then(|v| v.get("cover"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        description: None,
+        language: None,
+        upload_date: None,
+        duration: video
+            .and_then(|v| v.get("duration"))
+            .and_then(serde_json::Value::as_f64),
+        formats: vec![format],
+        subtitles: std::collections::HashMap::new(),
+        automatic_captions: std::collections::HashMap::new(),
+        images: Vec::new(),
+        music_urls: Vec::new(),
+    })
 }
