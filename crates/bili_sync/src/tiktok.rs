@@ -2973,12 +2973,27 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
         bail!("TikTok 视频详情接口返回空响应（当前出口可能被 TikTok 风控，请更换外源代理节点后重试）");
     }
     let payload = decode_tiktok_body(&last_body)?;
+    // TikTok 对已删除/私密/区域不可用的视频返回非 0 statusCode 且不带 itemInfo
+    // （实测 10231），此时给出明确提示，避免误判为出口风控。
+    let status_code = payload
+        .get("statusCode")
+        .or_else(|| payload.get("status_code"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
     let item = payload
         .pointer("/itemInfo/itemStruct")
         .or_else(|| payload.pointer("/itemInfo/item"))
         .or_else(|| payload.get("item"))
         .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| anyhow!("TikTok 视频详情响应缺少 item 信息"))?;
+        .ok_or_else(|| {
+            if status_code != 0 {
+                anyhow!(
+                    "TikTok 视频详情返回状态码 {status_code}（视频可能已删除、设为私密或当前区域不可用）"
+                )
+            } else {
+                anyhow!("TikTok 视频详情响应缺少 item 信息")
+            }
+        })?;
     let video = item.get("video").and_then(serde_json::Value::as_object);
 
     // 新版详情接口结构：playAddr 直接是带签名参数的完整直链字符串，

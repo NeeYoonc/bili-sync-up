@@ -147,6 +147,18 @@
 			youtubeSourceType: 'tiktok',
 			title: 'TikTok 作者',
 			icon: UserIcon
+		},
+		TIKTOK_FAVORITE: {
+			type: 'tiktok',
+			youtubeSourceType: 'tiktok_favorite',
+			title: '我的喜欢',
+			icon: HeartIcon
+		},
+		TIKTOK_COLLECTION: {
+			type: 'tiktok',
+			youtubeSourceType: 'tiktok_collection',
+			title: '收藏夹',
+			icon: ListTreeIcon
 		}
 	} as const;
 	const DOUYIN_SOURCE_SECTIONS = {
