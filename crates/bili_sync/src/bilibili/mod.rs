@@ -291,3 +291,53 @@ pub enum VideoInfo {
         actors: Option<String>,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::VideoInfo;
+    use serde_json::json;
+
+    /// B站 view 接口对部分特殊状态视频（数据异常/下架中）返回的 data 缺少 pages/state 字段，
+    /// untagged 反序列化会依次尝试各变体，最终匹配到 Collection 而不是 Detail。
+    /// 这曾导致 workflow.rs 中 `let VideoInfo::Detail { .. } = view else { unreachable!() }` panic。
+    #[test]
+    fn view_data_without_pages_matches_collection_not_detail() {
+        let data = json!({
+            "bvid": "BV1test",
+            "title": "测试视频",
+            "pic": "https://example.com/cover.jpg",
+            "ctime": 1620000000,
+            "pubdate": 1620000000
+        });
+        let info: VideoInfo = serde_json::from_value(data).expect("应能解析为某个变体");
+        assert!(
+            matches!(info, VideoInfo::Collection { .. }),
+            "缺少 pages 的 view 数据应解析为 Collection，实际: {:?}",
+            std::mem::discriminant(&info)
+        );
+    }
+
+    /// 正常 view 数据应解析为 Detail（回归保护）
+    #[test]
+    fn normal_view_data_matches_detail() {
+        let data = json!({
+            "bvid": "BV1test",
+            "title": "测试视频",
+            "desc": "描述",
+            "pic": "https://example.com/cover.jpg",
+            "owner": { "mid": 1, "name": "UP主", "face": "https://example.com/face.jpg" },
+            "ctime": 1620000000,
+            "pubdate": 1620000000,
+            "duration": 100,
+            "pages": [ { "cid": 1, "page": 1, "from": "vupload", "part": "P1", "duration": 100 } ],
+            "state": 0
+        });
+        match serde_json::from_value::<VideoInfo>(data) {
+            Ok(info) => assert!(
+                matches!(info, VideoInfo::Detail { .. }),
+                "正常 view 数据解析变体不符"
+            ),
+            Err(e) => panic!("正常 view 数据解析失败: {}", e),
+        }
+    }
+}

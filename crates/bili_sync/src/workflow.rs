@@ -2193,7 +2193,14 @@ pub async fn fetch_video_details(
                                 ..
                             } = &mut view_info
                             else {
-                                unreachable!()
+                                // B站详情接口对部分特殊状态视频（如数据异常/下架中）返回的 data 缺少 pages，
+                                // 会被 serde untagged 解析为其他 VideoInfo 变体（如 Collection）。
+                                // 这里不再 panic，而是记录并跳过该视频，避免整个下载流程崩溃。
+                                warn!(
+                                    "视频「{}」({}) 详情接口返回了非预期信息结构（可能为数据异常/下架中视频），本轮跳过处理",
+                                    &video_model.name, &video_model.bvid
+                                );
+                                return Ok(());
                             };
 
                             // 充电视频不再自动删除。
