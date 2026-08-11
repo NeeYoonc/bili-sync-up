@@ -1165,7 +1165,7 @@
 												src={getEmbeddedPlayerUrl() ?? undefined}
 												title={getEmbeddedPlayerTitle()}
 												allow="autoplay; fullscreen"
-												referrerpolicy="strict-origin-when-cross-origin"
+												referrerpolicy="unsafe-url"
 											></iframe>
 										{/key}
 									{:else}
