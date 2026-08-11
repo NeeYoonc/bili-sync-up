@@ -67,7 +67,7 @@
 	$: embeddedFrameStyle = isTikTok
 		? 'width: min(100%, 360px); height: 740px; margin-inline: auto;'
 		: isDouyin
-		? 'aspect-ratio: 9/16; height: min(70vh, 640px, calc(100vw * 16 / 9)); max-width: 100%; margin-inline: auto;'
+		? 'width: min(100%, 324px); height: 672px; margin-inline: auto;'
 		: 'aspect-ratio: 16/9; max-height: 70vh;';
 	$: imageUrls = videoData?.video.image_urls ?? [];
 	$: isImagePost = Boolean(videoData?.video.is_image_post);
