@@ -655,6 +655,43 @@ async fn ensure_ai_renamed_column(connection: &DatabaseConnection) -> Result<()>
     Ok(())
 }
 
+
+async fn ensure_video_skip_reason_column(connection: &DatabaseConnection) -> Result<()> {
+    use sea_orm::ConnectionTrait;
+
+    let backend = connection.get_database_backend();
+
+    // 检查是否已有 skip_reason 字段
+    let check_sql = "SELECT COUNT(*) FROM pragma_table_info('video') WHERE name = 'skip_reason'";
+    let result: Option<i32> = connection
+        .query_one(sea_orm::Statement::from_string(backend, check_sql))
+        .await?
+        .and_then(|row| row.try_get_by_index(0).ok());
+
+    if let Some(count) = result {
+        if count >= 1 {
+            debug!("video.skip_reason 字段已存在");
+            return Ok(());
+        }
+    }
+
+    // 添加 skip_reason 字段
+    let add_sql = "ALTER TABLE video ADD COLUMN skip_reason TEXT";
+    match connection
+        .execute(sea_orm::Statement::from_string(backend, add_sql))
+        .await
+    {
+        Ok(_) => info!("成功添加 video.skip_reason 字段"),
+        Err(e) => {
+            if !e.to_string().contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn ensure_danmaku_last_write_count_column(connection: &DatabaseConnection) -> Result<()> {
     use sea_orm::ConnectionTrait;
 
@@ -747,6 +784,11 @@ pub async fn setup_database() -> DatabaseConnection {
 
     if let Err(e) = ensure_danmaku_last_write_count_column(&connection).await {
         tracing::warn!("添加 danmaku_last_write_count 字段失败: {}", e);
+    }
+
+    // 添加 video.skip_reason 字段（未达最低下载标准等主动跳过原因）
+    if let Err(e) = ensure_video_skip_reason_column(&connection).await {
+        tracing::warn!("添加 video.skip_reason 字段失败: {}", e);
     }
 
     // 预热数据库，加载热数据到内存映射

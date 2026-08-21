@@ -3596,6 +3596,8 @@ struct DownloadPageArgs<'a> {
     filter_option: &'a FilterOption,
     inline_total_file_size_bytes: Arc<TokioMutex<Option<i64>>>,
     inline_chapters_split: Arc<TokioMutex<bool>>,
+    inline_skip_reason: Arc<TokioMutex<Option<String>>>,
+    inline_skip_reason_touched: Arc<TokioMutex<bool>>,
 }
 
 fn video_status_should_run_nfo(separate_status: &[bool; 5]) -> bool {
@@ -5580,6 +5582,8 @@ async fn download_video_pages(
     );
     let inline_total_file_size_bytes = Arc::new(TokioMutex::new(None));
     let inline_chapters_split = Arc::new(TokioMutex::new(false));
+    let inline_skip_reason = Arc::new(TokioMutex::new(None));
+    let inline_skip_reason_touched = Arc::new(TokioMutex::new(false));
     let res_5_fut = Box::pin(
         // 分发并执行分 P 下载的任务
         dispatch_download_page(
@@ -5597,6 +5601,8 @@ async fn download_video_pages(
                 filter_option,
                 inline_total_file_size_bytes: inline_total_file_size_bytes.clone(),
                 inline_chapters_split: inline_chapters_split.clone(),
+                inline_skip_reason: inline_skip_reason.clone(),
+                inline_skip_reason_touched: inline_skip_reason_touched.clone(),
             },
             token.clone(),
         ),
@@ -5606,6 +5612,8 @@ async fn download_video_pages(
         tokio::join!(res_1_fut, res_2_fut, res_folder_fut, res_3_fut, res_4_fut, res_5_fut);
     let inline_total_file_size_bytes = inline_total_file_size_bytes.lock().await.take();
     let inline_chapters_split = *inline_chapters_split.lock().await;
+    let inline_skip_reason = inline_skip_reason.lock().await.take();
+    let inline_skip_reason_touched = *inline_skip_reason_touched.lock().await;
 
     // 兼容命名：根目录补充“根目录名-thumb/fanart”，例如：
     // - 投稿源同UP合集分季：浅影阿_合集-thumb.jpg / 浅影阿_合集-fanart.jpg（使用 UP 头像）
@@ -6141,6 +6149,11 @@ async fn download_video_pages(
     if inline_chapters_split {
         video_active_model.single_page = Set(Some(false));
     }
+    // 未达最低分辨率/质量等主动跳过：仅在本轮实际执行过分P下载时写入视频级跳过原因
+    // （成功下载会清除旧标记；未执行分P下载时保留原有标记，避免重试封面/头像时误清）
+    if inline_skip_reason_touched {
+        video_active_model.skip_reason = Set(inline_skip_reason);
+    }
     video_active_model.total_file_size_bytes = Set(inline_total_file_size_bytes.or_else(|| {
         latest_video_snapshot
             .as_ref()
@@ -6161,6 +6174,7 @@ struct PageDownloadOutcome {
     persistence: PagePersistenceDecision,
     video_total_file_size_bytes_override: Option<i64>,
     split_chapters: bool,
+    skip_reason: Option<String>,
 }
 
 fn active_value_matches<T>(value: &sea_orm::ActiveValue<T>, original: &T) -> bool
@@ -6292,6 +6306,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                 if download_abort_reason.is_some() {
                     continue;
                 }
+                *args.inline_skip_reason_touched.lock().await = true;
                 let model = outcome.model;
                 // 该视频的所有分页的下载状态都会在此返回，需要根据这些状态确认视频层"分 P 下载"子任务的状态
                 // 在过去的实现中，此处仅仅根据 page_download_status 的最高标志位来判断，如果最高标志位是 true 则认为完成
@@ -6316,6 +6331,12 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                     );
                 }
                 split_chapters |= outcome.split_chapters;
+                if let Some(reason) = outcome.skip_reason {
+                    let mut skip_reason_guard = args.inline_skip_reason.lock().await;
+                    if skip_reason_guard.is_none() {
+                        *skip_reason_guard = Some(reason);
+                    }
+                }
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -7088,16 +7109,22 @@ async fn download_page(
 
     let (res_1, res_2, res_3, res_4, res_5) = tokio::join!(res_1_fut, res_2_fut, res_3_fut, res_4_fut, res_5_fut);
 
-    let (res_2, mut page_file_size_bytes, mut page_video_stream_size_bytes, mut page_audio_stream_size_bytes) =
-        match res_2 {
-            Ok(video_result) => (
-                Ok(video_result.status),
-                video_result.file_size_bytes,
-                video_result.video_stream_size_bytes,
-                video_result.audio_stream_size_bytes,
-            ),
-            Err(err) => (Err(err), None, None, None),
-        };
+    let (
+        res_2,
+        mut page_file_size_bytes,
+        mut page_video_stream_size_bytes,
+        mut page_audio_stream_size_bytes,
+        media_skip_reason,
+    ) = match res_2 {
+        Ok(video_result) => (
+            Ok(video_result.status),
+            video_result.file_size_bytes,
+            video_result.video_stream_size_bytes,
+            video_result.audio_stream_size_bytes,
+            video_result.skip_reason,
+        ),
+        Err(err) => (Err(err), None, None, None, None),
+    };
     let mut chapter_total_file_size_bytes: Option<i64> = None;
     let mut split_chapters = false;
 
@@ -7612,6 +7639,7 @@ async fn download_page(
         persistence,
         video_total_file_size_bytes_override: chapter_total_file_size_bytes,
         split_chapters,
+        skip_reason: media_skip_reason,
     })
 }
 
@@ -8009,6 +8037,7 @@ struct PageVideoFetchResult {
     file_size_bytes: Option<i64>,
     video_stream_size_bytes: Option<i64>,
     audio_stream_size_bytes: Option<i64>,
+    skip_reason: Option<String>,
 }
 
 fn to_db_file_size(size: u64) -> i64 {
@@ -8388,6 +8417,10 @@ async fn download_page_video_from_streams(
                             file_size_bytes: None,
                             video_stream_size_bytes: None,
                             audio_stream_size_bytes: None,
+                            skip_reason: Some(format!(
+                                "未达到设定的最低分辨率（最低 {:?}，实际最高 {:?}），已跳过下载",
+                                filter_option.video_min_quality, max_quality
+                            )),
                         });
                     }
                 }
@@ -8419,6 +8452,10 @@ async fn download_page_video_from_streams(
                     file_size_bytes: None,
                     video_stream_size_bytes: None,
                     audio_stream_size_bytes: None,
+                    skip_reason: Some(format!(
+                        "未达到设定的最低分辨率（最低 {:?}，实际 {:?}），已跳过下载",
+                        filter_option.video_min_quality, actual_quality
+                    )),
                 });
             }
         }
@@ -8684,6 +8721,7 @@ async fn download_page_video_from_streams(
         file_size_bytes: Some(to_db_file_size(total_bytes)),
         video_stream_size_bytes,
         audio_stream_size_bytes,
+        skip_reason: None,
     })
 }
 
@@ -8707,6 +8745,7 @@ async fn fetch_page_video(
             file_size_bytes: None,
             video_stream_size_bytes: None,
             audio_stream_size_bytes: None,
+            skip_reason: None,
         });
     }
 
@@ -8723,6 +8762,7 @@ async fn fetch_page_video(
             file_size_bytes: None,
             video_stream_size_bytes: None,
             audio_stream_size_bytes: None,
+            skip_reason: None,
         });
     }
 
@@ -8737,6 +8777,7 @@ async fn fetch_page_video(
             file_size_bytes: placeholder_size,
             video_stream_size_bytes: None,
             audio_stream_size_bytes: placeholder_size,
+            skip_reason: None,
         });
     }
 
@@ -8823,6 +8864,7 @@ async fn fetch_page_video(
                             file_size_bytes: placeholder_size,
                             video_stream_size_bytes: None,
                             audio_stream_size_bytes: placeholder_size,
+                            skip_reason: None,
                         });
                     }
                     return Err(e);
@@ -14871,6 +14913,7 @@ mod tests {
             is_charge_video: Set(false),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
         }
         .insert(db)
         .await
@@ -15760,6 +15803,7 @@ mod tests {
             is_charge_video: false,
             charge_can_play: false,
             total_file_size_bytes: None,
+            skip_reason: None,
         };
 
         let resolved = resolve_final_video_path("/videos/new-path", "/videos/old-path", Some(&latest_video));

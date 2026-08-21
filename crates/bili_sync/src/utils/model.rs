@@ -1547,6 +1547,7 @@ mod tests {
             is_charge_video: Set(false),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
         }
         .insert(db)
         .await

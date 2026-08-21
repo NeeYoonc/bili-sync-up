@@ -1138,6 +1138,7 @@ mod rename_tests {
             is_charge_video: Set(false),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
         }
         .insert(db.as_ref())
         .await
@@ -1469,6 +1470,7 @@ mod reset_path_tests {
             is_charge_video: false,
             charge_can_play: false,
             total_file_size_bytes: None,
+            skip_reason: None,
         }
     }
 
@@ -1873,6 +1875,7 @@ mod queue_sse_tests {
             is_charge_video: Set(false),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
         }
         .insert(db)
         .await
@@ -2001,6 +2004,7 @@ mod queue_sse_tests {
             is_charge_video: Set(is_charge_video),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
         }
         .insert(db)
         .await
@@ -3300,6 +3304,17 @@ pub async fn get_videos(
                     .await?
             };
 
+            // 查询视频级跳过原因（未达最低下载标准等），SeaORM 元组最多 12 列，单独按 ID 批量查询
+            let skip_reason_map: std::collections::HashMap<i32, Option<String>> = video::Entity::find()
+                .filter(video::Column::Id.is_in(raw_videos.iter().map(|(id, ..)| *id)))
+                .select_only()
+                .columns([video::Column::Id, video::Column::SkipReason])
+                .into_tuple::<(i32, Option<String>)>()
+                .all(db.as_ref())
+                .await?
+                .into_iter()
+                .collect();
+
             // 转换为VideoInfo并填充番剧标题
             let mut videos: Vec<VideoInfo> = raw_videos
                 .iter()
@@ -3318,7 +3333,7 @@ pub async fn get_videos(
                         _season_id,
                         _source_type,
                     )| {
-                        VideoInfo::from((
+                        let mut info = VideoInfo::from((
                             *id,
                             bvid.clone(),
                             name.clone(),
@@ -3329,7 +3344,9 @@ pub async fn get_videos(
                             cover.clone(),
                             *valid,
                             *is_charge_video,
-                        ))
+                        ));
+                        info.skip_reason = skip_reason_map.get(id).and_then(|v| v.clone());
+                        info
                     },
                 )
                 .collect();
@@ -3826,6 +3843,9 @@ pub async fn get_video(
             }
         }
     }
+    // 填充未达最低下载标准等主动跳过原因（B站视频）
+    video_info.skip_reason = raw_video.skip_reason.clone();
+
     let mut source = resolve_video_source_tag(db.as_ref(), &raw_video).await?;
     if let Some(source_tag) = source.as_mut() {
         if !source_tag.split_chapters_after_download && video_has_generated_chapter_pages(db.as_ref(), id).await? {

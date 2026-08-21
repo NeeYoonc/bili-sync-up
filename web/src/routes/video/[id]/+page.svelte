@@ -82,6 +82,15 @@
 		toast.error(isTikTok ? '无法下载视频' : isDouyin ? '付费视频未付费' : '充电视频未充电');
 	}
 
+	function showSkipReasonToast() {
+		const noticeKey = `${currentVideoId}-${safePlayingPageIndex}-skip-reason`;
+		if (lastPlaybackNoticeKey === noticeKey) return;
+		lastPlaybackNoticeKey = noticeKey;
+		toast.warning('未达到最低下载标准', {
+			description: videoData?.video.skip_reason ?? '该视频未下载本地媒体，无法进行本地播放'
+		});
+	}
+
 	function getCurrentPageInfo() {
 		if (!videoData?.pages?.length) return null;
 		return videoData.pages[safePlayingPageIndex] ?? null;
@@ -963,7 +972,8 @@
 										download_status: pageInfo.download_status,
 										valid: true,
 										is_charge_video: videoData.video.is_charge_video,
-										is_image_post: videoData.video.is_image_post
+										is_image_post: videoData.video.is_image_post,
+										skip_reason: videoData.video.skip_reason
 									}}
 									resourceId={routeResourceId}
 									mode="page"
@@ -1075,6 +1085,7 @@
 												onlinePlayMode = false;
 												chargeLockedDisplayMode = null;
 												showVideoPlayer = true;
+												if (videoData?.video.skip_reason) showSkipReasonToast();
 											}}
 										>
 											<PlayIcon class="mr-2 h-4 w-4" />
@@ -1197,6 +1208,8 @@
 													if (videoData?.video.is_charge_video) {
 														chargeLockedDisplayMode = 'local';
 														showChargeLockedToast('local');
+													} else if (videoData?.video.skip_reason) {
+														showSkipReasonToast();
 													}
 												}}
 												onloadstart={() => {
