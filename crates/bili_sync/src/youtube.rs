@@ -3837,6 +3837,14 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
         "--no-playlist",
         "--no-warnings",
     ]);
+    // YouTube 自 2025 年底起，默认 web 客户端要么报 “The page needs to be reloaded”，
+    // 要么只返回最高 1080p 的格式（高分辨率需要 PO Token/登录会话）。实测 web_embedded
+    // （网页嵌入式播放器客户端）无需登录即可返回完整格式列表（最高 8K），因此 YouTube
+    // 媒体解析固定优先使用该客户端（web_safari 作兜底），让下方的全局视频质量设置
+    // 能选到 1440p/4K/8K。
+    if is_youtube_url(url) {
+        command.args(["--extractor-args", "youtube:player_client=web_embedded,web_safari"]);
+    }
     append_ytdlp_runtime(&mut command);
     append_cookies_for_url(&mut command, url);
     append_youtube_proxy_for_url(&mut command, url);
