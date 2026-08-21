@@ -1,7 +1,7 @@
 # 更新记录
 
-## v3.1.1 (2026-08-21)
-- **抖音签名算法更新修复**：抖音更新 a_bogus 签名算法后，收藏夹列表/收藏夹作品/我的喜欢接口开始严格校验新算法，旧的本地移植签名被服务端以 `ArgusSecurityPlugin Signature Not Found` 直接 403 拒绝。现在这三个受保护接口改用官方 webmssdk+secsdk 现场签名（Node 子进程执行内嵌的官方 SDK，生成 a_bogus + timestamp + x-secsdk-web-signature），搜索/作者作品/稍后再看等其余接口仍走原有快速路径。需要 Node.js 以及登录助手导出的 douyin-secsdk.json（仅 cookies.txt 无法通过这三个接口）；若签名已通过但仍返回空响应（当前出口 IP 被抖音 bdturing 滑块风控），会给出明确提示：更换外源代理节点后重试。
+## v3.1.1 (2026-08-22)
+- **抖音收藏夹/我的喜欢签名修复**：实测抖音收藏夹列表、收藏夹作品、我的喜欢三个受保护接口只需要官方 secsdk 签名（`x-secsdk-web-signature`）+ 完整登录 Cookie 即可通过；`a_bogus` 参数必须字节级有效，项目无法生成有效值时，附加无效 `a_bogus` 反而会被 Turing 静默丢弃（HTTP 200 空响应）。签名器已改为仅生成 secsdk 签名（Node 子进程执行内嵌的官方 SDK），不再生成 `a_bogus`，同时移除内嵌的 webmssdk bdms 冗余文件以减小二进制体积；搜索/作者作品/稍后再看等其余接口仍走原有快速路径。需要 Node.js 与登录助手导出的 `douyin-secsdk.json`；若签名通过但返回空响应，会提示登录 Cookie 不完整/已失效或当前出口 IP 被抖音风控，建议重新同步登录状态或更换外源代理后重试。
 
 ## v3.1.0 (2026-08-12)
 - **新增 YouTube 视频源**：支持按分类管理 YouTube 视频源，投稿/收藏夹/稍后再看等列表可添加为同步源；登录状态通过电脑端登录助手扩展或手动导入 cookies.txt 传输，服务端先用 yt-dlp 验证再替换；登录状态会自动续期守护，Cookie 按域名隔离；可单独配置 YouTube 专用代理。Docker 部署内置 Node/QuickJS 运行时与兼容 glibc 的 yt-dlp，无需额外容器即可完成登录与下载。
