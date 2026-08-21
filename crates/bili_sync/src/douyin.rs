@@ -1946,6 +1946,188 @@ async fn signed_get_without_webid(
     signed_get_impl(base_url, pairs, false).await
 }
 
+/// 接口中文名（用于错误提示）。
+fn endpoint_display_name(base_url: &str) -> &'static str {
+    if base_url.starts_with(DOUYIN_FAVORITE_API) {
+        "我的喜欢"
+    } else if base_url.starts_with(DOUYIN_COLLECTIONS_API) {
+        "收藏夹列表"
+    } else if base_url.starts_with(DOUYIN_COLLECTION_VIDEOS_API) {
+        "收藏夹作品"
+    } else {
+        "抖音 Web API"
+    }
+}
+
+/// 需要 Node 现场签名（webmssdk a_bogus + secsdk x-secsdk-web-signature）的
+/// 受保护抖音接口。抖音在 2026-08 更新签名算法后，收藏夹列表/收藏夹作品/我的喜欢
+/// 三个接口会严格校验新算法，旧的 f2 移植（`douyin_sign`）生成的 a_bogus 会被
+/// 服务端以 `ArgusSecurityPlugin Signature Not Found` 直接 403 拒绝；其余接口
+/// （搜索/作者作品/稍后再看等）仍接受旧算法，继续走纯 Rust 快速路径。
+fn endpoint_needs_sdk_signature(base_url: &str) -> bool {
+    base_url.starts_with(DOUYIN_FAVORITE_API)
+        || base_url.starts_with(DOUYIN_COLLECTIONS_API)
+        || base_url.starts_with(DOUYIN_COLLECTION_VIDEOS_API)
+}
+
+// ---------- 抖音 webmssdk + secsdk 现场签名（Node 子进程） ----------
+// 与 TikTok 同理：官方 SDK（VMP webmssdk + secsdk）需要在浏览器指纹环境里实时
+// 生成签名，服务端无法用旧的纯代码移植复刻。这里把签名器与 SDK 内嵌进二进制，
+// 首次使用时释放到 CONFIG_DIR/tools/douyin/，再用 Node 子进程现场签名。
+
+/// 内嵌的抖音签名器（生成 a_bogus + uifid + timestamp + x-secsdk-web-signature）。
+const DOUYIN_SIGNER_JS: &str = include_str!("../../../scripts/douyin-signer.cjs");
+const DOUYIN_SDK_BDMS_ENV_JS: &str = include_str!("../../../scripts/douyin-sdk/bdms-env.js");
+const DOUYIN_SDK_BDMS_JS: &str = include_str!("../../../scripts/douyin-sdk/bdms.js");
+const DOUYIN_SDK_SECSDK_RUNTIME_JS: &str = include_str!("../../../scripts/douyin-sdk/secsdk-runtime.js");
+const DOUYIN_SDK_WEBSIGN_ENV_JS: &str = include_str!("../../../scripts/douyin-sdk/websign-env.js");
+
+/// 抖音签名器落盘目录（CONFIG_DIR/tools/douyin/）。
+fn douyin_signer_tools_dir() -> PathBuf {
+    CONFIG_DIR.join("tools").join("douyin")
+}
+
+/// 确保签名器与 SDK 已写入磁盘（缺失或长度不符时重新释放）。
+async fn ensure_douyin_signer() -> Result<PathBuf> {
+    let dir = douyin_signer_tools_dir();
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .context("创建抖音签名器目录失败")?;
+    let files: &[(&str, &str)] = &[
+        ("douyin-signer.cjs", DOUYIN_SIGNER_JS),
+        ("bdms-env.js", DOUYIN_SDK_BDMS_ENV_JS),
+        ("bdms.js", DOUYIN_SDK_BDMS_JS),
+        ("secsdk-runtime.js", DOUYIN_SDK_SECSDK_RUNTIME_JS),
+        ("websign-env.js", DOUYIN_SDK_WEBSIGN_ENV_JS),
+    ];
+    let mut signer_path = None;
+    for (name, content) in files {
+        let path = if *name == "douyin-signer.cjs" {
+            let p = dir.join(name);
+            signer_path = Some(p.clone());
+            p
+        } else {
+            dir.join("douyin-sdk").join(name)
+        };
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .context("创建抖音签名器子目录失败")?;
+        }
+        let needs_write = match tokio::fs::metadata(&path).await {
+            Ok(meta) => meta.len() != content.len() as u64,
+            Err(_) => true,
+        };
+        if needs_write {
+            tokio::fs::write(&path, content)
+                .await
+                .with_context(|| format!("写入抖音签名器文件 {name} 失败"))?;
+        }
+    }
+    Ok(signer_path.expect("签名器路径必填"))
+}
+
+/// 查找 Node.js 运行时：优先 BILI_SYNC_DOUYIN_NODE / BILI_SYNC_TIKTOK_NODE，
+/// 其次常见安装路径与 CONFIG_DIR/tools，最后系统 PATH。
+fn find_douyin_node() -> Option<PathBuf> {
+    for var in ["BILI_SYNC_DOUYIN_NODE", "BILI_SYNC_TIKTOK_NODE"] {
+        if let Ok(configured) = std::env::var(var) {
+            let path = PathBuf::from(configured);
+            let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+            if path.is_file() {
+                return Some(path);
+            }
+            let candidate = if path.is_dir() { path.join(node_name) } else { path };
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let candidates = [
+            PathBuf::from(r"C:\Program Files\nodejs\node.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\nodejs\node.exe"),
+            CONFIG_DIR.join("bin").join("node.exe"),
+            CONFIG_DIR.join("tools").join("node.exe"),
+        ];
+        if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+            return Some(path);
+        }
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(node_name))
+            .find(|path| path.is_file())
+    })
+}
+
+/// 用官方 webmssdk + secsdk 现场签名抖音受保护接口 URL，返回签名后的完整 URL。
+///
+/// 需要 Node.js 与已导入的 douyin-cookies.txt、douyin-secsdk.json
+/// （后者由“外部平台登录助手”在电脑浏览器同步 TikTok/抖音登录状态时导出，
+/// 包含 secsdk 会话密钥）。签名失败时给出明确指引而不是静默 403。
+async fn sign_douyin_url(url: &str) -> Result<String> {
+    let signer = ensure_douyin_signer().await?;
+    let node = find_douyin_node().ok_or_else(|| {
+        anyhow!(
+            "未找到 Node.js 运行时：抖音收藏夹/我的喜欢接口需要 Node.js 执行官方 webmssdk+secsdk 现场签名。请安装 Node.js，或通过环境变量 BILI_SYNC_DOUYIN_NODE 指定 node 路径"
+        )
+    })?;
+    let mut command = tokio::process::Command::new(&node);
+    command
+        .arg(&signer)
+        .arg(url)
+        .env("BILI_SYNC_CONFIG_DIR", CONFIG_DIR.as_os_str())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .map_err(|_| anyhow!("抖音签名器执行超时（60s）"))?
+        .map_err(|error| anyhow!("启动抖音签名器失败（Node 运行时不完整？）：{error}"))?;
+    if !output.status.success() {
+        bail!(
+            "抖音签名器执行失败（退出码 {}）：{}",
+            output.status.code().unwrap_or(-1),
+            douyin_signer_output_text(&output.stderr, &output.stdout)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let marker = "__SIGN_RESULT__";
+    let signed = stdout
+        .rfind(marker)
+        .and_then(|index| serde_json::from_str::<serde_json::Value>(stdout[index + marker.len()..].trim()).ok())
+        .filter(|value| value.get("ok").and_then(serde_json::Value::as_bool) == Some(true))
+        .and_then(|value| value.get("signed_url").and_then(serde_json::Value::as_str).map(str::to_string));
+    let Some(signed) = signed else {
+        bail!(
+            "抖音签名器未返回有效签名 URL：{}",
+            douyin_signer_output_text(&output.stderr, &output.stdout)
+        );
+    };
+    if !signed.starts_with("https://") {
+        bail!("抖音签名器返回的签名 URL 无效");
+    }
+    Ok(signed)
+}
+
+/// 把签名器子进程输出截断为可读文本（UTF-8）。
+fn douyin_signer_output_text(stderr: &[u8], stdout: &[u8]) -> String {
+    let stderr_text = String::from_utf8_lossy(stderr).to_string();
+    let text = if stderr_text.trim().is_empty() {
+        String::from_utf8_lossy(stdout).to_string()
+    } else {
+        stderr_text
+    };
+    let text = text.trim();
+    if text.chars().count() > 300 {
+        let tail: String = text.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
+        format!("…{tail}")
+    } else {
+        text.to_string()
+    }
+}
+
 async fn signed_get_impl(
     base_url: &str,
     mut pairs: Vec<(&str, String)>,
@@ -1969,9 +2151,18 @@ async fn signed_get_impl(
         pairs.push(("msToken", ms_token));
     }
     let params = serde_urlencoded::to_string(&pairs)?;
-    let signature = douyin_sign::generate(&params);
-    let mut url = reqwest::Url::parse_with_params(base_url, &pairs)?;
-    url.query_pairs_mut().append_pair("a_bogus", &signature);
+    // 收藏夹/我的喜欢等受保护接口走官方 SDK 现场签名；其余接口继续用
+    // 旧的 f2 移植快速路径（仍被服务端接受）。
+    let url = if endpoint_needs_sdk_signature(base_url) {
+        let unsigned = reqwest::Url::parse_with_params(base_url, &pairs)?;
+        let signed = sign_douyin_url(unsigned.as_str()).await?;
+        reqwest::Url::parse(&signed)?
+    } else {
+        let signature = douyin_sign::generate(&params);
+        let mut url = reqwest::Url::parse_with_params(base_url, &pairs)?;
+        url.query_pairs_mut().append_pair("a_bogus", &signature);
+        url
+    };
     let cookies = cookie_values();
     let uifid = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP"));
     let mut attempt = 0usize;
@@ -1989,7 +2180,14 @@ async fn signed_get_impl(
         let bytes = response.bytes().await?;
         if status.is_success() {
             if bytes.is_empty() {
-                bail!("抖音 Web API 返回空响应；请重新导入电脑浏览器刚导出的抖音 Cookie");
+                if endpoint_needs_sdk_signature(base_url) {
+                    // 签名已通过但返回空 body：通常是当前出口 IP 被抖音风控
+                    // （响应头 bd-ticket-guard-result=1101 + bdturing 滑块验证）。
+                    // 更换外源代理节点或刷新 cookies 后通常可恢复。
+                    bail!("{} 返回空响应：签名已通过但被抖音风控拦截（可能触发滑块验证）。请更换外源代理节点或稍后重试", endpoint_display_name(base_url));
+                } else {
+                    bail!("抖音 Web API 返回空响应；请重新导入电脑浏览器刚导出的抖音 Cookie");
+                }
             }
             return serde_json::from_slice(&bytes).context("解析抖音 Web API 响应失败");
         }
@@ -3467,6 +3665,32 @@ fn integer(value: &serde_json::Value, keys: &[&str]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn debug_probe_collections_abogus_url() {
+        let mut pairs = common_query_pairs();
+        pairs.extend([("cursor", "0".to_string()), ("count", "12".to_string())]);
+        ensure_search_ms_token(false).await.unwrap();
+        let cookies = cookie_values();
+        pairs.push(("webid", stable_webid().await.unwrap()));
+        if let Some(uifid) = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP")) {
+            pairs.push(("uifid", uifid.clone()));
+        }
+        let verify_fp = stable_verify_fp().await.unwrap();
+        pairs.push(("verifyFp", verify_fp.clone()));
+        pairs.push(("fp", verify_fp));
+        if let Some(ms_token) = cookies.get("msToken").cloned() {
+            pairs.push(("msToken", ms_token));
+        }
+        let params = serde_urlencoded::to_string(&pairs).unwrap();
+        let signature = douyin_sign::generate(&params);
+        let mut url = reqwest::Url::parse_with_params(DOUYIN_COLLECTIONS_API, &pairs).unwrap();
+        url.query_pairs_mut().append_pair("a_bogus", &signature);
+        println!("PROBE_SIGN={}", signature);
+        println!("PROBE_PARAMS={}", params);
+        println!("PROBE_URL={}", url.as_str());
+    }
 
     #[test]
     fn accepts_netscape_douyin_cookie() {
