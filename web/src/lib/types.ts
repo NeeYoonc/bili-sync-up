@@ -1347,6 +1347,12 @@ export interface DashBoardResponse {
 	total_douyin_series: number;
 	enabled_tiktok_sources: number;
 	total_tiktok_sources: number;
+	enabled_tiktok_authors: number;
+	total_tiktok_authors: number;
+	enabled_tiktok_liked: number;
+	total_tiktok_liked: number;
+	enabled_tiktok_collections: number;
+	total_tiktok_collections: number;
 	enabled_youtube_subscriptions: number;
 	total_youtube_subscriptions: number;
 	enabled_youtube_channels: number;
@@ -1358,6 +1364,9 @@ export interface DashBoardResponse {
 	enabled_youtube_watch_later: number;
 	total_youtube_watch_later: number;
 	videos_by_day: DayCountPair[];
+	youtube_videos_by_day: DayCountPair[];
+	douyin_videos_by_day: DayCountPair[];
+	tiktok_videos_by_day: DayCountPair[];
 	monitoring_status: MonitoringStatus;
 }
 
@@ -1406,6 +1415,7 @@ export interface LatestIngestItem {
 	download_speed_bps: number | null;
 	status: 'success' | 'failed' | 'deleted' | 'pending';
 	series_name: string | null; // 番剧系列名称（从share_copy的《》中提取）
+	platform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok'; // 视频平台
 }
 
 export interface LatestIngestResponse {

@@ -17338,6 +17338,105 @@ pub async fn refresh_scanning_endpoint(
 pub struct LatestIngestQuery {
     /// 返回条数，默认 10，最大 100
     pub limit: Option<usize>,
+    /// 平台过滤：all / bilibili / youtube / douyin / tiktok，默认 all
+    pub platform: Option<String>,
+}
+
+/// 解析入库记录的平台过滤参数（默认 all）。
+fn resolve_ingest_platform(platform: &Option<String>) -> &'static str {
+    match platform.as_deref().unwrap_or("all") {
+        "bilibili" => "bilibili",
+        "youtube" => "youtube",
+        "douyin" => "douyin",
+        "tiktok" => "tiktok",
+        _ => "all",
+    }
+}
+
+/// 外部平台入库记录行（you_tube_video JOIN you_tube_source）。
+#[derive(sea_orm::FromQueryResult, Debug)]
+struct ExternalIngestRow {
+    video_id: i32,
+    video_name: String,
+    upper_name: String,
+    path: String,
+    ingested_at: String,
+    download_status: String,
+    platform: String,
+}
+
+/// 查询外部平台（YouTube/抖音/TikTok）入库记录，按 created_at 倒序。
+///
+/// `platform` 为 all/youtube/douyin/tiktok 之一；`only_completed` 为 true 时
+/// 只返回已完成/已跳过的视频（用于「最近处理」列表）。
+async fn fetch_external_ingests(
+    db: &DatabaseConnection,
+    platform: &str,
+    limit: usize,
+    only_completed: bool,
+) -> Result<Vec<ExternalIngestRow>, ApiError> {
+    let where_clause = match platform {
+        "youtube" => "WHERE s.source_type NOT LIKE 'douyin%' AND s.source_type NOT LIKE 'tiktok%'",
+        "douyin" => "WHERE s.source_type LIKE 'douyin%'",
+        "tiktok" => "WHERE s.source_type LIKE 'tiktok%'",
+        _ => "",
+    };
+    let completed_clause = if only_completed {
+        if where_clause.is_empty() {
+            "WHERE yv.download_status IN ('completed','skipped')"
+        } else {
+            "AND yv.download_status IN ('completed','skipped')"
+        }
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT
+            yv.id AS video_id,
+            yv.title AS video_name,
+            yv.uploader AS upper_name,
+            COALESCE(yv.output_path, yv.url) AS path,
+            yv.created_at AS ingested_at,
+            yv.download_status AS download_status,
+            CASE
+                WHEN s.source_type LIKE 'tiktok%' THEN 'tiktok'
+                WHEN s.source_type LIKE 'douyin%' THEN 'douyin'
+                ELSE 'youtube'
+            END AS platform
+        FROM you_tube_video yv
+        JOIN you_tube_source s ON yv.source_id = s.id
+        {where_clause}
+        {completed_clause}
+        ORDER BY yv.created_at DESC, yv.id DESC
+        LIMIT {limit}"
+    );
+    ExternalIngestRow::find_by_statement(sea_orm::Statement::from_string(
+        db.get_database_backend(),
+        sql,
+    ))
+    .all(db)
+    .await
+    .map_err(|e| ApiError::from(InnerApiError::from(e)))
+}
+
+/// 把外部平台入库记录行转换为响应结构。
+fn external_ingest_row_to_item(row: ExternalIngestRow) -> crate::api::response::LatestIngestItemResponse {
+    let status = match row.download_status.as_str() {
+        "completed" | "skipped" => "success",
+        "failed" => "failed",
+        _ => "pending",
+    };
+    crate::api::response::LatestIngestItemResponse {
+        video_id: row.video_id,
+        video_name: row.video_name,
+        upper_name: row.upper_name,
+        path: row.path,
+        ingested_at: row.ingested_at,
+        download_speed_bps: None,
+        status: status.to_string(),
+        series_name: None,
+        platform: row.platform,
+    }
 }
 
 fn extract_series_name_from_share_copy(share_copy: &Option<String>) -> Option<String> {
@@ -17383,6 +17482,7 @@ fn video_to_ingest_item(
         download_speed_bps,
         status: status_label_from_video(&v),
         series_name: extract_series_name_from_share_copy(&v.share_copy),
+        platform: "bilibili".to_string(),
     }
 }
 
@@ -17402,15 +17502,17 @@ fn ingest_event_to_response(e: crate::ingest_log::IngestEvent) -> crate::api::re
         download_speed_bps: e.download_speed_bps,
         status: status_str.to_string(),
         series_name: e.series_name,
+        platform: "bilibili".to_string(),
     }
 }
 
-/// 获取首页「最新入库」列表（只按数据库新增时间排序）
+/// 获取首页「最新入库」列表（按数据库新增时间排序，支持平台过滤）
 #[utoipa::path(
     get,
     path = "/api/ingest/latest",
     params(
-        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100")
+        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100"),
+        ("platform" = Option<String>, Query, description = "平台过滤：all / bilibili / youtube / douyin / tiktok，默认 all")
     ),
     responses(
         (status = 200, description = "获取成功", body = crate::api::response::LatestIngestResponse),
@@ -17422,34 +17524,51 @@ pub async fn get_latest_ingests(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<crate::api::response::LatestIngestResponse>, ApiError> {
     let limit = query.limit.unwrap_or(10).clamp(1, 100);
+    let platform = resolve_ingest_platform(&query.platform);
+    let mut items: Vec<crate::api::response::LatestIngestItemResponse> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
 
-    let videos = video::Entity::find()
-        .order_by_desc(video::Column::CreatedAt)
-        .order_by_desc(video::Column::Id)
-        .limit(limit as u64)
-        .all(db.as_ref())
-        .await
-        .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
+    if platform == "all" || platform == "bilibili" {
+        let videos = video::Entity::find()
+            .order_by_desc(video::Column::CreatedAt)
+            .order_by_desc(video::Column::Id)
+            .limit(limit as u64)
+            .all(db.as_ref())
+            .await
+            .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
+        for v in videos {
+            if seen.insert(("bilibili".to_string(), v.id)) {
+                let created_at = v.created_at.clone();
+                items.push(video_to_ingest_item(v, created_at, None));
+            }
+        }
+    }
 
-    let resp_items = videos
-        .into_iter()
-        .map(|v| {
-            let created_at = v.created_at.clone();
-            video_to_ingest_item(v, created_at, None)
-        })
-        .collect();
+    if platform == "all" || matches!(platform, "youtube" | "douyin" | "tiktok") {
+        let rows = fetch_external_ingests(db.as_ref(), platform, limit, false).await?;
+        for row in rows {
+            if seen.insert((row.platform.clone(), row.video_id)) {
+                items.push(external_ingest_row_to_item(row));
+            }
+        }
+    }
+
+    // 合并后按时间倒序，截断到 limit
+    items.sort_by(|a, b| b.ingested_at.cmp(&a.ingested_at));
+    items.truncate(limit);
 
     Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
-        items: resp_items,
+        items,
     }))
 }
 
-/// 获取首页「最近处理」列表（下载/修复/弹幕等任务完成事件）
+/// 获取首页「最近处理」列表（下载/修复/弹幕等任务完成事件，支持平台过滤）
 #[utoipa::path(
     get,
     path = "/api/ingest/recent",
     params(
-        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100")
+        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100"),
+        ("platform" = Option<String>, Query, description = "平台过滤：all / bilibili / youtube / douyin / tiktok，默认 all")
     ),
     responses(
         (status = 200, description = "获取成功", body = crate::api::response::LatestIngestResponse),
@@ -17461,54 +17580,56 @@ pub async fn get_recent_ingests(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<crate::api::response::LatestIngestResponse>, ApiError> {
     let limit = query.limit.unwrap_or(10).clamp(1, 100);
+    let platform = resolve_ingest_platform(&query.platform);
+    let mut items: Vec<crate::api::response::LatestIngestItemResponse> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
 
-    // 1) 先取内存事件（带速度）
-    let mut items = crate::ingest_log::INGEST_LOG.list_latest(limit).await;
-
-    // 2) 不足时再用 DB 补齐。DB 没有持久化“处理完成时间”，这里用新增时间兜底。
-    if items.len() < limit {
-        let need = limit - items.len();
-        let mut existing_ids = std::collections::HashSet::new();
-        for it in &items {
-            existing_ids.insert(it.video_id);
-        }
-
-        // 只查询已完成的视频（download_status >= STATUS_COMPLETED，即最高位为1）
-        let fallback = video::Entity::find()
-            .filter(video::Column::DownloadStatus.gte(crate::utils::status::STATUS_COMPLETED))
-            .order_by_desc(video::Column::CreatedAt)
-            .limit(need as u64)
-            .all(db.as_ref())
-            .await
-            .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
-
-        for v in fallback {
-            if existing_ids.contains(&v.id) {
-                continue;
+    // 1) 内存事件（B 站下载链路产生，带真实速度）
+    if platform == "all" || platform == "bilibili" {
+        for e in crate::ingest_log::INGEST_LOG.list_latest(limit).await {
+            if seen.insert(("bilibili".to_string(), e.video_id)) {
+                items.push(ingest_event_to_response(e));
             }
-            let status = status_label_from_video(&v);
-            items.push(crate::ingest_log::IngestEvent {
-                video_id: v.id,
-                video_name: v.name.clone(),
-                upper_name: v.upper_name.clone(),
-                path: v.path.clone(),
-                ingested_at: v.created_at.clone(),
-                download_speed_bps: None,
-                status: match status.as_str() {
-                    "deleted" => crate::ingest_log::IngestStatus::Deleted,
-                    "success" => crate::ingest_log::IngestStatus::Success,
-                    _ => crate::ingest_log::IngestStatus::Failed,
-                },
-                series_name: extract_series_name_from_share_copy(&v.share_copy),
-            });
         }
     }
 
-    // 3) 转响应结构
-    let resp_items = items.into_iter().map(ingest_event_to_response).collect();
+    // 2) 内存不足时用 DB 补齐
+    if items.len() < limit {
+        if platform == "all" || platform == "bilibili" {
+            let need = limit - items.len();
+            let fallback = video::Entity::find()
+                .filter(video::Column::DownloadStatus.gte(crate::utils::status::STATUS_COMPLETED))
+                .order_by_desc(video::Column::CreatedAt)
+                .limit(need as u64)
+                .all(db.as_ref())
+                .await
+                .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
+            for v in fallback {
+                if seen.insert(("bilibili".to_string(), v.id)) {
+                    let created_at = v.created_at.clone();
+                    items.push(video_to_ingest_item(v, created_at, None));
+                }
+            }
+        }
+        if platform == "all" || matches!(platform, "youtube" | "douyin" | "tiktok") {
+            let need = limit - items.len();
+            if need > 0 {
+                let rows = fetch_external_ingests(db.as_ref(), platform, need, true).await?;
+                for row in rows {
+                    if seen.insert((row.platform.clone(), row.video_id)) {
+                        items.push(external_ingest_row_to_item(row));
+                    }
+                }
+            }
+        }
+    }
+
+    // 合并后按时间倒序，截断到 limit
+    items.sort_by(|a, b| b.ingested_at.cmp(&a.ingested_at));
+    items.truncate(limit);
 
     Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
-        items: resp_items,
+        items,
     }))
 }
 
@@ -19827,6 +19948,15 @@ async fn fetch_and_cache_season_title(season_id: &str) -> Option<String> {
     None
 }
 
+/// 外部平台（YouTube/抖音/TikTok）近七日每日新增视频统计行。
+#[derive(sea_orm::FromQueryResult, Debug)]
+struct ExternalDayCountRow {
+    day: String,
+    youtube_cnt: i64,
+    douyin_cnt: i64,
+    tiktok_cnt: i64,
+}
+
 /// 获取仪表盘数据
 #[utoipa::path(
     get,
@@ -19843,7 +19973,7 @@ pub async fn get_dashboard_data(
 ) -> Result<ApiResponse<crate::api::response::DashBoardResponse>, ApiError> {
     let (enabled_favorites, enabled_collections, enabled_submissions, enabled_watch_later, enabled_bangumi,
          total_favorites, total_collections, total_submissions, total_watch_later, total_bangumi,
-         youtube_sources, videos_by_day) = tokio::try_join!(
+         youtube_sources, videos_by_day, external_day_rows) = tokio::try_join!(
         favorite::Entity::find()
             .filter(favorite::Column::Enabled.eq(true))
             .count(db.as_ref()),
@@ -19900,7 +20030,55 @@ ORDER BY
     "
         ))
         .all(db.as_ref()),
+        // 外部平台（YouTube/抖音/TikTok）近七日新增视频，按天分组统计
+        ExternalDayCountRow::find_by_statement(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "
+SELECT
+    dates.day AS day,
+    COALESCE(SUM(CASE WHEN s.source_type NOT LIKE 'tiktok%' AND s.source_type NOT LIKE 'douyin%' THEN 1 ELSE 0 END), 0) AS youtube_cnt,
+    COALESCE(SUM(CASE WHEN s.source_type LIKE 'douyin%' THEN 1 ELSE 0 END), 0) AS douyin_cnt,
+    COALESCE(SUM(CASE WHEN s.source_type LIKE 'tiktok%' THEN 1 ELSE 0 END), 0) AS tiktok_cnt
+FROM
+    (
+        SELECT
+            DATE('now', '-' || n || ' days', 'localtime') AS day
+        FROM
+            (
+                SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6
+            )
+    ) AS dates
+LEFT JOIN
+    you_tube_video yv ON DATE(yv.created_at) = dates.day
+LEFT JOIN
+    you_tube_source s ON yv.source_id = s.id
+GROUP BY
+    dates.day
+ORDER BY
+    dates.day;
+    "
+        ))
+        .all(db.as_ref()),
     )?;
+
+    // 拆分外部平台每日统计到各平台数组（日期顺序与 B 站查询一致）
+    let mut youtube_videos_by_day: Vec<crate::api::response::DayCountPair> = Vec::new();
+    let mut douyin_videos_by_day: Vec<crate::api::response::DayCountPair> = Vec::new();
+    let mut tiktok_videos_by_day: Vec<crate::api::response::DayCountPair> = Vec::new();
+    for row in external_day_rows {
+        youtube_videos_by_day.push(crate::api::response::DayCountPair {
+            day: row.day.clone(),
+            cnt: row.youtube_cnt,
+        });
+        douyin_videos_by_day.push(crate::api::response::DayCountPair {
+            day: row.day.clone(),
+            cnt: row.douyin_cnt,
+        });
+        tiktok_videos_by_day.push(crate::api::response::DayCountPair {
+            day: row.day,
+            cnt: row.tiktok_cnt,
+        });
+    }
 
     let youtube_type_count = |source_type: &str| {
         let matching = youtube_sources
@@ -19921,6 +20099,9 @@ ORDER BY
     let (enabled_douyin_watch_later, total_douyin_watch_later) = youtube_type_count("douyin_watch_later");
     let (enabled_douyin_theaters, total_douyin_theaters) = youtube_type_count("douyin_theater");
     let (enabled_douyin_series, total_douyin_series) = youtube_type_count("douyin_series");
+    let (enabled_tiktok_authors, total_tiktok_authors) = youtube_type_count("tiktok");
+    let (enabled_tiktok_liked, total_tiktok_liked) = youtube_type_count("tiktok_favorite");
+    let (enabled_tiktok_collections, total_tiktok_collections) = youtube_type_count("tiktok_collection");
     let douyin_only = youtube_sources
         .iter()
         .filter(|source| source.source_type.starts_with("douyin"));
@@ -19933,7 +20114,7 @@ ORDER BY
     let enabled_tiktok_sources = tiktok_only.filter(|source| source.enabled).count() as u64;
     let youtube_only = youtube_sources
         .iter()
-        .filter(|source| !source.source_type.starts_with("douyin") && source.source_type != "tiktok");
+        .filter(|source| !source.source_type.starts_with("douyin") && !source.source_type.starts_with("tiktok"));
     let total_youtube_sources = youtube_only.clone().count() as u64;
     let enabled_youtube_sources = youtube_only.filter(|source| source.enabled).count() as u64;
     let enabled_external_sources = enabled_youtube_sources + enabled_douyin_sources + enabled_tiktok_sources;
@@ -19999,6 +20180,12 @@ ORDER BY
         total_douyin_series,
         enabled_tiktok_sources,
         total_tiktok_sources,
+        enabled_tiktok_authors,
+        total_tiktok_authors,
+        enabled_tiktok_liked,
+        total_tiktok_liked,
+        enabled_tiktok_collections,
+        total_tiktok_collections,
         enabled_youtube_subscriptions,
         total_youtube_subscriptions,
         enabled_youtube_channels,
@@ -20010,6 +20197,9 @@ ORDER BY
         enabled_youtube_watch_later,
         total_youtube_watch_later,
         videos_by_day,
+        youtube_videos_by_day,
+        douyin_videos_by_day,
+        tiktok_videos_by_day,
         monitoring_status,
     }))
 }

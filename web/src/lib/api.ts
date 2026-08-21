@@ -1240,15 +1240,21 @@ class ApiClient {
 	/**
 	 * 获取首页最新入库列表
 	 */
-	async getLatestIngests(limit: number = 10): Promise<ApiResponse<LatestIngestResponse>> {
-		return this.get<LatestIngestResponse>('/ingest/latest', { limit });
+	async getLatestIngests(
+		limit: number = 10,
+		platform: string = 'all'
+	): Promise<ApiResponse<LatestIngestResponse>> {
+		return this.get<LatestIngestResponse>('/ingest/latest', { limit, platform });
 	}
 
 	/**
 	 * 获取首页最近处理列表
 	 */
-	async getRecentIngests(limit: number = 10): Promise<ApiResponse<LatestIngestResponse>> {
-		return this.get<LatestIngestResponse>('/ingest/recent', { limit });
+	async getRecentIngests(
+		limit: number = 10,
+		platform: string = 'all'
+	): Promise<ApiResponse<LatestIngestResponse>> {
+		return this.get<LatestIngestResponse>('/ingest/recent', { limit, platform });
 	}
 
 	/**
@@ -1826,12 +1832,14 @@ export const api = {
 	/**
 	 * 获取首页最新入库列表
 	 */
-	getLatestIngests: (limit: number = 10) => apiClient.getLatestIngests(limit),
+	getLatestIngests: (limit: number = 10, platform: string = 'all') =>
+		apiClient.getLatestIngests(limit, platform),
 
 	/**
 	 * 获取首页最近处理列表
 	 */
-	getRecentIngests: (limit: number = 10) => apiClient.getRecentIngests(limit),
+	getRecentIngests: (limit: number = 10, platform: string = 'all') =>
+		apiClient.getRecentIngests(limit, platform),
 
 	/**
 	 * 检查 beta 镜像是否有更新（用于角标提示）

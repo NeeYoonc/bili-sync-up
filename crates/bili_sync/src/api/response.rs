@@ -1035,6 +1035,12 @@ pub struct DashBoardResponse {
     pub total_douyin_series: u64,
     pub enabled_tiktok_sources: u64,
     pub total_tiktok_sources: u64,
+    pub enabled_tiktok_authors: u64,
+    pub total_tiktok_authors: u64,
+    pub enabled_tiktok_liked: u64,
+    pub total_tiktok_liked: u64,
+    pub enabled_tiktok_collections: u64,
+    pub total_tiktok_collections: u64,
     pub enabled_youtube_subscriptions: u64,
     pub total_youtube_subscriptions: u64,
     pub enabled_youtube_channels: u64,
@@ -1045,7 +1051,14 @@ pub struct DashBoardResponse {
     pub total_youtube_liked: u64,
     pub enabled_youtube_watch_later: u64,
     pub total_youtube_watch_later: u64,
+    /// B 站近七日新增视频
     pub videos_by_day: Vec<DayCountPair>,
+    /// YouTube 近七日新增视频
+    pub youtube_videos_by_day: Vec<DayCountPair>,
+    /// 抖音近七日新增视频
+    pub douyin_videos_by_day: Vec<DayCountPair>,
+    /// TikTok 近七日新增视频
+    pub tiktok_videos_by_day: Vec<DayCountPair>,
     /// 当前监听状态
     pub monitoring_status: MonitoringStatus,
 }
@@ -1220,6 +1233,8 @@ pub struct LatestIngestItemResponse {
     pub status: String,
     /// 番剧系列名称（从share_copy的《》中提取）
     pub series_name: Option<String>,
+    /// 视频平台：bilibili / youtube / douyin / tiktok
+    pub platform: String,
 }
 
 // 最新入库列表响应

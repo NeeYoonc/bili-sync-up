@@ -69,6 +69,8 @@
 	let showIngestSheet = false;
 	type IngestView = 'latest' | 'recent';
 	let ingestView: IngestView = 'latest';
+	type IngestPlatform = 'all' | 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
+	let ingestPlatform: IngestPlatform = 'all';
 	type MonitoringPlatform = 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
 	let monitoringPlatform: MonitoringPlatform = 'bilibili';
 	let unsubscribeSysInfo: (() => void) | null = null;
@@ -211,10 +213,32 @@
 		return view === 'latest' ? '最新入库' : '最近处理';
 	}
 
-	async function loadIngests(view: IngestView = ingestView) {
+	const INGEST_PLATFORM_LABEL: Record<IngestPlatform, string> = {
+		all: '全部',
+		bilibili: 'B站',
+		youtube: 'YouTube',
+		douyin: '抖音',
+		tiktok: 'TikTok'
+	};
+
+	const INGEST_PLATFORM_TABS: Array<{ value: IngestPlatform; label: string }> = [
+		{ value: 'all', label: '全部' },
+		{ value: 'bilibili', label: 'B站' },
+		{ value: 'youtube', label: 'YouTube' },
+		{ value: 'douyin', label: '抖音' },
+		{ value: 'tiktok', label: 'TikTok' }
+	];
+
+	async function loadIngests(
+		view: IngestView = ingestView,
+		platform: IngestPlatform = ingestPlatform
+	) {
 		ingestView = view;
+		ingestPlatform = platform;
 		const request =
-			view === 'latest' ? () => api.getLatestIngests(10) : () => api.getRecentIngests(10);
+			view === 'latest'
+				? () => api.getLatestIngests(10, platform)
+				: () => api.getRecentIngests(10, platform);
 		const response = await runRequest(request, {
 			setLoading: (value) => (loadingLatestIngests = value),
 			context: `加载${getIngestViewTitle(view)}失败`
@@ -359,11 +383,57 @@
 
 	// 图表配置
 	const videoChartConfig = {
-		videos: {
-			label: '视频数量',
-			color: 'var(--color-slate-700)'
+		bilibili: {
+			label: 'B站',
+			color: 'var(--color-sky-600)'
+		},
+		youtube: {
+			label: 'YouTube',
+			color: 'var(--color-red-600)'
+		},
+		douyin: {
+			label: '抖音',
+			color: 'var(--color-purple-600)'
+		},
+		tiktok: {
+			label: 'TikTok',
+			color: 'var(--color-emerald-600)'
 		}
 	} satisfies Chart.ChartConfig;
+
+	// 合并各平台近七日新增视频为多序列图表数据（按天对齐，缺失补 0）
+	type DayMultiCount = {
+		day: string;
+		bilibili: number;
+		youtube: number;
+		douyin: number;
+		tiktok: number;
+	};
+	let dayMultiCounts: DayMultiCount[] = [];
+	$: if (dashboardData) {
+		const sources = [
+			dashboardData.videos_by_day,
+			dashboardData.youtube_videos_by_day ?? [],
+			dashboardData.douyin_videos_by_day ?? [],
+			dashboardData.tiktok_videos_by_day ?? []
+		];
+		const dayCount = Math.max(...sources.map((list) => list.length), 0);
+		dayMultiCounts = [];
+		for (let i = 0; i < dayCount; i++) {
+			dayMultiCounts.push({
+				day:
+					dashboardData.videos_by_day[i]?.day ??
+					dashboardData.youtube_videos_by_day[i]?.day ??
+					dashboardData.douyin_videos_by_day[i]?.day ??
+					dashboardData.tiktok_videos_by_day[i]?.day ??
+					'',
+				bilibili: dashboardData.videos_by_day[i]?.cnt ?? 0,
+				youtube: dashboardData.youtube_videos_by_day?.[i]?.cnt ?? 0,
+				douyin: dashboardData.douyin_videos_by_day?.[i]?.cnt ?? 0,
+				tiktok: dashboardData.tiktok_videos_by_day?.[i]?.cnt ?? 0
+			});
+		}
+	}
 
 	const memoryChartConfig = {
 		used: {
@@ -668,7 +738,25 @@
 													<span class="text-sm">作者投稿</span>
 												</div>
 												<Badge variant="outline">
-													{dashboardData.enabled_tiktok_sources} / {dashboardData.total_tiktok_sources}
+													{dashboardData.enabled_tiktok_authors} / {dashboardData.total_tiktok_authors}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<HeartIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">我的喜欢</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_tiktok_liked} / {dashboardData.total_tiktok_liked}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<FolderIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">收藏夹</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_tiktok_collections} / {dashboardData.total_tiktok_collections}
 												</Badge>
 											</div>
 											<div class="flex items-center justify-between">
@@ -699,32 +787,64 @@
 						<VideoIcon class="text-muted-foreground h-4 w-4" />
 					</CardHeader>
 					<CardContent>
-						{#if dashboardData && dashboardData.videos_by_day.length > 0}
+						{#if dayMultiCounts.length > 0}
 							<div class="mb-4 space-y-2">
 								<div class="flex items-center justify-between text-sm">
 									<span>近七日新增视频</span>
-									<span class="font-medium"
-										>{dashboardData.videos_by_day.reduce((sum, v) => sum + v.cnt, 0)} 个</span
-									>
+									<span class="font-medium">
+										{dayMultiCounts.reduce(
+											(sum, v) => sum + v.bilibili + v.youtube + v.douyin + v.tiktok,
+											0
+										)}{' '}
+										个
+									</span>
+								</div>
+								<div class="flex flex-wrap gap-3 text-xs">
+									{#each ['bilibili', 'youtube', 'douyin', 'tiktok'] as key (key)}
+										<span class="flex items-center gap-1">
+											<span
+												class="inline-block h-2 w-2 rounded-sm"
+												style="background:{videoChartConfig[key as keyof typeof videoChartConfig].color}"
+											></span>
+											<span class="text-muted-foreground"
+												>{videoChartConfig[key as keyof typeof videoChartConfig].label}</span
+											>
+										</span>
+									{/each}
 								</div>
 							</div>
 							<Chart.Container config={videoChartConfig} class="h-[200px] w-full">
 								<BarChart
-									data={dashboardData.videos_by_day}
+									data={dayMultiCounts}
 									x="day"
 									axis="x"
 									series={[
 										{
-											key: 'cnt',
-											label: '新增视频',
-											color: videoChartConfig.videos.color
+											key: 'bilibili',
+											label: 'B站',
+											color: videoChartConfig.bilibili.color
+										},
+										{
+											key: 'youtube',
+											label: 'YouTube',
+											color: videoChartConfig.youtube.color
+										},
+										{
+											key: 'douyin',
+											label: '抖音',
+											color: videoChartConfig.douyin.color
+										},
+										{
+											key: 'tiktok',
+											label: 'TikTok',
+											color: videoChartConfig.tiktok.color
 										}
 									]}
 									props={{
 										bars: {
 											stroke: 'none',
 											rounded: 'all',
-											radius: 8,
+											radius: 6,
 											initialHeight: 0
 										},
 										highlight: { area: { fill: 'none' } },
@@ -1054,16 +1174,34 @@
 					</Button>
 				</Dialog.Title>
 			</Dialog.Header>
+			<div class="mt-3 flex flex-wrap gap-1.5">
+				{#each INGEST_PLATFORM_TABS as tab (tab.value)}
+					<Button
+						size="sm"
+						variant={ingestPlatform === tab.value ? 'default' : 'outline'}
+						class="h-7 px-2.5 text-xs"
+						disabled={loadingLatestIngests}
+						onclick={() => loadIngests(ingestView, tab.value)}
+					>
+						{tab.label}
+					</Button>
+				{/each}
+			</div>
 			<div class="mt-2 max-h-[60vh] space-y-2 overflow-auto">
 				{#if latestIngests.length === 0}
 					<EmptyState title={`暂无${getIngestViewTitle()}记录`} class="border-0 bg-transparent py-8" />
 				{:else}
-					{#each latestIngests as item (item.video_id)}
+					{#each latestIngests as item (item.platform + '-' + item.video_id)}
 						<div class="hover:bg-muted/30 rounded-lg border p-3 transition-colors">
 							<div class="flex items-start justify-between gap-3">
 								<div class="min-w-0 flex-1">
-									<div class="truncate font-medium" title={item.video_name}>
-										{item.video_name}
+									<div class="flex items-center gap-2">
+										<div class="truncate font-medium" title={item.video_name}>
+											{item.video_name}
+										</div>
+										<Badge variant="outline" class="shrink-0 px-1.5 py-0 text-[10px]">
+											{INGEST_PLATFORM_LABEL[item.platform]}
+										</Badge>
 									</div>
 									<div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-2 text-xs">
 										{#if item.upper_name && item.upper_name.trim() !== ''}
