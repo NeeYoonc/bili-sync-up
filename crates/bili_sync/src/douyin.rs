@@ -1959,10 +1959,10 @@ fn endpoint_display_name(base_url: &str) -> &'static str {
     }
 }
 
-/// 需要 Node 现场签名（webmssdk a_bogus + secsdk x-secsdk-web-signature）的
-/// 受保护抖音接口。抖音在 2026-08 更新签名算法后，收藏夹列表/收藏夹作品/我的喜欢
-/// 三个接口会严格校验新算法，旧的 f2 移植（`douyin_sign`）生成的 a_bogus 会被
-/// 服务端以 `ArgusSecurityPlugin Signature Not Found` 直接 403 拒绝；其余接口
+/// 需要 Node 现场签名（secsdk x-secsdk-web-signature）的受保护抖音接口。
+/// 收藏夹列表/收藏夹作品/我的喜欢三个接口实测只需 secsdk 签名 + 完整登录 Cookie：
+/// 附加 a_bogus 必须字节级有效，项目无法生成有效值，无效的 a_bogus 反而会被 Turing
+/// 静默丢弃（HTTP 200 空响应），因此这三个接口不再生成 a_bogus；其余接口
 /// （搜索/作者作品/稍后再看等）仍接受旧算法，继续走纯 Rust 快速路径。
 fn endpoint_needs_sdk_signature(base_url: &str) -> bool {
     base_url.starts_with(DOUYIN_FAVORITE_API)
@@ -1970,15 +1970,13 @@ fn endpoint_needs_sdk_signature(base_url: &str) -> bool {
         || base_url.starts_with(DOUYIN_COLLECTION_VIDEOS_API)
 }
 
-// ---------- 抖音 webmssdk + secsdk 现场签名（Node 子进程） ----------
-// 与 TikTok 同理：官方 SDK（VMP webmssdk + secsdk）需要在浏览器指纹环境里实时
-// 生成签名，服务端无法用旧的纯代码移植复刻。这里把签名器与 SDK 内嵌进二进制，
-// 首次使用时释放到 CONFIG_DIR/tools/douyin/，再用 Node 子进程现场签名。
+// ---------- 抖音 secsdk 现场签名（Node 子进程） ----------
+// 我的喜欢/收藏夹等接口由抖音 Turing 安全网关校验 secsdk（x-secsdk-web-signature）。
+// 这里把签名器与 SDK 内嵌进二进制，首次使用时释放到 CONFIG_DIR/tools/douyin/，
+// 再用 Node 子进程现场签名。
 
-/// 内嵌的抖音签名器（生成 a_bogus + uifid + timestamp + x-secsdk-web-signature）。
+/// 内嵌的抖音签名器（生成 timestamp + x-secsdk-web-signature）。
 const DOUYIN_SIGNER_JS: &str = include_str!("../../../scripts/douyin-signer.cjs");
-const DOUYIN_SDK_BDMS_ENV_JS: &str = include_str!("../../../scripts/douyin-sdk/bdms-env.js");
-const DOUYIN_SDK_BDMS_JS: &str = include_str!("../../../scripts/douyin-sdk/bdms.js");
 const DOUYIN_SDK_SECSDK_RUNTIME_JS: &str = include_str!("../../../scripts/douyin-sdk/secsdk-runtime.js");
 const DOUYIN_SDK_WEBSIGN_ENV_JS: &str = include_str!("../../../scripts/douyin-sdk/websign-env.js");
 
@@ -1995,8 +1993,6 @@ async fn ensure_douyin_signer() -> Result<PathBuf> {
         .context("创建抖音签名器目录失败")?;
     let files: &[(&str, &str)] = &[
         ("douyin-signer.cjs", DOUYIN_SIGNER_JS),
-        ("bdms-env.js", DOUYIN_SDK_BDMS_ENV_JS),
-        ("bdms.js", DOUYIN_SDK_BDMS_JS),
         ("secsdk-runtime.js", DOUYIN_SDK_SECSDK_RUNTIME_JS),
         ("websign-env.js", DOUYIN_SDK_WEBSIGN_ENV_JS),
     ];
@@ -2063,7 +2059,7 @@ fn find_douyin_node() -> Option<PathBuf> {
     })
 }
 
-/// 用官方 webmssdk + secsdk 现场签名抖音受保护接口 URL，返回签名后的完整 URL。
+/// 用官方 secsdk 现场签名抖音受保护接口 URL，返回签名后的完整 URL。
 ///
 /// 需要 Node.js 与已导入的 douyin-cookies.txt、douyin-secsdk.json
 /// （后者由“外部平台登录助手”在电脑浏览器同步 TikTok/抖音登录状态时导出，
@@ -2184,7 +2180,7 @@ async fn signed_get_impl(
                     // 签名已通过但返回空 body：通常是当前出口 IP 被抖音风控
                     // （响应头 bd-ticket-guard-result=1101 + bdturing 滑块验证）。
                     // 更换外源代理节点或刷新 cookies 后通常可恢复。
-                    bail!("{} 返回空响应：签名已通过，但 2026-08 起抖音将该接口绑定到真实浏览器设备（Turing 风控，服务端重放即使签名字节级一致也返回空 body）。请用「外部平台登录助手」重新同步抖音登录状态；若仍失败，请先在已登录抖音的浏览器中打开「我的喜欢」页完成设备验证后再试", endpoint_display_name(base_url));
+                    bail!("{} 返回空响应：签名已通过但未返回数据，通常是登录 Cookie 不完整/已失效，或当前出口 IP 被抖音风控。请用「外部平台登录助手」重新同步抖音登录状态（cookies.txt + secsdk），或更换外源代理节点后重试", endpoint_display_name(base_url));
                 } else {
                     bail!("抖音 Web API 返回空响应；请重新导入电脑浏览器刚导出的抖音 Cookie");
                 }

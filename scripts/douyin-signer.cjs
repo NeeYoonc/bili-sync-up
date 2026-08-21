@@ -1,9 +1,9 @@
 // douyin-signer.cjs — 抖音收藏夹/我的喜欢等受保护接口签名器
-// 生成 a_bogus（官方 webmssdk/bdms）+ x-secsdk-web-signature（secsdk）
-// 用法: node douyin-signer.cjs <完整URL(不含签名)> [--config <config_dir>]
+// 生成 x-secsdk-web-signature（secsdk）。实测抖音 favorite/collections/collection_videos
+// 三个接口只需要 secsdk 签名 + 完整登录 Cookie；附加无效的 a_bogus 反而会被 Turing
+// 静默丢弃（HTTP 200 空响应），因此这里不再生成 a_bogus。
 "use strict";
 const fs = require('node:fs');
-const REAL_PROCESS = global.process;
 const path = require('node:path');
 // 支持用环境变量覆盖 SDK 目录（供服务端把 SDK 释放到独立目录后调用）。
 const SDK_DIR = process.env.BILI_SYNC_DOUYIN_SDK_DIR || path.join(__dirname, 'douyin-sdk');
@@ -11,7 +11,7 @@ let cfgIdx = process.argv.indexOf('--config');
 const CFG_DIR = process.env.BILI_SYNC_CONFIG_DIR || (cfgIdx > -1 ? process.argv[cfgIdx + 1] : '');
 const targetUrl = process.argv[2];
 const RESULT = '__SIGN_RESULT__';
-function fail(msg) { console.log(RESULT + JSON.stringify({ ok: false, error: msg })); if (global.process) global.process.exit(1); else REAL_PROCESS.exit(1); }
+function fail(msg) { console.log(RESULT + JSON.stringify({ ok: false, error: msg })); process.exit(1); }
 if (!targetUrl) fail('缺少目标 URL');
 
 // ---------- 加载 secsdk 环境（douyin-secsdk.json） ----------
@@ -31,34 +31,8 @@ liveEnv.ua = liveEnv.ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKi
 liveEnv.href = liveEnv.href || 'https://www.douyin.com/jingxuan';
 liveEnv.ssr_user_id = liveEnv.ssr_user_id || '';
 
-// ---------- 第一步：a_bogus（bdms webmssdk） ----------
-function generateABogus(url) {
-  global._process = global.process;
-  try { delete global.process; } catch (e) {}
-  const envUtils = require(path.join(SDK_DIR, 'bdms-env.js'));
-  require(path.join(SDK_DIR, 'bdms.js'));
-  if (envUtils && envUtils.restoreProcess) envUtils.restoreProcess();
-  if (envUtils && envUtils.window) envUtils.window.a_bogus = null;
-  const originalSet = URLSearchParams.prototype.set;
-  URLSearchParams.prototype.set = function (key, value) {
-    if (key === 'a_bogus' && envUtils && envUtils.window) { envUtils.window.a_bogus = value; }
-    return originalSet.call(this, key, value);
-  };
-  try { if (globalThis.bdms && globalThis.bdms.init) globalThis.bdms.init({ aid: 6383 }); } catch (e) {}
-  if (envUtils && envUtils.simulateMouseTrack) envUtils.simulateMouseTrack({ points: 20, duration: 500 });
-  const xhr = new (envUtils.window.XMLHttpRequest || globalThis.XMLHttpRequest)();
-  const invokeList = [
-    { "args": ["GET", url, true], "func": function () {} },
-    { "args": ["Accept", "application/json,text/plain,*/*"], "func": function () {} },
-    { "args": ["uifid", ""] }
-  ];
-  xhr.bdmsInvokeList = invokeList;
-  try { xhr.send(null); } catch (e) { /* VM 后续步骤可能报错，a_bogus 已在 URLSearchParams hook 中捕获 */ }
-  return envUtils.window ? envUtils.window.a_bogus : null;
-}
-
-// ---------- 第二步：secsdk（x-secsdk-web-signature） ----------
-function signWebUrl(urlWithABogus) {
+// ---------- secsdk（x-secsdk-web-signature） ----------
+function signWebUrl(url) {
   globalThis.__DY_SECSDK_ENV__ = liveEnv;
   const envPath = path.join(SDK_DIR, 'websign-env.js');
   delete require.cache[require.resolve(envPath)];
@@ -70,21 +44,17 @@ function signWebUrl(urlWithABogus) {
   if (env.restoreProcess) env.restoreProcess();
   const f = win.use && win.use('webSignUrl');
   if (typeof f !== 'function') throw new Error('webSignUrl 未注册');
-  const r = f(urlWithABogus);
+  const r = f(url);
   if (typeof r === 'string') return r;
   if (r && typeof r.url === 'string') return r.url;
   throw new Error('webSignUrl 返回为空（secsdk 会话密钥可能过期，请重新用登录助手导出抖音登录状态）');
 }
 
 try {
-  const aBogus = generateABogus(targetUrl);
-  if (!aBogus) fail('a_bogus 生成失败：官方 webmssdk 未捕获到签名（SDK 可能已更新，请在浏览器打开抖音后重新抓取最新 webmssdk/bdms）');
-  const sep = targetUrl.includes('?') ? '&' : '?';
-  const urlWithABogus = targetUrl + sep + 'a_bogus=' + aBogus;
-  const signed = signWebUrl(urlWithABogus);
+  const signed = signWebUrl(targetUrl);
   if (!signed || !signed.includes('x-secsdk-web-signature')) fail('secsdk 签名生成失败（返回：' + String(signed).slice(0, 120) + '）');
   console.log(RESULT + JSON.stringify({ ok: true, signed_url: signed }));
-  if (global.process) global.process.exit(0); else REAL_PROCESS.exit(0);
+  process.exit(0);
 } catch (e) {
   fail(String((e && e.stack) || e));
 }
