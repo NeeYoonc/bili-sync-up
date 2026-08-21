@@ -57,6 +57,7 @@ export interface YouTubeSource {
 	pending_count: number;
 	completed_count: number;
 	failed_count: number;
+	skipped_count: number;
 }
 
 export interface CreateYouTubeSourceRequest {
@@ -99,7 +100,7 @@ export interface YouTubeVideo {
 	thumbnail?: string | null;
 	published_at?: string | null;
 	duration_seconds?: number | null;
-	download_status: 'pending' | 'downloading' | 'completed' | 'failed';
+	download_status: 'pending' | 'downloading' | 'completed' | 'failed' | 'skipped';
 	retry_count: number;
 	output_path?: string | null;
 	error_message?: string | null;
@@ -185,6 +186,7 @@ export interface YouTubeQueueStatusResponse {
 	downloading: number;
 	completed: number;
 	failed: number;
+	skipped: number;
 	tasks: YouTubeVideo[];
 }
 

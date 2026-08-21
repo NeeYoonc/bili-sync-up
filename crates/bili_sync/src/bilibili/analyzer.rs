@@ -369,20 +369,23 @@ impl PageAnalyzer {
         );
 
         if video_stream_count == 0 {
-            // 分析筛选失败的原因
-            let max_quality_requested = filter_option.video_max_quality as u32;
-            if max_quality_requested >= 120 {
-                tracing::error!("❌ 无可用视频流！请求4K+质量({})可能需要：", max_quality_requested);
-                tracing::error!("   1. 大会员权限");
-                tracing::error!("   2. 视频本身支持该质量");
-                tracing::error!("   3. 正确的登录状态");
-                tracing::error!("   建议：降低质量要求或检查会员状态");
+            // 区分“有视频流但都低于设定的最低质量”（主动跳过，非错误）与“真正无可用视频流”。
+            let max_available = self.max_available_video_quality();
+            if let Some(max_quality) = max_available {
+                if max_quality < filter_option.video_min_quality {
+                    tracing::debug!(
+                        "视频流均低于设定的最低质量（最低 {:?}，实际最高 {:?}），将按“跳过”处理而非失败",
+                        filter_option.video_min_quality,
+                        max_quality
+                    );
+                    // 不再打印 ERROR 级的“无可用视频流”误导日志；
+                    // 具体跳过原因由 workflow 层以 WARN 输出。
+                } else {
+                    // 存在达到最低质量的流，但被编码/最大质量/HDR 等条件过滤掉：仍属异常场景。
+                    Self::analyze_no_video_stream_error(filter_option);
+                }
             } else {
-                tracing::error!("❌ 无可用视频流！可能原因：");
-                tracing::error!("   1. 网络问题或API访问失败");
-                tracing::error!("   2. 视频不存在或已删除");
-                tracing::error!("   3. 编码格式不匹配");
-                tracing::error!("   建议：检查网络连接和编码设置");
+                Self::analyze_no_video_stream_error(filter_option);
             }
         }
         // 标记高品质音频是否异常
@@ -548,6 +551,46 @@ impl PageAnalyzer {
         Ok(streams)
     }
 
+    /// 返回原始播放信息中可用的最高视频质量（不应用过滤条件）。
+    ///
+    /// 用于区分“没有任何可用视频流”和“有视频流但都低于设定的最低质量”，
+    /// 后者应作为跳过/警告处理而不是下载失败。
+    pub fn max_available_video_quality(&self) -> Option<VideoQuality> {
+        let dash_max = self
+            .info
+            .pointer("/dash/video")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|video| video["id"].as_u64())
+            .filter_map(|id| VideoQuality::from_repr(id as usize))
+            .max();
+        let durl_quality = self
+            .info
+            .get("quality")
+            .and_then(|value| value.as_u64())
+            .and_then(|id| VideoQuality::from_repr(id as usize));
+        dash_max.or(durl_quality)
+    }
+
+    /// 在“确实没有可用的视频流”时输出诊断日志（非质量不足导致的跳过场景）。
+    fn analyze_no_video_stream_error(filter_option: &FilterOption) {
+        let max_quality_requested = filter_option.video_max_quality as u32;
+        if max_quality_requested >= 120 {
+            tracing::error!("❌ 无可用视频流！请求4K+质量({})可能需要：", max_quality_requested);
+            tracing::error!("   1. 大会员权限");
+            tracing::error!("   2. 视频本身支持该质量");
+            tracing::error!("   3. 正确的登录状态");
+            tracing::error!("   建议：降低质量要求或检查会员状态");
+        } else {
+            tracing::error!("❌ 无可用视频流！可能原因：");
+            tracing::error!("   1. 网络问题或API访问失败");
+            tracing::error!("   2. 视频不存在或已删除");
+            tracing::error!("   3. 编码格式不匹配");
+            tracing::error!("   建议：检查网络连接和编码设置");
+        }
+    }
+
     pub fn best_stream(&mut self, filter_option: &FilterOption) -> Result<BestStream> {
         let streams = self.streams(filter_option)?;
         if self.is_flv_stream() || self.is_html5_mp4_stream() || self.is_episode_try_mp4_stream() {
@@ -561,7 +604,17 @@ impl PageAnalyzer {
 
         tracing::debug!("=== 最佳流选择 ===");
         if videos.is_empty() {
-            tracing::error!("错误: 没有可用的视频流！");
+            if self
+                .max_available_video_quality()
+                .is_some_and(|quality| quality < filter_option.video_min_quality)
+            {
+                tracing::debug!(
+                    "没有符合最低质量要求的视频流（最低 {:?}），交由上层按“跳过”处理",
+                    filter_option.video_min_quality
+                );
+            } else {
+                tracing::error!("错误: 没有可用的视频流！");
+            }
             return Err(anyhow!("no video stream found"));
         }
 
@@ -718,5 +771,36 @@ mod tests {
             BiliError::VideoStreamEmpty(msg) => assert!(msg.contains("dash/video")),
             other => panic!("unexpected bili error: {:?}", other),
         }
+    }
+
+    /// 视频流存在但都低于设定的最低质量：应识别为“跳过”而非“无可用视频流”硬错误。
+    /// 该场景由 workflow 层以 WARN 输出并跳过下载，analyzer 不应走 ERROR 分支。
+    #[test]
+    fn below_min_quality_is_detected_not_hard_error() {
+        let info = json!({
+            "dash": {
+                "video": [
+                    { "base_url": "https://example.com/480p.m4s", "id": 32, "codecid": 7 }
+                ]
+            }
+        });
+        let mut analyzer = PageAnalyzer::new(info);
+        let filter = FilterOption {
+            video_min_quality: VideoQuality::Quality720p,
+            ..Default::default()
+        };
+
+        // 未过滤的最高可用质量应为 480p
+        assert_eq!(
+            analyzer.max_available_video_quality(),
+            Some(VideoQuality::Quality480p)
+        );
+
+        // 筛选后无视频流（不应触发“无可用视频流”ERROR 分支，因为 max_available < min）
+        let streams = analyzer.streams(&filter).expect("streams 不应报错");
+        assert!(streams.is_empty(), "480p 应被 720p 最低质量过滤掉");
+
+        // 上层（workflow）会依据 max_available_video_quality 判断为“跳过”
+        assert!(analyzer.best_stream(&filter).is_err());
     }
 }

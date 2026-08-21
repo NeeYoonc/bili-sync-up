@@ -7572,7 +7572,9 @@ async fn download_page(
     let final_video_path = chapter_primary_path.unwrap_or_else(|| video_path.clone());
 
     let final_video_path_str = final_video_path.to_string_lossy().to_string();
-    let final_page_path = if skip_charge_video_media_download {
+    let final_page_path = if skip_charge_video_media_download
+        || matches!(results.get(1), Some(ExecutionStatus::Skipped))
+    {
         original_page_model.path.clone()
     } else if inaccessible_reason.is_some() {
         original_page_model
@@ -8366,7 +8368,61 @@ async fn download_page_video_from_streams(
     let start_time = std::time::Instant::now();
 
     // 根据流类型进行不同处理
-    let best_stream_result = streams.best_stream(filter_option)?;
+    let best_stream_result = match streams.best_stream(filter_option) {
+        Ok(result) => result,
+        Err(err) => {
+            // 视频源存在，但最高可用画质仍低于设定的最低分辨率时，按“跳过/警告”处理，
+            // 不进入失败重试。
+            if !audio_only {
+                if let Some(max_quality) = streams.max_available_video_quality() {
+                    if max_quality < filter_option.video_min_quality {
+                        warn!(
+                            "视频「{}」第{}页未达到设定的最低分辨率/质量（最低 {:?}，实际最高 {:?}），跳过下载",
+                            video_model.name,
+                            page_info_for_download.page,
+                            filter_option.video_min_quality,
+                            max_quality
+                        );
+                        return Ok(PageVideoFetchResult {
+                            status: ExecutionStatus::Skipped,
+                            file_size_bytes: None,
+                            video_stream_size_bytes: None,
+                            audio_stream_size_bytes: None,
+                        });
+                    }
+                }
+            }
+            return Err(err);
+        }
+    };
+    // 即使 best_stream 成功，也可能选中低于最低质量的混合流/旧格式流；
+    // 这里按实际选中的视频流质量判断，避免下载低清文件。
+    if !audio_only {
+        let actual_quality = match &best_stream_result {
+            BestStream::VideoAudio { video, .. } => match video {
+                VideoStream::DashVideo { quality, .. } => Some(*quality),
+                _ => None,
+            },
+            BestStream::Mixed(_) => streams.max_available_video_quality(),
+        };
+        if let Some(actual_quality) = actual_quality {
+            if actual_quality < filter_option.video_min_quality {
+                warn!(
+                    "视频「{}」第{}页未达到设定的最低分辨率/质量（最低 {:?}，实际 {:?}），跳过下载",
+                    video_model.name,
+                    page_info_for_download.page,
+                    filter_option.video_min_quality,
+                    actual_quality
+                );
+                return Ok(PageVideoFetchResult {
+                    status: ExecutionStatus::Skipped,
+                    file_size_bytes: None,
+                    video_stream_size_bytes: None,
+                    audio_stream_size_bytes: None,
+                });
+            }
+        }
+    }
     if let Err(e) = save_download_play_stream_cache(connection, page_id, &best_stream_result).await {
         debug!("写入下载播放缓存失败（不影响下载）: page_id={}, error={}", page_id, e);
     }

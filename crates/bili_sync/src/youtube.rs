@@ -224,6 +224,7 @@ pub struct YouTubeQueueStatusResponse {
     pub downloading: u64,
     pub completed: u64,
     pub failed: u64,
+    pub skipped: u64,
     pub tasks: Vec<YouTubeVideoResponse>,
 }
 
@@ -264,6 +265,7 @@ pub struct YouTubeSourceResponse {
     pub pending_count: u64,
     pub completed_count: u64,
     pub failed_count: u64,
+    pub skipped_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1627,6 +1629,7 @@ async fn get_platform_queue_status(
             downloading: 0,
             completed: 0,
             failed: 0,
+            skipped: 0,
             tasks: Vec::new(),
         }));
     }
@@ -1638,7 +1641,7 @@ async fn get_platform_queue_status(
     };
     let tasks = youtube_video::Entity::find()
         .filter(youtube_video::Column::SourceId.is_in(source_ids.clone()))
-        .filter(youtube_video::Column::DownloadStatus.is_in(["pending", "downloading", "failed"]))
+        .filter(youtube_video::Column::DownloadStatus.is_in(["pending", "downloading", "failed", "skipped"]))
         .order_by_asc(youtube_video::Column::Id)
         .limit(100)
         .all(db)
@@ -1651,6 +1654,7 @@ async fn get_platform_queue_status(
         downloading: count("downloading").await?,
         completed: count("completed").await?,
         failed: count("failed").await?,
+        skipped: count("skipped").await?,
         tasks,
     }))
 }
@@ -1786,7 +1790,7 @@ fn youtube_failure_status(video: &youtube_video::Model) -> u32 {
 
 async fn youtube_artifact_status(video: &youtube_video::Model, source: &youtube_source::Model) -> ([u32; 5], [u32; 5]) {
     let failure = youtube_failure_status(video);
-    let completed = video.download_status == "completed";
+    let completed = video.download_status == "completed" || video.download_status == "skipped";
     let output = video.output_path.as_deref().map(PathBuf::from);
     let charge_locked = video.is_charge_video && !video.charge_can_play;
     let media_ok = charge_locked
@@ -1826,6 +1830,10 @@ async fn youtube_artifact_status(video: &youtube_video::Model, source: &youtube_
     // 占位（付费/加密/明确不可下载）视频：与 B 站充电视频占位一致，任务整体视为已完成，
     // 不再对封面/NFO/头像等子任务显示“未开始”。
     if charge_locked {
+        return ([7, 7, 7, 7, 7], [7, 7, 7, 7, 7]);
+    }
+    // 主动跳过（未达最低分辨率等）：在视频卡片中视为已完成，警告信息由队列页展示。
+    if video.download_status == "skipped" {
         return ([7, 7, 7, 7, 7], [7, 7, 7, 7, 7]);
     }
     let video_status = [
@@ -2875,6 +2883,34 @@ async fn download_video(
                     notify_queue_status_changed();
                     return Ok(());
                 }
+                if downloaded.skipped {
+                    // 未达到最低分辨率等主动跳过场景：标记为 skipped 并写入警告，
+                    // 不进入 failed，也不保留不存在的输出路径。
+                    let mut skipped: youtube_video::ActiveModel = video.clone().into();
+                    skipped.download_status = Set("skipped".to_string());
+                    skipped.retry_count = Set(0);
+                    skipped.output_path = Set(None);
+                    skipped.error_message = Set(downloaded.warning_message);
+                    skipped.title = Set(downloaded.title);
+                    skipped.uploader = Set(downloaded.uploader);
+                    skipped.thumbnail = Set(downloaded.thumbnail);
+                    skipped.published_at = Set(downloaded.published_at);
+                    skipped.duration_seconds = Set(downloaded.duration_seconds);
+                    skipped.updated_at = Set(now_standard_string());
+                    skipped.update(db).await?;
+                    info!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        youtube_id = %video.youtube_id,
+                        "{}视频源「{}」视频「{}」已跳过下载（未达到最低分辨率或主动跳过）",
+                        platform_label,
+                        source.name,
+                        video.title
+                    );
+                    notify_videos_changed();
+                    notify_queue_status_changed();
+                    return Ok(());
+                }
                 let downloaded_title = downloaded.title.clone();
                 if source.ai_rename && crate::config::reload_config().ai_rename.enabled {
                     match ai_rename_external_file(&source, &video, &downloaded, None, None).await {
@@ -3003,6 +3039,8 @@ struct DownloadedYouTubeMedia {
     warning_message: Option<String>,
     /// 抖音付费/加密内容（CENC 加密且无解密密钥）已转占位文件。
     paid_content: bool,
+    /// 因未达到设定的最低分辨率等原因主动跳过下载，不作为错误/失败处理。
+    skipped: bool,
 }
 
 struct SelectedStreams {
@@ -3215,6 +3253,7 @@ pub async fn ai_rename_external_history(
             is_image_post: video.is_image_post,
             warning_message: None,
             paid_content: false,
+            skipped: false,
         };
         match external_ai_file(
             source,
@@ -3369,6 +3408,7 @@ async fn download_youtube_media(
                 is_image_post: false,
                 warning_message: Some("无法下载视频：你所在国家或地区无法下载此视频".to_string()),
                 paid_content: true,
+                skipped: false,
             });
         }
         Err(error) => return Err(error),
@@ -3398,12 +3438,6 @@ async fn download_youtube_media(
         // 大小就把任务标记为完成。
         remove_file_if_exists(&output_path).await?;
     }
-    if let Some(parent) = output_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("无法创建{platform}下载目录: {}", parent.display()))?;
-    }
-
     let filter_option = source
         .filter_option
         .as_ref()
@@ -3418,6 +3452,54 @@ async fn download_youtube_media(
     } else {
         None
     };
+
+    // 未达到设定的最低分辨率时主动跳过下载，不产生失败/错误任务。
+    if !media_exists && !metadata.images.is_empty() && !source.audio_only {
+        if let Some(selected) = selected.as_ref() {
+            let min_height = youtube_quality_height(filter_option.video_min_quality);
+            if let Some(actual_height) = selected_effective_video_height(selected) {
+                if actual_height > 0 && actual_height < min_height {
+                    warn!(
+                        platform,
+                        source_id = source.id,
+                        youtube_id = %video.youtube_id,
+                        min_height,
+                        actual_height,
+                        "{}视频源「{}」视频「{}」未达到设定的最低分辨率 {}p（实际 {}p），跳过下载",
+                        platform,
+                        source.name,
+                        title,
+                        min_height,
+                        actual_height
+                    );
+                    return Ok(DownloadedYouTubeMedia {
+                        output_path,
+                        title,
+                        uploader,
+                        thumbnail: metadata.thumbnail,
+                        published_at: metadata.upload_date,
+                        duration_seconds: metadata
+                            .duration
+                            .and_then(|value| i32::try_from(value.round() as i64).ok()),
+                        is_image_post: false,
+                        warning_message: Some(format!(
+                            "未达到设定的最低分辨率（最低 {}p，实际 {}p），已跳过下载",
+                            min_height, actual_height
+                        )),
+                        paid_content: false,
+                        skipped: true,
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(parent) = output_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("无法创建{platform}下载目录: {}", parent.display()))?;
+    }
+
     if media_exists {
         // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
     } else if !metadata.images.is_empty() {
@@ -3622,6 +3704,7 @@ async fn download_youtube_media(
         is_image_post: !metadata.images.is_empty(),
         warning_message,
         paid_content: false,
+        skipped: false,
     })
 }
 
@@ -3654,6 +3737,7 @@ async fn paid_placeholder_result(
             "{platform}付费/加密内容（CENC 加密且未提供解密密钥），需购买后才能下载；已清理无效媒体并生成占位文件"
         )),
         paid_content: true,
+        skipped: false,
     })
 }
 
@@ -3877,6 +3961,19 @@ fn format_quality_height(format: &ExternalMediaFormat) -> i32 {
         (_, Some(height)) => height,
         (Some(width), None) => width,
         _ => 0,
+    }
+}
+
+/// 返回实际下载时会使用的视频流高度。
+///
+/// 与 `download_youtube_media` 的分支保持一致：
+/// - 独立视频流 + 独立音频流同时存在时，使用视频流高度；
+/// - 否则使用混合流（音视频一体）高度。
+fn selected_effective_video_height(selected: &SelectedStreams) -> Option<i32> {
+    if selected.video.is_some() && selected.audio.is_some() {
+        selected.video.as_ref().map(format_quality_height)
+    } else {
+        selected.mixed.as_ref().map(format_quality_height)
     }
 }
 
@@ -5067,6 +5164,7 @@ pub(crate) async fn source_response(db: &DatabaseConnection, source: youtube_sou
         pending_count: count("pending").await?,
         completed_count: count("completed").await?,
         failed_count: count("failed").await?,
+        skipped_count: count("skipped").await?,
     })
 }
 
