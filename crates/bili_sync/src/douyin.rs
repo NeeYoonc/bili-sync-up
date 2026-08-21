@@ -2184,7 +2184,7 @@ async fn signed_get_impl(
                     // 签名已通过但返回空 body：通常是当前出口 IP 被抖音风控
                     // （响应头 bd-ticket-guard-result=1101 + bdturing 滑块验证）。
                     // 更换外源代理节点或刷新 cookies 后通常可恢复。
-                    bail!("{} 返回空响应：签名已通过但被抖音风控拦截（可能触发滑块验证）。请更换外源代理节点或稍后重试", endpoint_display_name(base_url));
+                    bail!("{} 返回空响应：签名已通过，但 2026-08 起抖音将该接口绑定到真实浏览器设备（Turing 风控，服务端重放即使签名字节级一致也返回空 body）。请用「外部平台登录助手」重新同步抖音登录状态；若仍失败，请先在已登录抖音的浏览器中打开「我的喜欢」页完成设备验证后再试", endpoint_display_name(base_url));
                 } else {
                     bail!("抖音 Web API 返回空响应；请重新导入电脑浏览器刚导出的抖音 Cookie");
                 }
