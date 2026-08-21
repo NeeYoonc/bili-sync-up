@@ -341,6 +341,7 @@ export interface VideoInfo {
 	image_urls?: string[];
 	bangumi_title?: string; // 番剧真实标题，用于番剧类型视频的显示
 	url?: string; // 平台原始视频地址（外部平台使用）
+	skip_reason?: string; // 主动跳过下载的原因（如未达到最低分辨率）；无此字段表示正常
 }
 
 // 视频列表响应类型

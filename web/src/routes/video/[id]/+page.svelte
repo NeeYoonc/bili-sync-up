@@ -854,7 +854,8 @@
 					is_charge_video: videoData.video.is_charge_video,
 					is_image_post: videoData.video.is_image_post,
 					image_urls: videoData.video.image_urls,
-					bangumi_title: videoData.video.bangumi_title
+					bangumi_title: videoData.video.bangumi_title,
+					skip_reason: videoData.video.skip_reason
 				}}
 				mode="detail"
 				resourceId={routeResourceId}
@@ -871,6 +872,11 @@
 			/>
 		</div>
 
+		{#if videoData.video.skip_reason}
+			<div class="mb-4 rounded-lg border border-yellow-500/60 bg-yellow-50 p-3 text-sm text-yellow-900 dark:bg-yellow-950/30 dark:text-yellow-200">
+				⚠️ 该视频未达到设定的最低下载标准，已跳过下载，不会生成本地媒体文件。详情：{videoData.video.skip_reason}
+			</div>
+		{/if}
 		<!-- 下载路径信息 -->
 		{#if videoData.video.path || (videoData.pages && videoData.pages.length > 0 && videoData.pages[0].path)}
 			<div class="bg-muted mb-4 rounded-lg border {isMobile ? 'p-3' : 'p-4'}">
@@ -1144,6 +1150,11 @@
 								</div>
 							{/if}
 
+							{#if videoData.video.skip_reason}
+								<div class="mb-3 rounded-lg border border-yellow-500/60 bg-yellow-50 p-3 text-sm text-yellow-900 dark:bg-yellow-950/30 dark:text-yellow-200">
+									⚠️ 该视频未达到最低下载标准，未下载本地媒体，无法进行本地播放。
+								</div>
+							{/if}
 							<div class="overflow-hidden rounded-lg bg-black">
 								{#if imageViewMode && imageUrls.length > 0}
 									<img

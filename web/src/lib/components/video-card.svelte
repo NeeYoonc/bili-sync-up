@@ -334,8 +334,8 @@
 				on:error={handleCoverImageError}
 			/>
 			<!-- 类型标识和选择框统一排列在封面左上角 -->
-			{#if selectionMode || video.is_image_post || video.is_charge_video}
-				<div class="absolute top-2 left-2 z-20 flex items-center gap-1.5">
+			{#if selectionMode || video.is_image_post || video.is_charge_video || video.skip_reason}
+				<div class="absolute top-2 left-2 z-20 flex max-w-[calc(100%-88px)] flex-wrap items-center gap-1.5">
 					{#if selectionMode}
 					<input
 						type="checkbox"
@@ -356,6 +356,14 @@
 							title={isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
 						>
 							{isTikTok ? '无法下载视频' : isDouyin ? '付费' : '充电视频'}
+						</Badge>
+					{/if}
+					{#if video.skip_reason}
+						<Badge
+							class="border border-yellow-500/60 bg-yellow-200 text-xs text-yellow-950 shadow-md hover:bg-yellow-200"
+							title={video.skip_reason}
+						>
+							未达到最低下载标准
 						</Badge>
 					{/if}
 				</div>
@@ -404,6 +412,14 @@
 					title={isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
 				>
 					{isTikTok ? '无法下载视频' : isDouyin ? '付费' : '充电视频'}
+				</Badge>
+			{/if}
+			{#if (coverFailed || mode !== 'default') && video.skip_reason}
+				<Badge
+					class="mt-0.5 shrink-0 border border-yellow-500/60 bg-yellow-200 text-xs text-yellow-950 hover:bg-yellow-200"
+					title={video.skip_reason}
+				>
+					未达到最低下载标准
 				</Badge>
 			{/if}
 			<CardTitle

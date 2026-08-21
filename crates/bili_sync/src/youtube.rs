@@ -1898,6 +1898,12 @@ async fn unified_youtube_parts(
             image_urls,
             bangumi_title: None,
             url: Some(video.url.clone()),
+            skip_reason: (video.download_status == "skipped").then(|| {
+                video
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "未达到最低下载标准".to_string())
+            }),
         },
         PageInfo {
             id: video.id,

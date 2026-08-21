@@ -385,6 +385,8 @@ pub struct VideoInfo {
     pub bangumi_title: Option<String>, // 番剧真实标题，用于番剧类型视频的显示
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>, // 平台原始视频地址（YouTube/抖音/TikTok 外部平台使用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>, // 主动跳过下载的原因（如未达到最低分辨率）；None 表示正常
 }
 
 impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> for VideoInfo {
@@ -417,6 +419,7 @@ impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> f
             image_urls: Vec::new(),
             bangumi_title: None, // 默认为None，将在API层根据视频类型填充
             url: None,
+            skip_reason: None,
         }
     }
 }
