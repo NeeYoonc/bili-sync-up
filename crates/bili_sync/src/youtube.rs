@@ -3605,19 +3605,40 @@ async fn download_youtube_media(
             output_path.with_extension(format!("audio.{}", audio_stream.ext.as_deref().unwrap_or("m4a")));
         let merge_temporary = output_path.with_extension("merging.mp4");
         // YouTube 的高画质通常是独立 DASH 音视频流。两条直链都交给项目
-        // 原生统一下载器并行传输，避免大视频完成后才开始等待音频。
-        let video_download = async {
-            fetch_platform_asset(downloader, source, &video_urls, &video_temporary)
-                .await
-                .with_context(|| format!("使用项目统一下载器下载{platform}视频流失败"))
-        };
-        let audio_download = async {
-            fetch_platform_asset(downloader, source, &audio_urls, &audio_temporary)
-                .await
-                .with_context(|| format!("使用项目统一下载器下载{platform}音频流失败"))
-        };
-        if let Err(error) = tokio::try_join!(video_download, audio_download) {
-            let _ = remove_file_if_exists(&video_temporary).await;
+        // 原生统一下载器并行传输；音频失败时保留已下载的视频临时文件，
+        // 下次重试只重新下载音频，避免大视频（数百 MB）整片重下。
+        let video_ready = is_reusable_media_file(&video_temporary).await;
+        let mut audio_error: Option<anyhow::Error> = None;
+        if video_ready {
+            info!(
+                platform,
+                source_id = source.id,
+                youtube_id = %video.youtube_id,
+                path = %video_temporary.display(),
+                "{}视频流临时文件已存在，复用后仅重试音频",
+                platform
+            );
+            if let Err(error) =
+                fetch_platform_asset(downloader, source, &audio_urls, &audio_temporary).await
+            {
+                audio_error = Some(error.context(format!("使用项目统一下载器下载{platform}音频流失败")));
+            }
+        } else {
+            let video_fut = fetch_platform_asset(downloader, source, &video_urls, &video_temporary);
+            let audio_fut = fetch_platform_asset(downloader, source, &audio_urls, &audio_temporary);
+            let (video_result, audio_result) = tokio::join!(video_fut, audio_fut);
+            if let Err(error) = video_result {
+                let error = error.context(format!("使用项目统一下载器下载{platform}视频流失败"));
+                let _ = remove_file_if_exists(&video_temporary).await;
+                let _ = remove_file_if_exists(&audio_temporary).await;
+                return Err(error);
+            }
+            audio_error = audio_result
+                .err()
+                .map(|error| error.context(format!("使用项目统一下载器下载{platform}音频流失败")));
+        }
+        if let Some(error) = audio_error {
+            // 保留视频临时文件：下次重试时仅重新下载音频后合并。
             let _ = remove_file_if_exists(&audio_temporary).await;
             return Err(error);
         }

@@ -36,6 +36,76 @@ fn url_host(url: &str) -> Option<String> {
         .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
 }
 
+fn is_googlevideo_url(url: &str) -> bool {
+    url_host(url).is_some_and(|host| host.ends_with(".googlevideo.com"))
+}
+
+/// googlevideo 音频直链（mime=audio/*，如 itag 139/140/251）在部分 CDN 节点上
+/// 每个 Range 请求上限约 1MiB，超出即 403；视频直链通常允许 4MiB。用于选择
+/// googlevideo 分片大小。
+fn googlevideo_url_is_audio(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .query_pairs()
+                .find(|(key, _)| key == "mime")
+                .map(|(_, value)| value.to_ascii_lowercase())
+        })
+        .is_some_and(|mime| mime.starts_with("audio/"))
+}
+
+/// googlevideo 直链的 `mn` 参数携带备用 CDN 节点（如 `sn-A,sn-B`）。主节点被
+/// 限速/掐断（音频 403 / TLS 中途断开）时替换 hostname 即可切到其它节点。
+/// 返回「原 URL + 全部备用节点 URL」。
+fn googlevideo_alternate_urls(url: &str) -> Vec<String> {
+    let Ok(parsed) = Url::parse(url) else {
+        return vec![url.to_string()];
+    };
+    let Some(host) = parsed.host_str() else {
+        return vec![url.to_string()];
+    };
+    let host = host.to_ascii_lowercase();
+    if !host.ends_with(".googlevideo.com") {
+        return vec![url.to_string()];
+    }
+    let Some(mn) = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "mn")
+        .map(|(_, value)| value.into_owned())
+    else {
+        return vec![url.to_string()];
+    };
+    let nodes: Vec<&str> = mn.split(',').filter(|value| !value.trim().is_empty()).collect();
+    if nodes.len() < 2 {
+        return vec![url.to_string()];
+    }
+    // hostname 形如 rr5---sn-oguesndz.googlevideo.com；保持 rr 前缀并替换 sn- 段
+    let base = host.strip_suffix(".googlevideo.com").unwrap_or(&host);
+    let current_sn = base.rsplit("---").next().unwrap_or("");
+    let prefix = base.strip_suffix(current_sn).unwrap_or("");
+    let mut candidates = Vec::with_capacity(nodes.len());
+    candidates.push(url.to_string());
+    for node in nodes {
+        let node = node.trim();
+        if node.is_empty() || node == current_sn {
+            continue;
+        }
+        let sn = node.trim_start_matches("sn-");
+        if sn.is_empty() {
+            continue;
+        }
+        let mut alt = parsed.clone();
+        if alt
+            .set_host(Some(&format!("{prefix}sn-{sn}.googlevideo.com")))
+            .is_ok()
+        {
+            candidates.push(alt.to_string());
+        }
+    }
+    candidates
+}
+
 fn prune_expired_bad_cdn_hosts(cache: &mut HashMap<String, Instant>) {
     let now = Instant::now();
     cache.retain(|_, marked_at| now.duration_since(*marked_at) <= BAD_CDN_HOST_TTL);
@@ -216,11 +286,60 @@ impl Downloader {
             }
         }
 
-        let result = self.fetch_single(url, path, referer, None).await;
+        // googlevideo 直链拒绝无 Range 的完整 GET（403/掐断连接），必须走有界 Range。
+        let result = if is_googlevideo_url(url) {
+            self.fetch_googlevideo_single(url, path, referer).await
+        } else {
+            self.fetch_single(url, path, referer, None).await
+        };
         if result.is_err() {
             let _ = fs::remove_file(path).await;
         }
         result
+    }
+
+    /// googlevideo 直链拒绝无 Range 的完整 GET（403/掐断连接），多线程分片又因
+    /// 探测失败不可用时的兜底：重新探测总大小，再按有界 Range（音频 1MiB、
+    /// 视频 4MiB）顺序下载。
+    async fn fetch_googlevideo_single(
+        &self,
+        url: &str,
+        path: &Path,
+        referer: Option<&str>,
+    ) -> Result<()> {
+        let (range_supported, probe_size) = self.probe_range_support_and_size(url, referer, None).await?;
+        let total_size = probe_size
+            .filter(|size| *size > 0)
+            .ok_or_else(|| anyhow!("无法获取 googlevideo 文件大小（Range 探测失败）"))?;
+        ensure!(range_supported, "googlevideo 未返回 Range 支持");
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).await?;
+            }
+        }
+        let file = File::create(path).await?;
+        file.set_len(total_size).await?;
+        drop(file);
+        let segment = if googlevideo_url_is_audio(url) {
+            MIN_SEGMENT_SIZE
+        } else {
+            GOOGLEVIDEO_SEGMENT_SIZE
+        };
+        let (_, ranges) = build_parallel_ranges(total_size, 1, true, segment);
+        for (start, end) in ranges {
+            download_range_to_file_with_retry(
+                self.client.clone(),
+                url,
+                path,
+                start,
+                end,
+                RANGE_DOWNLOAD_ATTEMPTS,
+                referer,
+                None,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn fetch_single(&self, url: &str, path: &Path, referer: Option<&str>, cookie: Option<&str>) -> Result<()> {
@@ -333,11 +452,17 @@ impl Downloader {
     ) -> Result<()> {
         let is_googlevideo = url_host(url).is_some_and(|host| host.ends_with(".googlevideo.com"));
         // 小型 GoogleVideo 单连接也可能在完整传输前直接关闭 TLS；从 1MiB 起走
-        // Range 分片可让失败只影响一个小分片。
+        // Range 分片可让失败只影响一个小分片。音频直链在部分节点上每个 Range
+        // 上限仅约 1MiB（超出 403），音频统一使用 1MiB 分片。
         let min_parallel_size = if is_googlevideo {
             MIN_SEGMENT_SIZE
         } else {
             MIN_PARALLEL_SIZE
+        };
+        let googlevideo_segment = if is_googlevideo && googlevideo_url_is_audio(url) {
+            MIN_SEGMENT_SIZE
+        } else {
+            GOOGLEVIDEO_SEGMENT_SIZE
         };
 
         // 创建父目录
@@ -356,8 +481,34 @@ impl Downloader {
         );
         ensure!(range_supported, "服务器不支持Range分片下载");
 
-        let (concurrency, ranges) = build_parallel_ranges(total_size, threads, is_googlevideo);
-        ensure!(ranges.len() > 1, "分片数不足，跳过多线程下载");
+        let (concurrency, ranges) =
+            build_parallel_ranges(total_size, threads, is_googlevideo, googlevideo_segment);
+        if ranges.len() <= 1 {
+            // googlevideo 小文件（短音频常见，如 2~3MB 的 m4a）只有一个分片时，
+            // 不能跳过多线程后回退到无 Range 的完整 GET——googlevideo 对无 Range
+            // 请求直接 403/掐断连接。改用有界 Range 单连接下载整个文件。
+            if let Some(parent) = path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent).await?;
+                }
+            }
+            let file = File::create(path).await?;
+            file.set_len(total_size).await?;
+            drop(file);
+            let (part_start, part_end) = ranges[0];
+            download_range_to_file_with_retry(
+                self.client.clone(),
+                url,
+                path,
+                part_start,
+                part_end,
+                RANGE_DOWNLOAD_ATTEMPTS,
+                referer,
+                cookie,
+            )
+            .await?;
+            return Ok(());
+        }
 
         let total_mb = total_size as f64 / 1024.0 / 1024.0;
         info!(
@@ -612,25 +763,29 @@ impl Downloader {
 
         let mut last_error = None;
         for url in urls.iter() {
-            if is_url_blocked_by_bad_cdn_host(url) {
-                debug!("跳过短期内已判定证书异常的 CDN URL: {}", url);
-                continue;
-            }
-
-            let result = match referer {
-                Some(referer) => self.fetch_with_referer(url, path, referer).await,
-                None => self.fetch(url, path).await,
-            };
-            match result {
-                Ok(_) => {
-                    return Ok(());
+            // googlevideo 直链主节点被限速/掐断时，逐个尝试 `mn` 参数里的备用
+            // CDN 节点（替换 hostname），避免整轮失败。
+            for candidate in googlevideo_alternate_urls(url) {
+                if is_url_blocked_by_bad_cdn_host(&candidate) {
+                    debug!("跳过短期内已判定证书异常的 CDN URL: {}", candidate);
+                    continue;
                 }
-                Err(err) => {
-                    if is_certificate_name_mismatch_error(&err) {
-                        mark_bad_cdn_host(url, &err);
+
+                let result = match referer {
+                    Some(referer) => self.fetch_with_referer(&candidate, path, referer).await,
+                    None => self.fetch(&candidate, path).await,
+                };
+                match result {
+                    Ok(_) => {
+                        return Ok(());
                     }
-                    warn!("下载资源「{}」失败: {:#}", path.display(), err);
-                    last_error = Some(err);
+                    Err(err) => {
+                        if is_certificate_name_mismatch_error(&err) {
+                            mark_bad_cdn_host(&candidate, &err);
+                        }
+                        warn!("下载资源「{}」失败: {:#}", path.display(), err);
+                        last_error = Some(err);
+                    }
                 }
             }
         }
@@ -768,7 +923,12 @@ impl Downloader {
     }
 }
 
-fn build_parallel_ranges(total_size: u64, threads: usize, is_googlevideo: bool) -> (usize, Vec<(u64, u64)>) {
+fn build_parallel_ranges(
+    total_size: u64,
+    threads: usize,
+    is_googlevideo: bool,
+    googlevideo_segment: u64,
+) -> (usize, Vec<(u64, u64)>) {
     if total_size == 0 {
         return (1, Vec::new());
     }
@@ -784,7 +944,7 @@ fn build_parallel_ranges(total_size: u64, threads: usize, is_googlevideo: bool) 
         let mut ranges = Vec::new();
         let mut start = 0u64;
         while start < total_size {
-            let end = start.saturating_add(GOOGLEVIDEO_SEGMENT_SIZE - 1).min(total_size - 1);
+            let end = start.saturating_add(googlevideo_segment - 1).min(total_size - 1);
             ranges.push((start, end));
             start = end.saturating_add(1);
         }
@@ -1333,7 +1493,7 @@ mod tests {
     #[test]
     fn googlevideo_uses_small_ranges_with_bounded_native_concurrency() {
         let total_size = 18 * 1024 * 1024;
-        let (concurrency, ranges) = build_parallel_ranges(total_size, 16, true);
+        let (concurrency, ranges) = build_parallel_ranges(total_size, 16, true, GOOGLEVIDEO_SEGMENT_SIZE);
 
         assert_eq!(concurrency, GOOGLEVIDEO_MAX_CONNECTIONS);
         assert_eq!(ranges.len(), 5);
@@ -1343,9 +1503,35 @@ mod tests {
     }
 
     #[test]
+    fn googlevideo_audio_uses_1mib_ranges() {
+        // 短音频（2.88MB）按音频 1MiB 分片应拆成 3 段有界 Range，而不是
+        // 单个 4MiB 分片（部分节点音频 Range 上限 1MiB，超限 403）。
+        let total_size = 2_884_577;
+        let (_, ranges) = build_parallel_ranges(total_size, 4, true, MIN_SEGMENT_SIZE);
+
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0], (0, MIN_SEGMENT_SIZE - 1));
+        assert_eq!(ranges[1], (MIN_SEGMENT_SIZE, 2 * MIN_SEGMENT_SIZE - 1));
+        assert_eq!(ranges[2], (2 * MIN_SEGMENT_SIZE, total_size - 1));
+    }
+
+    #[test]
+    fn googlevideo_alternate_hosts_are_discovered() {
+        let url = "https://rr5---sn-oguesndz.googlevideo.com/videoplayback?mn=sn-oguesndz%2Csn-oguelnl7&mime=audio%2Fmp4&itag=140";
+        let candidates = googlevideo_alternate_urls(url);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], url);
+        assert!(
+            candidates[1].starts_with("https://rr5---sn-oguelnl7.googlevideo.com/"),
+            "备用节点 URL 异常: {}",
+            candidates[1]
+        );
+    }
+
+    #[test]
     fn regular_cdn_keeps_configured_parallel_range_count() {
         let total_size = 64 * 1024 * 1024;
-        let (concurrency, ranges) = build_parallel_ranges(total_size, 8, false);
+        let (concurrency, ranges) = build_parallel_ranges(total_size, 8, false, 0);
 
         assert_eq!(concurrency, 8);
         assert_eq!(ranges.len(), 8);
