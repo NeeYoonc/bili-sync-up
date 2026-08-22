@@ -208,6 +208,15 @@ pub struct DouyinCookieImportRequest {
     pub verify_fp: Option<String>,
     #[serde(default)]
     pub ms_token: Option<String>,
+    /// 浏览器扩展同步的抖音 localStorage（secsdk 会话密钥，我的喜欢/收藏夹签名需要）。
+    #[serde(default)]
+    pub local_storage: Option<serde_json::Map<String, serde_json::Value>>,
+    /// 导出页面的浏览器 UA（secsdk 签名环境使用）。
+    #[serde(default)]
+    pub ua: Option<String>,
+    /// 导出页面地址（secsdk 签名环境使用）。
+    #[serde(default)]
+    pub href: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -336,15 +345,38 @@ pub async fn import_douyin_cookie_file(
         persist_session_value(&ms_token_path(), ms_token).await?;
         imported_device_fields += 1;
     }
+    // 登录助手同步的 localStorage 里包含抖音 secsdk 会话密钥（security-sdk/SLARDAR 等），
+    // 「我的喜欢」「收藏夹」接口签名需要用到；写入 douyin-secsdk.json 供签名器读取。
+    let mut secsdk_imported = false;
+    if let Some(local_storage) = request.local_storage.as_ref().filter(|map| !map.is_empty()) {
+        let secsdk = serde_json::json!({
+            "localStorage": local_storage,
+            "ua": request.ua.clone().unwrap_or_default(),
+            "href": request.href.clone().unwrap_or_default(),
+            "ssr_user_id": "",
+        });
+        tokio::fs::write(
+            douyin_secsdk_path(),
+            serde_json::to_vec_pretty(&secsdk).context("序列化抖音 secsdk 会话失败")?,
+        )
+        .await
+        .context("写入抖音 secsdk 密钥文件失败")?;
+        secsdk_imported = true;
+    }
+    let device_suffix = if imported_device_fields > 0 {
+        format!("及 {imported_device_fields} 项浏览器设备参数")
+    } else {
+        String::new()
+    };
+    let secsdk_suffix = if secsdk_imported {
+        "；我的喜欢/收藏夹签名会话已同步 ✓".to_string()
+    } else {
+        "；⚠ 未同步我的喜欢/收藏夹签名会话（如需使用我的喜欢/收藏夹，请用电脑端登录助手重新传输登录状态）".to_string()
+    };
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
         message: format!(
-            "已导入抖音 cookies.txt{}；作者作品扫描和媒体解析将使用此状态",
-            if imported_device_fields > 0 {
-                format!("及 {imported_device_fields} 项浏览器设备参数")
-            } else {
-                String::new()
-            }
+            "已导入抖音 cookies.txt{device_suffix}；作者作品扫描和媒体解析将使用此状态{secsdk_suffix}"
         ),
     }))
 }
@@ -2509,6 +2541,11 @@ pub(crate) fn append_cookies(command: &mut tokio::process::Command) {
 
 pub(crate) fn cookie_path() -> PathBuf {
     CONFIG_DIR.join("douyin-cookies.txt")
+}
+
+/// 抖音 secsdk 会话密钥文件（由外部平台登录助手同步的 localStorage 写入）。
+pub(crate) fn douyin_secsdk_path() -> PathBuf {
+    CONFIG_DIR.join("douyin-secsdk.json")
 }
 
 /// 抖音登录状态相关文件（主 Cookie 与设备参数）的基准名。

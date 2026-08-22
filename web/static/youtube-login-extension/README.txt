@@ -24,6 +24,13 @@ Edge：
 douyin.com、bytedance.com Cookie，或 tiktok.com、tiktokcdn.com Cookie；
 不读取或传输账号密码。
 
+抖音同步说明：
+- “传输抖音登录状态”会同时传输登录 Cookie（cookies.txt）和「我的喜欢/收藏夹」接口
+  签名所需的会话密钥（浏览器 localStorage 中的 security-sdk/SLARDAR 等，保存为
+  douyin-secsdk.json）。
+- 仅手动导入 cookies.txt 可以用于作者作品扫描；要拉取「我的喜欢」「收藏夹」，
+  请使用电脑端登录助手的“传输抖音登录状态”完整同步一次。
+
 TikTok 同步说明：
 - “同步 TikTok 登录状态”仅传输登录 Cookie（cookies.txt）。
 - TikTok 的“我的喜欢/关注列表”只需 cookies.txt 即可拉取；若返回空响应，

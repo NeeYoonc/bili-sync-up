@@ -98,8 +98,11 @@
 					<ol class="mt-2 list-decimal space-y-1 pl-5">
 						<li>加载登录助手并连接当前 Bili Sync 设置页。</li>
 						<li>点击“打开抖音”，在同一电脑浏览器登录抖音。</li>
-						<li>点击“传输抖音登录状态”。Docker 会直接收到 Cookie，不需要内嵌浏览器。</li>
+						<li>点击“传输抖音登录状态”。Docker 会直接收到 Cookie 与「我的喜欢/收藏夹」签名会话，不需要内嵌浏览器。</li>
 					</ol>
+					<p class="mt-2">
+						提示：仅手动导入 cookies.txt 可用于作者作品扫描；「我的喜欢」「收藏夹」需要用上面的登录助手完整传输一次。
+					</p>
 				</div>
 				<p class="text-muted-foreground text-xs">
 					抖音作者作品接口需要新鲜 Cookie。保存位置：<code class="break-all">{status?.cookie_path ?? '加载中…'}</code>

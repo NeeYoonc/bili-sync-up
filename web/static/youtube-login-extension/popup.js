@@ -55,7 +55,9 @@ async function captureDouyinSessionParams() {
 
 	const [{ result }] = await chrome.scripting.executeScript({
 		target: { tabId: tab.id },
-		func: () => {
+		world: 'MAIN',
+		awaitPromise: true,
+		func: async () => {
 			const result = {};
 			const urls = [
 				...performance
@@ -76,6 +78,54 @@ async function captureDouyinSessionParams() {
 					// 忽略无效或非 HTTP 资源地址。
 				}
 			}
+			// 收集抖音 secsdk 会话密钥（localStorage + IndexedDB 的 security-sdk/SLARDAR 等）。
+			// 「我的喜欢」「收藏夹」接口签名需要这些密钥，服务端会写入 douyin-secsdk.json。
+			const secsdkPrefix = /^(security-sdk\/|SLARDAR|web_runtime_security_uid|web_secsdk_runtime_cache|SysInfo|g_ven)/;
+			const local_storage = {};
+			for (let i = 0; i < localStorage.length; i++) {
+				const key = localStorage.key(i);
+				if (key && secsdkPrefix.test(key)) {
+					try {
+						local_storage[key] = localStorage.getItem(key);
+					} catch {
+						// 单个键读取失败不影响其余密钥
+					}
+				}
+			}
+			// 抖音 secsdk 的部分密钥（s_sdk_crypt_sdk / s_sdk_server_cert_key 等）
+			// 存在 IndexedDB 的 secure-store 库，需要一并读取并合并进 local_storage。
+			try {
+				const openRequest = indexedDB.open('secure-store');
+				const db = await new Promise((resolve, reject) => {
+					openRequest.onsuccess = () => resolve(openRequest.result);
+					openRequest.onerror = () => reject(openRequest.error);
+				});
+				if (db.objectStoreNames.contains('cryptvalues')) {
+					const store = db.transaction('cryptvalues', 'readonly').objectStore('cryptvalues');
+					const keys = await new Promise((resolve, reject) => {
+						const request = store.getAllKeys();
+						request.onsuccess = () => resolve(request.result);
+						request.onerror = () => reject(request.error);
+					});
+					const values = await new Promise((resolve, reject) => {
+						const request = store.getAll();
+						request.onsuccess = () => resolve(request.result);
+						request.onerror = () => reject(request.error);
+					});
+					(keys || []).forEach((key, index) => {
+						if (key && values && values[index] !== undefined && secsdkPrefix.test(String(key))) {
+							local_storage[String(key)] = String(values[index]);
+						}
+					});
+				}
+			} catch {
+				// IndexedDB 读取失败时至少保留 localStorage 中的密钥
+			}
+			if (Object.keys(local_storage).length > 0) {
+				result.local_storage = local_storage;
+			}
+			result.ua = navigator.userAgent || '';
+			result.href = window.location.href || '';
 			return result;
 		}
 	});
