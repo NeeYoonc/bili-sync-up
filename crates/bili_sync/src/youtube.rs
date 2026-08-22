@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{Extension, Json, Path as AxumPath, Query};
@@ -54,6 +54,12 @@ const SUBSCRIPTIONS_URL: &str = "https://www.youtube.com/feed/subscriptions";
 const SUBSCRIPTION_CHANNELS_URL: &str = "https://www.youtube.com/feed/channels";
 const LIKED_URL: &str = "https://www.youtube.com/playlist?list=LL";
 const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
+
+/// 扫描失败告警静默期：同一来源失败后 6 小时内不重复打 WARN，避免私有源
+/// （稍后再看/喜欢/订阅）登录失效时每轮（约 20 分钟）刷屏告警。
+const SCAN_FAILURE_WARN_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
+static SCAN_FAILURE_WARN_LAST: LazyLock<StdMutex<HashMap<i32, Instant>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 static YTDLP_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -2334,7 +2340,43 @@ pub async fn process_scheduled_sources(
             }
         }
         if let Err(error) = scan_result {
-            warn!(source_id = source.id, error = %error, "扫描{}视频源「{}」失败", source_platform_label(source), source.name);
+            let now = Instant::now();
+            let mut last_warns = SCAN_FAILURE_WARN_LAST
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last_warns
+                .get(&source.id)
+                .is_some_and(|marked_at| now.duration_since(*marked_at) < SCAN_FAILURE_WARN_COOLDOWN)
+            {
+                drop(last_warns);
+                debug!(
+                    source_id = source.id,
+                    error = %error,
+                    "扫描{}视频源「{}」失败（处于静默期，不重复告警）",
+                    source_platform_label(source),
+                    source.name
+                );
+            } else {
+                last_warns.insert(source.id, now);
+                drop(last_warns);
+                if is_youtube_private_source(source) && is_youtube_auth_required_error(&error) {
+                    warn!(
+                        source_id = source.id,
+                        %error,
+                        "扫描{}视频源「{}」失败：需要有效的 YouTube 登录状态（稍后再看/喜欢/订阅为私有内容）。请重新导入最新的 YouTube cookies 后重试",
+                        source_platform_label(source),
+                        source.name
+                    );
+                } else {
+                    warn!(
+                        source_id = source.id,
+                        error = %error,
+                        "扫描{}视频源「{}」失败",
+                        source_platform_label(source),
+                        source.name
+                    );
+                }
+            }
         }
         let delay = crate::config::reload_config()
             .submission_risk_control
@@ -2398,6 +2440,14 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         // yt-dlp tiktok:user 平铺扫描——后者对部分作者会因无法解析 secondary
         // user ID 而整轮失败。公开作者无需登录。
         return crate::tiktok::scan_tiktok_user_source(db, source).await;
+    }
+    // 稍后再看/我的喜欢/订阅 属于登录私有内容；未导入有效 YouTube 会话时直接
+    // 给出明确提示并跳过扫描，避免每轮 yt-dlp 白跑并报出误导性的“播放列表不存在”。
+    if is_youtube_private_source(source) && !has_youtube_session(&cookie_path()) {
+        bail!(
+            "「{}」需要有效的 YouTube 登录状态（稍后再看/喜欢/订阅为私有内容）：请在设置页用电脑端登录助手重新导入 YouTube cookies",
+            source.name
+        );
     }
     let tiktok = crate::tiktok::is_tiktok_source(source);
     let mut command = ytdlp_command();
@@ -3857,6 +3907,83 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
 }
 
 pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<ExternalMediaMetadata> {
+    let is_youtube = is_youtube_url(url);
+    // YouTube 自 2025 年底起，默认 web 客户端要么报 “The page needs to be reloaded”，
+    // 要么只返回最高 1080p 的格式（高分辨率需要 PO Token/登录会话）。实测 web_embedded
+    // （网页嵌入式播放器客户端）无需登录即可返回完整格式列表（最高 8K），因此 YouTube
+    // 媒体解析固定优先使用该客户端（web_safari 作兜底），让下方的全局视频质量设置
+    // 能选到 1440p/4K/8K。
+    let client_args = if is_youtube {
+        Some("youtube:player_client=web_embedded,web_safari")
+    } else {
+        None
+    };
+    let metadata = run_ytdlp_metadata(url, platform, client_args).await?;
+    // web_embedded 对部分视频（尤其需要 PO Token/登录会话的高码率源）只返回
+    // ≤1080p 格式。此时依次尝试其它无需登录即可返回完整格式的客户端（tv_embedded、
+    // tv/mweb/web 等，tv/web 依赖 JS 运行时生成 PO Token），取分辨率上限更高的
+    // 一份，避免“设置 4K/8K 却只能下到 1080p”。仅对最高不足 4K 的情况触发。
+    if is_youtube {
+        let mut best = metadata;
+        let mut best_max = youtube_max_format_height(&best.formats);
+        if best_max < 2160 {
+            debug!(
+                url = %url,
+                first_max_height = best_max,
+                "web_embedded 仅返回最高 {}p 格式，逐个尝试备用客户端以获取更高码率",
+                best_max
+            );
+            for client_args in YOUTUBE_FULL_FORMAT_CLIENTS {
+                if best_max >= 2160 {
+                    break;
+                }
+                match run_ytdlp_metadata(url, platform, Some(client_args)).await {
+                    Ok(alt) => {
+                        let alt_max = youtube_max_format_height(&alt.formats);
+                        if alt_max > best_max {
+                            info!(
+                                url = %url,
+                                client = client_args,
+                                previous_max_height = best_max,
+                                alt_max_height = alt_max,
+                                "YouTube 媒体解析改用备用客户端 {}（{}p -> {}p）",
+                                client_args,
+                                best_max,
+                                alt_max
+                            );
+                            best = alt;
+                            best_max = alt_max;
+                        }
+                    }
+                    Err(error) => {
+                        debug!(
+                            url = %url,
+                            client = client_args,
+                            error = %error,
+                            "YouTube 备用客户端解析失败，继续尝试下一个"
+                        );
+                    }
+                }
+            }
+        }
+        return Ok(best);
+    }
+    Ok(metadata)
+}
+
+/// web_embedded 返回格式被限制在 1080p 时的备用客户端（按成功率排序，均无需登录）。
+const YOUTUBE_FULL_FORMAT_CLIENTS: &[&str] = &[
+    "youtube:player_client=tv_embedded,tv",
+    "youtube:player_client=mweb",
+    "youtube:player_client=web",
+    "youtube:player_client=android_vr",
+];
+
+async fn run_ytdlp_metadata(
+    url: &str,
+    platform: &str,
+    client_args: Option<&str>,
+) -> Result<ExternalMediaMetadata> {
     let mut command = ytdlp_command();
     command.args([
         "--dump-single-json",
@@ -3864,13 +3991,8 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
         "--no-playlist",
         "--no-warnings",
     ]);
-    // YouTube 自 2025 年底起，默认 web 客户端要么报 “The page needs to be reloaded”，
-    // 要么只返回最高 1080p 的格式（高分辨率需要 PO Token/登录会话）。实测 web_embedded
-    // （网页嵌入式播放器客户端）无需登录即可返回完整格式列表（最高 8K），因此 YouTube
-    // 媒体解析固定优先使用该客户端（web_safari 作兜底），让下方的全局视频质量设置
-    // 能选到 1440p/4K/8K。
-    if is_youtube_url(url) {
-        command.args(["--extractor-args", "youtube:player_client=web_embedded,web_safari"]);
+    if let Some(client_args) = client_args {
+        command.args(["--extractor-args", client_args]);
     }
     append_ytdlp_runtime(&mut command);
     append_cookies_for_url(&mut command, url);
@@ -3883,6 +4005,41 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
         bail!("yt-dlp 解析 {platform} 媒体直链失败：{}", command_error(&output));
     }
     serde_json::from_slice(&output.stdout).with_context(|| format!("解析 yt-dlp {platform} 媒体元数据失败"))
+}
+
+/// 格式列表中分辨率上限（最高高度，无则 0）。
+fn youtube_max_format_height(formats: &[ExternalMediaFormat]) -> i32 {
+    formats
+        .iter()
+        .filter_map(|format| format.height)
+        .max()
+        .unwrap_or(0)
+}
+
+/// 需要 YouTube 登录状态的私有来源类型。
+fn is_youtube_private_source(source: &youtube_source::Model) -> bool {
+    matches!(
+        source.source_type.as_str(),
+        "watch_later" | "liked" | "subscriptions"
+    )
+}
+
+/// yt-dlp 对“需要登录的私有列表（如稍后再看 WL）”在未登录/登录失效时的典型报错。
+fn is_youtube_auth_required_error(error: &anyhow::Error) -> bool {
+    let text = format!("{:#}", error).to_ascii_lowercase();
+    [
+        "playlist does not exist",
+        "this playlist is private",
+        "private video",
+        "sign in to confirm",
+        "requires authentication",
+        "login required",
+        "log in",
+        "must be logged in",
+        "you are not authorized",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 fn select_youtube_streams(
@@ -5719,7 +5876,13 @@ async fn guard_external_login_states() -> Result<()> {
                 .await;
             }
             Err(error) => {
-                debug!("YouTube 登录状态检查失败（网络等原因），保留现有会话: {:#}", error);
+                // 代理未开/上游抖动等网络原因：会话无法续约但保留现状。从 debug
+                // 提升为 warn，避免用户看到“会话一直失效”却不知道是代理/网络导致
+                // 续约根本没发生。
+                warn!(
+                    error = %error,
+                    "YouTube 登录状态检查失败（代理/网络不可用），本次未能续约会话，保留现有会话。请确认外源代理（proxy/youtube_proxy）可用"
+                );
             }
         }
     }
