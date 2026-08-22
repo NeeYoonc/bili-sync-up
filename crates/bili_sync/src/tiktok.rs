@@ -1231,6 +1231,103 @@ pub async fn scan_tiktok_favorite_source(
     persist_tiktok_posts(db, source, posts).await
 }
 
+/// 扫描“TikTok 作者”源：官方 `api/creator/item_list/` Web API 拉取 + 统一入库/增量逻辑。
+///
+/// 替代 yt-dlp `tiktok:user` 平铺扫描（yt-dlp 对部分作者会因无法解析
+/// secondary user ID 而整轮失败，报错形如 “Unable to extract secondary
+/// user ID”）。公开作者无需登录；已导入 cookies 时自动携带以获得完整列表。
+pub async fn scan_tiktok_user_source(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+) -> Result<u64> {
+    let sec_uid = resolve_tiktok_sec_uid_public(&source.url).await?;
+    let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
+    let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
+    let stop_when_known = (!scan_deleted_videos).then_some(&known_video_ids);
+    let posts = fetch_tiktok_creator_posts(&sec_uid, usize::MAX, stop_when_known).await?;
+    persist_tiktok_posts(db, source, posts).await
+}
+
+/// 解析 TikTok 作者 secUid（公开作者优先，无需登录）。
+///
+/// 公开内容依次尝试，全部失败才报错：
+///  1. 主页 SSR 数据（`fetch_tiktok_ssr_profile`，不需要 Cookie，但部分网络会被 403）；
+///  2. 第三方作者搜索 `www.tikwm.com`（绕过 TikTok WAF，返回 secUid，与搜索接口同源）；
+///  3. `resolve_tiktok_sec_uid`（官方 user/detail + 主页 HTML 兜底，需要登录态）。
+async fn resolve_tiktok_sec_uid_public(url: &str) -> Result<String> {
+    if let Some(unique_id) = tiktok_unique_id_from_url(url) {
+        if let Ok(Some(user)) = fetch_tiktok_ssr_profile(&unique_id).await {
+            if let Some(sec_uid) = user
+                .get("secUid")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                return Ok(sec_uid.to_string());
+            }
+        }
+        if let Some(sec_uid) = search_tiktok_sec_uid(&unique_id).await? {
+            return Ok(sec_uid);
+        }
+    }
+    resolve_tiktok_sec_uid(url).await
+}
+
+/// 通过第三方搜索接口按唯一用户名精确匹配 secUid（TikTok 官方接口被 WAF 拦截时兜底）。
+///
+/// 与 `search_tiktok_profiles` 同一数据源（`www.tikwm.com/api/user/search`），
+/// 该服务返回的用户对象带 `secUid`。按 uniqueId 精确匹配，避免取到同名他人。
+async fn search_tiktok_sec_uid(unique_id: &str) -> Result<Option<String>> {
+    let client = reqwest::Client::builder()
+        .user_agent(TIKTOK_WEB_UA)
+        .timeout(TIKTOK_SEARCH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let url = reqwest::Url::parse_with_params(
+        TIKWM_USER_SEARCH_API,
+        &[("keywords", unique_id), ("count", "12")],
+    )?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+        .send()
+        .await
+        .context("请求 TikTok 作者搜索失败（用于解析 secUid）")?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let payload: serde_json::Value = serde_json::from_str(&response.text().await?)
+        .context("解析 TikTok 作者搜索响应失败（用于解析 secUid）")?;
+    if payload.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
+        return Ok(None);
+    }
+    let Some(user_list) = payload
+        .pointer("/data/user_list")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(None);
+    };
+    for entry in user_list {
+        let Some(user) = entry.get("user") else {
+            continue;
+        };
+        let matched = user
+            .get("uniqueId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(unique_id.trim_start_matches('@')));
+        if !matched {
+            continue;
+        }
+        if let Some(sec_uid) = user
+            .get("secUid")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(sec_uid.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 /// 公共入库逻辑：与抖音源一致的增量/过滤/关键字/时长/日期处理。
 async fn persist_tiktok_posts(
     db: &DatabaseConnection,
@@ -1353,7 +1450,7 @@ async fn persist_tiktok_posts(
     active.update(db).await?;
     notify_video_sources_changed();
     if added > 0 {
-        info!(source_id = source.id, added, "TikTok 我的喜欢源发现新作品");
+        info!(source_id = source.id, added, name = %source.name, "TikTok 视频源「{}」发现 {} 个新视频", source.name, added);
         notify_videos_changed();
         notify_queue_status_changed();
     }
@@ -2520,6 +2617,157 @@ pub(crate) async fn fetch_tiktok_author_avatar_url(sec_uid: &str) -> anyhow::Res
         .map(|value| value.to_string())
         .filter(|value| !value.trim().is_empty());
     Ok(avatar)
+}
+
+/// 拉取指定作者的公开作品（官方 `/api/creator/item_list/` Web API，分页）。
+///
+/// 与 `fetch_tiktok_author_avatar_url` 同源：带登录 Cookie（可选）+ 随机
+/// verifyFp + 进程稳定 device_id 即可在服务端直接访问（不要求浏览器签名）。
+/// 公开作者无需登录（无 Cookie 时以空 Cookie 请求）。复用 `parse_tiktok_item`
+/// 解析 `itemList`。`stop_when_known` 非空时整页均为已知视频即提前停止翻页
+/// （与抖音源一致，避免每轮全量枚举触发风控）。
+///
+/// 注意：该接口 `count` 参数上限为 15，大于 15 会返回 HTTP 400（实测 30 → 400）。
+async fn fetch_tiktok_creator_posts(
+    sec_uid: &str,
+    limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
+) -> Result<Vec<TikTokPost>> {
+    let cookie = tiktok_cookie_header().unwrap_or_default();
+    let device_id = tiktok_web_device_id();
+    let verify_fp = format!(
+        "verify_{}",
+        (0..7).map(|_| format!("{:x}", rand::random::<u8>() % 16)).collect::<String>()
+    );
+    let mut cursor = chrono::Utc::now().timestamp_millis().to_string();
+    let mut posts = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..500 {
+        let params: Vec<(&str, String)> = vec![
+            ("aid", "1988".to_string()),
+            ("app_language", "en".to_string()),
+            ("app_name", "tiktok_web".to_string()),
+            ("browser_language", "en-US".to_string()),
+            ("browser_name", "Mozilla".to_string()),
+            ("browser_online", "true".to_string()),
+            ("browser_platform", "Win32".to_string()),
+            ("browser_version", "5.0 (Windows)".to_string()),
+            ("channel", "tiktok_web".to_string()),
+            ("cookie_enabled", "true".to_string()),
+            ("count", "15".to_string()),
+            ("cursor", cursor.clone()),
+            ("device_id", device_id.to_string()),
+            ("device_platform", "web_pc".to_string()),
+            ("focus_state", "true".to_string()),
+            ("from_page", "user".to_string()),
+            ("history_len", "2".to_string()),
+            ("is_fullscreen", "false".to_string()),
+            ("is_page_visible", "true".to_string()),
+            ("language", "en".to_string()),
+            ("os", "windows".to_string()),
+            ("priority_region", "".to_string()),
+            ("referer", "".to_string()),
+            ("region", "US".to_string()),
+            ("screen_height", "1080".to_string()),
+            ("screen_width", "1920".to_string()),
+            ("secUid", sec_uid.to_string()),
+            ("type", "1".to_string()),
+            ("tz_name", "UTC".to_string()),
+            ("verifyFp", verify_fp.clone()),
+            ("webcast_language", "en".to_string()),
+        ];
+        let url =
+            reqwest::Url::parse_with_params("https://www.tiktok.com/api/creator/item_list/", &params)?;
+        // 风控/限流退避重试（与 tiktok_impersonated_get_with_retry 一致）
+        let mut attempt = 0usize;
+        let (status, body) = loop {
+            let (status, body, _) = tiktok_impersonated_get(url.as_str(), &cookie).await?;
+            if status == 200 {
+                break (status, body);
+            }
+            let risk_limited = is_tiktok_risk_status(status);
+            if risk_limited {
+                record_tiktok_risk_event().await;
+            }
+            if !risk_limited || attempt >= TIKTOK_RISK_RETRY_ATTEMPTS {
+                break (status, body);
+            }
+            let wait = Duration::from_secs(3 * (attempt as u64 + 1));
+            warn!(
+                target: "bili_sync_rs::tiktok",
+                status,
+                attempt = attempt + 1,
+                wait_secs = wait.as_secs(),
+                "TikTok 作者作品接口触发风控或限流，延迟后重试"
+            );
+            tokio::time::sleep(wait).await;
+            attempt += 1;
+        };
+        if status != 200 {
+            bail!(
+                "TikTok 作者作品返回 HTTP {}{}",
+                status,
+                tiktok_risk_status_hint(status)
+            );
+        }
+        if body.trim().is_empty() {
+            bail!(
+                "TikTok 作者作品返回空响应：当前出口 IP 可能被 TikTok 风控，请在设置页配置外源代理（proxy/youtube_proxy）后重试"
+            );
+        }
+        let payload = decode_tiktok_body(&body)?;
+        let mut page_posts = Vec::new();
+        if let Some(items) = payload.get("itemList").and_then(serde_json::Value::as_array) {
+            for item in items {
+                if let Some(post) = parse_tiktok_item(item) {
+                    page_posts.push(post);
+                }
+            }
+        }
+        // 增量优先：整页都是已知视频时提前停止翻页
+        if all_tiktok_posts_known(&page_posts, stop_when_known) {
+            break;
+        }
+        for post in page_posts {
+            if seen.insert(post.id.clone()) {
+                posts.push(post);
+            }
+        }
+        if posts.len() >= limit
+            || !payload.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false)
+        {
+            break;
+        }
+        let next = payload
+            .get("cursor")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| value.as_i64().map(|number| number.to_string()))
+            })
+            .unwrap_or_else(|| cursor.clone());
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+        tokio::time::sleep(tiktok_page_delay().await).await;
+        if posts.len() > 20_000 {
+            warn!(sec_uid, "TikTok 作者作品超过 20000 条，停止继续枚举");
+            break;
+        }
+    }
+    Ok(posts)
+}
+
+/// 该页作品是否全部属于已知集合（用于增量扫描提前停止翻页）。
+fn all_tiktok_posts_known(posts: &[TikTokPost], known: Option<&HashSet<String>>) -> bool {
+    match known {
+        Some(known) if !known.is_empty() => {
+            !posts.is_empty() && posts.iter().all(|post| known.contains(&post.id))
+        }
+        _ => false,
+    }
 }
 
 /// 从 TikTok 主页链接提取 `@` 句柄（用户名或 secUid）。

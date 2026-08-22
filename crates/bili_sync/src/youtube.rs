@@ -2393,6 +2393,12 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         crate::tiktok::ensure_tiktok_session()?;
         return crate::tiktok::scan_tiktok_collection_source(db, source).await;
     }
+    if source.source_type == "tiktok" {
+        // TikTok 作者源走官方 API 直连扫描（api/creator/item_list/），不再依赖
+        // yt-dlp tiktok:user 平铺扫描——后者对部分作者会因无法解析 secondary
+        // user ID 而整轮失败。公开作者无需登录。
+        return crate::tiktok::scan_tiktok_user_source(db, source).await;
+    }
     let tiktok = crate::tiktok::is_tiktok_source(source);
     let mut command = ytdlp_command();
     command.args(["--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]);

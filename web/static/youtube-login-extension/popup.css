@@ -183,3 +183,15 @@ button:disabled {
     color: #aab2c2;
   }
 }
+
+
+.version {
+	font-size: 0.7em;
+	font-weight: 600;
+	color: #06b6d4;
+	background: rgba(6, 182, 212, 0.1);
+	border-radius: 999px;
+	padding: 0.1em 0.5em;
+	margin-left: 0.25em;
+	vertical-align: middle;
+}

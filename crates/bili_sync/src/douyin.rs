@@ -362,6 +362,17 @@ pub async fn import_douyin_cookie_file(
         .await
         .context("写入抖音 secsdk 密钥文件失败")?;
         secsdk_imported = true;
+        info!(
+            target: "bili_sync_rs::douyin",
+            keys = local_storage.len(),
+            "已同步抖音 secsdk 签名会话（{} 个密钥）",
+            local_storage.len()
+        );
+    } else {
+        warn!(
+            target: "bili_sync_rs::douyin",
+            "导入抖音 cookies 未携带 secsdk 签名会话（local_storage 为空）：请用电脑端登录助手完整传输，勿只导入 cookies.txt"
+        );
     }
     let device_suffix = if imported_device_fields > 0 {
         format!("及 {imported_device_fields} 项浏览器设备参数")

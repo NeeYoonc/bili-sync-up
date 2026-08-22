@@ -26,8 +26,12 @@ douyin.com、bytedance.com Cookie，或 tiktok.com、tiktokcdn.com Cookie；
 
 抖音同步说明：
 - “传输抖音登录状态”会同时传输登录 Cookie（cookies.txt）和「我的喜欢/收藏夹」接口
-  签名所需的会话密钥（浏览器 localStorage 中的 security-sdk/SLARDAR 等，保存为
-  douyin-secsdk.json）。
+  签名所需的会话密钥（浏览器 localStorage/sessionStorage 与 IndexedDB 中的
+  security-sdk/SLARDAR 等，保存为 douyin-secsdk.json）。
+- 同步抖音前请保持已登录的抖音网页（www.douyin.com）打开；助手会自动遍历所有抖音
+  标签页并合并密钥，因此即使开着多个抖音页面（如 live/creator 子域）也能拿到密钥。
+- 导入成功后状态栏会显示“我的喜欢/收藏夹签名会话已同步 ✓”；如果仍提示缺少
+  douyin-secsdk.json，说明浏览器加载的还是旧版助手，请删除旧扩展后重新加载 v1.5.2。
 - 仅手动导入 cookies.txt 可以用于作者作品扫描；要拉取「我的喜欢」「收藏夹」，
   请使用电脑端登录助手的“传输抖音登录状态”完整同步一次。
 
