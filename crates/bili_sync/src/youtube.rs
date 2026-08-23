@@ -3047,9 +3047,13 @@ async fn download_video(
                     return Ok(());
                 }
                 // TikTok 对短间隔重复请求会升级风控（403/验证页），重试退避显著拉长；
-                // 其它平台维持原有 5 秒/次退避。
+                // 其它平台维持原有 5 秒/次退避。YouTube 命中验证墙（Sign in to
+                // confirm you're not a bot）时拉长到 5 分钟级，让出口 IP 冷却，
+                // 避免每 5 秒空转把风控越打越重。
                 let retry_delay = if crate::tiktok::is_tiktok_source(&source) {
                     Duration::from_secs((retry_count.max(1) as u64) * 30)
+                } else if !crate::tiktok::is_tiktok_source(&source) && !is_douyin_source(&source) && is_youtube_bot_wall_error(&error) {
+                    Duration::from_secs(300 * (retry_count.max(1) as u64))
                 } else {
                     Duration::from_secs((retry_count.max(1) as u64) * 5)
                 };
@@ -3925,43 +3929,46 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
     // 一份，避免“设置 4K/8K 却只能下到 1080p”。仅对最高不足 4K 的情况触发。
     if is_youtube {
         let mut best = metadata;
-        let mut best_max = youtube_max_format_height(&best.formats);
+        let best_max = youtube_max_format_height(&best.formats);
+        // web_embedded 对部分视频（尤其需要 PO Token/登录会话的高码率源）只返回
+        // ≤1080p 格式。用 tv_embedded 再解析一次取分辨率更高的一份。为避免高频
+        // 多客户端请求把出口 IP 打标（YouTube 会直接进入 “Sign in to confirm
+        // you're not a bot” 风控墙），每个视频仅在进程内尝试一次，且只试一个
+        // 备用客户端。
         if best_max < 2160 {
-            debug!(
-                url = %url,
-                first_max_height = best_max,
-                "web_embedded 仅返回最高 {}p 格式，逐个尝试备用客户端以获取更高码率",
-                best_max
-            );
-            for client_args in YOUTUBE_FULL_FORMAT_CLIENTS {
-                if best_max >= 2160 {
-                    break;
-                }
-                match run_ytdlp_metadata(url, platform, Some(client_args)).await {
-                    Ok(alt) => {
-                        let alt_max = youtube_max_format_height(&alt.formats);
-                        if alt_max > best_max {
-                            info!(
-                                url = %url,
-                                client = client_args,
-                                previous_max_height = best_max,
-                                alt_max_height = alt_max,
-                                "YouTube 媒体解析改用备用客户端 {}（{}p -> {}p）",
-                                client_args,
-                                best_max,
-                                alt_max
-                            );
-                            best = alt;
-                            best_max = alt_max;
-                        }
-                    }
-                    Err(error) => {
-                        debug!(
+            // 锁只用于判断是否首次尝试，随后立即释放，避免跨 await 持有非 Send 的
+            // MutexGuard。
+            let first_attempt = {
+                let mut tried = YOUTUBE_FALLBACK_TRIED
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                tried.insert(url.to_string())
+            };
+            if first_attempt {
+                debug!(
+                    url = %url,
+                    first_max_height = best_max,
+                    "web_embedded 仅返回最高 {}p 格式，尝试 tv_embedded 获取更高码率（每视频仅一次）",
+                    best_max
+                );
+                if let Ok(alt) = run_ytdlp_metadata(
+                    url,
+                    platform,
+                    Some("youtube:player_client=tv_embedded,tv"),
+                )
+                .await
+                {
+                    let alt_max = youtube_max_format_height(&alt.formats);
+                    if alt_max > best_max {
+                        info!(
                             url = %url,
-                            client = client_args,
-                            error = %error,
-                            "YouTube 备用客户端解析失败，继续尝试下一个"
+                            previous_max_height = best_max,
+                            alt_max_height = alt_max,
+                            "YouTube 媒体解析改用 tv_embedded 客户端（{}p -> {}p）",
+                            best_max,
+                            alt_max
                         );
+                        return Ok(alt);
                     }
                 }
             }
@@ -3971,13 +3978,9 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
     Ok(metadata)
 }
 
-/// web_embedded 返回格式被限制在 1080p 时的备用客户端（按成功率排序，均无需登录）。
-const YOUTUBE_FULL_FORMAT_CLIENTS: &[&str] = &[
-    "youtube:player_client=tv_embedded,tv",
-    "youtube:player_client=mweb",
-    "youtube:player_client=web",
-    "youtube:player_client=android_vr",
-];
+/// 记录已尝试过 tv_embedded 兜底解析的视频 URL，避免每次重试都多发一个请求。
+static YOUTUBE_FALLBACK_TRIED: LazyLock<StdMutex<HashSet<String>>> =
+    LazyLock::new(|| StdMutex::new(HashSet::new()));
 
 async fn run_ytdlp_metadata(
     url: &str,
@@ -4014,6 +4017,19 @@ fn youtube_max_format_height(formats: &[ExternalMediaFormat]) -> i32 {
         .filter_map(|format| format.height)
         .max()
         .unwrap_or(0)
+}
+
+/// YouTube 验证墙/客户端不可用错误：命中后应拉长退避，避免高频请求加重风控。
+fn is_youtube_bot_wall_error(error: &anyhow::Error) -> bool {
+    let text = format!("{:#}", error).to_ascii_lowercase();
+    [
+        "sign in to confirm you're not a bot",
+        "sign in to confirm",
+        "requested format is not available",
+        "the page needs to be reloaded",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 /// 需要 YouTube 登录状态的私有来源类型。
