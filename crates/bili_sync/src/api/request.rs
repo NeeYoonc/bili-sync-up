@@ -604,3 +604,28 @@ pub struct TestProxyRequest {
     /// 待测试的代理地址（http/socks5）；为空时使用当前已保存配置。
     pub proxy: Option<String>,
 }
+
+
+/// 数据库维护操作类型。
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseMaintenanceAction {
+    /// 清空图片代理缓存（image_proxy_cache）
+    ClearImageCache,
+    /// 清空 AI 对话历史（ai_conversation_history）
+    ClearAiHistory,
+    /// 清理已完成/失败的任务队列记录
+    ClearQueueHistory,
+    /// 清理孤立记录（来源已删除的 YouTube 视频、无主分P）
+    CleanOrphans,
+    /// VACUUM 压缩数据库
+    Vacuum,
+    /// 备份数据库（VACUUM INTO 快照）
+    Backup,
+}
+
+/// 数据库维护请求。
+#[derive(Deserialize, ToSchema)]
+pub struct DatabaseMaintenanceRequest {
+    pub action: DatabaseMaintenanceAction,
+}

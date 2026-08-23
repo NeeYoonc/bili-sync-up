@@ -61,6 +61,9 @@ import type {
 	TikTokSecUidStatusResponse,
 	TikTokStatusResponse,
 	TestProxyResponse,
+	DatabaseStatusResponse,
+	DatabaseMaintenanceAction,
+	DatabaseMaintenanceResponse,
 	YouTubeSearchRequest,
 	YouTubeSearchResponse,
 	YouTubeSourceVideosRequest,
@@ -1392,6 +1395,22 @@ class ApiClient {
 	/**
 	 * 测试外源网络代理到谷歌官网的连通性
 	 */
+	/**
+	 * 获取数据库状态概览（设置页 → 数据库管理）
+	 */
+	async getDatabaseStatus(): Promise<ApiResponse<DatabaseStatusResponse>> {
+		return this.get<DatabaseStatusResponse>('/database/status');
+	}
+
+	/**
+	 * 执行数据库维护操作（设置页 → 数据库管理）
+	 */
+	async runDatabaseMaintenance(
+		action: DatabaseMaintenanceAction
+	): Promise<ApiResponse<DatabaseMaintenanceResponse>> {
+		return this.post<DatabaseMaintenanceResponse>('/database/maintenance', { action });
+	}
+
 	async testProxy(proxy?: string): Promise<ApiResponse<TestProxyResponse>> {
 		return this.post<TestProxyResponse>('/proxy/test', proxy !== undefined ? { proxy } : {});
 	}
@@ -1899,6 +1918,9 @@ export const api = {
 		webhook_synology_chat_template?: string;
 	}) => apiClient.testNotification(params),
 	testProxy: (proxy?: string) => apiClient.testProxy(proxy),
+	getDatabaseStatus: () => apiClient.getDatabaseStatus(),
+	runDatabaseMaintenance: (action: DatabaseMaintenanceAction) =>
+		apiClient.runDatabaseMaintenance(action),
 	/**
 	 * 订阅系统信息WebSocket事件
 	 */

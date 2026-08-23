@@ -20281,6 +20281,38 @@ pub async fn test_proxy_handler(
     }
 }
 
+/// 获取数据库状态概览（设置页 → 数据库管理）。
+#[utoipa::path(
+    get,
+    path = "/api/database/status",
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseStatusResponse>),
+    )
+)]
+pub async fn get_database_status(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<crate::api::response::DatabaseStatusResponse>, ApiError> {
+    let status = crate::db_maintenance::database_status(&db).await?;
+    Ok(ApiResponse::ok(status))
+}
+
+/// 执行数据库维护操作（设置页 → 数据库管理）。
+#[utoipa::path(
+    post,
+    path = "/api/database/maintenance",
+    request_body = crate::api::request::DatabaseMaintenanceRequest,
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseMaintenanceResponse>),
+    )
+)]
+pub async fn run_database_maintenance(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    axum::Json(request): axum::Json<crate::api::request::DatabaseMaintenanceRequest>,
+) -> Result<ApiResponse<crate::api::response::DatabaseMaintenanceResponse>, ApiError> {
+    let response = crate::db_maintenance::run_maintenance(&db, request.action).await?;
+    Ok(ApiResponse::ok(response))
+}
+
 /// 测试推送通知
 #[utoipa::path(
     post,

@@ -9,6 +9,7 @@
 	import { CustomSelect } from '$lib/components/ui/select';
 	import { SheetFooter } from '$lib/components/ui/sheet';
 	import * as Tabs from '$lib/components/ui/tabs';
+	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import QrLogin from '$lib/components/qr-login.svelte';
 	import ResponsiveSheet from '$lib/components/responsive-sheet.svelte';
 	import SectionHeader from '$lib/components/section-header.svelte';
@@ -33,6 +34,7 @@
 		BellIcon,
 		SparklesIcon,
 		RefreshCwIcon,
+	DatabaseIcon,
 		EyeIcon,
 		YoutubeIcon,
 		Music2Icon
@@ -156,6 +158,12 @@
 			icon: SparklesIcon
 		},
 		{
+			id: 'database',
+			title: '数据库管理',
+			description: '查看数据库状态，清理缓存与孤立记录',
+			icon: DatabaseIcon
+		},
+		{
 			id: 'system',
 			title: '系统设置',
 			description: '扫描间隔等其他设置',
@@ -179,7 +187,8 @@
 		interface: '调整主题模式和前端界面显示偏好。',
 		notification: '配置扫描完成后的推送渠道、测试发送和通知内容。',
 		ai_rename: '配置 AI 自动重命名的启用范围、提示词和相关行为。',
-		system: '调整扫描间隔、监听端口、路径模板和基础系统行为。'
+		system: '调整扫描间隔、监听端口、路径模板和基础系统行为。',
+		database: '查看数据库文件信息与各表数据量；可清理图片代理缓存、AI 对话历史、任务队列历史与孤立记录，执行 VACUUM 压缩或备份数据库。'
 	} as const;
 
 	function getSettingTooltip(id: string) {
@@ -441,6 +450,24 @@
 	let aiRenameRenameParentDir = false;
 	let aiRenameSaving = false;
 	let aiRenameClearingCache = false;
+
+	// 数据库管理
+	let databaseStatus: {
+		path: string;
+		db_size_bytes: number;
+		wal_size_bytes: number;
+		reclaimable_bytes: number;
+		tables: { table: string; rows: number; label: string }[];
+		youtube_video_status: { status: string; count: number }[];
+	} | null = null;
+	let databaseLoading = false;
+	let databaseActionRunning = false;
+	let databaseAction: {
+		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup';
+		label: string;
+		description: string;
+		danger: boolean;
+	} | null = null;
 
 	const defaultWebhookCustomBody = `{
   "source": "{{source}}",
@@ -1040,6 +1067,60 @@
 		}
 		videoNameHasPath = hasPathSeparator(videoName);
 		multiPageNameHasPath = hasPathSeparator(multiPageName);
+	}
+
+	// ===== 数据库管理 =====
+	function formatBytes(bytes: number): string {
+		if (!bytes || bytes <= 0) return '0 B';
+		const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+		const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+		const value = bytes / Math.pow(1024, index);
+		return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[index]}`;
+	}
+
+	async function loadDatabaseStatus() {
+		databaseLoading = true;
+		try {
+			const response = await runRequest(() => api.getDatabaseStatus(), {
+				context: '获取数据库状态失败'
+			});
+			if (response) databaseStatus = response.data;
+		} finally {
+			databaseLoading = false;
+		}
+	}
+
+	function requestDatabaseAction(
+		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup',
+		label: string,
+		description: string,
+		danger = false
+	) {
+		databaseAction = { action, label, description, danger };
+	}
+
+	async function runDatabaseAction() {
+		if (!databaseAction) return;
+		const { action, label } = databaseAction;
+		databaseActionRunning = true;
+		try {
+			const response = await runRequest(() => api.runDatabaseMaintenance(action), {
+				context: `${label}失败`
+			});
+			if (response?.data?.success) {
+				toast.success(`${label}成功`, { description: response.data.message });
+				await loadDatabaseStatus();
+			} else if (response?.data) {
+				toast.error(`${label}失败`, { description: response.data.message });
+			}
+		} finally {
+			databaseActionRunning = false;
+			databaseAction = null;
+		}
+	}
+
+	$: if (openSheet === 'database') {
+		loadDatabaseStatus();
 	}
 
 	async function handleTestProxy() {
@@ -5117,3 +5198,200 @@
 		</SheetFooter>
 	</form>
 </ResponsiveSheet>
+
+<!-- 数据库管理抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'database'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="数据库管理"
+	description="查看数据库状态，清理缓存与孤立记录"
+	titleTooltip={getSettingTooltip('database')}
+	{isMobile}
+>
+	<div class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}">
+		<div
+			class="min-h-0 flex-1 space-y-6 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}"
+		>
+			{#if databaseLoading && !databaseStatus}
+				<div class="flex justify-center py-12">
+					<Loading />
+				</div>
+			{:else if databaseStatus}
+				<!-- 数据库信息 -->
+				<div class="space-y-3">
+					<h3 class="text-base font-semibold">数据库信息</h3>
+					<div class="rounded-lg border p-4">
+						<div class="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+							<div>
+								<span class="text-muted-foreground">主库大小：</span>
+								<span class="font-medium">{formatBytes(databaseStatus.db_size_bytes)}</span>
+							</div>
+							<div>
+								<span class="text-muted-foreground">WAL：</span>
+								<span class="font-medium">{formatBytes(databaseStatus.wal_size_bytes)}</span>
+							</div>
+							<div>
+								<span class="text-muted-foreground">可回收空间：</span>
+								<span class="font-medium">{formatBytes(databaseStatus.reclaimable_bytes)}</span>
+							</div>
+						</div>
+						<p class="text-muted-foreground mt-2 break-all text-xs">{databaseStatus.path}</p>
+						{#if databaseStatus.reclaimable_bytes > 1024 * 1024}
+							<div class="mt-2 rounded-md bg-amber-100 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+								可回收空间较大，建议执行「压缩数据库」释放磁盘空间。
+							</div>
+						{/if}
+					</div>
+				</div>
+
+				<!-- 数据量统计 -->
+				<div class="space-y-3">
+					<h3 class="text-base font-semibold">数据量统计</h3>
+					<div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+						{#each databaseStatus.tables as stat (stat.table)}
+							<div class="rounded-lg border p-3">
+								<p class="text-muted-foreground text-xs">{stat.label}</p>
+								<p class="mt-1 text-lg font-semibold">{stat.rows}</p>
+							</div>
+						{/each}
+					</div>
+					{#if databaseStatus.youtube_video_status.length > 0}
+						<div class="flex flex-wrap items-center gap-2">
+							<span class="text-muted-foreground text-xs">YouTube 视频状态：</span>
+							{#each databaseStatus.youtube_video_status as item (item.status)}
+								<Badge variant="secondary">{item.status}：{item.count}</Badge>
+							{/each}
+						</div>
+					{/if}
+				</div>
+
+				<!-- 维护操作 -->
+				<div class="space-y-3">
+					<h3 class="text-base font-semibold">维护操作</h3>
+					<div class="space-y-2">
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clear_image_cache', '清理图片代理缓存', '清空网页图片代理缓存，图片将按需重新拉取。')}
+						>
+							<div>
+								<p class="text-sm font-medium">清理图片代理缓存</p>
+								<p class="text-muted-foreground text-xs">清空 image_proxy_cache 表</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clear_ai_history', '清理 AI 对话历史', '清空 AI 重命名使用的历史对话记录，不影响已完成的命名。')}
+						>
+							<div>
+								<p class="text-sm font-medium">清理 AI 对话历史</p>
+								<p class="text-muted-foreground text-xs">清空 ai_conversation_history 表</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clear_queue_history', '清理任务队列历史', '删除已经完成或失败的任务队列记录（删除来源/添加来源等历史任务）。')}
+						>
+							<div>
+								<p class="text-sm font-medium">清理任务队列历史</p>
+								<p class="text-muted-foreground text-xs">删除已完成/失败的任务队列记录</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clean_orphans', '清理孤立记录', '删除来源已删除但仍保留在数据库里的 YouTube 视频记录，以及无主分P记录。', true)}
+						>
+							<div>
+								<p class="text-sm font-medium">清理孤立记录</p>
+								<p class="text-muted-foreground text-xs">来源已删除的 YouTube 视频 / 无主分P</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('vacuum', '压缩数据库', '执行 VACUUM 回收删除数据后留下的磁盘空间，可能需要几秒到几十秒。')}
+						>
+							<div>
+								<p class="text-sm font-medium">压缩数据库</p>
+								<p class="text-muted-foreground text-xs">回收可释放空间（当前约 {formatBytes(databaseStatus.reclaimable_bytes)}）</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('backup', '备份数据库', '生成一份完整数据库快照到配置目录（data-backup-时间戳.sqlite），不影响当前运行。')}
+						>
+							<div>
+								<p class="text-sm font-medium">备份数据库</p>
+								<p class="text-muted-foreground text-xs">VACUUM INTO 快照，不锁库</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+					</div>
+				</div>
+			{/if}
+		</div>
+		<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t pt-4'}>
+			<Button
+				type="button"
+				variant="outline"
+				onclick={loadDatabaseStatus}
+				disabled={databaseLoading}
+				class="w-full"
+			>
+				{databaseLoading ? '刷新中...' : '刷新统计'}
+			</Button>
+		</SheetFooter>
+	</div>
+</ResponsiveSheet>
+
+<!-- 数据库维护确认对话框 -->
+<AlertDialog.Root
+	open={!!databaseAction}
+	onOpenChange={(open) => {
+		if (!open) databaseAction = null;
+	}}
+>
+	<AlertDialog.Content class="max-w-md">
+		<AlertDialog.Header>
+			<AlertDialog.Title class={databaseAction?.danger ? 'text-destructive dark:text-red-400' : ''}>
+				{databaseAction?.label}
+			</AlertDialog.Title>
+			<AlertDialog.Description>{databaseAction?.description}</AlertDialog.Description>
+		</AlertDialog.Header>
+		<AlertDialog.Footer class="flex justify-end gap-3 pt-4">
+			<button
+				type="button"
+				class="hover:bg-accent rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+				disabled={databaseActionRunning}
+				onclick={() => (databaseAction = null)}
+			>
+				取消
+			</button>
+			<button
+				type="button"
+				class="disabled:cursor-not-allowed rounded-md border border-transparent bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+				disabled={databaseActionRunning}
+				onclick={runDatabaseAction}
+			>
+				{databaseActionRunning ? '执行中...' : '确认执行'}
+			</button>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>

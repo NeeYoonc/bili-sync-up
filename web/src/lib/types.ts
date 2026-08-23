@@ -1441,3 +1441,44 @@ export interface TestProxyResponse {
 	status?: number | null;
 	error?: string | null;
 }
+
+
+// ===== 数据库管理 =====
+
+export interface DatabaseTableStat {
+	table: string;
+	rows: number;
+	label: string;
+}
+
+export interface DatabaseStatusCount {
+	status: string;
+	count: number;
+}
+
+export interface DatabaseStatusResponse {
+	path: string;
+	db_size_bytes: number;
+	wal_size_bytes: number;
+	reclaimable_bytes: number;
+	tables: DatabaseTableStat[];
+	youtube_video_status: DatabaseStatusCount[];
+}
+
+export type DatabaseMaintenanceAction =
+	| 'clear_image_cache'
+	| 'clear_ai_history'
+	| 'clear_queue_history'
+	| 'clean_orphans'
+	| 'vacuum'
+	| 'backup';
+
+export interface DatabaseMaintenanceResponse {
+	success: boolean;
+	message: string;
+	removed_rows?: number | null;
+	backup_path?: string | null;
+	backup_size_bytes?: number | null;
+	size_before_bytes?: number | null;
+	size_after_bytes?: number | null;
+}

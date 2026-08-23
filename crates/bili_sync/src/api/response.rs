@@ -1311,3 +1311,54 @@ pub struct TestProxyResponse {
     pub error: Option<String>,
 }
 
+/// 数据库管理：单个表的记录数统计。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseTableStat {
+    /// 表名
+    pub table: String,
+    /// 记录数
+    pub rows: i64,
+    /// 用户可读的中文表名说明
+    pub label: String,
+}
+
+/// 数据库管理：按状态统计。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseStatusCount {
+    pub status: String,
+    pub count: i64,
+}
+
+/// 数据库管理：数据库状态概览。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseStatusResponse {
+    /// 数据库文件路径
+    pub path: String,
+    /// 主库文件大小（字节）
+    pub db_size_bytes: u64,
+    /// WAL 文件大小（字节，0 表示不存在）
+    pub wal_size_bytes: u64,
+    /// 可回收空间（字节，VACUUM 可释放）
+    pub reclaimable_bytes: u64,
+    /// 各表记录数
+    pub tables: Vec<DatabaseTableStat>,
+    /// YouTube 视频下载状态统计
+    pub youtube_video_status: Vec<DatabaseStatusCount>,
+}
+
+/// 数据库管理：维护操作结果。
+#[derive(Debug, Serialize, ToSchema, Default)]
+pub struct DatabaseMaintenanceResponse {
+    pub success: bool,
+    pub message: String,
+    /// 本次删除的行数（清理类操作）
+    pub removed_rows: Option<u64>,
+    /// 备份文件路径（backup 操作）
+    pub backup_path: Option<String>,
+    /// 备份文件大小（字节，backup 操作）
+    pub backup_size_bytes: Option<u64>,
+    /// 操作前数据库大小（字节，vacuum/backup 操作）
+    pub size_before_bytes: Option<u64>,
+    /// 操作后数据库大小（字节，vacuum 操作）
+    pub size_after_bytes: Option<u64>,
+}
