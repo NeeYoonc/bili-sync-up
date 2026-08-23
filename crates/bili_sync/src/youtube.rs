@@ -3913,28 +3913,28 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
 pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<ExternalMediaMetadata> {
     let is_youtube = is_youtube_url(url);
     // YouTube 自 2025 年底起，默认 web 客户端要么报 “The page needs to be reloaded”，
-    // 要么只返回最高 1080p 的格式（高分辨率需要 PO Token/登录会话）。实测 web_embedded
-    // （网页嵌入式播放器客户端）无需登录即可返回完整格式列表（最高 8K），因此 YouTube
-    // 媒体解析固定优先使用该客户端（web_safari 作兜底），让下方的全局视频质量设置
-    // 能选到 1440p/4K/8K。
+    // 要么只返回最高 1080p 的格式（高分辨率走 SABR 协议、响应里没有签名直链）。
+    // web_embedded/web_safari 对多数视频可返回完整格式；visionos 客户端（yt-dlp
+    // ≥2026.08.19 内置）对走 SABR 协议的高码率源返回最高 4K 的签名直链，是目前
+    // 不依赖 PO Token/JS 运行时的 4K 兜底。三个客户端格式会合并，全局视频质量
+    // 设置可据此选到 1440p/4K。
     let client_args = if is_youtube {
-        Some("youtube:player_client=web_embedded,web_safari")
+        Some("youtube:player_client=web_embedded,web_safari,visionos")
     } else {
         None
     };
     let metadata = run_ytdlp_metadata(url, platform, client_args).await?;
     // web_embedded 对部分视频（尤其需要 PO Token/登录会话的高码率源）只返回
-    // ≤1080p 格式。此时依次尝试其它无需登录即可返回完整格式的客户端（tv_embedded、
-    // tv/mweb/web 等，tv/web 依赖 JS 运行时生成 PO Token），取分辨率上限更高的
-    // 一份，避免“设置 4K/8K 却只能下到 1080p”。仅对最高不足 4K 的情况触发。
+    // ≤1080p 格式。此时用备用客户端再解析一次（tv_embedded/tv 为传统兜底，
+    // visionos 提供 4K 直链），取分辨率上限更高的一份，避免“设置 4K 却只能
+    // 下到 1080p”。仅对最高不足 4K 的情况触发。
     if is_youtube {
         let mut best = metadata;
         let best_max = youtube_max_format_height(&best.formats);
         // web_embedded 对部分视频（尤其需要 PO Token/登录会话的高码率源）只返回
-        // ≤1080p 格式。用 tv_embedded 再解析一次取分辨率更高的一份。为避免高频
-        // 多客户端请求把出口 IP 打标（YouTube 会直接进入 “Sign in to confirm
-        // you're not a bot” 风控墙），每个视频仅在进程内尝试一次，且只试一个
-        // 备用客户端。
+        // ≤1080p 格式。用 tv_embedded/tv/visionos 再解析一次取分辨率更高的一份。
+        // 为避免高频多客户端请求把出口 IP 打标（YouTube 会直接进入 “Sign in to
+        // confirm you're not a bot” 风控墙），每个视频仅在进程内尝试一次。
         if best_max < 2160 {
             // 锁只用于判断是否首次尝试，随后立即释放，避免跨 await 持有非 Send 的
             // MutexGuard。
@@ -3948,13 +3948,13 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
                 debug!(
                     url = %url,
                     first_max_height = best_max,
-                    "web_embedded 仅返回最高 {}p 格式，尝试 tv_embedded 获取更高码率（每视频仅一次）",
+                    "web_embedded 仅返回最高 {}p 格式，尝试 tv_embedded/tv/visionos 获取更高码率（每视频仅一次）",
                     best_max
                 );
                 if let Ok(alt) = run_ytdlp_metadata(
                     url,
                     platform,
-                    Some("youtube:player_client=tv_embedded,tv"),
+                    Some("youtube:player_client=tv_embedded,tv,visionos"),
                 )
                 .await
                 {
@@ -3964,7 +3964,7 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
                             url = %url,
                             previous_max_height = best_max,
                             alt_max_height = alt_max,
-                            "YouTube 媒体解析改用 tv_embedded 客户端（{}p -> {}p）",
+                            "YouTube 媒体解析改用 tv_embedded/tv/visionos 客户端（{}p -> {}p）",
                             best_max,
                             alt_max
                         );
@@ -5508,17 +5508,47 @@ async fn ytdlp_version_at(executable: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// yt-dlp 自 2026.08.19 起内置 `visionos` 客户端：对 YouTube 走 SABR 协议的
+/// 高码率源（web 客户端响应无签名直链）返回最高 4K 的签名直链，是目前不依赖
+/// PO Token/JS 运行时的 4K 兜底。低于该版本的 yt-dlp 不认识该客户端。
+const YTDLP_VISIONOS_MIN_VERSION: (u32, u32, u32) = (2026, 8, 19);
+
+/// 解析 yt-dlp `--version` 输出（如 `2026.08.19`，开发版可能带 `.devN` 后缀），
+/// 只取前三个数字段比较。
+fn ytdlp_version_at_least(version: &str, want: (u32, u32, u32)) -> bool {
+    let mut parts = version.split('.').filter_map(|part| part.parse::<u32>().ok());
+    let got = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    got >= want
+}
+
 pub(crate) async fn ensure_ytdlp_available() -> Result<()> {
     if let Ok(configured) = std::env::var("BILI_SYNC_YTDLP_PATH") {
         let configured = PathBuf::from(configured);
-        if ytdlp_version_at(&configured).await.is_some() {
-            return Ok(());
+        let Some(version) = ytdlp_version_at(&configured).await else {
+            bail!("BILI_SYNC_YTDLP_PATH 指向的 yt-dlp 不可用：{}", configured.display());
+        };
+        if !ytdlp_version_at_least(&version, YTDLP_VISIONOS_MIN_VERSION) {
+            warn!(
+                version,
+                path = %configured.display(),
+                "自定义 yt-dlp 版本过旧（缺少 visionos 客户端），YouTube 4K 视频可能只能下载到 1080p；请升级到 2026.08.19 及以上版本"
+            );
         }
-        bail!("BILI_SYNC_YTDLP_PATH 指向的 yt-dlp 不可用：{}", configured.display());
+        return Ok(());
     }
 
-    if ytdlp_version().await.is_some() {
-        return Ok(());
+    if let Some(version) = ytdlp_version().await {
+        if ytdlp_version_at_least(&version, YTDLP_VISIONOS_MIN_VERSION) {
+            return Ok(());
+        }
+        warn!(
+            version,
+            "当前 yt-dlp 版本过旧（缺少 visionos 客户端，YouTube 4K 会退化为 1080p），自动重新下载最新版"
+        );
     }
 
     let package = current_ytdlp_package().ok_or_else(|| {
@@ -5530,8 +5560,10 @@ pub(crate) async fn ensure_ytdlp_available() -> Result<()> {
     })?;
     let _guard = ytdlp_install_lock().lock().await;
 
-    if ytdlp_version().await.is_some() {
-        return Ok(());
+    if let Some(version) = ytdlp_version().await {
+        if ytdlp_version_at_least(&version, YTDLP_VISIONOS_MIN_VERSION) {
+            return Ok(());
+        }
     }
 
     let binary_path = managed_ytdlp_path(package);
