@@ -170,6 +170,36 @@ pub fn merge_set_cookie(
     changed
 }
 
+/// 对 cookies 文本执行浏览器式被动续约（合并响应头里的 Set-Cookie），
+/// 返回合并后的文本。没有 Set-Cookie、无变化或内容不变时返回 None。
+pub fn renew_cookie_text(
+    contents: &str,
+    headers: &HeaderMap,
+    fallback_domain: &str,
+    allowed_domain: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let values = headers.get_all(SET_COOKIE).iter().collect::<Vec<&HeaderValue>>();
+    if values.is_empty() {
+        return None;
+    }
+    let mut rows = parse_netscape(contents);
+    let mut changed = false;
+    for value in values {
+        let Ok(text) = value.to_str() else {
+            continue;
+        };
+        changed |= merge_set_cookie(&mut rows, text, fallback_domain, &allowed_domain);
+    }
+    if !changed {
+        return None;
+    }
+    let serialized = serialize_netscape(&rows);
+    if serialized == contents {
+        return None;
+    }
+    Some(serialized)
+}
+
 /// 把响应头里的 `Set-Cookie` 合并写回 cookies.txt（浏览器式被动续约）。
 /// 没有变化时不会触碰文件；读取/写入失败只告警，不阻断请求。
 pub async fn renew_cookie_file(

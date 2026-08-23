@@ -317,9 +317,8 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         warn!(%error, "yt-dlp 自动安装失败");
     }
     let version = ytdlp_version().await;
-    let cookie = cookie_path();
-    let logged_in = has_youtube_session(&cookie)
-        && tokio::time::timeout(Duration::from_secs(15), load_youtube_subscription_channels(&cookie))
+    let logged_in = youtube_has_session()
+        && tokio::time::timeout(Duration::from_secs(15), load_youtube_subscription_channels())
             .await
             .is_ok_and(|result| result.is_ok());
     Ok(ApiResponse::ok(YouTubeStatusResponse {
@@ -328,7 +327,7 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         logged_in,
         default_output_path: default_output_path().display().to_string(),
         container_runtime: is_container_runtime(),
-        cookie_path: cookie_path().display().to_string(),
+        cookie_path: youtube_cookie_file().map(|path| path.display().to_string()).unwrap_or_default(),
     }))
 }
 
@@ -766,7 +765,7 @@ async fn get_youtube_subscription_channels(
     page_size: i32,
     keyword: Option<&str>,
 ) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
-    let initial_data = load_youtube_subscription_channels(&cookie_path()).await?;
+    let initial_data = load_youtube_subscription_channels().await?;
     let mut channels = Vec::new();
     let mut seen = HashSet::new();
     collect_youtube_channel_renderers(&initial_data, &mut seen, &mut channels);
@@ -791,8 +790,10 @@ async fn get_youtube_subscription_channels(
     }))
 }
 
-async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::Value> {
-    let cookie_jar = youtube_cookie_jar(path)?;
+async fn load_youtube_subscription_channels() -> Result<serde_json::Value> {
+    let contents = youtube_cookie_text()
+        .context("读取 YouTube Cookie 失败：请先在设置页导入 cookies.txt 或传输登录状态")?;
+    let cookie_jar = youtube_cookie_jar_from_text(&contents)?;
     let mut client_builder = reqwest::Client::builder()
         // Netscape 文件同时包含 YouTube 和 Google 账号域 Cookie。必须让
         // Cookie Jar 按域名分别发送：直接拼成一个 Cookie 请求头会把
@@ -817,13 +818,16 @@ async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::V
         .context("访问 YouTube 已订阅频道页面失败")?;
     // 浏览器式被动续约：把页面响应里的 Set-Cookie 合并写回 cookies.txt。
     let fallback_domain = response.url().host_str().unwrap_or("www.youtube.com").to_string();
-    crate::utils::netscape_cookies::renew_cookie_file(
-        path,
+    if let Some(merged) = crate::utils::netscape_cookies::renew_cookie_text(
+        &contents,
         response.headers(),
         &fallback_domain,
         is_youtube_auth_cookie_domain,
-    )
-    .await;
+    ) {
+        if let Err(error) = set_youtube_cookies(&merged).await {
+            warn!(error = %error, "写回 YouTube 续约后的 Cookie 失败");
+        }
+    }
 
     let final_url = response.url().to_string();
     if final_url.contains("accounts.google.com") || final_url.contains("ServiceLogin") {
@@ -844,6 +848,10 @@ async fn load_youtube_subscription_channels(path: &Path) -> Result<serde_json::V
 fn youtube_cookie_jar(path: &Path) -> Result<Arc<reqwest::cookie::Jar>> {
     let contents =
         std::fs::read_to_string(path).with_context(|| format!("读取 YouTube Cookie 失败：{}", path.display()))?;
+    youtube_cookie_jar_from_text(&contents)
+}
+
+fn youtube_cookie_jar_from_text(contents: &str) -> Result<Arc<reqwest::cookie::Jar>> {
     let now = chrono::Utc::now().timestamp();
     let jar = Arc::new(reqwest::cookie::Jar::default());
     let mut cookie_count = 0usize;
@@ -1084,24 +1092,17 @@ pub async fn import_youtube_cookie_file(
             "文件不是包含 YouTube 会话的 Netscape cookies.txt；请在已登录 YouTube 的浏览器中导出 cookies.txt",
         ));
     }
-    let path = cookie_path();
-    prepare_parent(&path).await?;
-    let temporary = path.with_extension("txt.importing");
-    tokio::fs::write(&temporary, request.cookies.as_bytes())
-        .await
-        .context("写入 YouTube cookies.txt 失败")?;
-    if let Err(error) = validate_youtube_login_cookie(&temporary).await {
-        let _ = tokio::fs::remove_file(&temporary).await;
+    // 先清理旧会话（数据库 + 历史文件），再将新会话写入数据库。
+    clear_youtube_login_state().await;
+    set_youtube_cookies(&request.cookies).await?;
+    if let Err(error) = validate_youtube_login_cookie().await {
+        clear_youtube_login_state().await;
         return Err(ApiError::bad_request(format!(
             "YouTube cookies.txt 验证失败：{}（{}）",
             error,
             youtube_cookie_diagnostic(&request.cookies)
         )));
     }
-    // 旧版导入可能残留 `*.backup` / `*.importing` / `*.before-*` 等备份快照，
-    // 先清理（排除当前临时文件）再写入新会话，避免新旧 Cookie 混用。
-    clear_youtube_login_state_files_except(Some(&temporary)).await;
-    replace_cookie_file(&temporary, &path).await?;
 
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
@@ -2443,7 +2444,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     }
     // 稍后再看/我的喜欢/订阅 属于登录私有内容；未导入有效 YouTube 会话时直接
     // 给出明确提示并跳过扫描，避免每轮 yt-dlp 白跑并报出误导性的“播放列表不存在”。
-    if is_youtube_private_source(source) && !has_youtube_session(&cookie_path()) {
+    if is_youtube_private_source(source) && !youtube_has_session() {
         bail!(
             "「{}」需要有效的 YouTube 登录状态（稍后再看/喜欢/订阅为私有内容）：请在设置页用电脑端登录助手重新导入 YouTube cookies",
             source.name
@@ -5929,6 +5930,66 @@ fn cookie_path() -> PathBuf {
     CONFIG_DIR.join("youtube-cookies.txt")
 }
 
+/// YouTube 凭证当前内容：优先数据库，回退旧版 cookies.txt 文件（启动迁移会搬进数据库）。
+fn youtube_cookie_text() -> Option<String> {
+    if let Some(value) = crate::credential_store::get(crate::credential_store::keys::YOUTUBE_COOKIES) {
+        return Some(value);
+    }
+    let legacy = CONFIG_DIR.join("youtube-cookies.txt");
+    std::fs::read_to_string(legacy).ok()
+}
+
+/// 返回可直接传给 yt-dlp `--cookies` 的路径（数据库凭证的影子文件或旧版文件）。
+fn youtube_cookie_file() -> Option<PathBuf> {
+    let contents = youtube_cookie_text()?;
+    if contents.trim().is_empty() {
+        return None;
+    }
+    match crate::credential_store::sync_shadow(crate::credential_store::keys::YOUTUBE_COOKIES, &contents) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            warn!(error = %error, "写入 YouTube 影子 Cookie 文件失败");
+            None
+        }
+    }
+}
+
+/// 把 YouTube 凭证写入数据库（并同步影子文件）。
+async fn set_youtube_cookies(contents: &str) -> Result<()> {
+    crate::credential_store::set(crate::credential_store::keys::YOUTUBE_COOKIES, contents).await
+}
+
+/// 清理 YouTube 登录状态：数据库凭证 + 旧版/历史残留文件。
+async fn clear_youtube_login_state() {
+    if crate::credential_store::has(crate::credential_store::keys::YOUTUBE_COOKIES) {
+        if let Err(error) = crate::credential_store::delete(crate::credential_store::keys::YOUTUBE_COOKIES).await {
+            warn!(error = %error, "清理数据库中的 YouTube 登录凭证失败");
+        }
+    }
+    clear_youtube_login_state_files_except(None).await;
+}
+
+/// 是否已导入有效的 YouTube 登录会话（数据库优先，兼容旧文件）。
+fn youtube_has_session() -> bool {
+    youtube_cookie_text().is_some_and(|contents| has_youtube_session_value(&contents))
+}
+
+fn has_youtube_session_value(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        if line.trim_start().starts_with('#') {
+            return false;
+        }
+        let columns = line.split('\t').collect::<Vec<_>>();
+        if columns.len() < 7 || !is_youtube_auth_cookie_domain(columns[0]) {
+            return false;
+        }
+        matches!(
+            columns[5],
+            "SID" | "SAPISID" | "APISID" | "__Secure-1PSID" | "__Secure-3PSID"
+        )
+    })
+}
+
 /// 清理旧版或历史导入残留的 YouTube 登录状态文件（主 Cookie 及其备份/临时快照）。
 /// `exclude` 用于跳过当前正在写入的临时文件。
 async fn clear_youtube_login_state_files_except(exclude: Option<&Path>) {
@@ -6008,12 +6069,11 @@ async fn guard_external_login_states() -> Result<()> {
     }
 
     // YouTube：订阅频道页面探测即续约。
-    let youtube_path = cookie_path();
-    if has_youtube_session(&youtube_path) {
-        match load_youtube_subscription_channels(&youtube_path).await {
+    if youtube_has_session() {
+        match load_youtube_subscription_channels().await {
             Ok(_) => info!("YouTube 登录状态有效，已完成会话续约"),
             Err(error) if format!("{:#}", error).contains("Cookie 已失效") => {
-                let _ = remove_file_if_exists(&youtube_path).await;
+                clear_youtube_login_state().await;
                 record_external_login_expired(
                     "YouTube",
                     "YouTube 登录状态已过期或未登录，已清理残留会话；请重新在设置页导入 cookies.txt",
@@ -6135,11 +6195,11 @@ async fn remove_empty_parent_directories(mut current: Option<&Path>, stop_at: &P
     }
 }
 
-async fn validate_youtube_login_cookie(path: &Path) -> Result<()> {
+async fn validate_youtube_login_cookie() -> Result<()> {
     // 不再仅依据 yt-dlp 输出中的 `Found YouTube account cookies` 判断登录。
     // 该提示只说明文件里存在账号 Cookie 名称，过期或不完整的会话也可能出现。
     // 真实访问账号专属的“已订阅频道”页面，才能确认 Cookie 当前确实可用。
-    tokio::time::timeout(LOGIN_TIMEOUT, load_youtube_subscription_channels(path))
+    tokio::time::timeout(LOGIN_TIMEOUT, load_youtube_subscription_channels())
         .await
         .map_err(|_| anyhow!("验证 YouTube 账号登录状态超时"))??;
     Ok(())
@@ -6152,8 +6212,7 @@ async fn prepare_parent(path: &Path) -> Result<()> {
         .with_context(|| format!("无法创建配置目录: {}", parent.display()))
 }
 fn append_cookies(command: &mut Command) {
-    let path = cookie_path();
-    if has_youtube_session(&path) {
+    if let Some(path) = youtube_cookie_file() {
         command.arg("--cookies").arg(path);
     }
 }
@@ -6329,21 +6388,7 @@ async fn replace_cookie_file(temporary: &Path, target: &Path) -> Result<()> {
 }
 
 fn has_youtube_session(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|contents| {
-        contents.lines().any(|line| {
-            if line.trim_start().starts_with('#') {
-                return false;
-            }
-            let columns = line.split('\t').collect::<Vec<_>>();
-            if columns.len() < 7 || !is_youtube_auth_cookie_domain(columns[0]) {
-                return false;
-            }
-            matches!(
-                columns[5],
-                "SID" | "SAPISID" | "APISID" | "__Secure-1PSID" | "__Secure-3PSID"
-            )
-        })
-    })
+    std::fs::read_to_string(path).is_ok_and(|contents| has_youtube_session_value(&contents))
 }
 
 fn is_netscape_youtube_cookie_file(contents: &str) -> bool {
@@ -6711,4 +6756,15 @@ mod tests {
         assert_eq!(path, expected, "短剧应输出 下载根/剧集名/Season 01/S01E03.mp4");
     }
 
+}
+
+/// 迁移旧版 YouTube 凭证文件到数据库（升级兼容；成功后删除旧文件）。
+pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
+    let _ = crate::credential_store::migrate_file_to_db(
+        crate::credential_store::keys::YOUTUBE_COOKIES,
+        &CONFIG_DIR.join("youtube-cookies.txt"),
+        is_netscape_youtube_cookie_file,
+    )
+    .await?;
+    Ok(())
 }

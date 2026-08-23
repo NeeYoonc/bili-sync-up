@@ -7,6 +7,7 @@ mod aria2_downloader;
 mod auth;
 mod bilibili;
 mod config;
+mod credential_store;
 mod database;
 mod db_maintenance;
 mod douyin;
@@ -76,6 +77,9 @@ async fn async_main() -> Result<()> {
     if let Err(e) = init_config_with_database(connection.as_ref().clone()).await {
         warn!("数据库配置系统初始化失败: {}, 继续使用TOML配置", e);
     }
+
+    // 迁移旧版外部平台凭证文件到数据库（YouTube/抖音/TikTok）
+    crate::credential_store::migrate_legacy_credentials_on_startup().await;
 
     // 启动时自动统一 upper_face 分桶目录大小写（A-Z -> a-z），避免媒体库头像匹配异常
     if let Err(e) = crate::workflow::migrate_upper_face_buckets_on_startup().await {

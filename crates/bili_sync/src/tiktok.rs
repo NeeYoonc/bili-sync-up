@@ -71,7 +71,7 @@ async fn tiktok_impersonated_get(url: &str, cookie: &str) -> Result<(u16, String
     .await?;
     let fresh_ms_token = extract_fresh_ms_token(&response_headers);
     if let Some(token) = &fresh_ms_token {
-        persist_tiktok_ms_token(token);
+        persist_tiktok_ms_token(token).await;
     }
     Ok((status, String::from_utf8_lossy(&body).to_string(), fresh_ms_token))
 }
@@ -105,15 +105,14 @@ fn extract_fresh_ms_token(headers: &[(String, String)]) -> Option<String> {
     None
 }
 
-/// 把 TikTok 新下发的 msToken 合并回 cookies.txt（原子写：临时文件 + rename）。
-/// 仅当值变化时才写盘，避免每次请求都产生无意义的文件写。
-fn persist_tiktok_ms_token(token: &str) {
-    let path = tiktok_cookie_path();
+/// 把 TikTok 新下发的 msToken 合并回数据库 cookies 凭证。
+/// 仅当值变化时才写库，避免每次请求都产生无意义的写入。
+async fn persist_tiktok_ms_token(token: &str) {
     let current = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     if current == token {
         return;
     }
-    let Ok(content) = std::fs::read_to_string(&path) else {
+    let Some(content) = tiktok_cookie_text() else {
         return;
     };
     let mut replaced = false;
@@ -133,10 +132,10 @@ fn persist_tiktok_ms_token(token: &str) {
     if !replaced {
         return;
     }
-    let tmp = path.with_extension("msToken.tmp");
-    if std::fs::write(&tmp, out.join("\n") + "\n").is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-        debug!("已把 TikTok 新下发的 msToken 合并回 cookies.txt");
+    if let Err(error) = set_tiktok_cookies(&(out.join("\n") + "\n")).await {
+        warn!(error = %error, "写回 TikTok 新下发的 msToken 失败");
+    } else {
+        debug!("已把 TikTok 新下发的 msToken 合并回数据库凭证");
     }
 }
 
@@ -395,10 +394,10 @@ fn tiktok_result_match_score(result: &YouTubeSearchResult, keyword: &str) -> u8 
 
 /// 当前 TikTok 登录状态：仅检查配置目录中的 cookies.txt 是否可识别。
 pub async fn tiktok_status() -> Result<ApiResponse<TikTokStatusResponse>, ApiError> {
-    let path = tiktok_cookie_path();
+    let cookie_file = tiktok_cookie_file();
     Ok(ApiResponse::ok(TikTokStatusResponse {
-        logged_in: has_tiktok_session(&path),
-        cookie_path: path.display().to_string(),
+        logged_in: tiktok_has_session(),
+        cookie_path: cookie_file.map(|path| path.display().to_string()).unwrap_or_default(),
     }))
 }
 
@@ -423,16 +422,13 @@ pub async fn import_tiktok_cookie_file(
             "文件不是包含 tiktok.com 会话的 Netscape cookies.txt；请在已登录 TikTok 的电脑浏览器中导出 cookies.txt",
         ));
     }
-    let path = tiktok_cookie_path();
-    let parent = path.parent().context("无效的 TikTok Cookie 文件路径")?;
-    tokio::fs::create_dir_all(parent).await?;
-    let temporary = path.with_extension("txt.importing");
-    tokio::fs::write(&temporary, request.cookies.as_bytes())
-        .await
-        .context("写入 TikTok cookies.txt 失败")?;
-    // 与 YouTube/抖音一致：清理旧会话及其备份/临时快照，避免新旧 Cookie 混用。
-    clear_tiktok_login_state_files_except(Some(&temporary)).await;
-    replace_cookie_file(&temporary, &path).await?;
+    // 与 YouTube/抖音一致：先清理旧会话（数据库 + 历史文件），避免新旧 Cookie 混用。
+    clear_tiktok_login_state().await;
+    set_tiktok_cookies(&request.cookies).await?;
+    if let Some(local_storage) = request.local_storage.as_ref().filter(|map| !map.is_empty()) {
+        let json = serde_json::to_string(local_storage).context("序列化 TikTok localStorage 会话失败")?;
+        set_tiktok_localstorage(&json).await?;
+    }
 
     // 导入后立即验证登录态：清除 secUid 缓存并请求官方接口，避免导入失效 Cookie 后
     // “我的喜欢/关注列表”等到真正使用时才报错。浏览器扩展无法导出有效会话时给出明确提示。
@@ -476,8 +472,68 @@ pub fn tiktok_cookie_path() -> PathBuf {
     CONFIG_DIR.join("tiktok-cookies.txt")
 }
 
+/// TikTok cookies 当前内容：优先数据库，回退旧版 tiktok-cookies.txt（启动迁移会搬进数据库）。
+fn tiktok_cookie_text() -> Option<String> {
+    if let Some(value) = crate::credential_store::get(crate::credential_store::keys::TIKTOK_COOKIES) {
+        return Some(value);
+    }
+    std::fs::read_to_string(tiktok_cookie_path()).ok()
+}
+
+async fn set_tiktok_cookies(contents: &str) -> Result<()> {
+    crate::credential_store::set(crate::credential_store::keys::TIKTOK_COOKIES, contents).await
+}
+
+/// TikTok localStorage 会话状态（webmssdk 签名器使用）：优先数据库，回退旧文件。
+fn tiktok_localstorage_text() -> Option<String> {
+    if let Some(value) = crate::credential_store::get(crate::credential_store::keys::TIKTOK_LOCALSTORAGE) {
+        return Some(value);
+    }
+    std::fs::read_to_string(CONFIG_DIR.join("tiktok-localstorage.json")).ok()
+}
+
+async fn set_tiktok_localstorage(json: &str) -> Result<()> {
+    crate::credential_store::set(crate::credential_store::keys::TIKTOK_LOCALSTORAGE, json).await
+}
+
+/// 返回可传给 yt-dlp `--cookies` 的 TikTok cookie 文件路径（数据库影子文件或旧版文件）。
+fn tiktok_cookie_file() -> Option<PathBuf> {
+    let contents = tiktok_cookie_text()?;
+    if contents.trim().is_empty() {
+        return None;
+    }
+    match crate::credential_store::sync_shadow(crate::credential_store::keys::TIKTOK_COOKIES, &contents) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            warn!(error = %error, "写入 TikTok 影子 Cookie 文件失败");
+            None
+        }
+    }
+}
+
+/// TikTok Node 签名器影子环境目录（tiktok-cookies.txt + tiktok-localstorage.json）。
+fn tiktok_signer_shadow_dir() -> PathBuf {
+    std::env::temp_dir().join("bili-sync-external").join("tiktok-signer")
+}
+
+async fn sync_tiktok_signer_env() -> Result<PathBuf> {
+    let dir = tiktok_signer_shadow_dir();
+    tokio::fs::create_dir_all(&dir).await?;
+    let cookies = tiktok_cookie_text().context("缺少 TikTok cookies：请先在设置页导入 cookies.txt")?;
+    tokio::fs::write(dir.join("tiktok-cookies.txt"), cookies.as_bytes()).await?;
+    if let Some(localstorage) = tiktok_localstorage_text() {
+        tokio::fs::write(dir.join("tiktok-localstorage.json"), localstorage.as_bytes()).await?;
+    }
+    Ok(dir)
+}
+
 fn has_tiktok_session(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|contents| is_netscape_tiktok_cookie_file(&contents))
+}
+
+/// TikTok 是否已导入会话（cookies 有效）。
+fn tiktok_has_session() -> bool {
+    tiktok_cookie_text().is_some_and(|contents| is_netscape_tiktok_cookie_file(&contents))
 }
 
 fn is_netscape_tiktok_cookie_file(contents: &str) -> bool {
@@ -506,6 +562,21 @@ fn is_tiktok_cookie_domain(domain: &str) -> bool {
     domain == "tiktok.com"
         || domain.ends_with(".tiktok.com")
         || domain.ends_with("tiktokcdn.com")
+}
+
+/// 清理 TikTok 登录状态：数据库凭证 + 旧版/历史残留文件。
+async fn clear_tiktok_login_state() {
+    for key in [
+        crate::credential_store::keys::TIKTOK_COOKIES,
+        crate::credential_store::keys::TIKTOK_LOCALSTORAGE,
+    ] {
+        if crate::credential_store::has(key) {
+            if let Err(error) = crate::credential_store::delete(key).await {
+                warn!(error = %error, "清理数据库中的 TikTok 登录凭证失败");
+            }
+        }
+    }
+    clear_tiktok_login_state_files_except(None).await;
 }
 
 /// 清理旧版或历史导入残留的 TikTok 登录状态文件。
@@ -562,8 +633,7 @@ async fn replace_cookie_file(temporary: &Path, target: &Path) -> Result<()> {
 
 /// 仅在存在已导入的 TikTok 会话时追加 --cookies，避免把 YouTube/抖音 Cookie 误用于 TikTok。
 pub fn append_tiktok_cookies(command: &mut Command) {
-    let path = tiktok_cookie_path();
-    if has_tiktok_session(&path) {
+    if let Some(path) = tiktok_cookie_file() {
         command.arg("--cookies").arg(path);
     }
 }
@@ -839,8 +909,7 @@ pub struct TikTokPost {
 const TIKTOK_FAVORITE_API: &str = "https://www.tiktok.com/api/favorite/item_list/";
 
 fn tiktok_cookie_values() -> HashMap<String, String> {
-    std::fs::read_to_string(tiktok_cookie_path())
-        .ok()
+    tiktok_cookie_text()
         .map(|contents| {
             contents
                 .lines()
@@ -887,7 +956,8 @@ pub fn tiktok_secuid_path() -> PathBuf {
 /// 读取手动设置的账号 secUid。格式校验：URL 安全字符串且长度足够，
 /// 避免把明显无效的输入当作有效凭证。
 fn load_manual_tiktok_secuid() -> Option<String> {
-    let value = std::fs::read_to_string(tiktok_secuid_path()).ok()?;
+    let value = crate::credential_store::get(crate::credential_store::keys::TIKTOK_SECUID)
+        .or_else(|| std::fs::read_to_string(tiktok_secuid_path()).ok())?;
     let value = value.trim().to_string();
     if value.len() >= 16
         && value
@@ -907,17 +977,18 @@ fn valid_manual_tiktok_secuid(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
-/// 保存/清空手动 TikTok 账号 secUid（空值清空文件）。
+/// 保存/清空手动 TikTok 账号 secUid（空值清空数据库条目）。
 pub async fn save_tiktok_manual_secuid(value: &str) -> Result<()> {
-    let path = tiktok_secuid_path();
     let value = value.trim();
     if value.is_empty() {
-        let _ = tokio::fs::remove_file(&path).await;
+        let _ = tokio::fs::remove_file(tiktok_secuid_path()).await;
+        if crate::credential_store::has(crate::credential_store::keys::TIKTOK_SECUID) {
+            crate::credential_store::delete(crate::credential_store::keys::TIKTOK_SECUID).await?;
+        }
         return Ok(());
     }
-    tokio::fs::write(&path, format!("{value}\n"))
-        .await
-        .with_context(|| format!("写入 TikTok 手动 secUid 失败: {}", path.display()))?;
+    crate::credential_store::set(crate::credential_store::keys::TIKTOK_SECUID, value).await?;
+    let _ = tokio::fs::remove_file(tiktok_secuid_path()).await;
     Ok(())
 }
 
@@ -1459,7 +1530,7 @@ async fn persist_tiktok_posts(
 
 /// 我的喜欢源需要登录状态；扫描入口统一从 youtube.rs 调用。
 pub fn ensure_tiktok_session() -> Result<()> {
-    if has_tiktok_session(&tiktok_cookie_path()) {
+    if tiktok_has_session() {
         Ok(())
     } else {
         bail!("TikTok 我的喜欢需要登录状态，请先在设置页导入 TikTok cookies.txt")
@@ -1773,11 +1844,12 @@ async fn sign_tiktok_url_with_sdk(url: &str, sdk: Option<&str>) -> Result<String
             "未找到 Node.js 运行时：TikTok 关注/收藏夹接口需要 Node.js 执行 webmssdk 现场签名。请安装 Node.js，或通过环境变量 BILI_SYNC_TIKTOK_NODE 指定 node 路径"
         )
     })?;
+    let signer_env_dir = sync_tiktok_signer_env().await?;
     let mut command = Command::new(&node);
     command
         .arg(&signer)
         .arg(url)
-        .env("BILI_SYNC_CONFIG_DIR", CONFIG_DIR.as_os_str())
+        .env("BILI_SYNC_CONFIG_DIR", signer_env_dir)
         .kill_on_drop(true);
     if let Some(runtime_id) = sdk {
         command.arg("--sdk").arg(runtime_id);
@@ -2526,7 +2598,8 @@ pub fn tiktok_webid_path() -> PathBuf {
 
 /// 读取手动设置的 TikTok 设备 ID。校验：纯数字且长度 16-20 位。
 fn load_manual_tiktok_webid() -> Option<u64> {
-    let value = std::fs::read_to_string(tiktok_webid_path()).ok()?;
+    let value = crate::credential_store::get(crate::credential_store::keys::TIKTOK_WEBID)
+        .or_else(|| std::fs::read_to_string(tiktok_webid_path()).ok())?;
     let value = value.trim().to_string();
     (value.len() >= 16 && value.len() <= 20 && value.chars().all(|character| character.is_ascii_digit()))
         .then(|| value.parse::<u64>().ok())
@@ -3485,4 +3558,39 @@ pub(crate) async fn fetch_tiktok_media_with_impersonation(urls: &[&str], path: &
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow!("TikTok 媒体直链列表为空")))
+}
+
+/// 迁移旧版 TikTok 凭证文件到数据库（升级兼容；成功后删除旧文件）。
+pub(crate) async fn migrate_legacy_tiktok_credentials() -> Result<()> {
+    let _ = crate::credential_store::migrate_file_to_db(
+        crate::credential_store::keys::TIKTOK_COOKIES,
+        &CONFIG_DIR.join("tiktok-cookies.txt"),
+        is_netscape_tiktok_cookie_file,
+    )
+    .await?;
+    let _ = crate::credential_store::migrate_file_to_db(
+        crate::credential_store::keys::TIKTOK_LOCALSTORAGE,
+        &CONFIG_DIR.join("tiktok-localstorage.json"),
+        |contents| serde_json::from_str::<serde_json::Value>(contents).is_ok(),
+    )
+    .await?;
+    if !crate::credential_store::has(crate::credential_store::keys::TIKTOK_SECUID) {
+        if let Some(secuid) = load_manual_tiktok_secuid() {
+            crate::credential_store::set(crate::credential_store::keys::TIKTOK_SECUID, &secuid).await?;
+            let _ = tokio::fs::remove_file(tiktok_secuid_path()).await;
+        }
+    }
+    if !crate::credential_store::has(crate::credential_store::keys::TIKTOK_WEBID) {
+        if let Ok(value) = std::fs::read_to_string(tiktok_webid_path()) {
+            let value = value.trim().to_string();
+            if value.len() >= 16
+                && value.len() <= 20
+                && value.chars().all(|character| character.is_ascii_digit())
+            {
+                crate::credential_store::set(crate::credential_store::keys::TIKTOK_WEBID, &value).await?;
+                let _ = tokio::fs::remove_file(tiktok_webid_path()).await;
+            }
+        }
+    }
+    Ok(())
 }

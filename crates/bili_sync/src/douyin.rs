@@ -289,10 +289,10 @@ struct PostPage {
 }
 
 pub async fn douyin_status() -> Result<ApiResponse<DouyinStatusResponse>, ApiError> {
-    let path = cookie_path();
+    let cookie_file = douyin_cookie_file();
     Ok(ApiResponse::ok(DouyinStatusResponse {
-        logged_in: has_douyin_session(&path),
-        cookie_path: path.display().to_string(),
+        logged_in: douyin_has_session(),
+        cookie_path: cookie_file.map(|path| path.display().to_string()).unwrap_or_default(),
     }))
 }
 
@@ -304,19 +304,10 @@ pub async fn import_douyin_cookie_file(
             "文件不是包含 douyin.com 会话的 Netscape cookies.txt；请在电脑浏览器打开抖音后导出 cookies.txt",
         ));
     }
-    let path = cookie_path();
-    let parent = path.parent().context("无效的抖音 Cookie 文件路径")?;
-    tokio::fs::create_dir_all(parent).await?;
-    let temporary = path.with_extension("txt.importing");
-    tokio::fs::write(&temporary, request.cookies.as_bytes())
-        .await
-        .context("写入抖音 cookies.txt 失败")?;
-    validate_cookie_file(&temporary).await?;
-    // 旧版或历史导入可能残留旧会话的 cookies/msToken/verify_fp/webid 及备份
-    // 快照，混用会导致签名或风控异常；验证通过后先全部清理（排除当前临时
-    // 文件）再写入新会话。
-    clear_douyin_login_state_except(Some(&temporary)).await;
-    replace_cookie_file(&temporary, &path).await?;
+    validate_cookie_contents(&request.cookies).await?;
+    // 先清理旧会话（数据库 + 历史文件），再将新会话写入数据库。
+    clear_douyin_login_state().await;
+    set_douyin_cookies(&request.cookies).await?;
     let mut imported_device_fields = 0usize;
     if let Some(webid) = request
         .webid
@@ -324,7 +315,7 @@ pub async fn import_douyin_cookie_file(
         .map(str::trim)
         .filter(|value| valid_webid(value))
     {
-        persist_session_value(&CONFIG_DIR.join("douyin-webid.txt"), webid).await?;
+        set_douyin_single_value(crate::credential_store::keys::DOUYIN_WEBID, webid).await?;
         imported_device_fields += 1;
     }
     if let Some(verify_fp) = request
@@ -333,7 +324,7 @@ pub async fn import_douyin_cookie_file(
         .map(str::trim)
         .filter(|value| valid_verify_fp(value))
     {
-        persist_session_value(&CONFIG_DIR.join("douyin-verify-fp.txt"), verify_fp).await?;
+        set_douyin_single_value(crate::credential_store::keys::DOUYIN_VERIFY_FP, verify_fp).await?;
         imported_device_fields += 1;
     }
     if let Some(ms_token) = request
@@ -342,11 +333,11 @@ pub async fn import_douyin_cookie_file(
         .map(str::trim)
         .filter(|value| valid_ms_token(value))
     {
-        persist_session_value(&ms_token_path(), ms_token).await?;
+        set_douyin_single_value(crate::credential_store::keys::DOUYIN_MSTOKEN, ms_token).await?;
         imported_device_fields += 1;
     }
     // 登录助手同步的 localStorage 里包含抖音 secsdk 会话密钥（security-sdk/SLARDAR 等），
-    // 「我的喜欢」「收藏夹」接口签名需要用到；写入 douyin-secsdk.json 供签名器读取。
+    // 「我的喜欢」「收藏夹」接口签名需要用到；写入数据库供签名器读取。
     let mut secsdk_imported = false;
     if let Some(local_storage) = request.local_storage.as_ref().filter(|map| !map.is_empty()) {
         let secsdk = serde_json::json!({
@@ -355,12 +346,7 @@ pub async fn import_douyin_cookie_file(
             "href": request.href.clone().unwrap_or_default(),
             "ssr_user_id": "",
         });
-        tokio::fs::write(
-            douyin_secsdk_path(),
-            serde_json::to_vec_pretty(&secsdk).context("序列化抖音 secsdk 会话失败")?,
-        )
-        .await
-        .context("写入抖音 secsdk 密钥文件失败")?;
+        set_douyin_secsdk(&serde_json::to_string(&secsdk).context("序列化抖音 secsdk 会话失败")?).await?;
         secsdk_imported = true;
         info!(
             target: "bili_sync_rs::douyin",
@@ -2114,11 +2100,12 @@ async fn sign_douyin_url(url: &str) -> Result<String> {
             "未找到 Node.js 运行时：抖音收藏夹/我的喜欢接口需要 Node.js 执行官方 webmssdk+secsdk 现场签名。请安装 Node.js，或通过环境变量 BILI_SYNC_DOUYIN_NODE 指定 node 路径"
         )
     })?;
+    let signer_env_dir = sync_douyin_signer_env().await?;
     let mut command = tokio::process::Command::new(&node);
     command
         .arg(&signer)
         .arg(url)
-        .env("BILI_SYNC_CONFIG_DIR", CONFIG_DIR.as_os_str())
+        .env("BILI_SYNC_CONFIG_DIR", signer_env_dir)
         .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(60), command.output())
         .await
@@ -2333,18 +2320,13 @@ async fn generate_webid() -> Result<String> {
 /// user_unique_id；每次搜索都重新生成会被识别为同一会话在不断更换设备，几次
 /// 请求后即返回 verify_check。因此首次生成后与 Cookie 一样落到配置目录复用。
 async fn stable_webid() -> Result<String> {
-    let path = CONFIG_DIR.join("douyin-webid.txt");
-    if let Ok(value) = tokio::fs::read_to_string(&path).await {
-        let value = value.trim();
-        if valid_webid(value) {
-            return Ok(value.to_string());
+    if let Some(value) = douyin_single_value(crate::credential_store::keys::DOUYIN_WEBID) {
+        if valid_webid(&value) {
+            return Ok(value);
         }
     }
     let webid = generate_webid().await?;
-    tokio::fs::create_dir_all(&*CONFIG_DIR).await?;
-    let temporary = path.with_extension("txt.importing");
-    tokio::fs::write(&temporary, webid.as_bytes()).await?;
-    replace_cookie_file(&temporary, &path).await?;
+    set_douyin_single_value(crate::credential_store::keys::DOUYIN_WEBID, &webid).await?;
     Ok(webid)
 }
 
@@ -2394,18 +2376,13 @@ fn generate_verify_fp() -> String {
 /// verifyFp/fp 与 webid 一样属于浏览器会话指纹。每次搜索重新生成会导致同一
 /// Cookie 在短时间内不断更换设备指纹，因此首次生成后持久化复用。
 async fn stable_verify_fp() -> Result<String> {
-    let path = CONFIG_DIR.join("douyin-verify-fp.txt");
-    if let Ok(value) = tokio::fs::read_to_string(&path).await {
-        let value = value.trim();
-        if valid_verify_fp(value) {
-            return Ok(value.to_string());
+    if let Some(value) = douyin_single_value(crate::credential_store::keys::DOUYIN_VERIFY_FP) {
+        if valid_verify_fp(&value) {
+            return Ok(value);
         }
     }
     let value = generate_verify_fp();
-    tokio::fs::create_dir_all(&*CONFIG_DIR).await?;
-    let temporary = path.with_extension("txt.importing");
-    tokio::fs::write(&temporary, value.as_bytes()).await?;
-    replace_cookie_file(&temporary, &path).await?;
+    set_douyin_single_value(crate::credential_store::keys::DOUYIN_VERIFY_FP, &value).await?;
     Ok(value)
 }
 
@@ -2427,17 +2404,16 @@ async fn ensure_search_ms_token(force_refresh: bool) -> Result<()> {
     if imported_cookie_has_ms_token() {
         return Ok(());
     }
-    let path = ms_token_path();
     if !force_refresh {
-        let fresh = tokio::fs::metadata(&path)
-            .await
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|elapsed| elapsed < Duration::from_secs(12 * 60 * 60));
-        if fresh {
-            if let Ok(value) = tokio::fs::read_to_string(&path).await {
-                if valid_ms_token(&value) {
+        if let Some(value) = douyin_single_value(crate::credential_store::keys::DOUYIN_MSTOKEN) {
+            if valid_ms_token(&value) {
+                // 保留原文件时代 12 小时内复用的新鲜度语义：
+                // 数据库的 updated_at 代替文件 mtime。
+                if let Some(updated_at_unix) = crate::credential_store::updated_at(crate::credential_store::keys::DOUYIN_MSTOKEN) {
+                    if chrono::Utc::now().timestamp().saturating_sub(updated_at_unix) < 12 * 3600 {
+                        return Ok(());
+                    }
+                } else {
                     return Ok(());
                 }
             }
@@ -2477,10 +2453,7 @@ async fn ensure_search_ms_token(force_refresh: bool) -> Result<()> {
         .find_map(|part| part.trim().strip_prefix("msToken=").map(str::to_string))
         .filter(|value| valid_ms_token(value))
         .context("抖音 mssdk 响应没有返回有效 msToken")?;
-    tokio::fs::create_dir_all(&*CONFIG_DIR).await?;
-    let temporary = path.with_extension("txt.importing");
-    tokio::fs::write(&temporary, token.as_bytes()).await?;
-    replace_cookie_file(&temporary, &path).await?;
+    set_douyin_single_value(crate::credential_store::keys::DOUYIN_MSTOKEN, &token).await?;
     Ok(())
 }
 
@@ -2512,8 +2485,7 @@ pub(crate) fn cookie_header() -> Result<String> {
 }
 
 fn read_cookie_file_values() -> HashMap<String, String> {
-    std::fs::read_to_string(cookie_path())
-        .ok()
+    douyin_cookie_text()
         .map(|contents| {
             contents
                 .lines()
@@ -2534,9 +2506,9 @@ fn read_cookie_file_values() -> HashMap<String, String> {
 fn cookie_values() -> HashMap<String, String> {
     let mut values = read_cookie_file_values();
     if !values.contains_key("msToken") {
-        if let Ok(token) = std::fs::read_to_string(ms_token_path()) {
+        if let Some(token) = douyin_single_value(crate::credential_store::keys::DOUYIN_MSTOKEN) {
             if valid_ms_token(&token) {
-                values.insert("msToken".to_string(), token.trim().to_string());
+                values.insert("msToken".to_string(), token);
             }
         }
     }
@@ -2544,8 +2516,7 @@ fn cookie_values() -> HashMap<String, String> {
 }
 
 pub(crate) fn append_cookies(command: &mut tokio::process::Command) {
-    let path = cookie_path();
-    if has_douyin_session(&path) {
+    if let Some(path) = douyin_cookie_file() {
         command.arg("--cookies").arg(path);
     }
 }
@@ -2557,6 +2528,76 @@ pub(crate) fn cookie_path() -> PathBuf {
 /// 抖音 secsdk 会话密钥文件（由外部平台登录助手同步的 localStorage 写入）。
 pub(crate) fn douyin_secsdk_path() -> PathBuf {
     CONFIG_DIR.join("douyin-secsdk.json")
+}
+
+/// 抖音 cookies 当前内容：优先数据库，回退旧版 cookies.txt（启动迁移会搬进数据库）。
+fn douyin_cookie_text() -> Option<String> {
+    if let Some(value) = crate::credential_store::get(crate::credential_store::keys::DOUYIN_COOKIES) {
+        return Some(value);
+    }
+    std::fs::read_to_string(cookie_path()).ok()
+}
+
+/// 抖音 secsdk 签名会话 JSON 当前内容：优先数据库，回退旧版 douyin-secsdk.json。
+fn douyin_secsdk_text() -> Option<String> {
+    if let Some(value) = crate::credential_store::get(crate::credential_store::keys::DOUYIN_SECSDK) {
+        return Some(value);
+    }
+    std::fs::read_to_string(douyin_secsdk_path()).ok()
+}
+
+async fn set_douyin_cookies(contents: &str) -> Result<()> {
+    crate::credential_store::set(crate::credential_store::keys::DOUYIN_COOKIES, contents).await
+}
+
+async fn set_douyin_secsdk(json: &str) -> Result<()> {
+    crate::credential_store::set(crate::credential_store::keys::DOUYIN_SECSDK, json).await
+}
+
+/// 抖音是否已导入可用会话（cookies 有效）。
+fn douyin_has_session() -> bool {
+    douyin_cookie_text().is_some_and(|contents| is_netscape_douyin_cookie_file(&contents))
+}
+
+/// 返回可传给 yt-dlp `--cookies` 的抖音 cookie 文件路径（数据库影子文件或旧版文件）。
+fn douyin_cookie_file() -> Option<PathBuf> {
+    let contents = douyin_cookie_text()?;
+    if contents.trim().is_empty() {
+        return None;
+    }
+    match crate::credential_store::sync_shadow(crate::credential_store::keys::DOUYIN_COOKIES, &contents) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            warn!(target: "bili_sync_rs::douyin", error = %error, "写入抖音影子 Cookie 文件失败");
+            None
+        }
+    }
+}
+
+/// 抖音 Node 签名器使用的影子环境目录（含 douyin-cookies.txt + douyin-secsdk.json）。
+fn douyin_signer_shadow_dir() -> PathBuf {
+    std::env::temp_dir().join("bili-sync-external").join("douyin-signer")
+}
+
+/// 把数据库里的 cookies 与 secsdk 会话写入签名器影子目录，返回该目录。
+async fn sync_douyin_signer_env() -> Result<PathBuf> {
+    let dir = douyin_signer_shadow_dir();
+    tokio::fs::create_dir_all(&dir).await?;
+    let cookies = douyin_cookie_text().context("缺少抖音 cookies：请先在设置页导入 cookies.txt")?;
+    let secsdk = douyin_secsdk_text()
+        .context("缺少抖音 secsdk 签名会话：请用电脑端登录助手重新传输登录状态")?;
+    tokio::fs::write(dir.join("douyin-cookies.txt"), cookies.as_bytes()).await?;
+    tokio::fs::write(dir.join("douyin-secsdk.json"), secsdk.as_bytes()).await?;
+    Ok(dir)
+}
+
+/// webid / verify_fp / msToken 等单值凭证的数据库读取。
+fn douyin_single_value(key: &str) -> Option<String> {
+    crate::credential_store::get(key).map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+}
+
+async fn set_douyin_single_value(key: &str, value: &str) -> Result<()> {
+    crate::credential_store::set(key, value.trim()).await
 }
 
 /// 抖音登录状态相关文件（主 Cookie 与设备参数）的基准名。
@@ -2573,6 +2614,19 @@ const DOUYIN_LOGIN_STATE_BASES: [&str; 4] = [
 /// `*.backup` / `*.importing` / `*.before-har-*` 等备份快照；新旧混用会导致
 /// 签名校验或风控异常。新导入前调用，先清干净再写入新会话。
 pub(crate) async fn clear_douyin_login_state() {
+    for key in [
+        crate::credential_store::keys::DOUYIN_COOKIES,
+        crate::credential_store::keys::DOUYIN_SECSDK,
+        crate::credential_store::keys::DOUYIN_MSTOKEN,
+        crate::credential_store::keys::DOUYIN_WEBID,
+        crate::credential_store::keys::DOUYIN_VERIFY_FP,
+    ] {
+        if crate::credential_store::has(key) {
+            if let Err(error) = crate::credential_store::delete(key).await {
+                warn!(target: "bili_sync_rs::douyin", error = %error, "清理数据库中的抖音登录凭证失败");
+            }
+        }
+    }
     clear_douyin_login_state_except(None).await;
 }
 
@@ -2629,13 +2683,18 @@ async fn capture_douyin_response_cookies(response: &reqwest::Response) {
         .host_str()
         .unwrap_or("www.douyin.com")
         .to_string();
-    crate::utils::netscape_cookies::renew_cookie_file(
-        &cookie_path(),
-        response.headers(),
-        &fallback_domain,
-        is_douyin_cookie_domain,
-    )
-    .await;
+    if let Some(contents) = douyin_cookie_text() {
+        if let Some(merged) = crate::utils::netscape_cookies::renew_cookie_text(
+            &contents,
+            response.headers(),
+            &fallback_domain,
+            is_douyin_cookie_domain,
+        ) {
+            if let Err(error) = set_douyin_cookies(&merged).await {
+                warn!(target: "bili_sync_rs::douyin", error = %error, "写回抖音续约后的 Cookie 失败");
+            }
+        }
+    }
 }
 
 /// 登录状态探测结果。
@@ -2656,7 +2715,7 @@ pub(crate) enum DouyinLoginProbe {
 /// 仅在响应明确表示未登录时返回 `Expired`；HTTP 403 等风控或网络错误一律返回
 /// `Unclear`，避免把“被风控”误判成“掉登录”而清掉用户会话。
 pub(crate) async fn probe_douyin_login() -> DouyinLoginProbe {
-    if !has_douyin_session(&cookie_path()) {
+    if !douyin_has_session() {
         return DouyinLoginProbe::NotConfigured;
     }
     match signed_get(DOUYIN_PROFILE_SELF_API, common_query_pairs()).await {
@@ -2685,7 +2744,7 @@ pub(crate) async fn probe_douyin_login() -> DouyinLoginProbe {
 }
 
 fn ensure_session() -> Result<()> {
-    if has_douyin_session(&cookie_path()) {
+    if douyin_has_session() {
         Ok(())
     } else {
         bail!("抖音扫描需要新鲜 Cookie，请先在设置页导入电脑浏览器导出的 douyin.com cookies.txt")
@@ -2717,9 +2776,8 @@ fn is_netscape_douyin_cookie_file(contents: &str) -> bool {
         })
 }
 
-async fn validate_cookie_file(path: &Path) -> Result<()> {
-    let contents = tokio::fs::read_to_string(path).await?;
-    if !is_netscape_douyin_cookie_file(&contents) {
+async fn validate_cookie_contents(contents: &str) -> Result<()> {
+    if !is_netscape_douyin_cookie_file(contents) {
         bail!("Cookie 文件没有可用的 douyin.com 会话字段");
     }
     let response = reqwest::Client::builder()
@@ -3977,4 +4035,41 @@ mod tests {
         let _ = std::fs::remove_file(&senc_path);
     }
 
+}
+
+/// 迁移旧版抖音凭证文件到数据库（升级兼容；成功后删除旧文件）。
+pub(crate) async fn migrate_legacy_douyin_credentials() -> Result<()> {
+    let _ = crate::credential_store::migrate_file_to_db(
+        crate::credential_store::keys::DOUYIN_COOKIES,
+        &CONFIG_DIR.join("douyin-cookies.txt"),
+        is_netscape_douyin_cookie_file,
+    )
+    .await?;
+    let _ = crate::credential_store::migrate_file_to_db(
+        crate::credential_store::keys::DOUYIN_SECSDK,
+        &douyin_secsdk_path(),
+        |contents| serde_json::from_str::<serde_json::Value>(contents).is_ok(),
+    )
+    .await?;
+    for (key, name, valid) in [
+        (crate::credential_store::keys::DOUYIN_MSTOKEN, "douyin-mstoken.txt", valid_ms_token as fn(&str) -> bool),
+        (crate::credential_store::keys::DOUYIN_WEBID, "douyin-webid.txt", valid_webid as fn(&str) -> bool),
+        (crate::credential_store::keys::DOUYIN_VERIFY_FP, "douyin-verify-fp.txt", valid_verify_fp as fn(&str) -> bool),
+    ] {
+        if crate::credential_store::has(key) {
+            continue;
+        }
+        let path = CONFIG_DIR.join(name);
+        let Ok(value) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        let value = value.trim();
+        if !valid(value) {
+            continue;
+        }
+        crate::credential_store::set(key, value).await?;
+        let _ = tokio::fs::remove_file(&path).await;
+        info!(target: "bili_sync_rs::douyin", key, "已将旧版抖音凭证文件迁移到数据库并删除");
+    }
+    Ok(())
 }

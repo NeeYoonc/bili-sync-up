@@ -869,6 +869,11 @@ pub async fn setup_database() -> DatabaseConnection {
     let connection_arc = Arc::new(connection.clone());
     let _ = GLOBAL_DB.set(connection_arc);
 
+    // 加载外部平台（YouTube/抖音/TikTok）凭证到内存缓存
+    if let Err(error) = crate::credential_store::init(&connection).await {
+        tracing::warn!(error = %error, "加载外部平台凭证失败");
+    }
+
     connection
 }
 
