@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -5525,6 +5525,30 @@ fn ytdlp_version_at_least(version: &str, want: (u32, u32, u32)) -> bool {
     got >= want
 }
 
+/// yt-dlp 自动升级失败后的重试冷却：启动阶段多个入口（设置页/添加源/扫描）都会调用
+/// `ensure_ytdlp_available`，失败后 1 小时内不再重试，避免反复触发一次最长 3 分钟的下载。
+const YTDLP_UPGRADE_RETRY_COOLDOWN: Duration = Duration::from_secs(60 * 60);
+
+/// 距下次允许自动升级 yt-dlp 的 Unix 秒（0 表示未冷却）。
+static YTDLP_UPGRADE_COOLDOWN_UNTIL: AtomicI64 = AtomicI64::new(0);
+
+fn ytdlp_upgrade_on_cooldown() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    now < YTDLP_UPGRADE_COOLDOWN_UNTIL.load(Ordering::Relaxed)
+}
+
+fn set_ytdlp_upgrade_cooldown() {
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+        + YTDLP_UPGRADE_RETRY_COOLDOWN.as_secs() as i64;
+    YTDLP_UPGRADE_COOLDOWN_UNTIL.store(until, Ordering::Relaxed);
+}
+
 pub(crate) async fn ensure_ytdlp_available() -> Result<()> {
     if let Ok(configured) = std::env::var("BILI_SYNC_YTDLP_PATH") {
         let configured = PathBuf::from(configured);
@@ -5541,16 +5565,6 @@ pub(crate) async fn ensure_ytdlp_available() -> Result<()> {
         return Ok(());
     }
 
-    if let Some(version) = ytdlp_version().await {
-        if ytdlp_version_at_least(&version, YTDLP_VISIONOS_MIN_VERSION) {
-            return Ok(());
-        }
-        warn!(
-            version,
-            "当前 yt-dlp 版本过旧（缺少 visionos 客户端，YouTube 4K 会退化为 1080p），自动重新下载最新版"
-        );
-    }
-
     let package = current_ytdlp_package().ok_or_else(|| {
         anyhow!(
             "当前系统架构暂不支持自动下载 yt-dlp（{}-{}），请设置 BILI_SYNC_YTDLP_PATH",
@@ -5560,14 +5574,39 @@ pub(crate) async fn ensure_ytdlp_available() -> Result<()> {
     })?;
     let _guard = ytdlp_install_lock().lock().await;
 
+    // 已有可用的 yt-dlp：版本达标直接使用；过旧则自动升级（优先走外源代理）。
+    // 升级失败不阻断流程，继续用旧版（4K 可能退化为 1080p），并进入 1 小时重试冷却。
     if let Some(version) = ytdlp_version().await {
         if ytdlp_version_at_least(&version, YTDLP_VISIONOS_MIN_VERSION) {
             return Ok(());
         }
+        if ytdlp_upgrade_on_cooldown() {
+            return Ok(());
+        }
+        let binary_path = managed_ytdlp_path(package);
+        match download_and_install_ytdlp(package, &binary_path, Some(&version)).await {
+            Ok(()) => {
+                if let Some(new_version) = ytdlp_version_at(&binary_path).await {
+                    info!(version = new_version, "yt-dlp 已自动升级并可用");
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                set_ytdlp_upgrade_cooldown();
+                warn!(
+                    version,
+                    error = %error,
+                    "yt-dlp 自动升级失败，继续使用现有版本（YouTube 4K 可能退化为 1080p，1 小时内不再自动重试；也可手动把新版 yt-dlp 放到 {}）",
+                    managed_ytdlp_path(package).display()
+                );
+                return Ok(());
+            }
+        }
     }
 
+    // 完全没有 yt-dlp：全新安装（失败即报错，因为无旧版可回退）。
     let binary_path = managed_ytdlp_path(package);
-    download_and_install_ytdlp(package, &binary_path).await?;
+    download_and_install_ytdlp(package, &binary_path, None).await?;
     let version = ytdlp_version_at(&binary_path)
         .await
         .ok_or_else(|| anyhow!("yt-dlp 安装完成后执行校验失败：{}", binary_path.display()))?;
@@ -5636,7 +5675,11 @@ fn managed_ytdlp_path(package: YtDlpPackage) -> PathBuf {
         .join(package.binary_name)
 }
 
-async fn download_and_install_ytdlp(package: YtDlpPackage, binary_path: &Path) -> Result<()> {
+async fn download_and_install_ytdlp(
+    package: YtDlpPackage,
+    binary_path: &Path,
+    old_version: Option<&str>,
+) -> Result<()> {
     let parent = binary_path
         .parent()
         .ok_or_else(|| anyhow!("yt-dlp 安装路径无效：{}", binary_path.display()))?;
@@ -5644,66 +5687,120 @@ async fn download_and_install_ytdlp(package: YtDlpPackage, binary_path: &Path) -
         .await
         .with_context(|| format!("创建 yt-dlp 安装目录失败：{}", parent.display()))?;
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(YTDLP_DOWNLOAD_TIMEOUT)
-        .user_agent(concat!("bili-sync-up/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("创建 yt-dlp 下载客户端失败")?;
     let asset_url = format!("{YTDLP_RELEASE_BASE_URL}/{}", package.asset_name);
     let checksums_url = format!("{YTDLP_RELEASE_BASE_URL}/SHA2-256SUMS");
-    info!(
-        target = package.target_key,
-        asset = package.asset_name,
-        url = asset_url,
-        "本机未检测到 yt-dlp，开始下载对应系统版本"
-    );
-
-    let (asset_response, checksums_response) =
-        tokio::try_join!(client.get(&asset_url).send(), client.get(&checksums_url).send())
-            .context("请求 yt-dlp 官方发布文件失败")?;
-    let asset_bytes = asset_response
-        .error_for_status()
-        .with_context(|| format!("下载 yt-dlp 返回错误状态：{asset_url}"))?
-        .bytes()
-        .await
-        .context("读取 yt-dlp 下载内容失败")?;
-    let checksums = checksums_response
-        .error_for_status()
-        .with_context(|| format!("下载 yt-dlp 校验文件返回错误状态：{checksums_url}"))?
-        .text()
-        .await
-        .context("读取 yt-dlp 校验文件失败")?;
-    let expected = checksum_for_release_asset(&checksums, package.asset_name)
-        .ok_or_else(|| anyhow!("yt-dlp 官方校验文件中缺少 {}", package.asset_name))?;
-    let actual = hex::encode(Sha256::digest(asset_bytes.as_ref()));
-    if !actual.eq_ignore_ascii_case(expected) {
-        bail!(
-            "yt-dlp 文件校验失败：asset={}, expected={}, actual={}",
-            package.asset_name,
-            expected,
-            actual
-        );
+    match old_version {
+        Some(version) => info!(
+            version,
+            url = asset_url,
+            "yt-dlp 版本过旧，自动下载最新版替换"
+        ),
+        None => info!(
+            target = package.target_key,
+            asset = package.asset_name,
+            url = asset_url,
+            "本机未检测到 yt-dlp，开始下载对应系统版本"
+        ),
     }
 
-    if let Some(archive_binary_name) = package.archive_binary_name {
-        install_ytdlp_zip(asset_bytes.as_ref(), binary_path, archive_binary_name).await?;
+    // 外源代理：配置了代理时优先走代理下载（部分网络下 GitHub 仅代理可达），
+    // 代理失败再回退直连；未配置代理则只走直连。
+    let configured_proxy = configured_external_proxy();
+    let proxy = if configured_proxy.trim().is_empty() {
+        None
+    } else {
+        Some(configured_proxy.trim().to_string())
+    };
+    let build_client = |use_proxy: bool| -> Result<reqwest::Client> {
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(YTDLP_DOWNLOAD_TIMEOUT)
+            .user_agent(concat!("bili-sync-up/", env!("CARGO_PKG_VERSION")));
+        if use_proxy {
+            if let Some(proxy) = proxy.as_deref() {
+                builder = builder.proxy(
+                    reqwest::Proxy::all(proxy)
+                        .with_context(|| format!("解析 yt-dlp 下载代理失败：{proxy}"))?,
+                );
+            }
+        }
+        builder.build().context("创建 yt-dlp 下载客户端失败")
+    };
+    let attempts: Vec<bool> = if proxy.is_some() { vec![true, false] } else { vec![false] };
+    let total_attempts = attempts.len();
+
+    let mut last_error = None;
+    for (index, use_proxy) in attempts.into_iter().enumerate() {
+        let client = build_client(use_proxy)?;
+        let fetched = async {
+            let (asset_response, checksums_response) = tokio::try_join!(
+                client.get(&asset_url).send(),
+                client.get(&checksums_url).send(),
+            )
+            .context("请求 yt-dlp 官方发布文件失败")?;
+            let asset_bytes = asset_response
+                .error_for_status()
+                .with_context(|| format!("下载 yt-dlp 返回错误状态：{asset_url}"))?
+                .bytes()
+                .await
+                .context("读取 yt-dlp 下载内容失败")?;
+            let checksums = checksums_response
+                .error_for_status()
+                .with_context(|| format!("下载 yt-dlp 校验文件返回错误状态：{checksums_url}"))?
+                .text()
+                .await
+                .context("读取 yt-dlp 校验文件失败")?;
+            Ok::<_, anyhow::Error>((asset_bytes, checksums))
+        }
+        .await;
+        let (asset_bytes, checksums) = match fetched {
+            Ok(value) => value,
+            Err(error) => {
+                last_error = Some(error);
+                if index + 1 < total_attempts {
+                    warn!(
+                        "yt-dlp {}下载失败，回退直连重试",
+                        if use_proxy { "代理" } else { "直连" }
+                    );
+                }
+                continue;
+            }
+        };
+
+        let expected = checksum_for_release_asset(&checksums, package.asset_name)
+            .ok_or_else(|| anyhow!("yt-dlp 官方校验文件中缺少 {}", package.asset_name))?;
+        let actual = hex::encode(Sha256::digest(asset_bytes.as_ref()));
+        if !actual.eq_ignore_ascii_case(expected) {
+            bail!(
+                "yt-dlp 文件校验失败：asset={}, expected={}, actual={}",
+                package.asset_name,
+                expected,
+                actual
+            );
+        }
+
+        if let Some(archive_binary_name) = package.archive_binary_name {
+            install_ytdlp_zip(asset_bytes.as_ref(), binary_path, archive_binary_name).await?;
+            return Ok(());
+        }
+
+        let temporary = binary_path.with_extension(if cfg!(windows) { "download.exe" } else { "download" });
+        if let Err(error) = tokio::fs::write(&temporary, asset_bytes.as_ref()).await {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(error).with_context(|| format!("写入 yt-dlp 临时文件失败：{}", temporary.display()));
+        }
+        set_ytdlp_executable_permissions(&temporary).await?;
+        if ytdlp_version_at(&temporary).await.is_none() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            bail!("下载的 yt-dlp 无法执行：{}", temporary.display());
+        }
+        replace_file(&temporary, binary_path)
+            .await
+            .with_context(|| format!("安装 yt-dlp 失败：{}", binary_path.display()))?;
         return Ok(());
     }
 
-    let temporary = binary_path.with_extension(if cfg!(windows) { "download.exe" } else { "download" });
-    if let Err(error) = tokio::fs::write(&temporary, asset_bytes.as_ref()).await {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(error).with_context(|| format!("写入 yt-dlp 临时文件失败：{}", temporary.display()));
-    }
-    set_ytdlp_executable_permissions(&temporary).await?;
-    if ytdlp_version_at(&temporary).await.is_none() {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        bail!("下载的 yt-dlp 无法执行：{}", temporary.display());
-    }
-    replace_file(&temporary, binary_path)
-        .await
-        .with_context(|| format!("安装 yt-dlp 失败：{}", binary_path.display()))
+    Err(last_error.unwrap_or_else(|| anyhow!("yt-dlp 下载失败")))
 }
 
 async fn install_ytdlp_zip(bytes: &[u8], binary_path: &Path, archive_binary_name: &str) -> Result<()> {
