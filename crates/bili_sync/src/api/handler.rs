@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::{convert::Infallible, time::Duration as StdDuration};
 
 use anyhow::{anyhow, Context, Result};
-use axum::extract::{Extension, Json, Path, Query};
+use axum::extract::{Extension, Json, Multipart, Path, Query};
 use axum::http::{header::IF_NONE_MATCH, HeaderMap};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
@@ -20339,6 +20339,75 @@ pub async fn restore_database(
 ) -> Result<ApiResponse<crate::api::response::DatabaseRestoreResponse>, ApiError> {
     let response = crate::db_maintenance::restore_backup(&request.backup_file).await?;
     Ok(ApiResponse::ok(response))
+}
+
+/// 上传外部备份包并安排恢复（重启后生效）。
+/// 请以 multipart 表单上传，字段名为 `file`。
+#[utoipa::path(
+    post,
+    path = "/api/database/restore-upload",
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseRestoreResponse>),
+    )
+)]
+pub async fn restore_database_upload(
+    mut multipart: Multipart,
+) -> Result<ApiResponse<crate::api::response::DatabaseRestoreResponse>, ApiError> {
+    use tokio::io::AsyncWriteExt;
+    const MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024; // 1GB
+
+    let mut uploaded: Option<(std::path::PathBuf, String)> = None;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|err| ApiError::bad_request(format!("读取上传数据失败：{err}")))?
+    {
+        let Some(field_name) = field.name() else { continue };
+        if field_name != "file" {
+            continue;
+        }
+        let original_name = field.file_name().unwrap_or("backup.sqlite").to_string();
+        let tmp_path = std::env::temp_dir().join(format!("bili-sync-db-import-{}.sqlite", uuid::Uuid::new_v4()));
+        let mut out = tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(|err| ApiError::bad_request(format!("创建上传临时文件失败：{err}")))?;
+        let mut total: u64 = 0;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|err| ApiError::bad_request(format!("读取上传数据失败：{err}")))?
+        {
+            total = total.saturating_add(chunk.len() as u64);
+            if total > MAX_UPLOAD_BYTES {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(ApiError::bad_request("上传的备份包过大（上限 1GB）"));
+            }
+            out.write_all(&chunk)
+                .await
+                .map_err(|err| ApiError::bad_request(format!("写入上传临时文件失败：{err}")))?;
+        }
+        out.flush()
+            .await
+            .map_err(|err| ApiError::bad_request(format!("写入上传临时文件失败：{err}")))?;
+        drop(out);
+        uploaded = Some((tmp_path, original_name));
+        break;
+    }
+
+    let Some((tmp_path, original_name)) = uploaded else {
+        return Err(ApiError::bad_request("未收到上传文件（表单字段名应为 file）"));
+    };
+
+    match crate::db_maintenance::import_backup(&tmp_path, &original_name).await {
+        Ok(response) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            Ok(ApiResponse::ok(response))
+        }
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            Err(ApiError::bad_request(err.to_string()))
+        }
+    }
 }
 
 /// 测试推送通知

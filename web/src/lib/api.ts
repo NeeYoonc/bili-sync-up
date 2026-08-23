@@ -121,11 +121,15 @@ class ApiClient {
 	private async request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
 		const url = `${this.baseURL}${endpoint}`;
 
+		const headers: Record<string, string> = {
+			...this.defaultHeaders,
+			...(options.headers as Record<string, string> | undefined)
+		};
+		if (typeof FormData !== 'undefined' && options.body instanceof FormData) {
+			delete headers['Content-Type'];
+		}
 		const config: RequestInit = {
-			headers: {
-				...this.defaultHeaders,
-				...options.headers
-			},
+			headers,
 			...options
 		};
 
@@ -1424,6 +1428,15 @@ class ApiClient {
 		return this.post<DatabaseRestoreResponse>('/database/restore', { backup_file: backupFile });
 	}
 
+	async uploadRestoreBackup(file: File, filename?: string): Promise<ApiResponse<DatabaseRestoreResponse>> {
+		const form = new FormData();
+		form.append('file', file, filename ?? file.name);
+		return this.request<DatabaseRestoreResponse>('/database/restore-upload', {
+			method: 'POST',
+			body: form
+		});
+	}
+
 	async testProxy(proxy?: string): Promise<ApiResponse<TestProxyResponse>> {
 		return this.post<TestProxyResponse>('/proxy/test', proxy !== undefined ? { proxy } : {});
 	}
@@ -1936,6 +1949,7 @@ export const api = {
 		apiClient.runDatabaseMaintenance(action),
 	getDatabaseBackups: () => apiClient.getDatabaseBackups(),
 	restoreDatabase: (backupFile: string) => apiClient.restoreDatabase(backupFile),
+	uploadRestoreBackup: (file: File, filename?: string) => apiClient.uploadRestoreBackup(file, filename),
 	/**
 	 * 订阅系统信息WebSocket事件
 	 */

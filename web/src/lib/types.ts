@@ -1489,6 +1489,7 @@ export interface DatabaseBackupInfo {
 	path: string;
 	size_bytes: number;
 	created_at: string;
+	is_import: boolean;
 }
 
 export interface DatabaseBackupListResponse {

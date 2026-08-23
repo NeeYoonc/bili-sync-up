@@ -469,10 +469,13 @@
 		danger: boolean;
 	} | null = null;
 
-	let databaseBackups: { name: string; path: string; size_bytes: number; created_at: string }[] = [];
+	let databaseBackups: { name: string; path: string; size_bytes: number; created_at: string; is_import: boolean }[] = [];
 	let databaseBackupsLoading = false;
 	let restoreTarget: { name: string; size_bytes: number; created_at: string } | null = null;
 	let restoreRunning = false;
+	let importFileInput: HTMLInputElement | undefined;
+	let importRestoreTarget: { file: File; name: string; size_bytes: number } | null = null;
+	let importRestoreRunning = false;
 
 	const defaultWebhookCustomBody = `{
   "source": "{{source}}",
@@ -1127,6 +1130,38 @@
 		} finally {
 			restoreRunning = false;
 			restoreTarget = null;
+		}
+	}
+
+	function selectImportFile() {
+		importFileInput?.click();
+	}
+
+	function onImportFilePicked(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (!file) return;
+		importRestoreTarget = { file, name: file.name, size_bytes: file.size };
+	}
+
+	async function runImportRestore() {
+		if (!importRestoreTarget) return;
+		const target = importRestoreTarget;
+		importRestoreRunning = true;
+		try {
+			const response = await runRequest(() => api.uploadRestoreBackup(target.file, target.name), {
+				context: '导入备份包失败'
+			});
+			if (response?.data?.success) {
+				toast.success('备份包已导入', { description: response.data.message });
+				await loadDatabaseBackups();
+			} else if (response?.data) {
+				toast.error('导入备份包失败', { description: response.data.message });
+			}
+		} finally {
+			importRestoreRunning = false;
+			importRestoreTarget = null;
 		}
 	}
 
@@ -5389,6 +5424,28 @@
 
 				<!-- 数据库备份与恢复 -->
 				<div class="space-y-3">
+					<div class="rounded-lg border p-3">
+						<div class="flex items-center justify-between gap-3">
+							<div class="min-w-0">
+								<p class="text-sm font-medium">导入备份包</p>
+								<p class="text-muted-foreground text-xs">选择其他电脑导出的 .sqlite 备份文件，导入后即可恢复；外部备份也会保留在本机备份列表中。</p>
+							</div>
+							<input
+								bind:this={importFileInput}
+								type="file"
+								accept=".sqlite,.db"
+								class="hidden"
+								onchange={onImportFilePicked}
+							/>
+							<button
+								type="button"
+								class="hover:bg-accent flex-shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors"
+								onclick={selectImportFile}
+							>
+								选择文件
+							</button>
+						</div>
+					</div>
 					<div class="flex items-center justify-between">
 						<h3 class="text-base font-semibold">数据库备份</h3>
 						<button
@@ -5409,7 +5466,12 @@
 							{#each databaseBackups as backup (backup.name)}
 								<div class="hover:bg-accent flex items-center justify-between rounded-lg border p-3 transition-colors">
 									<div class="min-w-0">
-										<p class="truncate font-mono text-sm">{backup.name}</p>
+										<p class="truncate font-mono text-sm">
+											{backup.name}
+											{#if backup.is_import}
+												<span class="ml-2 rounded bg-blue-500/15 px-1.5 py-0.5 text-xs font-normal text-blue-600 dark:text-blue-400">外部导入</span>
+											{/if}
+										</p>
 										<p class="text-muted-foreground text-xs">
 											{formatBytes(backup.size_bytes)} · {backup.created_at}
 										</p>
@@ -5519,6 +5581,47 @@
 				onclick={runRestore}
 			>
 				{restoreRunning ? '安排中...' : '确认恢复'}
+			</button>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>
+<!-- 数据库导入备份确认对话框 -->
+<AlertDialog.Root
+	open={!!importRestoreTarget}
+	onOpenChange={(open) => {
+		if (!open) importRestoreTarget = null;
+	}}
+>
+	<AlertDialog.Content class="max-w-md">
+		<AlertDialog.Header>
+			<AlertDialog.Title class="text-destructive dark:text-red-400">导入备份包并恢复</AlertDialog.Title>
+			<AlertDialog.Description>
+				<p class="mb-2">确定要导入以下备份包并替换当前数据库吗？</p>
+				<div class="rounded-md border bg-muted/50 p-3 font-mono text-xs">
+					<p class="break-all">{importRestoreTarget?.name}</p>
+					<p class="text-muted-foreground mt-1">{formatBytes(importRestoreTarget?.size_bytes ?? 0)}</p>
+				</div>
+				<div class="mt-3 rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+					<strong>注意：</strong>导入后会校验备份包有效性，恢复将在重启后生效。当前数据库会先自动保留一份快照，但请确认无需保留其它数据。
+				</div>
+			</AlertDialog.Description>
+		</AlertDialog.Header>
+		<AlertDialog.Footer class="flex justify-end gap-3 pt-4">
+			<button
+				type="button"
+				class="hover:bg-accent rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+				disabled={importRestoreRunning}
+				onclick={() => (importRestoreTarget = null)}
+			>
+				取消
+			</button>
+			<button
+				type="button"
+				class="disabled:cursor-not-allowed rounded-md border border-transparent bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+				disabled={importRestoreRunning}
+				onclick={runImportRestore}
+			>
+				{importRestoreRunning ? '导入中...' : '确认导入并恢复'}
 			</button>
 		</AlertDialog.Footer>
 	</AlertDialog.Content>

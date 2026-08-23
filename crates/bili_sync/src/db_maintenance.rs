@@ -444,11 +444,55 @@ mod tests {
             .expect("VACUUM 失败");
         assert!(resp.success);
     }
+    #[tokio::test]
+    async fn stage_restore_accepts_import_named_file() {
+        let dir = temp_dir("bili-sync-import-stage-test").await;
+        let backup = dir.join("data-import-20260824-120000.sqlite");
+        make_valid_backup(&backup).await;
+
+        stage_restore_at(&dir, "data-import-20260824-120000.sqlite")
+            .await
+            .expect("导入备份名应可通过校验");
+        assert!(dir.join("data.restore.sqlite").is_file());
+        assert!(dir.join("data.restore.marker").is_file());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn import_backup_moves_stages_and_keeps_import_file() {
+        let dir = temp_dir("bili-sync-import-test").await;
+        let external = dir.join("external-backup.sqlite");
+        make_valid_backup(&external).await;
+
+        let response = import_backup_at(&dir, &external, "external-backup.sqlite")
+            .await
+            .expect("导入备份失败");
+        assert!(response.success);
+        assert!(response.restart_required);
+        let name = response.backup_name.as_deref().expect("应有备份名");
+        assert!(name.starts_with("data-import-"), "{name}");
+        assert!(dir.join(name).is_file(), "导入文件应保留在配置目录");
+        assert!(!external.exists(), "外部临时文件应被移走");
+        assert!(dir.join("data.restore.sqlite").is_file());
+        assert!(dir.join("data.restore.marker").is_file());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn import_backup_rejects_invalid_sqlite() {
+        let dir = temp_dir("bili-sync-import-invalid-test").await;
+        let junk = dir.join("junk.sqlite");
+        tokio::fs::write(&junk, b"not a sqlite database at all").await.unwrap();
+
+        let result = import_backup_at(&dir, &junk, "junk.sqlite").await;
+        assert!(result.is_err(), "无效文件应被拒绝");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 }
 
 // ===== 备份 / 恢复 =====
 
-/// 列出配置目录下的数据库备份文件（data-backup-*.sqlite），按时间倒序。
+/// 列出配置目录下的数据库备份与导入文件（data-backup-*.sqlite / data-import-*.sqlite），按时间倒序。
 pub async fn list_backups() -> DatabaseBackupListResponse {
     let mut backups = Vec::new();
     let Ok(mut entries) = tokio::fs::read_dir(&*CONFIG_DIR).await else {
@@ -456,7 +500,9 @@ pub async fn list_backups() -> DatabaseBackupListResponse {
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("data-backup-") || !name.ends_with(".sqlite") {
+        let is_import = name.starts_with("data-import-") && name.ends_with(".sqlite");
+        let is_backup = name.starts_with("data-backup-") && name.ends_with(".sqlite");
+        if !is_import && !is_backup {
             continue;
         }
         let size_bytes = entry
@@ -483,6 +529,7 @@ pub async fn list_backups() -> DatabaseBackupListResponse {
             path: entry.path().display().to_string(),
             size_bytes,
             created_at,
+            is_import,
         });
     }
     backups.sort_by(|left, right| right.created_at.cmp(&left.created_at));
@@ -547,8 +594,8 @@ async fn stage_restore_at(config_dir: &std::path::Path, name: &str) -> Result<()
     if name.is_empty()
         || name.contains(['/', '\\'])
         || name.contains("..")
-        || !name.starts_with("data-backup-")
         || !name.ends_with(".sqlite")
+        || (!name.starts_with("data-backup-") && !name.starts_with("data-import-"))
     {
         bail!("无效的备份文件名：{name}");
     }
@@ -568,4 +615,47 @@ async fn stage_restore_at(config_dir: &std::path::Path, name: &str) -> Result<()
         .await
         .with_context(|| "写入恢复标记失败".to_string())?;
     Ok(())
+}
+
+/// 导入外部备份包：校验 → 移入配置目录（data-import-*.sqlite）→ 安排恢复（重启后生效）。
+pub async fn import_backup(
+    src_path: &std::path::Path,
+    original_name: &str,
+) -> Result<DatabaseRestoreResponse> {
+    import_backup_at(&CONFIG_DIR, src_path, original_name).await
+}
+
+/// `import_backup` 的可测试实现：目标目录通过参数注入。
+async fn import_backup_at(
+    config_dir: &std::path::Path,
+    src_path: &std::path::Path,
+    _original_name: &str,
+) -> Result<DatabaseRestoreResponse> {
+    // 仅接受真实的 bili-sync SQLite 数据库，避免导入任意文件。
+    validate_backup_is_sqlite(src_path).await?;
+
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let mut name = format!("data-import-{timestamp}.sqlite");
+    let mut target = config_dir.join(&name);
+    let mut counter = 1;
+    while target.exists() {
+        name = format!("data-import-{timestamp}-{counter}.sqlite");
+        target = config_dir.join(&name);
+        counter += 1;
+    }
+    tokio::fs::rename(src_path, &target)
+        .await
+        .with_context(|| format!("保存导入的备份包失败：{}", target.display()))?;
+
+    if let Err(err) = stage_restore_at(config_dir, &name).await {
+        let _ = tokio::fs::remove_file(&target).await;
+        return Err(err);
+    }
+    info!(path = %target.display(), "数据库管理：已导入外部备份包并安排恢复（重启后生效）");
+    Ok(DatabaseRestoreResponse {
+        success: true,
+        message: format!("已导入备份包「{name}」并安排恢复，重启 bili-sync 后生效"),
+        backup_name: Some(name),
+        restart_required: true,
+    })
 }

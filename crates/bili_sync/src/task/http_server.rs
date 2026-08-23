@@ -140,6 +140,7 @@ use crate::api::handler::{
     get_database_status,
     get_database_backups,
     restore_database,
+    restore_database_upload,
     run_database_maintenance,
     test_risk_control_handler,
     update_config,
@@ -434,6 +435,11 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/database/maintenance", post(run_database_maintenance))
         .route("/api/database/backups", get(get_database_backups))
         .route("/api/database/restore", post(restore_database))
+        // 外部备份包上传可达数百 MB，单路由放宽 body 上限
+        .route(
+            "/api/database/restore-upload",
+            post(restore_database_upload).layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)),
+        )
         // 视频流API
         .route("/api/videos/stream/{video_id}", get(stream_video))
         // 新增在线播放API

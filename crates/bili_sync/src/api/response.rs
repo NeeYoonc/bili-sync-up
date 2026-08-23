@@ -1374,6 +1374,8 @@ pub struct DatabaseBackupInfo {
     pub size_bytes: u64,
     /// 创建时间（YYYY-MM-DD HH:MM:SS）
     pub created_at: String,
+    /// 是否为外部导入的备份包（data-import-*.sqlite）
+    pub is_import: bool,
 }
 
 /// 数据库备份列表。
