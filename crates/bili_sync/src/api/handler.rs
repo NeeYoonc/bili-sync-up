@@ -20313,6 +20313,34 @@ pub async fn run_database_maintenance(
     Ok(ApiResponse::ok(response))
 }
 
+/// 获取数据库备份列表（设置页 → 数据库管理）。
+#[utoipa::path(
+    get,
+    path = "/api/database/backups",
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseBackupListResponse>),
+    )
+)]
+pub async fn get_database_backups() -> Result<ApiResponse<crate::api::response::DatabaseBackupListResponse>, ApiError> {
+    Ok(ApiResponse::ok(crate::db_maintenance::list_backups().await))
+}
+
+/// 安排数据库恢复（重启后生效）。
+#[utoipa::path(
+    post,
+    path = "/api/database/restore",
+    request_body = crate::api::request::RestoreDatabaseRequest,
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseRestoreResponse>),
+    )
+)]
+pub async fn restore_database(
+    axum::Json(request): axum::Json<crate::api::request::RestoreDatabaseRequest>,
+) -> Result<ApiResponse<crate::api::response::DatabaseRestoreResponse>, ApiError> {
+    let response = crate::db_maintenance::restore_backup(&request.backup_file).await?;
+    Ok(ApiResponse::ok(response))
+}
+
 /// 测试推送通知
 #[utoipa::path(
     post,

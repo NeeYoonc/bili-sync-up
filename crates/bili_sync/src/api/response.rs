@@ -1362,3 +1362,33 @@ pub struct DatabaseMaintenanceResponse {
     /// 操作后数据库大小（字节，vacuum 操作）
     pub size_after_bytes: Option<u64>,
 }
+
+/// 数据库备份文件信息。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseBackupInfo {
+    /// 备份文件名（data-backup-YYYYMMDD-HHMMSS.sqlite）
+    pub name: String,
+    /// 备份文件完整路径
+    pub path: String,
+    /// 文件大小（字节）
+    pub size_bytes: u64,
+    /// 创建时间（YYYY-MM-DD HH:MM:SS）
+    pub created_at: String,
+}
+
+/// 数据库备份列表。
+#[derive(Debug, Serialize, ToSchema, Default)]
+pub struct DatabaseBackupListResponse {
+    pub backups: Vec<DatabaseBackupInfo>,
+}
+
+/// 数据库恢复结果。
+#[derive(Debug, Serialize, ToSchema, Default)]
+pub struct DatabaseRestoreResponse {
+    pub success: bool,
+    pub message: String,
+    /// 被恢复的备份文件名
+    pub backup_name: Option<String>,
+    /// 是否需要在重启后生效
+    pub restart_required: bool,
+}

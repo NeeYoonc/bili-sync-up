@@ -5,13 +5,14 @@
 //! - 清理类：图片代理缓存、AI 对话历史、任务队列历史、孤立记录
 //! - 维护类：VACUUM 压缩、VACUUM INTO 快照备份（不锁库、不影响运行）
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use tracing::info;
 
 use crate::api::request::DatabaseMaintenanceAction;
 use crate::api::response::{
-    DatabaseMaintenanceResponse, DatabaseStatusCount, DatabaseStatusResponse, DatabaseTableStat,
+    DatabaseBackupInfo, DatabaseBackupListResponse, DatabaseMaintenanceResponse, DatabaseRestoreResponse,
+    DatabaseStatusCount, DatabaseStatusResponse, DatabaseTableStat,
 };
 use crate::config::CONFIG_DIR;
 
@@ -260,6 +261,41 @@ pub async fn run_maintenance(
 
 #[cfg(test)]
 mod tests {
+    use sea_orm::sqlx::sqlite::SqliteConnectOptions;
+    use sea_orm::sqlx::SqlitePool;
+    use sea_orm::SqlxSqliteConnector;
+
+    /// 构造一个最小但有效的 bili-sync 备份库（含必需表）。
+    async fn make_valid_backup(path: &std::path::Path) {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        let conn = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool.clone());
+        for sql in [
+            "CREATE TABLE video (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE video_source (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE config_items (key TEXT PRIMARY KEY)",
+            "CREATE TABLE seaql_migrations (version TEXT PRIMARY KEY)",
+        ] {
+            conn.execute_unprepared(sql).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    async fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        dir
+    }
+
     use super::*;
     use sea_orm::{ConnectionTrait, Database};
 
@@ -280,6 +316,53 @@ mod tests {
             db.execute_unprepared(sql).await.expect("建表失败");
         }
         db
+    }
+
+    #[tokio::test]
+    async fn backup_timestamp_parses_name() {
+        assert_eq!(
+            backup_timestamp("data-backup-20260824-123456.sqlite").as_deref(),
+            Some("2026-08-24 12:34:56")
+        );
+        assert!(backup_timestamp("data-backup-bad.sqlite").is_none());
+        assert!(backup_timestamp("other.sqlite").is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_backup_accepts_real_db_and_rejects_junk() {
+        let dir = temp_dir("bili-sync-backup-test").await;
+        let valid = dir.join("valid.sqlite");
+        make_valid_backup(&valid).await;
+        assert!(validate_backup_is_sqlite(&valid).await.is_ok());
+
+        let junk = dir.join("junk.sqlite");
+        tokio::fs::write(&junk, b"this is not sqlite").await.unwrap();
+        assert!(validate_backup_is_sqlite(&junk).await.is_err());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn stage_restore_writes_marker_and_staged_copy() {
+        let dir = temp_dir("bili-sync-restore-test").await;
+        let backup = dir.join("data-backup-20260824-123456.sqlite");
+        make_valid_backup(&backup).await;
+
+        stage_restore_at(&dir, "data-backup-20260824-123456.sqlite")
+            .await
+            .unwrap();
+        assert!(dir.join("data.restore.marker").is_file());
+        assert!(dir.join("data.restore.sqlite").is_file());
+        assert_eq!(
+            tokio::fs::read_to_string(dir.join("data.restore.marker"))
+                .await
+                .unwrap(),
+            "data-backup-20260824-123456.sqlite"
+        );
+
+        // 路径穿越 / 非法文件名被拒绝
+        assert!(stage_restore_at(&dir, "../data.sqlite").await.is_err());
+        assert!(stage_restore_at(&dir, "evil.sqlite").await.is_err());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
@@ -361,4 +444,128 @@ mod tests {
             .expect("VACUUM 失败");
         assert!(resp.success);
     }
+}
+
+// ===== 备份 / 恢复 =====
+
+/// 列出配置目录下的数据库备份文件（data-backup-*.sqlite），按时间倒序。
+pub async fn list_backups() -> DatabaseBackupListResponse {
+    let mut backups = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(&*CONFIG_DIR).await else {
+        return DatabaseBackupListResponse::default();
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("data-backup-") || !name.ends_with(".sqlite") {
+            continue;
+        }
+        let size_bytes = entry
+            .metadata()
+            .await
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let created_at = if let Some(parsed) = backup_timestamp(&name) {
+            parsed
+        } else if let Ok(meta) = entry.metadata().await {
+            meta.modified()
+                .ok()
+                .map(|time| {
+                    chrono::DateTime::<chrono::Local>::from(time)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        backups.push(DatabaseBackupInfo {
+            name,
+            path: entry.path().display().to_string(),
+            size_bytes,
+            created_at,
+        });
+    }
+    backups.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    DatabaseBackupListResponse { backups }
+}
+
+/// 从备份文件名解析创建时间：data-backup-YYYYMMDD-HHMMSS.sqlite
+fn backup_timestamp(name: &str) -> Option<String> {
+    let stem = name.strip_prefix("data-backup-")?.strip_suffix(".sqlite")?;
+    chrono::NaiveDateTime::parse_from_str(stem, "%Y%m%d-%H%M%S")
+        .ok()
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+/// 校验备份文件确实是可用的 bili-sync SQLite 数据库。
+async fn validate_backup_is_sqlite(path: &std::path::Path) -> Result<()> {
+    use sea_orm::sqlx::sqlite::SqliteConnectOptions;
+    use sea_orm::sqlx::SqlitePool;
+    use sea_orm::SqlxSqliteConnector;
+
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false);
+    let pool = SqlitePool::connect_with(options)
+        .await
+        .with_context(|| format!("无法打开备份文件（不是有效的 SQLite 数据库）：{}", path.display()))?;
+    let conn = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool.clone());
+    for table in ["video", "video_source", "config_items", "seaql_migrations"] {
+        let sql = format!(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{}'",
+            table.replace('\'', "''")
+        );
+        let count = conn
+            .query_one(Statement::from_string(conn.get_database_backend(), sql))
+            .await?
+            .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+            .unwrap_or(0);
+        if count < 1 {
+            bail!("备份文件缺少必需的表 {table}，可能不是本程序的数据库备份");
+        }
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// 安排数据库恢复：校验备份 → 复制为暂存文件 → 写“重启后生效”标记。
+pub async fn restore_backup(backup_file: &str) -> Result<DatabaseRestoreResponse> {
+    let name = backup_file.trim();
+    stage_restore_at(&CONFIG_DIR, name).await?;
+    info!(backup = name, "数据库恢复已安排：重启后生效");
+    Ok(DatabaseRestoreResponse {
+        success: true,
+        message: format!("已安排恢复「{name}」，重启 bili-sync 后生效"),
+        backup_name: Some(name.to_string()),
+        restart_required: true,
+    })
+}
+
+/// `restore_backup` 的可测试实现：目标目录通过参数注入。
+async fn stage_restore_at(config_dir: &std::path::Path, name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains(['/', '\\'])
+        || name.contains("..")
+        || !name.starts_with("data-backup-")
+        || !name.ends_with(".sqlite")
+    {
+        bail!("无效的备份文件名：{name}");
+    }
+    let source = config_dir.join(name);
+    if !source.is_file() {
+        bail!("备份文件不存在：{}", source.display());
+    }
+    validate_backup_is_sqlite(&source).await?;
+
+    let staged = config_dir.join("data.restore.sqlite");
+    let marker = config_dir.join("data.restore.marker");
+    let _ = tokio::fs::remove_file(&staged).await;
+    tokio::fs::copy(&source, &staged)
+        .await
+        .with_context(|| format!("复制备份文件失败：{}", source.display()))?;
+    tokio::fs::write(&marker, name.as_bytes())
+        .await
+        .with_context(|| "写入恢复标记失败".to_string())?;
+    Ok(())
 }

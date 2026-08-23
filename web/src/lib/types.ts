@@ -1482,3 +1482,22 @@ export interface DatabaseMaintenanceResponse {
 	size_before_bytes?: number | null;
 	size_after_bytes?: number | null;
 }
+
+
+export interface DatabaseBackupInfo {
+	name: string;
+	path: string;
+	size_bytes: number;
+	created_at: string;
+}
+
+export interface DatabaseBackupListResponse {
+	backups: DatabaseBackupInfo[];
+}
+
+export interface DatabaseRestoreResponse {
+	success: boolean;
+	message: string;
+	backup_name?: string | null;
+	restart_required: boolean;
+}

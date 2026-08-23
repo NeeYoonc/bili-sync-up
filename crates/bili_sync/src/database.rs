@@ -767,8 +767,77 @@ async fn preheat_database(connection: &DatabaseConnection) -> Result<()> {
     Ok(())
 }
 
+/// 应用上一次请求的“重启后恢复数据库”（设置页 → 数据库管理）。
+///
+/// 恢复请求在运行时把备份复制为 `data.restore.sqlite` 并写入
+/// `data.restore.marker`；本函数在**任何数据库连接建立之前**执行：
+/// 当前主库（含 WAL/SHM）整体挪到 `data.sqlite.pre-restore-<时间戳>`，
+/// 再用暂存文件替换主库，最后删除标记。旧库快照保留，便于手动回滚。
+pub async fn apply_pending_database_restore() -> anyhow::Result<bool> {
+    apply_pending_database_restore_at(&CONFIG_DIR).await
+}
+
+/// `apply_pending_database_restore` 的可测试实现：目录通过参数注入。
+async fn apply_pending_database_restore_at(config_dir: &std::path::Path) -> anyhow::Result<bool> {
+    use anyhow::Context;
+
+    let marker = config_dir.join("data.restore.marker");
+    let staged = config_dir.join("data.restore.sqlite");
+    if !marker.is_file() {
+        return Ok(false);
+    }
+    let source_name = tokio::fs::read_to_string(&marker)
+        .await
+        .unwrap_or_default();
+    if !staged.is_file() {
+        warn!(
+            marker = %marker.display(),
+            "检测到数据库恢复标记但暂存文件缺失，已忽略恢复请求"
+        );
+        let _ = tokio::fs::remove_file(&marker).await;
+        return Ok(false);
+    }
+
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    // 只保留最新一份 pre-restore 快照，避免累积占用磁盘。
+    if let Ok(mut entries) = tokio::fs::read_dir(config_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("data.sqlite.pre-restore-") {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+    }
+    // 挪走当前主库 + WAL/SHM（保留旧状态，便于手动回滚）。
+    for suffix in ["", "-wal", "-shm"] {
+        let from = config_dir.join(format!("data.sqlite{suffix}"));
+        if from.is_file() {
+            let to = config_dir.join(format!("data.sqlite.pre-restore-{timestamp}{suffix}"));
+            tokio::fs::rename(&from, &to)
+                .await
+                .with_context(|| format!("移动旧数据库文件失败：{}", from.display()))?;
+        }
+    }
+    // 用暂存文件替换主库。
+    tokio::fs::rename(&staged, &config_dir.join("data.sqlite"))
+        .await
+        .with_context(|| format!("替换主数据库失败：{}", staged.display()))?;
+    let _ = tokio::fs::remove_file(&marker).await;
+
+    info!(
+        source = %source_name.trim(),
+        snapshot = %format!("data.sqlite.pre-restore-{timestamp}"),
+        "数据库恢复已生效（原库已保留为恢复前快照）"
+    );
+    Ok(true)
+}
+
 /// 进行数据库迁移并获取数据库连接，供外部使用
 pub async fn setup_database() -> DatabaseConnection {
+    // 先处理“重启后恢复数据库”，必须在任何数据库连接建立之前。
+    if let Err(error) = apply_pending_database_restore().await {
+        warn!(error = %error, "应用数据库恢复失败，继续使用现有数据库");
+    }
     migrate_database().await.expect("数据库迁移失败");
     let connection = database_connection().await.expect("获取数据库连接失败");
 
@@ -1037,5 +1106,71 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    async fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn pending_restore_swaps_db_and_keeps_snapshot() {
+        let dir = temp_dir("bili-sync-db-restore").await;
+        // 当前库 + WAL/SHM
+        tokio::fs::write(dir.join("data.sqlite"), b"old-main").await.unwrap();
+        tokio::fs::write(dir.join("data.sqlite-wal"), b"old-wal").await.unwrap();
+        tokio::fs::write(dir.join("data.sqlite-shm"), b"old-shm").await.unwrap();
+        // 暂存恢复文件 + 标记
+        tokio::fs::write(dir.join("data.restore.sqlite"), b"restored-main").await.unwrap();
+        tokio::fs::write(
+            dir.join("data.restore.marker"),
+            b"data-backup-20260824-123456.sqlite",
+        )
+        .await
+        .unwrap();
+
+        let applied = apply_pending_database_restore_at(&dir).await.unwrap();
+        assert!(applied, "应检测到恢复标记并应用");
+        assert_eq!(
+            tokio::fs::read_to_string(dir.join("data.sqlite")).await.unwrap(),
+            "restored-main"
+        );
+        assert!(!dir.join("data.restore.marker").exists());
+        assert!(!dir.join("data.restore.sqlite").exists());
+        assert!(!dir.join("data.sqlite-wal").exists());
+        assert!(!dir.join("data.sqlite-shm").exists());
+
+        // 恢复前快照应完整保留（主库 + WAL + SHM）
+        let mut snapshot_files = 0;
+        let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("data.sqlite.pre-restore-") {
+                snapshot_files += 1;
+            }
+        }
+        assert_eq!(snapshot_files, 3, "应保留主库/WAL/SHM 三份快照");
+
+        // 无标记时返回 false 且不再改动
+        let again = apply_pending_database_restore_at(&dir).await.unwrap();
+        assert!(!again);
+        assert_eq!(
+            tokio::fs::read_to_string(dir.join("data.sqlite")).await.unwrap(),
+            "restored-main"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

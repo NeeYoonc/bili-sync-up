@@ -138,6 +138,8 @@ use crate::api::handler::{
     test_notification_handler,
     test_proxy_handler,
     get_database_status,
+    get_database_backups,
+    restore_database,
     run_database_maintenance,
     test_risk_control_handler,
     update_config,
@@ -430,6 +432,8 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         // 数据库管理
         .route("/api/database/status", get(get_database_status))
         .route("/api/database/maintenance", post(run_database_maintenance))
+        .route("/api/database/backups", get(get_database_backups))
+        .route("/api/database/restore", post(restore_database))
         // 视频流API
         .route("/api/videos/stream/{video_id}", get(stream_video))
         // 新增在线播放API

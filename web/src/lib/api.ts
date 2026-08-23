@@ -64,6 +64,9 @@ import type {
 	DatabaseStatusResponse,
 	DatabaseMaintenanceAction,
 	DatabaseMaintenanceResponse,
+	DatabaseBackupInfo,
+	DatabaseBackupListResponse,
+	DatabaseRestoreResponse,
 	YouTubeSearchRequest,
 	YouTubeSearchResponse,
 	YouTubeSourceVideosRequest,
@@ -1411,6 +1414,16 @@ class ApiClient {
 		return this.post<DatabaseMaintenanceResponse>('/database/maintenance', { action });
 	}
 
+	/** 获取数据库备份列表 */
+	async getDatabaseBackups(): Promise<ApiResponse<DatabaseBackupListResponse>> {
+		return this.get<DatabaseBackupListResponse>('/database/backups');
+	}
+
+	/** 安排数据库恢复（重启后生效） */
+	async restoreDatabase(backupFile: string): Promise<ApiResponse<DatabaseRestoreResponse>> {
+		return this.post<DatabaseRestoreResponse>('/database/restore', { backup_file: backupFile });
+	}
+
 	async testProxy(proxy?: string): Promise<ApiResponse<TestProxyResponse>> {
 		return this.post<TestProxyResponse>('/proxy/test', proxy !== undefined ? { proxy } : {});
 	}
@@ -1921,6 +1934,8 @@ export const api = {
 	getDatabaseStatus: () => apiClient.getDatabaseStatus(),
 	runDatabaseMaintenance: (action: DatabaseMaintenanceAction) =>
 		apiClient.runDatabaseMaintenance(action),
+	getDatabaseBackups: () => apiClient.getDatabaseBackups(),
+	restoreDatabase: (backupFile: string) => apiClient.restoreDatabase(backupFile),
 	/**
 	 * 订阅系统信息WebSocket事件
 	 */

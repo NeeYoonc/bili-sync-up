@@ -629,3 +629,11 @@ pub enum DatabaseMaintenanceAction {
 pub struct DatabaseMaintenanceRequest {
     pub action: DatabaseMaintenanceAction,
 }
+
+
+/// 数据库恢复请求：指定要恢复的备份文件名。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RestoreDatabaseRequest {
+    /// 备份文件名（data-backup-YYYYMMDD-HHMMSS.sqlite）
+    pub backup_file: String,
+}

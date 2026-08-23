@@ -469,6 +469,11 @@
 		danger: boolean;
 	} | null = null;
 
+	let databaseBackups: { name: string; path: string; size_bytes: number; created_at: string }[] = [];
+	let databaseBackupsLoading = false;
+	let restoreTarget: { name: string; size_bytes: number; created_at: string } | null = null;
+	let restoreRunning = false;
+
 	const defaultWebhookCustomBody = `{
   "source": "{{source}}",
   "title": "{{title}}",
@@ -1090,6 +1095,41 @@
 		}
 	}
 
+	async function loadDatabaseBackups() {
+		databaseBackupsLoading = true;
+		try {
+			const response = await runRequest(() => api.getDatabaseBackups(), {
+				context: '获取数据库备份列表失败'
+			});
+			if (response) databaseBackups = response.data.backups;
+		} finally {
+			databaseBackupsLoading = false;
+		}
+	}
+
+	async function confirmRestore(backup: { name: string; size_bytes: number; created_at: string }) {
+		restoreTarget = backup;
+	}
+
+	async function runRestore() {
+		if (!restoreTarget) return;
+		const name = restoreTarget.name;
+		restoreRunning = true;
+		try {
+			const response = await runRequest(() => api.restoreDatabase(name), {
+				context: '恢复数据库失败'
+			});
+			if (response?.data?.success) {
+				toast.success('恢复已安排', { description: response.data.message });
+			} else if (response?.data) {
+				toast.error('恢复失败', { description: response.data.message });
+			}
+		} finally {
+			restoreRunning = false;
+			restoreTarget = null;
+		}
+	}
+
 	function requestDatabaseAction(
 		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup',
 		label: string,
@@ -1121,6 +1161,7 @@
 
 	$: if (openSheet === 'database') {
 		loadDatabaseStatus();
+		loadDatabaseBackups();
 	}
 
 	async function handleTestProxy() {
@@ -5345,6 +5386,49 @@
 						</button>
 					</div>
 				</div>
+
+				<!-- 数据库备份与恢复 -->
+				<div class="space-y-3">
+					<div class="flex items-center justify-between">
+						<h3 class="text-base font-semibold">数据库备份</h3>
+						<button
+							type="button"
+							class="text-muted-foreground hover:text-foreground text-xs transition-colors"
+							onclick={loadDatabaseBackups}
+							disabled={databaseBackupsLoading}
+						>
+							{databaseBackupsLoading ? '刷新中...' : '刷新列表'}
+						</button>
+					</div>
+					{#if databaseBackups.length === 0}
+						<div class="text-muted-foreground rounded-lg border border-dashed p-4 text-center text-sm">
+							暂无备份。点击上方「备份数据库」生成一份快照。
+						</div>
+					{:else}
+						<div class="space-y-2">
+							{#each databaseBackups as backup (backup.name)}
+								<div class="hover:bg-accent flex items-center justify-between rounded-lg border p-3 transition-colors">
+									<div class="min-w-0">
+										<p class="truncate font-mono text-sm">{backup.name}</p>
+										<p class="text-muted-foreground text-xs">
+											{formatBytes(backup.size_bytes)} · {backup.created_at}
+										</p>
+									</div>
+									<button
+										type="button"
+										class="text-destructive hover:text-destructive/80 flex-shrink-0 rounded-md border border-destructive/40 px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+										onclick={() => confirmRestore(backup)}
+									>
+										恢复
+									</button>
+								</div>
+							{/each}
+						</div>
+						<p class="text-muted-foreground text-xs">
+							恢复会替换当前数据库，重启后生效；恢复前会自动保留一份当前库的快照（data.sqlite.pre-restore-*）。
+						</p>
+					{/if}
+				</div>
 			{/if}
 		</div>
 		<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t pt-4'}>
@@ -5391,6 +5475,50 @@
 				onclick={runDatabaseAction}
 			>
 				{databaseActionRunning ? '执行中...' : '确认执行'}
+			</button>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>
+
+<!-- 数据库恢复确认对话框 -->
+<AlertDialog.Root
+	open={!!restoreTarget}
+	onOpenChange={(open) => {
+		if (!open) restoreTarget = null;
+	}}
+>
+	<AlertDialog.Content class="max-w-md">
+		<AlertDialog.Header>
+			<AlertDialog.Title class="text-destructive dark:text-red-400">恢复数据库</AlertDialog.Title>
+			<AlertDialog.Description>
+				<p class="mb-2">确定要用以下备份替换当前数据库吗？</p>
+				<div class="rounded-md border bg-muted/50 p-3 font-mono text-xs">
+					<p class="break-all">{restoreTarget?.name}</p>
+					<p class="text-muted-foreground mt-1">
+						{formatBytes(restoreTarget?.size_bytes ?? 0)} · {restoreTarget?.created_at}
+					</p>
+				</div>
+				<div class="mt-3 rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+					<strong>注意：</strong>恢复将在重启后生效。当前数据库会先自动保留一份快照，但请确认无需保留其它数据。
+				</div>
+			</AlertDialog.Description>
+		</AlertDialog.Header>
+		<AlertDialog.Footer class="flex justify-end gap-3 pt-4">
+			<button
+				type="button"
+				class="hover:bg-accent rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+				disabled={restoreRunning}
+				onclick={() => (restoreTarget = null)}
+			>
+				取消
+			</button>
+			<button
+				type="button"
+				class="disabled:cursor-not-allowed rounded-md border border-transparent bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+				disabled={restoreRunning}
+				onclick={runRestore}
+			>
+				{restoreRunning ? '安排中...' : '确认恢复'}
 			</button>
 		</AlertDialog.Footer>
 	</AlertDialog.Content>
