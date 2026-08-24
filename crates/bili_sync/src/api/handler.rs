@@ -15179,7 +15179,7 @@ pub async fn get_log_files() -> Result<ApiResponse<LogFilesResponse>, ApiError> 
     Ok(ApiResponse::ok(LogFilesResponse { files }))
 }
 
-/// 日志文件信息
+/// 日志文件信息。
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LogFileInfo {
     pub level: String,
@@ -15188,7 +15188,7 @@ pub struct LogFileInfo {
     pub modified: u64,
 }
 
-/// 日志文件列表响应
+/// 日志文件列表响应。
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LogFilesResponse {
     pub files: Vec<LogFileInfo>,
