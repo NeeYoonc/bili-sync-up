@@ -164,6 +164,7 @@ async fn delete_where(db: &DatabaseConnection, sql: &str) -> Result<u64> {
 pub async fn run_maintenance(
     db: &DatabaseConnection,
     action: DatabaseMaintenanceAction,
+    keep_days: Option<u32>,
 ) -> Result<DatabaseMaintenanceResponse> {
     match action {
         DatabaseMaintenanceAction::ClearImageCache => {
@@ -237,13 +238,14 @@ pub async fn run_maintenance(
             })
         }
         DatabaseMaintenanceAction::CleanLogs => {
-            // 先把缓冲里的日志刷入文件，再清理超过保留期的旧文件（保留最近 7 天）。
+            // 先把缓冲里的日志刷入文件，再清理超过保留期的旧文件。
             crate::utils::file_logger::flush_file_logger();
-            let removed = crate::utils::file_logger::clean_old_log_files(7);
-            info!(removed, "数据库管理：已清理旧日志文件");
+            let keep_days = keep_days.unwrap_or(7).clamp(1, 365);
+            let removed = crate::utils::file_logger::clean_old_log_files(keep_days);
+            info!(removed, keep_days, "数据库管理：已清理旧日志文件");
             Ok(DatabaseMaintenanceResponse {
                 success: true,
-                message: format!("已清理 {removed} 个旧日志文件（保留最近 7 天）"),
+                message: format!("已清理 {removed} 个旧日志文件（保留最近 {keep_days} 天）"),
                 removed_rows: Some(removed as u64),
                 ..Default::default()
             })
@@ -418,7 +420,7 @@ mod tests {
             db.execute_unprepared(sql).await.expect("插入失败");
         }
 
-        let resp = run_maintenance(&db, DatabaseMaintenanceAction::CleanOrphans)
+        let resp = run_maintenance(&db, DatabaseMaintenanceAction::CleanOrphans, None)
             .await
             .expect("清理孤立记录失败");
         assert!(resp.success);
@@ -435,23 +437,23 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM you_tube_video").await, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM page").await, 1);
 
-        let resp = run_maintenance(&db, DatabaseMaintenanceAction::ClearQueueHistory)
+        let resp = run_maintenance(&db, DatabaseMaintenanceAction::ClearQueueHistory, None)
             .await
             .expect("清理队列失败");
         assert_eq!(resp.removed_rows, Some(1));
         assert_eq!(count(&db, "SELECT COUNT(*) FROM task_queue").await, 1);
 
-        let resp = run_maintenance(&db, DatabaseMaintenanceAction::ClearAiHistory)
+        let resp = run_maintenance(&db, DatabaseMaintenanceAction::ClearAiHistory, None)
             .await
             .expect("清理 AI 历史失败");
         assert_eq!(resp.removed_rows, Some(1));
 
-        let resp = run_maintenance(&db, DatabaseMaintenanceAction::ClearImageCache)
+        let resp = run_maintenance(&db, DatabaseMaintenanceAction::ClearImageCache, None)
             .await
             .expect("清理图片缓存失败");
         assert_eq!(resp.removed_rows, Some(1));
 
-        let resp = run_maintenance(&db, DatabaseMaintenanceAction::Vacuum)
+        let resp = run_maintenance(&db, DatabaseMaintenanceAction::Vacuum, None)
             .await
             .expect("VACUUM 失败");
         assert!(resp.success);

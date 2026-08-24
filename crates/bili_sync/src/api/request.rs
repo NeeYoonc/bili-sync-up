@@ -627,9 +627,12 @@ pub enum DatabaseMaintenanceAction {
 }
 
 /// 数据库维护请求。
-#[derive(Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct DatabaseMaintenanceRequest {
     pub action: DatabaseMaintenanceAction,
+    /// 仅清理日志（CleanLogs）使用：保留最近 N 天（含今天），默认 7 天
+    #[serde(default)]
+    pub keep_days: Option<u32>,
 }
 
 

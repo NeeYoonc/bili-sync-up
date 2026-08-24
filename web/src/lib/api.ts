@@ -1413,9 +1413,13 @@ class ApiClient {
 	 * 执行数据库维护操作（设置页 → 数据库管理）
 	 */
 	async runDatabaseMaintenance(
-		action: DatabaseMaintenanceAction
+		action: DatabaseMaintenanceAction,
+		keepDays?: number
 	): Promise<ApiResponse<DatabaseMaintenanceResponse>> {
-		return this.post<DatabaseMaintenanceResponse>('/database/maintenance', { action });
+		return this.post<DatabaseMaintenanceResponse>('/database/maintenance', {
+			action,
+			...(keepDays !== undefined ? { keep_days: keepDays } : {})
+		});
 	}
 
 	/** 获取数据库备份列表 */
@@ -1945,8 +1949,8 @@ export const api = {
 	}) => apiClient.testNotification(params),
 	testProxy: (proxy?: string) => apiClient.testProxy(proxy),
 	getDatabaseStatus: () => apiClient.getDatabaseStatus(),
-	runDatabaseMaintenance: (action: DatabaseMaintenanceAction) =>
-		apiClient.runDatabaseMaintenance(action),
+	runDatabaseMaintenance: (action: DatabaseMaintenanceAction, keepDays?: number) =>
+		apiClient.runDatabaseMaintenance(action, keepDays),
 	getDatabaseBackups: () => apiClient.getDatabaseBackups(),
 	restoreDatabase: (backupFile: string) => apiClient.restoreDatabase(backupFile),
 	uploadRestoreBackup: (file: File, filename?: string) => apiClient.uploadRestoreBackup(file, filename),

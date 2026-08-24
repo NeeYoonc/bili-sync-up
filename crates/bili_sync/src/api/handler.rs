@@ -20309,7 +20309,7 @@ pub async fn run_database_maintenance(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     axum::Json(request): axum::Json<crate::api::request::DatabaseMaintenanceRequest>,
 ) -> Result<ApiResponse<crate::api::response::DatabaseMaintenanceResponse>, ApiError> {
-    let response = crate::db_maintenance::run_maintenance(&db, request.action).await?;
+    let response = crate::db_maintenance::run_maintenance(&db, request.action, request.keep_days).await?;
     Ok(ApiResponse::ok(response))
 }
 

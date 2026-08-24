@@ -467,6 +467,7 @@
 		label: string;
 		description: string;
 		danger: boolean;
+		keepDays: number;
 	} | null = null;
 
 	let databaseBackups: { name: string; path: string; size_bytes: number; created_at: string; is_import: boolean }[] = [];
@@ -1169,17 +1170,19 @@
 		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup' | 'clean_logs',
 		label: string,
 		description: string,
-		danger = false
+		danger = false,
+		keepDays = 7
 	) {
-		databaseAction = { action, label, description, danger };
+		databaseAction = { action, label, description, danger, keepDays };
 	}
 
 	async function runDatabaseAction() {
 		if (!databaseAction) return;
 		const { action, label } = databaseAction;
+		const keepDays = action === 'clean_logs' ? databaseAction.keepDays : undefined;
 		databaseActionRunning = true;
 		try {
-			const response = await runRequest(() => api.runDatabaseMaintenance(action), {
+			const response = await runRequest(() => api.runDatabaseMaintenance(action, keepDays), {
 				context: `${label}失败`
 			});
 			if (response?.data?.success) {
@@ -5423,7 +5426,7 @@
 							type="button"
 							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
 							onclick={() =>
-								requestDatabaseAction('clean_logs', '清理旧日志', '删除保留期（7 天）以外的旧日志文件，释放磁盘空间；当前正在写入的日志不受影响。')}
+								requestDatabaseAction('clean_logs', '清理旧日志', '删除保留期以外的旧日志文件，释放磁盘空间；保留天数可在确认框中自由调整（1-365 天），当前正在写入的日志不受影响。', false, 7)}
 						>
 							<div>
 								<p class="text-sm font-medium">清理旧日志</p>
@@ -5532,6 +5535,24 @@
 				{databaseAction?.label}
 			</AlertDialog.Title>
 			<AlertDialog.Description>{databaseAction?.description}</AlertDialog.Description>
+			{#if databaseAction?.action === 'clean_logs'}
+				<div class="mt-3 flex items-center gap-2">
+					<label for="keep-log-days" class="text-muted-foreground whitespace-nowrap text-sm">保留天数</label>
+					<input
+						id="keep-log-days"
+						type="number"
+						min="1"
+						max="365"
+						value={databaseAction.keepDays}
+						oninput={(e) => {
+							const value = Number((e.currentTarget as HTMLInputElement).value);
+							if (databaseAction) databaseAction.keepDays = value >= 1 ? Math.min(value, 365) : 1;
+						}}
+						class="border-input bg-background w-28 rounded-md border px-3 py-1.5 text-sm"
+					/>
+					<span class="text-muted-foreground text-xs">删除更早的日志文件</span>
+				</div>
+			{/if}
 		</AlertDialog.Header>
 		<AlertDialog.Footer class="flex justify-end gap-3 pt-4">
 			<button
