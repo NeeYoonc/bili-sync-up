@@ -3039,17 +3039,32 @@ async fn download_video(
                 active.download_status = Set(if exhausted { "failed" } else { "pending" }.to_string());
                 active.error_message = Set(Some(format!("{:#}", error)));
                 video = active.update(db).await?;
-                warn!(
-                    platform = platform_label,
-                    source_id = source.id,
-                    retry_count,
-                    max_retries = MAX_DOWNLOAD_RETRIES,
-                    error = %error,
-                    "{}视频源「{}」视频「{}」下载失败，真实错误已持久化",
-                    platform_label,
-                    source.name,
-                    video.title
-                );
+                // 前两次重试失败只记 debug，第三次起才报 WARN，避免每轮重试都刷屏。
+                if retry_count >= 3 {
+                    warn!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        retry_count,
+                        max_retries = MAX_DOWNLOAD_RETRIES,
+                        error = %error,
+                        "{}视频源「{}」视频「{}」下载失败，真实错误已持久化",
+                        platform_label,
+                        source.name,
+                        video.title
+                    );
+                } else {
+                    debug!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        retry_count,
+                        max_retries = MAX_DOWNLOAD_RETRIES,
+                        error = %error,
+                        "{}视频源「{}」视频「{}」下载失败，真实错误已持久化",
+                        platform_label,
+                        source.name,
+                        video.title
+                    );
+                }
                 notify_videos_changed();
                 notify_queue_status_changed();
 
