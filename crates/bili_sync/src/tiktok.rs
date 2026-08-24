@@ -30,7 +30,7 @@ use crate::youtube::{
     append_ytdlp_runtime, append_youtube_proxy, command_error,
     create_youtube_source,
     ensure_ytdlp_available, get_platform_sources, normalize_source_type, parse_video_id_set,
-    require_source_platform, reset_youtube_source_path, serialize_video_id_set, update_youtube_source,
+    require_source_platform, serialize_video_id_set, update_youtube_source,
     update_youtube_source_enabled, ytdlp_command, YouTubeLoginResponse, YouTubeSearchResponse,
     YouTubeSearchResult, YouTubeSourceResponse, YouTubeSourceVideosRequest,
 };
@@ -708,16 +708,6 @@ pub async fn delete_tiktok_source(
     .await?;
     Ok(ApiResponse::ok(true))
 }
-
-pub async fn reset_tiktok_source_path(
-    AxumPath(id): AxumPath<i32>,
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-    Json(request): Json<crate::youtube::ResetYouTubeSourcePathRequest>,
-) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
-    require_source_platform(db.as_ref(), id, "tiktok").await?;
-    reset_youtube_source_path(AxumPath(id), Extension(db), Json(request)).await
-}
-
 
 // ---------- TikTok 风控/限流退避 ----------
 

@@ -28,10 +28,11 @@ use bili_sync_entity::{youtube_source, youtube_video};
 
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::api::{
-    request::{ResetSpecificTasksRequest, UpdateVideoStatusRequest, VideosRequest},
+    request::{ResetSpecificTasksRequest, ResetVideoSourcePathRequest, UpdateVideoStatusRequest, VideosRequest},
     response::{
-        DeleteVideoResponse, PageInfo, ResetAllVideosResponse, ResetVideoResponse, SubmissionVideoInfo,
-        SubmissionVideosResponse, UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSourceTag, VideosResponse,
+        DeleteVideoResponse, PageInfo, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse,
+        SubmissionVideoInfo, SubmissionVideosResponse, UpdateVideoStatusResponse, VideoInfo, VideoResponse,
+        VideoSourceTag, VideosResponse,
     },
 };
 use crate::bilibili::{
@@ -217,11 +218,6 @@ pub struct UpdateYouTubeSourceRequest {
 pub struct DeleteYouTubeSourceRequest {
     #[serde(default)]
     pub delete_local_files: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ResetYouTubeSourcePathRequest {
-    pub new_path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1501,74 +1497,87 @@ pub async fn delete_douyin_source(
     Ok(ApiResponse::ok(true))
 }
 
-pub async fn reset_youtube_source_path(
-    AxumPath(id): AxumPath<i32>,
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-    Json(request): Json<ResetYouTubeSourcePathRequest>,
-) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
+pub(crate) async fn reset_external_source_path_shared(
+    txn: &sea_orm::DatabaseTransaction,
+    source_type: &str,
+    id: i32,
+    request: &ResetVideoSourcePathRequest,
+) -> Result<ResetVideoSourcePathResponse, anyhow::Error> {
     let new_path = request.new_path.trim();
     if new_path.is_empty() {
-        return Err(ApiError::from(anyhow!("下载目录不能为空")));
+        return Err(anyhow!("下载目录不能为空"));
     }
-    let Some(source) = youtube_source::Entity::find_by_id(id).one(db.as_ref()).await? else {
-        return Err(ApiError::from(anyhow!("YouTube 视频源不存在")));
+    let Some(source) = youtube_source::Entity::find_by_id(id).one(txn).await? else {
+        return Err(anyhow!("外部平台视频源不存在"));
     };
     // 只搬迁已记录的媒体文件；未记录的用户文件不会被碰触。
     let old_base = PathBuf::from(&source.path);
     let new_base = PathBuf::from(new_path);
-    for video in youtube_video::Entity::find()
+    let videos = youtube_video::Entity::find()
         .filter(youtube_video::Column::SourceId.eq(id))
-        .all(db.as_ref())
-        .await?
-    {
-        let Some(output_path) = video.output_path.as_deref() else {
-            continue;
-        };
-        let old_file = PathBuf::from(output_path);
-        let Ok(relative) = old_file.strip_prefix(&old_base) else {
-            continue;
-        };
-        let target = new_base.join(relative);
-        if old_file == target || !old_file.is_file() {
-            continue;
-        }
-        for companion in recorded_output_files(&old_file).await? {
-            let Ok(companion_relative) = companion.strip_prefix(&old_base) else {
+        .all(txn)
+        .await?;
+    let mut moved_files_count = 0usize;
+    let mut cleaned_folders_count = 0usize;
+    if request.apply_rename_rules {
+        for video in &videos {
+            let Some(output_path) = video.output_path.as_deref() else {
                 continue;
             };
-            let companion_target = new_base.join(companion_relative);
-            move_file_cross_volume(&companion, &companion_target).await?;
+            let old_file = PathBuf::from(output_path);
+            let Ok(relative) = old_file.strip_prefix(&old_base) else {
+                continue;
+            };
+            let target = new_base.join(relative);
+            if old_file == target || !old_file.is_file() {
+                continue;
+            }
+            for companion in recorded_output_files(&old_file).await? {
+                let Ok(companion_relative) = companion.strip_prefix(&old_base) else {
+                    continue;
+                };
+                let companion_target = new_base.join(companion_relative);
+                move_file_cross_volume(&companion, &companion_target).await?;
+                moved_files_count += 1;
+            }
+            if request.clean_empty_folders {
+                cleaned_folders_count += remove_empty_parent_directories(old_file.parent(), &old_base).await;
+            }
+            // 仅在实际移动文件时同步更新各视频 output_path（保持相对目录结构）
+            let mut active: youtube_video::ActiveModel = video.clone().into();
+            active.output_path = Set(Some(new_base.join(relative).display().to_string()));
+            active.updated_at = Set(now_standard_string());
+            active.update(txn).await?;
         }
-        remove_empty_parent_directories(old_file.parent(), &old_base).await;
-        let mut active: youtube_video::ActiveModel = video.into();
-        active.output_path = Set(Some(target.display().to_string()));
-        active.updated_at = Set(now_standard_string());
-        active.update(db.as_ref()).await?;
     }
     let mut active: youtube_source::ActiveModel = source.into();
     active.path = Set(new_path.to_string());
-    let source = active.update(db.as_ref()).await?;
-    notify_video_sources_changed();
-    notify_videos_changed();
-    Ok(ApiResponse::ok(source_response(db.as_ref(), source).await?))
+    active.update(txn).await?;
+    Ok(ResetVideoSourcePathResponse {
+        success: true,
+        source_id: id,
+        source_type: source_type.to_string(),
+        old_path: old_base.display().to_string(),
+        new_path: new_path.to_string(),
+        moved_files_count,
+        updated_videos_count: videos.len(),
+        cleaned_folders_count,
+        message: format!(
+            "{}视频源路径重设完成，移动 {} 个文件，清理 {} 个空文件夹",
+            external_platform_label(source_type),
+            moved_files_count,
+            cleaned_folders_count
+        ),
+    })
 }
 
-pub async fn reset_youtube_source_path_checked(
-    AxumPath(id): AxumPath<i32>,
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-    Json(request): Json<ResetYouTubeSourcePathRequest>,
-) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
-    require_source_platform(db.as_ref(), id, "youtube").await?;
-    reset_youtube_source_path(AxumPath(id), Extension(db), Json(request)).await
-}
-
-pub async fn reset_douyin_source_path(
-    AxumPath(id): AxumPath<i32>,
-    Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
-    Json(request): Json<ResetYouTubeSourcePathRequest>,
-) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
-    require_source_platform(db.as_ref(), id, "douyin").await?;
-    reset_youtube_source_path(AxumPath(id), Extension(db), Json(request)).await
+fn external_platform_label(source_type: &str) -> &str {
+    match source_type {
+        "youtube" => "YouTube",
+        "douyin" => "抖音",
+        "tiktok" => "TikTok",
+        _ => source_type,
+    }
 }
 
 pub async fn retry_youtube_video(
@@ -6183,16 +6192,25 @@ async fn move_file_cross_volume(source: &Path, target: &Path) -> Result<()> {
     }
 }
 
-async fn remove_empty_parent_directories(mut current: Option<&Path>, stop_at: &Path) {
+async fn remove_empty_parent_directories(mut current: Option<&Path>, stop_at: &Path) -> usize {
+    let mut removed = 0usize;
     while let Some(directory) = current {
-        if directory == stop_at || !directory.starts_with(stop_at) {
+        if !directory.starts_with(stop_at) {
             break;
         }
         match tokio::fs::remove_dir(directory).await {
-            Ok(()) => current = directory.parent(),
+            Ok(()) => {
+                removed += 1;
+                // 旧根目录移空后也一并删除（空目录删除成功，非空则失败退出）
+                if directory == stop_at {
+                    break;
+                }
+                current = directory.parent();
+            }
             Err(_) => break,
         }
     }
+    removed
 }
 
 async fn validate_youtube_login_cookie() -> Result<()> {

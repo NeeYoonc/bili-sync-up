@@ -294,9 +294,6 @@ class ApiClient {
 	): Promise<ApiResponse<YouTubeSource>> {
 		return this.put<YouTubeSource>(`/youtube/sources/${id}`, request);
 	}
-	async resetYouTubeSourcePath(id: number, new_path: string): Promise<ApiResponse<YouTubeSource>> {
-		return this.post<YouTubeSource>(`/youtube/sources/${id}/reset-path`, { new_path });
-	}
 	async deleteYouTubeSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
 		return this.delete<boolean>(`/youtube/sources/${id}?delete_local_files=${deleteLocalFiles}`);
 	}
@@ -385,9 +382,6 @@ class ApiClient {
 	): Promise<ApiResponse<YouTubeSource>> {
 		return this.put<YouTubeSource>(`/douyin/sources/${id}`, request);
 	}
-	async resetDouyinSourcePath(id: number, new_path: string): Promise<ApiResponse<YouTubeSource>> {
-		return this.post<YouTubeSource>(`/douyin/sources/${id}/reset-path`, { new_path });
-	}
 	async deleteDouyinSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
 		return this.delete<boolean>(`/douyin/sources/${id}?delete_local_files=${deleteLocalFiles}`);
 	}
@@ -408,9 +402,6 @@ class ApiClient {
 		request: UpdateYouTubeSourceRequest
 	): Promise<ApiResponse<YouTubeSource>> {
 		return this.put<YouTubeSource>(`/tiktok/sources/${id}`, request);
-	}
-	async resetTikTokSourcePath(id: number, new_path: string): Promise<ApiResponse<YouTubeSource>> {
-		return this.post<YouTubeSource>(`/tiktok/sources/${id}/reset-path`, { new_path });
 	}
 	async deleteTikTokSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
 		return this.delete<boolean>(`/tiktok/sources/${id}?delete_local_files=${deleteLocalFiles}`);
@@ -751,35 +742,7 @@ class ApiClient {
 		id: number,
 		params: ResetVideoSourcePathRequest
 	): Promise<ApiResponse<ResetVideoSourcePathResponse>> {
-		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
-			const before = (
-				sourceType === 'tiktok'
-					? await this.getTikTokSources()
-					: sourceType === 'douyin'
-						? await this.getDouyinSources()
-						: await this.getYouTubeSources()
-			).data.find((source) => source.id === id);
-			const result =
-				sourceType === 'tiktok'
-					? await this.resetTikTokSourcePath(id, params.new_path)
-					: sourceType === 'douyin'
-						? await this.resetDouyinSourcePath(id, params.new_path)
-						: await this.resetYouTubeSourcePath(id, params.new_path);
-			return {
-				status_code: result.status_code,
-				data: {
-					success: true,
-					source_id: id,
-					source_type: sourceType,
-					old_path: before?.path ?? '',
-					new_path: result.data.path,
-					moved_files_count: 0,
-					updated_videos_count: result.data.completed_count,
-					cleaned_folders_count: 0,
-					message: `${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源路径已按现有目录规则更新`
-				}
-			};
-		}
+		// YouTube/抖音/TikTok 与 B 站各类型统一走同一路径重设接口
 		return this.post<ResetVideoSourcePathResponse>(
 			`/video-sources/${sourceType}/${id}/reset-path`,
 			params
@@ -1470,8 +1433,6 @@ export const api = {
 		apiClient.setYouTubeSourceEnabled(id, enabled),
 	updateYouTubeSource: (id: number, request: UpdateYouTubeSourceRequest) =>
 		apiClient.updateYouTubeSource(id, request),
-	resetYouTubeSourcePath: (id: number, newPath: string) =>
-		apiClient.resetYouTubeSourcePath(id, newPath),
 	deleteYouTubeSource: (id: number, deleteLocalFiles = false) =>
 		apiClient.deleteYouTubeSource(id, deleteLocalFiles),
 	getYouTubeVideos: () => apiClient.getYouTubeVideos(),
@@ -1490,8 +1451,6 @@ export const api = {
 		apiClient.setDouyinSourceEnabled(id, enabled),
 	updateDouyinSource: (id: number, request: UpdateYouTubeSourceRequest) =>
 		apiClient.updateDouyinSource(id, request),
-	resetDouyinSourcePath: (id: number, newPath: string) =>
-		apiClient.resetDouyinSourcePath(id, newPath),
 	deleteDouyinSource: (id: number, deleteLocalFiles = false) =>
 		apiClient.deleteDouyinSource(id, deleteLocalFiles),
 
@@ -1609,8 +1568,6 @@ export const api = {
 		apiClient.setTikTokSourceEnabled(id, enabled),
 	updateTikTokSource: (id: number, request: UpdateYouTubeSourceRequest) =>
 		apiClient.updateTikTokSource(id, request),
-	resetTikTokSourcePath: (id: number, new_path: string) =>
-		apiClient.resetTikTokSourcePath(id, new_path),
 	deleteTikTokSource: (id: number, deleteLocalFiles = false) =>
 		apiClient.deleteTikTokSource(id, deleteLocalFiles),
 	getDouyinSourceVideos: (params: {

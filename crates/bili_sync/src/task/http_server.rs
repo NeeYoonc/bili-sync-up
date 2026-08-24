@@ -172,7 +172,7 @@ use crate::utils::model::queue_missing_video_file_size_backfill;
 use crate::tiktok::{
     create_tiktok_source, delete_tiktok_source, get_tiktok_followings, get_tiktok_playlists,
     get_tiktok_source_videos,
-    get_tiktok_sources, import_tiktok_cookie_file, reset_tiktok_source_path, search_tiktok,
+    get_tiktok_sources, import_tiktok_cookie_file, search_tiktok,
     tiktok_secuid_status, tiktok_status, update_tiktok_secuid, update_tiktok_source,
     update_tiktok_source_enabled,
 };
@@ -180,7 +180,7 @@ use crate::youtube::{
     create_douyin_source, create_youtube_source_checked, delete_douyin_source, delete_youtube_source_checked,
     get_douyin_queue_status, get_douyin_sources, get_douyin_videos, get_youtube_queue_status,
     get_youtube_channel_playlists, get_youtube_source_videos, get_youtube_sources, get_youtube_videos,
-    import_youtube_cookie_file, reset_douyin_source_path, reset_youtube_source_path_checked, retry_douyin_video,
+    import_youtube_cookie_file, retry_douyin_video,
     retry_youtube_video_checked, search_youtube, update_douyin_source, update_douyin_source_enabled,
     update_youtube_source_checked, update_youtube_source_enabled_checked, youtube_status,
 };
@@ -356,10 +356,6 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
             "/api/youtube/sources/{id}/enabled",
             put(update_youtube_source_enabled_checked),
         )
-        .route(
-            "/api/youtube/sources/{id}/reset-path",
-            post(reset_youtube_source_path_checked),
-        )
         .route("/api/youtube/videos", get(get_youtube_videos))
         .route("/api/youtube/videos/{id}/retry", post(retry_youtube_video_checked))
         .route("/api/youtube/queue-status", get(get_youtube_queue_status))
@@ -376,10 +372,6 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
             put(update_douyin_source).delete(delete_douyin_source),
         )
         .route("/api/douyin/sources/{id}/enabled", put(update_douyin_source_enabled))
-        .route(
-            "/api/douyin/sources/{id}/reset-path",
-            post(reset_douyin_source_path),
-        )
         .route("/api/tiktok/status", get(tiktok_status))
         .route("/api/tiktok/source-videos", get(get_tiktok_source_videos))
         .route("/api/tiktok/playlists", get(get_tiktok_playlists))
@@ -393,10 +385,6 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
             put(update_tiktok_source).delete(delete_tiktok_source),
         )
         .route("/api/tiktok/sources/{id}/enabled", put(update_tiktok_source_enabled))
-        .route(
-            "/api/tiktok/sources/{id}/reset-path",
-            post(reset_tiktok_source_path),
-        )
         .route("/api/douyin/videos", get(get_douyin_videos))
         .route("/api/douyin/videos/{id}/retry", post(retry_douyin_video))
         .route("/api/douyin/queue-status", get(get_douyin_queue_status))

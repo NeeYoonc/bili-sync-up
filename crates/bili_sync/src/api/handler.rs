@@ -10167,6 +10167,10 @@ pub async fn reset_video_source_path_internal(
                 message: format!("番剧 {} 路径重设完成", bangumi.name),
             }
         }
+        // 外部平台（YouTube/抖音/TikTok）复用同一套路径重设流程与响应格式
+        "youtube" | "douyin" | "tiktok" => {
+            crate::youtube::reset_external_source_path_shared(&txn, source_type.as_str(), id, &request).await?
+        }
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type).into()),
     };
 
