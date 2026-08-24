@@ -2861,14 +2861,19 @@ async fn fetch_tiktok_creator_posts(
         if all_tiktok_posts_known(&page_posts, stop_when_known) {
             break;
         }
+        // 新版接口不再返回 hasMore/cursor 字段，翻页游标改用本页最后一条的
+        // createTime（毫秒）继续向前翻；旧版接口仍返回 cursor 时优先使用。
+        let last_timestamp_ms = page_posts
+            .last()
+            .and_then(|post| post.timestamp)
+            .map(|seconds| seconds * 1000);
         for post in page_posts {
             if seen.insert(post.id.clone()) {
                 posts.push(post);
             }
         }
-        if posts.len() >= limit
-            || !payload.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false)
-        {
+        let has_more = payload.get("hasMore").and_then(serde_json::Value::as_bool);
+        if posts.len() >= limit || has_more == Some(false) {
             break;
         }
         let next = payload
@@ -2879,6 +2884,7 @@ async fn fetch_tiktok_creator_posts(
                     .map(str::to_string)
                     .or_else(|| value.as_i64().map(|number| number.to_string()))
             })
+            .or_else(|| last_timestamp_ms.map(|millis| millis.to_string()))
             .unwrap_or_else(|| cursor.clone());
         if next == cursor {
             break;
