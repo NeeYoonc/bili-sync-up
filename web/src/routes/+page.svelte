@@ -35,8 +35,7 @@
 	import FolderIcon from '@lucide/svelte/icons/folder';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import ClockIcon from '@lucide/svelte/icons/clock';
-	import CircleAlert from '@lucide/svelte/icons/circle-alert';
-	import VideoIcon from '@lucide/svelte/icons/video';
+		import VideoIcon from '@lucide/svelte/icons/video';
 	import TvIcon from '@lucide/svelte/icons/tv';
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
 	import CpuIcon from '@lucide/svelte/icons/cpu';
@@ -758,13 +757,6 @@
 												<Badge variant="outline">
 													{dashboardData.enabled_tiktok_collections} / {dashboardData.total_tiktok_collections}
 												</Badge>
-											</div>
-											<div class="flex items-center justify-between">
-												<div class="flex items-center gap-2">
-													<CircleAlert class="text-muted-foreground h-4 w-4" />
-													<span class="text-sm">登录状态</span>
-												</div>
-												<Badge variant="outline">公开内容无需登录</Badge>
 											</div>
 										</div>
 {/if}
