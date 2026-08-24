@@ -311,7 +311,7 @@ use crate::utils::model::{
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
 use crate::utils::scan_collector::create_new_video_info;
-use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX};
+use crate::utils::status::{PageStatus, VideoStatus, STATUS_COMPLETED, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX};
 
 const DB_LOCK_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
 const DOWNLOAD_RISK_CONTROL_RESUME_KEY: &str = "download_risk_control_resume_sources";
@@ -1240,6 +1240,11 @@ pub async fn process_video_source(
                 }
             }
         };
+
+    // 清理旧版本"未达最低下载标准"视频遗留的附属文件（封面/NFO/弹幕/字幕）
+    if let Err(err) = cleanup_completed_skipped_video_sidecars(&video_source, connection).await {
+        debug!("清理已完成跳过视频的历史附属文件失败: {:#}", err);
+    }
 
     let resume_download_without_refresh =
         !ARGS.scan_only && should_skip_refresh_for_download_risk_control_resume(&video_source, connection).await?;
@@ -2580,6 +2585,86 @@ pub async fn fetch_video_details(
     }
     video_source.log_fetch_video_end();
     Ok(())
+}
+
+/// 清理旧版本遗留的"已完成但未达最低下载标准"视频附属文件。
+/// 旧版本在视频因未达到最低分辨率被跳过时仍会生成封面/NFO/弹幕/字幕等文件，
+/// 新版不再生成；此处对已完成跳过的单P视频目录做一次性磁盘清理，避免历史残留。
+async fn cleanup_completed_skipped_video_sidecars(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<usize> {
+    let videos = video::Entity::find()
+        .filter(video::Column::Valid.eq(true))
+        .filter(video::Column::Deleted.eq(0))
+        .filter(video::Column::SinglePage.eq(true))
+        .filter(video::Column::DownloadStatus.gte(STATUS_COMPLETED))
+        .filter(video::Column::SkipReason.is_not_null())
+        .filter(video::Column::SkipReason.ne(""))
+        .filter(video_source.filter_expr())
+        .all(connection)
+        .await?;
+
+    debug!(
+        "清理已完成跳过视频附属文件: 源「{}」查询到 {} 个候选视频",
+        video_source.source_name_display(),
+        videos.len()
+    );
+    let mut removed = 0usize;
+    for video_model in videos {
+        let dir = Path::new(&video_model.path);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        // 仅清理"没有媒体文件"的目录（真正未下载媒体文件的跳过视频）；
+        // 若目录内存在媒体文件则视为正常下载，不清除任何附属文件。
+        let mut has_media = false;
+        let mut sidecar_candidates = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let lower = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(ext, "mp4" | "m4a" | "flv" | "mkv" | "mov" | "ts" | "webm" | "mp3" | "aac" | "wav" | "flac" | "m4s") {
+                has_media = true;
+                break;
+            }
+            if lower.ends_with(".nfo")
+                || lower.ends_with(".ass")
+                || lower.ends_with(".srt")
+                || lower.contains("-thumb.")
+                || lower.contains("-fanart.")
+                || lower.contains("-poster.")
+            {
+                sidecar_candidates.push(path);
+            }
+        }
+        if has_media {
+            continue;
+        }
+        let sidecar_count = sidecar_candidates.len();
+        for path in &sidecar_candidates {
+            if remove_file_if_exists(path).await? {
+                removed += 1;
+            }
+        }
+        if sidecar_count > 0 {
+            info!(
+                "已清理已完成跳过视频「{}」的 {} 个历史附属文件（未达到最低下载标准不保留封面/NFO/弹幕/字幕）",
+                video_model.name,
+                sidecar_count
+            );
+        }
+    }
+    Ok(removed)
 }
 
 /// 下载所有未处理成功的视频
@@ -7044,11 +7129,12 @@ async fn download_page(
     let nfo_path_for_chapters = nfo_path.clone();
     let danmaku_path_for_chapters = danmaku_path.clone();
     let subtitle_path_for_chapters = subtitle_path.clone();
+    let page_model_for_sidecars = page_model.clone();
     let skip_charge_video_media_download = video_model.is_charge_video && !video_source.download_charge_videos();
     let res_1_fut = Box::pin(fetch_page_poster(
         separate_status[0],
         video_model,
-        &page_model,
+        &page_model_for_sidecars,
         downloader,
         poster_path,
         fanart_path,
@@ -7071,7 +7157,7 @@ async fn download_page(
     let res_3_fut = Box::pin(generate_page_nfo(
         separate_status[2],
         video_model,
-        &page_model,
+        &page_model_for_sidecars,
         nfo_path,
         connection,
         if matches!(video_source, VideoSourceEnum::Collection(_))
@@ -7089,7 +7175,7 @@ async fn download_page(
         separate_status[3],
         bili_client,
         video_model,
-        &page_model,
+        &page_model_for_sidecars,
         connection,
         &danmaku_config,
         &page_info,
@@ -7107,8 +7193,9 @@ async fn download_page(
         token.clone(),
     ));
 
-    let (res_1, res_2, res_3, res_4, res_5) = tokio::join!(res_1_fut, res_2_fut, res_3_fut, res_4_fut, res_5_fut);
-
+    // 先执行视频下载任务：若视频因未达到最低下载标准被主动跳过，
+    // 则封面/NFO/弹幕/字幕等附属文件本轮不下载，避免为跳过视频生成多余文件。
+    let res_2 = res_2_fut.await;
     let (
         res_2,
         mut page_file_size_bytes,
@@ -7124,6 +7211,51 @@ async fn download_page(
             video_result.skip_reason,
         ),
         Err(err) => (Err(err), None, None, None, None),
+    };
+
+    // 视频未达到最低下载标准（本轮产生 skip_reason，或数据库已持久化 skip_reason
+    // 且该分页没有实际媒体文件）时，跳过并清理附属文件（封面/NFO/弹幕/字幕）。
+    let media_file_exists = fs::metadata(&video_path)
+        .await
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    let skip_reason_persisted = video_model
+        .skip_reason
+        .as_deref()
+        .is_some_and(|reason| !reason.trim().is_empty());
+    let skip_sidecars = media_skip_reason.is_some()
+        || (skip_reason_persisted
+            && !media_file_exists
+            && matches!(res_2, Ok(ExecutionStatus::Skipped)));
+
+    let (res_1, res_3, res_4, res_5) = if skip_sidecars {
+        if let Err(err) = remove_original_page_artifacts(
+            &video_path,
+            &nfo_path_for_chapters,
+            &poster_path_for_chapters,
+            fanart_path_for_chapters.as_deref(),
+            &danmaku_path_for_chapters,
+            &subtitle_path_for_chapters,
+        )
+        .await
+        {
+            debug!("清理未达最低下载标准视频的附属文件失败: {:#}", err);
+        }
+        info!(
+            "视频「{}」第 {} 页未达到最低下载标准，已跳过封面/NFO/弹幕/字幕等附属文件",
+            &video_model.name, page_model.pid
+        );
+        (
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+            Ok(PageDanmakuFetchResult {
+                status: ExecutionStatus::Skipped,
+                sync_update: None,
+            }),
+            Ok(ExecutionStatus::Skipped),
+        )
+    } else {
+        tokio::join!(res_1_fut, res_3_fut, res_4_fut, res_5_fut)
     };
     let mut chapter_total_file_size_bytes: Option<i64> = None;
     let mut split_chapters = false;
