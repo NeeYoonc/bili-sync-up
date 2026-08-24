@@ -622,6 +622,8 @@ pub enum DatabaseMaintenanceAction {
     Vacuum,
     /// 备份数据库（VACUUM INTO 快照）
     Backup,
+    /// 清理旧日志文件（保留最近 7 天）
+    CleanLogs,
 }
 
 /// 数据库维护请求。

@@ -236,6 +236,18 @@ pub async fn run_maintenance(
                 ..Default::default()
             })
         }
+        DatabaseMaintenanceAction::CleanLogs => {
+            // 先把缓冲里的日志刷入文件，再清理超过保留期的旧文件（保留最近 7 天）。
+            crate::utils::file_logger::flush_file_logger();
+            let removed = crate::utils::file_logger::clean_old_log_files(7);
+            info!(removed, "数据库管理：已清理旧日志文件");
+            Ok(DatabaseMaintenanceResponse {
+                success: true,
+                message: format!("已清理 {removed} 个旧日志文件（保留最近 7 天）"),
+                removed_rows: Some(removed as u64),
+                ..Default::default()
+            })
+        }
         DatabaseMaintenanceAction::Backup => {
             let before = file_size(&database_file()).await;
             let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");

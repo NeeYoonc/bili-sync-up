@@ -1471,7 +1471,8 @@ export type DatabaseMaintenanceAction =
 	| 'clear_queue_history'
 	| 'clean_orphans'
 	| 'vacuum'
-	| 'backup';
+	| 'backup'
+	| 'clean_logs';
 
 export interface DatabaseMaintenanceResponse {
 	success: boolean;

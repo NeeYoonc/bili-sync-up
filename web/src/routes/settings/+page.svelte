@@ -463,7 +463,7 @@
 	let databaseLoading = false;
 	let databaseActionRunning = false;
 	let databaseAction: {
-		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup';
+		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup' | 'clean_logs';
 		label: string;
 		description: string;
 		danger: boolean;
@@ -1166,7 +1166,7 @@
 	}
 
 	function requestDatabaseAction(
-		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup',
+		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup' | 'clean_logs',
 		label: string,
 		description: string,
 		danger = false
@@ -5416,6 +5416,18 @@
 							<div>
 								<p class="text-sm font-medium">备份数据库</p>
 								<p class="text-muted-foreground text-xs">VACUUM INTO 快照，不锁库</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clean_logs', '清理旧日志', '删除保留期（7 天）以外的旧日志文件，释放磁盘空间；当前正在写入的日志不受影响。')}
+						>
+							<div>
+								<p class="text-sm font-medium">清理旧日志</p>
+								<p class="text-muted-foreground text-xs">保留最近 7 天的 logs/*.csv</p>
 							</div>
 							<span class="text-muted-foreground text-xs">→</span>
 						</button>
