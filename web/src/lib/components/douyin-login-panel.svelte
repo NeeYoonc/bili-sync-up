@@ -105,7 +105,7 @@
 					</p>
 				</div>
 				<p class="text-muted-foreground text-xs">
-					抖音作者作品接口需要新鲜 Cookie。保存位置：<code class="break-all">{status?.cookie_path ?? '加载中…'}</code>
+					抖音作者作品接口需要新鲜 Cookie；登录凭证已保存到数据库，导入后自动维护、重启不丢失，无需手动管理文件。
 				</p>
 			</div>
 		</CardContent>

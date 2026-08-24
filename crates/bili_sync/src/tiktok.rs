@@ -404,7 +404,7 @@ pub async fn tiktok_status() -> Result<ApiResponse<TikTokStatusResponse>, ApiErr
 /// 生成 TikTok Cookie 导入结果提示；登录 Cookie 不完整时附加警告。
 fn tiktok_import_message() -> String {
     let mut message =
-        "已导入 TikTok cookies.txt；作者扫描和媒体解析将使用此登录状态".to_string();
+        "已导入 TikTok 登录凭证；作者扫描和媒体解析将使用此登录状态".to_string();
     if !tiktok_cookie_has_login() {
         message.push_str("；注意：未检测到 sessionid/sid_guard/uid_tt 等登录 Cookie，关注/喜欢列表可能不可用，请确认浏览器处于登录状态后重新导出 cookies.txt");
     }
@@ -930,7 +930,7 @@ fn tiktok_cookie_values() -> HashMap<String, String> {
 pub(crate) fn tiktok_cookie_header() -> Result<String> {
     let values = tiktok_cookie_values();
     if values.is_empty() {
-        bail!("尚未导入 TikTok cookies.txt，请在设置页导入后使用“我的喜欢”");
+        bail!("尚未导入 TikTok 登录凭证，请在设置页导入后使用“我的喜欢”");
     }
 
     Ok(values
@@ -1533,7 +1533,7 @@ pub fn ensure_tiktok_session() -> Result<()> {
     if tiktok_has_session() {
         Ok(())
     } else {
-        bail!("TikTok 我的喜欢需要登录状态，请先在设置页导入 TikTok cookies.txt")
+        bail!("TikTok 我的喜欢需要登录状态，请先在设置页导入 TikTok 登录凭证")
     }
 }
 

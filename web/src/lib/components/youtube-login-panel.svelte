@@ -143,8 +143,7 @@
 					<CircleAlert class="mt-0.5 h-4 w-4 shrink-0" />
 					<p>
 						手动备用方式：使用浏览器 Cookie 导出工具导出 Netscape 格式 cookies.txt，再点击“手动导入
-						cookies.txt”。服务端保存位置：<code class="break-all">{status?.cookie_path ?? '加载中…'}</code>
-						{#if status?.container_runtime}（位于 Docker 配置目录卷中）{/if}
+						cookies.txt”。登录凭证已保存到数据库，导入后自动维护、重启不丢失。
 					</p>
 				</div>
 			</div>

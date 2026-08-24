@@ -373,7 +373,7 @@ pub async fn import_douyin_cookie_file(
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
         message: format!(
-            "已导入抖音 cookies.txt{device_suffix}；作者作品扫描和媒体解析将使用此状态{secsdk_suffix}"
+            "已导入抖音登录凭证{device_suffix}；作者作品扫描和媒体解析将使用此状态{secsdk_suffix}"
         ),
     }))
 }
@@ -2210,7 +2210,7 @@ async fn signed_get_impl(
                     // 签名已通过但返回空 body：通常是当前出口 IP 被抖音风控
                     // （响应头 bd-ticket-guard-result=1101 + bdturing 滑块验证）。
                     // 更换外源代理节点或刷新 cookies 后通常可恢复。
-                    bail!("{} 返回空响应：签名已通过但未返回数据，通常是登录 Cookie 不完整/已失效，或当前出口 IP 被抖音风控。请用「外部平台登录助手」重新同步抖音登录状态（cookies.txt + secsdk），或更换外源代理节点后重试", endpoint_display_name(base_url));
+                    bail!("{} 返回空响应：签名已通过但未返回数据，通常是登录 Cookie 不完整/已失效，或当前出口 IP 被抖音风控。请用「外部平台登录助手」重新同步抖音登录状态（Cookie + secsdk 签名会话），或更换外源代理节点后重试", endpoint_display_name(base_url));
                 } else {
                     bail!("抖音 Web API 返回空响应；请重新导入电脑浏览器刚导出的抖音 Cookie");
                 }
@@ -2475,7 +2475,7 @@ fn client() -> Result<reqwest::Client> {
 pub(crate) fn cookie_header() -> Result<String> {
     let values = cookie_values();
     if values.is_empty() {
-        bail!("尚未导入抖音 cookies.txt");
+        bail!("尚未导入抖音登录凭证");
     }
     Ok(values
         .into_iter()
@@ -2747,7 +2747,7 @@ fn ensure_session() -> Result<()> {
     if douyin_has_session() {
         Ok(())
     } else {
-        bail!("抖音扫描需要新鲜 Cookie，请先在设置页导入电脑浏览器导出的 douyin.com cookies.txt")
+        bail!("抖音作者作品接口需要新鲜 Cookie，请在设置页重新导入登录凭证（电脑端登录助手或 cookies.txt）")
     }
 }
 

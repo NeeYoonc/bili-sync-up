@@ -1106,7 +1106,7 @@ pub async fn import_youtube_cookie_file(
 
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
-        message: "已导入 cookies.txt；订阅、喜欢和稍后再看将在下一次扫描时使用此登录状态".to_string(),
+        message: "已导入 YouTube 登录凭证；订阅、喜欢和稍后再看将在下一次扫描时使用此登录状态".to_string(),
     }))
 }
 

@@ -144,8 +144,7 @@
 				</div>
 				<p class="text-muted-foreground text-xs">
 					我的喜欢/关注列表仅需登录 Cookie（cookies.txt）即可服务端直连拉取；若返回空响应，通常是出口 IP 被 TikTok
-					风控，请更换干净的出口 IP 或配置外源代理。Cookie 保存位置：
-					<code class="break-all">{status?.cookie_path ?? '加载中…'}</code>
+					风控，请更换干净的出口 IP 或配置外源代理。登录凭证已保存到数据库，导入后自动维护、重启不丢失。
 				</p>
 
 				<div class="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">

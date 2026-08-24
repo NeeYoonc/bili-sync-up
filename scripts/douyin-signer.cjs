@@ -17,8 +17,8 @@ if (!targetUrl) fail('缺少目标 URL');
 // ---------- 加载 secsdk 环境（douyin-secsdk.json） ----------
 const keysPath = path.join(CFG_DIR, 'douyin-secsdk.json');
 let liveEnv = null;
-try { liveEnv = JSON.parse(fs.readFileSync(keysPath, 'utf8')); } catch (e) { fail('缺少抖音 secsdk 密钥文件 ' + keysPath + '：请在电脑浏览器打开抖音后，用登录助手导出（含 s_sdk_crypt_sdk / s_sdk_server_cert_key），或重新导入 cookies'); }
-if (!liveEnv.localStorage) fail('douyin-secsdk.json 缺少 localStorage（请重新用登录助手导出抖音登录状态）');
+try { liveEnv = JSON.parse(fs.readFileSync(keysPath, 'utf8')); } catch (e) { fail('缺少抖音 secsdk 签名会话（含 s_sdk_crypt_sdk / s_sdk_server_cert_key）：请在电脑浏览器打开抖音后，用登录助手重新传输抖音登录状态'); }
+if (!liveEnv.localStorage) fail('签名会话缺少 localStorage（请重新用登录助手传输抖音登录状态）');
 
 // cookies（覆盖导出中的 cookie，始终使用最新导入）
 let cookieStr = '';
