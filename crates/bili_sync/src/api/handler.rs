@@ -16063,22 +16063,31 @@ pub async fn proxy_image(
                             continue;
                         }
                         Ok(_) => {
-                            tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, status);
-                            return Err(anyhow!("图片请求失败: {}", status).into());
+                            // 刷新失败：直链已过期且当前无本地封面可兜底，按“无图”优雅返回，
+                            // 避免每个过期封面都刷 ERROR（详情接口需要浏览器 BotGuard 验证）。
+                            debug!(
+                                "TikTok 图片直链过期且无可刷新直链（无本地封面兜底），返回无图: {}",
+                                summarize_image_url(&url)
+                            );
+                            return Ok(local_cover_not_found_response());
                         }
                         Err(error) => {
-                            warn!(error = %error, "刷新 TikTok 图片直链失败，返回原状态码");
-                            tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, status);
-                            return Err(anyhow!("图片请求失败: {}", status).into());
+                            debug!(error = %error, "刷新 TikTok 图片直链失败，按无图兜底返回（详情接口需要浏览器 BotGuard 验证）");
+                            return Ok(local_cover_not_found_response());
                         }
                     }
                 }
                 Ok((status, _, _)) => {
-                    tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, status);
-                    return Err(anyhow!("图片请求失败: {}", status).into());
+                    debug!(
+                        "TikTok 图片下载非 200 状态（{}），按无图兜底返回: {}",
+                        status,
+                        summarize_image_url(&url)
+                    );
+                    return Ok(local_cover_not_found_response());
                 }
                 Err(error) => {
-                    return Err(anyhow!("使用 Chrome 指纹下载 TikTok 图片失败: {error:#}").into());
+                    debug!("使用 Chrome 指纹下载 TikTok 图片失败，按无图兜底返回: {error:#}");
+                    return Ok(local_cover_not_found_response());
                 }
             }
         }

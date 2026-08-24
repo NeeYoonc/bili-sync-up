@@ -524,7 +524,68 @@ async fn sync_tiktok_signer_env() -> Result<PathBuf> {
     if let Some(localstorage) = tiktok_localstorage_text() {
         tokio::fs::write(dir.join("tiktok-localstorage.json"), localstorage.as_bytes()).await?;
     }
+    // 同步 webmssdk 运行时：签名器以影子目录为 CONFIG_DIR 运行，需要候选 SDK 与
+    // active.json 才能命中已验证的最新版本（凭证入库后真实配置目录与影子目录分离）。
+    sync_tiktok_sdk_to_shadow(&dir).await?;
     Ok(dir)
+}
+
+/// 把配置目录中的 tiktok-sdk（webmssdk 候选与 active.json）同步到签名器影子目录。
+async fn sync_tiktok_sdk_to_shadow(shadow_dir: &Path) -> Result<()> {
+    let source = CONFIG_DIR.join("tiktok-sdk");
+    if !source.is_dir() {
+        return Ok(());
+    }
+    let target = shadow_dir.join("tiktok-sdk");
+    let active_marker = target.join("active.json");
+    let needs_sync = match tokio::fs::read(&active_marker).await {
+        Ok(existing) => match tokio::fs::read(source.join("active.json")).await {
+            Ok(current) => existing != current,
+            Err(_) => false,
+        },
+        Err(_) => true,
+    };
+    if !needs_sync {
+        return Ok(());
+    }
+    tokio::fs::create_dir_all(&target).await?;
+    let mut entries = tokio::fs::read_dir(&source).await?;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        if entry.file_type().await?.is_dir() {
+            copy_tiktok_sdk_dir(&from, &to).await?;
+        } else {
+            tokio::fs::copy(&from, &to).await?;
+        }
+    }
+    Ok(())
+}
+
+/// 复制目录（目标已存在且大小相同的文件跳过，减少重复 IO）。
+/// 使用显式栈迭代而非递归，避免递归 async fn 生成无限大 Future。
+async fn copy_tiktok_sdk_dir(from: &Path, to: &Path) -> Result<()> {
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((src_dir, dst_dir)) = pending.pop() {
+        tokio::fs::create_dir_all(&dst_dir).await?;
+        let mut entries = tokio::fs::read_dir(&src_dir).await?;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let child_from = entry.path();
+            let child_to = dst_dir.join(entry.file_name());
+            if entry.file_type().await?.is_dir() {
+                pending.push((child_from, child_to));
+            } else {
+                let skip = match tokio::fs::metadata(&child_to).await {
+                    Ok(meta) => meta.len() == entry.metadata().await?.len(),
+                    Err(_) => false,
+                };
+                if !skip {
+                    tokio::fs::copy(&child_from, &child_to).await?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn has_tiktok_session(path: &Path) -> bool {
@@ -1430,9 +1491,18 @@ async fn persist_tiktok_posts(
             .await?
         {
             deleted_video_ids.remove(&post.id);
-            if existing.is_image_post != post.is_image_post {
+            // 封面直链带签名会过期：扫描到同一视频时用最新封面刷新旧直链，
+            // 避免视频管理页封面长期停留在已过期的 403 直链上。
+            let thumbnail_refreshed = post
+                .thumbnail
+                .as_deref()
+                .is_some_and(|fresh| !fresh.is_empty() && existing.thumbnail.as_deref() != Some(fresh));
+            if existing.is_image_post != post.is_image_post || thumbnail_refreshed {
                 let mut active: youtube_video::ActiveModel = existing.into();
                 active.is_image_post = Set(post.is_image_post);
+                if thumbnail_refreshed {
+                    active.thumbnail = Set(post.thumbnail.clone());
+                }
                 active.updated_at = Set(now_standard_string());
                 active.update(db).await?;
             }
@@ -3281,7 +3351,7 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
         }
     }
     if last_body.trim().is_empty() {
-        bail!("TikTok 视频详情接口返回空响应（当前出口可能被 TikTok 风控，请更换外源代理节点后重试）");
+        bail!("TikTok 视频详情接口返回空响应（该接口需要浏览器 BotGuard 验证，服务端直连无法刷新过期直链；封面直链会在下次扫描时自动更新）");
     }
     let payload = decode_tiktok_body(&last_body)?;
     // TikTok 对已删除/私密/区域不可用的视频返回非 0 statusCode 且不带 itemInfo
@@ -3504,8 +3574,20 @@ pub(crate) async fn refresh_tiktok_cover_url(
     };
     let video_id = video.id;
     let video_url = video.url.clone();
-    let metadata = extract_tiktok_media_detail(&video_url).await?;
-    let Some(fresh) = metadata.thumbnail.filter(|value| !value.is_empty()) else {
+    // 官方 item/detail 需要浏览器 BotGuard 验证，服务端直连常返回空响应；
+    // 失败时改用第三方解析服务（TikWM）获取未过期的 CDN 封面直链。
+    let fresh = match extract_tiktok_media_detail(&video_url).await {
+        Ok(metadata) => metadata.thumbnail.filter(|value| !value.is_empty()),
+        Err(error) => {
+            debug!(error = %error, "TikTok 官方详情接口刷新封面直链失败，尝试第三方解析服务兜底");
+            None
+        }
+    };
+    let fresh = match fresh {
+        Some(fresh) => Some(fresh),
+        None => fetch_tiktok_cover_via_tikwm(&video_url).await?,
+    };
+    let Some(fresh) = fresh else {
         return Ok(None);
     };
     if fresh != stale_url {
@@ -3519,6 +3601,43 @@ pub(crate) async fn refresh_tiktok_cover_url(
         );
     }
     Ok(Some(fresh))
+}
+
+/// 通过第三方 TikTok 解析服务（TikWM）获取视频最新封面直链。
+///
+/// 官方 item/detail 接口需要浏览器 BotGuard 验证，服务端直连常返回空响应；
+/// TikWM 由服务端代拉视频信息，返回未过期的 CDN 封面地址，作为封面刷新兜底。
+async fn fetch_tiktok_cover_via_tikwm(video_url: &str) -> Result<Option<String>> {
+    let client = reqwest::Client::builder()
+        .user_agent(TIKTOK_WEB_UA)
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let api_url = reqwest::Url::parse_with_params(
+        "https://www.tikwm.com/api/",
+        &[("url", video_url)],
+    )?;
+    let response = client
+        .get(api_url)
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+        .send()
+        .await
+        .context("请求 TikWM 获取 TikTok 视频信息失败（用于刷新封面直链）")?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let payload: serde_json::Value = serde_json::from_str(&response.text().await?)
+        .context("解析 TikWM 视频信息响应失败（用于刷新封面直链）")?;
+    if payload.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
+        return Ok(None);
+    }
+    let cover = payload
+        .pointer("/data/cover")
+        .or_else(|| payload.pointer("/data/origin_cover"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Ok(cover)
 }
 
 pub(crate) async fn fetch_tiktok_media_with_impersonation(urls: &[&str], path: &Path) -> Result<()> {
