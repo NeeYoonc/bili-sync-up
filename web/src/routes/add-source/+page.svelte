@@ -215,7 +215,6 @@
 	let loadingDouyinFollowings = false;
 	let loadingTikTokFollowings = false;
 	let douyinCatalog: SearchResultItem[] = [];
-	let douyinCatalogSearchMode = false;
 	let loadingDouyinCatalog = false;
 	// YouTube “播放列表/收藏”：搜索 UP 主后展示其全部播放列表
 	let youtubeChannelPlaylists: SearchResultItem[] = [];
@@ -377,7 +376,6 @@
 		youtubeSourceType = String(nextValue ?? 'subscriptions') as YouTubeSourceType;
 		youtubeUrl = '';
 		douyinCatalog = [];
-		douyinCatalogSearchMode = false;
 		selectedVideos = [];
 		resetSubmissionState();
 		clearSearchPanel({ clearKeyword: true });
@@ -749,10 +747,6 @@
 			);
 			if (!response) return;
 			searchResults = response.data.results;
-			if (isCatalogSearch && youtubeSourceType === 'douyin_collection') {
-				douyinCatalog = response.data.results;
-				douyinCatalogSearchMode = true;
-			}
 			searchTotalResults = response.data.total;
 			showSearchResults = true;
 			if (response.data.results.length > 0) {
@@ -3562,6 +3556,7 @@
 								</div>
 
 								{/if}
+								{#if !(sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection')}
 								<div class="space-y-2">
 									<Label for="youtube-url">
 										{sourcePlatform === 'douyin'
@@ -3612,6 +3607,7 @@
 												: '请填写包含 list= 的 YouTube 播放列表链接。'}
 									</p>
 								</div>
+								{/if}
 							{:else if sourcePlatform === 'douyin' && douyinSourceNeedsSelection()}
 								<div class="space-y-2">
 									<Label for="youtube-url">
@@ -5278,16 +5274,16 @@
 				{/if}
 
 				<!-- 抖音收藏夹/放映厅/短剧：沿用 B 站收藏夹和合集的右侧选择方式 -->
-				{#if sourcePlatform === 'douyin' && (douyinCatalog.length > 0 || loadingDouyinCatalog)}
+				{#if sourcePlatform === 'douyin' && (douyinCatalog.length > 0 || loadingDouyinCatalog) && !(youtubeSourceType === 'douyin_collection' && showSearchResults)}
 					<div class={isCompactLayout ? 'w-full' : 'flex-1'}>
 						<SidePanel
 							isMobile={isCompactLayout}
 							title={youtubeSourceType === 'douyin_collection'
-								? (douyinCatalogSearchMode ? 'UP 的收藏夹' : '我的抖音收藏夹')
+								? '我的抖音收藏夹'
 								: youtubeSourceType === 'douyin_theater'
 									? '抖音放映厅'
 									: '抖音短剧'}
-							subtitle={loadingDouyinCatalog ? '正在获取…' : `共 ${douyinCatalog.length} 个，${douyinCatalogSearchMode ? '来自搜索，' : ''}点击选择`}
+							subtitle={loadingDouyinCatalog ? '正在获取…' : `共 ${douyinCatalog.length} 个，点击选择`}
 							maxHeightClass="max-h-126"
 							headerClass="bg-green-50 dark:bg-green-950"
 							titleClass="text-base font-medium text-green-800 dark:text-green-200"
