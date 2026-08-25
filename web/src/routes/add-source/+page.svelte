@@ -5308,7 +5308,7 @@
 				{/if}
 
 				<!-- 抖音收藏夹/放映厅/短剧：沿用 B 站收藏夹和合集的右侧选择方式 -->
-				{#if sourcePlatform === 'douyin' && (douyinCatalog.length > 0 || loadingDouyinCatalog) && !(youtubeSourceType === 'douyin_collection' && douyinCollectionSearchMode)}
+				{#if sourcePlatform === 'douyin' && (douyinCatalog.length > 0 || loadingDouyinCatalog) && !(youtubeSourceType === 'douyin_collection' && douyinCollectionSearchMode) && !(youtubeSourceType === 'douyin_collection' && showSubmissionSelection)}
 					<div class={isCompactLayout ? 'w-full' : 'flex-1'}>
 						<SidePanel
 							isMobile={isCompactLayout}
