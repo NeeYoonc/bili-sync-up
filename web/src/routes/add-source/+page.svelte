@@ -215,6 +215,7 @@
 	let loadingDouyinFollowings = false;
 	let loadingTikTokFollowings = false;
 	let douyinCatalog: SearchResultItem[] = [];
+	let douyinCollectionSearchMode = false;
 	let loadingDouyinCatalog = false;
 	// YouTube “播放列表/收藏”：搜索 UP 主后展示其全部播放列表
 	let youtubeChannelPlaylists: SearchResultItem[] = [];
@@ -376,6 +377,7 @@
 		youtubeSourceType = String(nextValue ?? 'subscriptions') as YouTubeSourceType;
 		youtubeUrl = '';
 		douyinCatalog = [];
+		douyinCollectionSearchMode = false;
 		selectedVideos = [];
 		resetSubmissionState();
 		clearSearchPanel({ clearKeyword: true });
@@ -747,6 +749,9 @@
 			);
 			if (!response) return;
 			searchResults = response.data.results;
+			if (youtubeSourceType === 'douyin_collection' && response.data.results.length > 0) {
+				douyinCollectionSearchMode = true;
+			}
 			searchTotalResults = response.data.total;
 			showSearchResults = true;
 			if (response.data.results.length > 0) {
@@ -2448,7 +2453,7 @@
 	function isYouTubeHistorySource(): boolean {
 		if (
 			sourcePlatform === 'douyin' &&
-			(youtubeSourceType === 'douyin_theater' || youtubeSourceType === 'douyin_series')
+			(youtubeSourceType === 'douyin_collection' || youtubeSourceType === 'douyin_theater' || youtubeSourceType === 'douyin_series')
 		) {
 			return false;
 		}
@@ -5184,7 +5189,7 @@
 														<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 														{@html result.title}
 													</h4>
-													{#if result.result_type}
+													{#if result.result_type && result.result_type !== 'douyin_collection'}
 														<span
 															class="flex-shrink-0 rounded px-1.5 py-0.5 text-xs {result.result_type ===
 															'media_bangumi'
@@ -5274,7 +5279,7 @@
 				{/if}
 
 				<!-- 抖音收藏夹/放映厅/短剧：沿用 B 站收藏夹和合集的右侧选择方式 -->
-				{#if sourcePlatform === 'douyin' && (douyinCatalog.length > 0 || loadingDouyinCatalog) && !(youtubeSourceType === 'douyin_collection' && showSearchResults)}
+				{#if sourcePlatform === 'douyin' && (douyinCatalog.length > 0 || loadingDouyinCatalog) && !(youtubeSourceType === 'douyin_collection' && douyinCollectionSearchMode)}
 					<div class={isCompactLayout ? 'w-full' : 'flex-1'}>
 						<SidePanel
 							isMobile={isCompactLayout}
