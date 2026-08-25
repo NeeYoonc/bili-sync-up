@@ -910,7 +910,7 @@ async fn fetch_collection_catalog() -> Result<Vec<YouTubeSearchResult>> {
                 continue;
             };
             let title = text(item, &["collects_name"]).unwrap_or_else(|| format!("收藏夹 {id}"));
-            let count = integer(item, &["total_number"]).unwrap_or_default();
+            let count = collection_video_count(item);
             results.push(YouTubeSearchResult {
                 result_type: "douyin_collection".to_string(),
                 title,
@@ -921,8 +921,8 @@ async fn fetch_collection_catalog() -> Result<Vec<YouTubeSearchResult>> {
                 youtube_url: format!("https://www.douyin.com/collection/{id}"),
                 channel_id: Some(id),
                 cover: image_url(item.get("collects_cover")).unwrap_or_default(),
-                description: format!("共 {count} 个作品"),
-                follower: Some(count),
+description: count.map(|n| format!("共 {n} 个作品")).unwrap_or_default(),
+                follower: count,
             });
         }
         if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
@@ -1021,7 +1021,7 @@ async fn fetch_user_collects_via_mobile(sec_uid: &str) -> Result<Vec<YouTubeSear
                 continue;
             };
             let title = text(item, &["collects_name"]).unwrap_or_else(|| format!("收藏夹 {id}"));
-            let count = integer(item, &["total_number"]).unwrap_or_default();
+            let count = collection_video_count(item);
             results.push(YouTubeSearchResult {
                 result_type: "douyin_collection".to_string(),
                 title,
@@ -1032,8 +1032,8 @@ async fn fetch_user_collects_via_mobile(sec_uid: &str) -> Result<Vec<YouTubeSear
                 youtube_url: format!("https://www.douyin.com/collection/{id}"),
                 channel_id: Some(id),
                 cover: image_url(item.get("collects_cover")).unwrap_or_default(),
-                description: format!("共 {count} 个作品"),
-                follower: Some(count),
+description: count.map(|n| format!("共 {n} 个作品")).unwrap_or_default(),
+                follower: count,
             });
         }
         if !json.get("has_more").and_then(value_as_bool).unwrap_or(false) {
@@ -1049,6 +1049,18 @@ async fn fetch_user_collects_via_mobile(sec_uid: &str) -> Result<Vec<YouTubeSear
     Ok(results)
 }
 
+/// 抖音收藏夹接口偶发不返回 total_number，兜底尝试其他数字字段；
+/// 全部缺失时返回 None，避免把作品数误显示为 0。
+fn collection_video_count(item: &serde_json::Value) -> Option<i64> {
+	for key in ["total_number", "aweme_count", "video_count", "collect_count"] {
+		if let Some(value) = integer(item, &[key]) {
+			if value > 0 {
+				return Some(value);
+			}
+		}
+	}
+	None
+}
 /// 移动端收藏夹接口需要的设备参数：伪造一组稳定值即可匿名访问公开收藏夹。
 fn mobile_device_params() -> Vec<(&'static str, String)> {
     vec![
