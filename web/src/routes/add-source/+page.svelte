@@ -240,6 +240,7 @@
 
 	// 过滤已有视频源相关
 	let existingVideoSources: VideoSourcesResponse | null = null;
+	let existingDouyinSources: YouTubeSource[] = [];
 	let existingCollectionIds: Set<string> = new Set();
 	let existingFavoriteIds: Set<number> = new Set();
 	let existingSubmissionIds: Set<number> = new Set();
@@ -693,7 +694,7 @@
 				isActive: true
 			}
 		]);
-		await Promise.all([loadExistingVideoSources(), loadQuickSubscriptionTemplates()]);
+		await Promise.all([loadExistingVideoSources(), loadExistingDouyinSources(), loadQuickSubscriptionTemplates()]);
 		if (sourcePlatform === 'youtube') {
 			await loadYouTubeDefaults();
 		} else if (sourcePlatform === 'douyin') {
@@ -1994,6 +1995,35 @@
 			existingBangumiSources = result.data.bangumi_sources;
 		} else {
 			existingBangumiSources = [];
+		}
+	}
+
+	// 已添加的抖音收藏夹 ID 集合（用于添加源界面的互斥置灰）
+	$: existingDouyinCollectionIds = new Set(
+		existingDouyinSources
+			.filter((s) => s.source_type === 'douyin_collection')
+			.map((s) => collectionIdFromDouyinUrl(s.url ?? ''))
+			.filter((id): id is string => id !== null)
+	);
+
+	function collectionIdFromDouyinUrl(url: string): string | null {
+		const match = url.match(/\/collection\/(\d+)/);
+		return match ? match[1] : null;
+	}
+
+	function isDouyinCollectionAdded(item: SearchResultItem): boolean {
+		const id = collectionIdFromDouyinUrl(item.youtube_url ?? '');
+		return id !== null && existingDouyinCollectionIds.has(id);
+	}
+
+	// 加载已有抖音源（用于收藏夹互斥置灰）
+	async function loadExistingDouyinSources() {
+		const result = await runRequest(() => api.getDouyinSources(), {
+			showErrorToast: false,
+			context: '加载已有抖音源失败'
+		});
+		if (result && Array.isArray(result.data)) {
+			existingDouyinSources = result.data;
 		}
 	}
 
@@ -5334,15 +5364,23 @@
 							{:else}
 								<div class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}" style={isMobile ? '' : 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}>
 									{#each douyinCatalog as item (item.youtube_url)}
-										<SelectableCardButton onclick={() => selectSearchResult(item)} class="p-3">
+										{@const isAdded = isDouyinCollectionAdded(item)}
+										<SelectableCardButton
+											onclick={() => selectSearchResult(item)}
+											disabled={isAdded}
+											class="p-3"
+										>
 											<div class="flex items-start gap-3">
 												<BiliImage src={item.cover} alt={item.title} class="h-16 w-12 flex-shrink-0 rounded object-cover" placeholder="封面" />
 												<div class="min-w-0 flex-1">
 													<h4 class="line-clamp-2 text-sm font-medium">{item.title}</h4>
 													<p class="text-muted-foreground mt-1 text-xs">{item.author}</p>
 													{#if item.description}<p class="text-muted-foreground/70 mt-1 line-clamp-2 text-xs">{item.description}</p>{/if}
+													
+													{#if isAdded}
+														<span class="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">已添加</span>
+													{/if}
 												</div>
-											</div>
 										</SelectableCardButton>
 									{/each}
 								</div>
