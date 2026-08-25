@@ -215,6 +215,7 @@
 	let loadingDouyinFollowings = false;
 	let loadingTikTokFollowings = false;
 	let douyinCatalog: SearchResultItem[] = [];
+	let douyinCatalogSearchMode = false;
 	let loadingDouyinCatalog = false;
 	// YouTube “播放列表/收藏”：搜索 UP 主后展示其全部播放列表
 	let youtubeChannelPlaylists: SearchResultItem[] = [];
@@ -376,6 +377,7 @@
 		youtubeSourceType = String(nextValue ?? 'subscriptions') as YouTubeSourceType;
 		youtubeUrl = '';
 		douyinCatalog = [];
+		douyinCatalogSearchMode = false;
 		selectedVideos = [];
 		resetSubmissionState();
 		clearSearchPanel({ clearKeyword: true });
@@ -734,7 +736,7 @@
 			return;
 		}
 		if (sourcePlatform === 'douyin') {
-			const isCatalogSearch = ['douyin_theater', 'douyin_series'].includes(youtubeSourceType);
+			const isCatalogSearch = ['douyin_collection', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType);
 			const response = await runRequest(
 				() =>
 					isCatalogSearch
@@ -747,6 +749,10 @@
 			);
 			if (!response) return;
 			searchResults = response.data.results;
+			if (isCatalogSearch && youtubeSourceType === 'douyin_collection') {
+				douyinCatalog = response.data.results;
+				douyinCatalogSearchMode = true;
+			}
 			searchTotalResults = response.data.total;
 			showSearchResults = true;
 			if (response.data.results.length > 0) {
@@ -3459,8 +3465,8 @@
 									</div>
 								</div>
 							{/if}
-							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && (youtubeSourceType === 'tiktok' || youtubeSourceType === 'tiktok_collection'))}
-{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok')}
+							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && (youtubeSourceType === 'tiktok' || youtubeSourceType === 'tiktok_collection'))}
+{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok')}
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
 								>
@@ -3473,7 +3479,9 @@
 													? '搜索抖音放映厅'
 													: youtubeSourceType === 'douyin_series'
 														? '搜索抖音短剧'
-														: '搜索抖音作者'
+														: youtubeSourceType === 'douyin_collection'
+															? '搜索抖音 UP 的收藏夹'
+															: '搜索抖音作者'
 												: youtubeSourceType === 'channel'
 												? '搜索 YouTube 频道'
 												: '搜索 YouTube 播放列表'}
@@ -3489,7 +3497,9 @@
 															? '输入放映厅名称、分类或作者...'
 															: youtubeSourceType === 'douyin_series'
 																? '输入短剧名称或作者...'
-																: '输入抖音作者昵称或抖音号...'
+																: youtubeSourceType === 'douyin_collection'
+																	? '输入 UP 昵称或抖音号，获取其公开收藏夹...'
+																	: '输入抖音作者昵称或抖音号...'
 														: youtubeSourceType === 'channel'
 														? '输入频道名称或 @用户名...'
 														: '输入播放列表名称...'}
@@ -3559,7 +3569,7 @@
 												? '放映厅详情链接'
 												: youtubeSourceType === 'douyin_series'
 													? '短剧详情链接'
-													: '抖音作者主页链接'
+													: youtubeSourceType === 'douyin_collection' ? '抖音收藏夹链接' : '抖音作者主页链接'
 											: sourcePlatform === 'tiktok' ? (youtubeSourceType === 'tiktok_favorite' ? '无需填写链接' : youtubeSourceType === 'tiktok_collection' ? 'TikTok 主页链接（可选，仅读取他人收藏夹时填写）' : 'TikTok 作者链接，如 https://www.tiktok.com/@user') : youtubeSourceType === 'playlist' ? 'YouTube 播放列表链接' : 'YouTube 频道链接'}
 									</Label>
 									{#if !(sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_favorite')}
@@ -3576,7 +3586,7 @@
 													? 'https://www.douyin.com/lvdetail/...'
 													: youtubeSourceType === 'douyin_series'
 														? 'https://www.douyin.com/series/...'
-														: 'https://www.douyin.com/user/...'
+														: youtubeSourceType === 'douyin_collection' ? 'https://www.douyin.com/collection/...' : 'https://www.douyin.com/user/...'
 												: youtubeSourceType === 'channel'
 												? 'https://www.youtube.com/@channel/videos'
 												: 'https://www.youtube.com/playlist?list=...'}
@@ -5273,11 +5283,11 @@
 						<SidePanel
 							isMobile={isCompactLayout}
 							title={youtubeSourceType === 'douyin_collection'
-								? '我的抖音收藏夹'
+								? (douyinCatalogSearchMode ? 'UP 的收藏夹' : '我的抖音收藏夹')
 								: youtubeSourceType === 'douyin_theater'
 									? '抖音放映厅'
 									: '抖音短剧'}
-							subtitle={loadingDouyinCatalog ? '正在获取…' : `共 ${douyinCatalog.length} 个，点击选择`}
+							subtitle={loadingDouyinCatalog ? '正在获取…' : `共 ${douyinCatalog.length} 个，${douyinCatalogSearchMode ? '来自搜索，' : ''}点击选择`}
 							maxHeightClass="max-h-126"
 							headerClass="bg-green-50 dark:bg-green-950"
 							titleClass="text-base font-medium text-green-800 dark:text-green-200"

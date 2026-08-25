@@ -44,6 +44,13 @@ const DOUYIN_PROFILE_OTHER_API: &str = "https://www.douyin.com/aweme/v1/web/user
 const DOUYIN_FOLLOWING_API: &str = "https://www.douyin.com/aweme/v1/web/user/following/list/";
 const DOUYIN_FAVORITE_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/favorite/";
 const DOUYIN_COLLECTIONS_API: &str = "https://www.douyin.com/aweme/v1/web/collects/list/";
+// 移动端收藏夹接口：无需登录即可匿名读取任意用户的公开收藏夹。
+// 网页版 collects/list 只返回当前登录账号自己的收藏夹并忽略他人 uid 参数，
+// 移动端（aweme.snssdk.com）携带 sec_owner_user_id + 设备参数即可读取他人公开收藏夹。
+const DOUYIN_MOBILE_COLLECTS_API: &str = "https://aweme.snssdk.com/aweme/v1/collects/list/";
+const DOUYIN_MOBILE_COLLECTION_VIDEOS_API: &str = "https://aweme.snssdk.com/aweme/v1/collects/video/list/";
+/// 移动端接口使用 App UA + 伪造设备参数即可匿名访问公开收藏夹。
+const DOUYIN_MOBILE_USER_AGENT: &str = "Dalvik/2.1.0 (Linux; U; Android 9; NX789J Build/PQ3A.190605.05141530)";
 const DOUYIN_COLLECTION_VIDEOS_API: &str = "https://www.douyin.com/aweme/v1/web/collects/video/list/";
 const DOUYIN_WATCH_LATER_API: &str = "https://www.douyin.com/aweme/v1/web/watchlater/list/";
 const DOUYIN_THEATER_FEED_API: &str = "https://www.douyin.com/aweme/v1/web/lvideo/theater/feed/";
@@ -670,7 +677,10 @@ pub async fn get_douyin_catalog(
     let mut results: Vec<YouTubeSearchResult> = match (source_type.as_str(), direct_id) {
         ("douyin_theater", Some(id)) => fetch_theater_catalog_item(id).await?.into_iter().collect(),
         ("douyin_series", Some(id)) => fetch_series_catalog_item(id).await?.into_iter().collect(),
-        ("douyin_collection", _) => fetch_collection_catalog().await?,
+        ("douyin_collection", _) => match keyword {
+            Some(keyword) => fetch_user_collection_catalog(keyword).await?,
+            None => fetch_collection_catalog().await?,
+        },
         ("douyin_theater", _) if keyword.is_some() => fetch_catalog_from_general_search(keyword.unwrap(), true).await?,
         ("douyin_series", _) if keyword.is_some() => fetch_catalog_from_general_search(keyword.unwrap(), false).await?,
         ("douyin_theater", _) => fetch_theater_catalog().await?,
@@ -679,7 +689,7 @@ pub async fn get_douyin_catalog(
     };
     // 综合搜索接口已经按作品标题/演员/描述做相关性检索，系列名本身不一定
     // 包含关键词；再做本地 contains 会把真实命中的结果误删。
-    if let Some(keyword) = keyword.filter(|_| !used_keyword_search) {
+    if let Some(keyword) = keyword.filter(|_| !used_keyword_search && source_type.as_str() != "douyin_collection") {
         let keyword = keyword.to_lowercase();
         results.retain(|item| {
             item.title.to_lowercase().contains(&keyword)
@@ -925,6 +935,139 @@ async fn fetch_collection_catalog() -> Result<Vec<YouTubeSearchResult>> {
         cursor = next;
     }
     Ok(results)
+}
+
+/// 按 UP 搜索其公开收藏夹（移动端接口，无需登录）。
+/// keyword 支持：作者主页链接、抖音号、昵称关键词。
+async fn fetch_user_collection_catalog(keyword: &str) -> Result<Vec<YouTubeSearchResult>> {
+    let trimmed = keyword.trim();
+    let mut users: Vec<(String, String)> = Vec::new();
+    if trimmed.contains('/') {
+        let sec_uid = resolve_sec_user_id(trimmed).await?;
+        users.push((sec_uid, String::new()));
+    } else {
+        let response = fetch_douyin_user_search(trimmed, false).await?;
+        let mut raw_users = Vec::new();
+        collect_user_infos(&response, &mut raw_users);
+        for user in raw_users {
+            if let Some(sec_uid) = text(user, &["sec_uid", "sec_user_id"]) {
+                let nickname = text(user, &["nickname"]).unwrap_or_default();
+                users.push((sec_uid, nickname));
+            }
+        }
+        if users.is_empty() {
+            bail!("未找到匹配的抖音作者：{trimmed}");
+        }
+    }
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    for (sec_uid, fallback_nickname) in users {
+        let mut items = fetch_user_collects_via_mobile(&sec_uid).await?;
+        for item in &mut items {
+            if item.author.is_empty() {
+                item.author = fallback_nickname.clone();
+            }
+        }
+        for item in items {
+            if seen.insert(item.youtube_url.clone()) {
+                results.push(item);
+            }
+        }
+        if results.len() >= 60 {
+            break;
+        }
+    }
+    Ok(results)
+}
+
+/// 移动端 collects/list：传入 sec_owner_user_id 即可匿名读取该用户的公开收藏夹。
+async fn fetch_user_collects_via_mobile(sec_uid: &str) -> Result<Vec<YouTubeSearchResult>> {
+    let client = reqwest::Client::builder()
+        .user_agent(DOUYIN_MOBILE_USER_AGENT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let mut cursor = 0i64;
+    let mut results = Vec::new();
+    for _ in 0..10 {
+        let mut pairs = mobile_device_params();
+        pairs.extend([
+            ("sec_owner_user_id", sec_uid.to_string()),
+            ("count", "20".to_string()),
+            ("cursor", cursor.to_string()),
+        ]);
+        let url = reqwest::Url::parse_with_params(DOUYIN_MOBILE_COLLECTS_API, &pairs)?;
+        let response = client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .context("请求抖音移动端收藏夹接口失败")?;
+        if !response.status().is_success() {
+            bail!("抖音移动端收藏夹接口返回 HTTP {}", response.status());
+        }
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .context("解析抖音移动端收藏夹响应失败")?;
+        ensure_douyin_status_ok(&json, "获取抖音 UP 收藏夹")?;
+        for item in json
+            .get("collects_list")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = text(item, &["collects_id_str", "collects_id"]) else {
+                continue;
+            };
+            let title = text(item, &["collects_name"]).unwrap_or_else(|| format!("收藏夹 {id}"));
+            let count = integer(item, &["total_number"]).unwrap_or_default();
+            results.push(YouTubeSearchResult {
+                result_type: "douyin_collection".to_string(),
+                title,
+                author: item
+                    .get("user_info")
+                    .and_then(|user| text(user, &["nickname"]))
+                    .unwrap_or_default(),
+                youtube_url: format!("https://www.douyin.com/collection/{id}"),
+                channel_id: Some(id),
+                cover: image_url(item.get("collects_cover")).unwrap_or_default(),
+                description: format!("共 {count} 个作品"),
+                follower: Some(count),
+            });
+        }
+        if !json.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = json.get("cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+        tokio::time::sleep(douyin_page_delay().await).await;
+    }
+    Ok(results)
+}
+
+/// 移动端收藏夹接口需要的设备参数：伪造一组稳定值即可匿名访问公开收藏夹。
+fn mobile_device_params() -> Vec<(&'static str, String)> {
+    vec![
+        ("aid", "1128".to_string()),
+        ("device_platform", "android".to_string()),
+        ("version_code", "390300".to_string()),
+        ("version_name", "39.3.0".to_string()),
+        ("app_name", "aweme".to_string()),
+        ("os", "android".to_string()),
+        ("device_type", "NX789J".to_string()),
+        ("language", "zh".to_string()),
+        ("os_api", "28".to_string()),
+        ("os_version", "9".to_string()),
+        ("resolution", "1080*1920".to_string()),
+        ("dpi", "420".to_string()),
+        ("channel", "update".to_string()),
+        ("iid", "1234567890123456".to_string()),
+        ("device_id", "1234567890123456".to_string()),
+    ]
 }
 
 async fn fetch_theater_catalog() -> Result<Vec<YouTubeSearchResult>> {
@@ -1331,8 +1474,8 @@ pub async fn fetch_source_posts(
         }
         "douyin_liked" => fetch_liked_posts(limit).await,
         "douyin_collection" => {
-            let id = numeric_id(source_url).context("无法从抖音收藏夹链接识别收藏夹 ID")?;
-            fetch_collection_posts(id, limit).await
+            let id = resolve_collection_id(source_url).await?;
+            fetch_collection_posts(&id, limit).await
         }
         "douyin_watch_later" => fetch_watch_later_posts(limit).await,
         "douyin_theater" => {
@@ -1345,6 +1488,67 @@ pub async fn fetch_source_posts(
         }
         value => bail!("不支持的抖音来源类型: {value}"),
     }
+}
+
+/// 从抖音收藏夹链接识别收藏夹 ID。
+///
+/// 移动端/网页分享链接常见两种形态：
+///   - https://www.douyin.com/collection/{id}（可带 ?modal_id=... 等参数）
+///   - https://v.douyin.com/xxxxx/（短链，需跟随跳转后再解析）
+/// 优先精确匹配 path 中的 /collection/{数字id}，避免被 modal_id 等 query 参数误导；
+/// 短链先跟随重定向拿到最终链接再解析。
+async fn resolve_collection_id(source_url: &str) -> Result<String> {
+    let trimmed = source_url.trim();
+    if let Some(id) = collection_id_from_url(trimmed) {
+        return Ok(id.to_string());
+    }
+    if let Some(id) = query_collection_id(trimmed) {
+        return Ok(id.to_string());
+    }
+    // v.douyin.com 短链：跟随重定向后解析最终链接
+    if trimmed.contains("v.douyin.com") {
+        ensure_session()?;
+        let client = client()?;
+        let response = client
+            .get(trimmed)
+            .send()
+            .await
+            .context("打开抖音收藏夹分享链接失败")?;
+        let final_url = response.url().clone();
+        let final_url = final_url.as_str();
+        if let Some(id) = collection_id_from_url(final_url) {
+            return Ok(id.to_string());
+        }
+        if let Some(id) = query_collection_id(final_url) {
+            return Ok(id.to_string());
+        }
+    }
+    numeric_id(trimmed)
+        .map(str::to_string)
+        .context("无法从抖音收藏夹链接识别收藏夹 ID")
+}
+
+/// 精确匹配 path 段 /collection/{数字id}，不受 ?modal_id= 等 query 参数干扰。
+fn collection_id_from_url(value: &str) -> Option<&str> {
+    let path = value.split(['?', '#']).next().unwrap_or(value);
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let index = parts.iter().position(|part| *part == "collection")?;
+    let id = parts.get(index + 1)?;
+    (!id.is_empty() && id.chars().all(|character| character.is_ascii_digit())).then_some(id)
+}
+
+/// 兜底：query 参数里的 collection_id。
+fn query_collection_id(value: &str) -> Option<&str> {
+    let query = value.split('?').nth(1)?;
+    query.split('&').find_map(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next()?;
+        let value = parts.next()?;
+        (key == "collection_id"
+            && !value.is_empty()
+            && value.chars().all(|character| character.is_ascii_digit()))
+        .then_some(value)
+    })
 }
 
 fn numeric_id(value: &str) -> Option<&str> {
@@ -1397,18 +1601,38 @@ async fn fetch_liked_posts(limit: usize) -> Result<Vec<DouyinPost>> {
 }
 
 async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+    // 移动端 collects/video/list 匿名即可读取任意公开收藏夹，不依赖登录 Cookie，
+    // 因此这里不走网页版 signed_get（后者要求浏览器会话与 secsdk 签名）。
+    let client = reqwest::Client::builder()
+        .user_agent(DOUYIN_MOBILE_USER_AGENT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
     for _ in 0..1000 {
         let page_size = page_size_for(limit, posts.len());
-        let mut pairs = common_query_pairs();
+        let mut pairs = mobile_device_params();
         pairs.extend([
             ("collects_id", id.to_string()),
             ("cursor", cursor.to_string()),
             ("count", page_size.to_string()),
         ]);
-        let response = signed_get(DOUYIN_COLLECTION_VIDEOS_API, pairs).await?;
+        let url = reqwest::Url::parse_with_params(DOUYIN_MOBILE_COLLECTION_VIDEOS_API, &pairs)?;
+        let response = client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .context("请求抖音移动端收藏夹作品接口失败")?;
+        if !response.status().is_success() {
+            bail!("抖音移动端收藏夹作品接口返回 HTTP {}", response.status());
+        }
+        let response: serde_json::Value = response
+            .json()
+            .await
+            .context("解析抖音移动端收藏夹作品响应失败")?;
         ensure_douyin_status_ok(&response, "获取抖音收藏夹作品")?;
         for item in response
             .get("aweme_list")
