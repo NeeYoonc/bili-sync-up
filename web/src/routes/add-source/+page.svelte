@@ -755,6 +755,12 @@
 			);
 			if (!response) return;
 			searchResults = response.data.results;
+			// 收藏夹类型：每次搜索都清空右侧面板（历史选择 / 已加载的 UP 收藏夹），避免叠加显示
+			if (youtubeSourceType === 'douyin_collection') {
+				showSubmissionSelection = false;
+				douyinCatalog = [];
+				douyinCatalogOwnerName = '';
+			}
 			if (youtubeSourceType === 'douyin_collection' && response.data.results.length > 0) {
 				douyinCollectionSearchMode = true;
 			}
