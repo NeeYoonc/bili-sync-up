@@ -216,6 +216,7 @@
 	let loadingTikTokFollowings = false;
 	let douyinCatalog: SearchResultItem[] = [];
 	let douyinCollectionSearchMode = false;
+	let douyinCatalogOwnerName = '';
 	let loadingDouyinCatalog = false;
 	// YouTube “播放列表/收藏”：搜索 UP 主后展示其全部播放列表
 	let youtubeChannelPlaylists: SearchResultItem[] = [];
@@ -378,6 +379,7 @@
 		youtubeUrl = '';
 		douyinCatalog = [];
 		douyinCollectionSearchMode = false;
+		douyinCatalogOwnerName = '';
 		selectedVideos = [];
 		resetSubmissionState();
 		clearSearchPanel({ clearKeyword: true });
@@ -416,12 +418,16 @@
 		);
 	}
 
-	async function loadDouyinCatalog(keyword?: string) {
+	async function loadDouyinCatalog(keyword?: string): Promise<boolean> {
 		const result = await runRequest(() => api.getDouyinCatalog(youtubeSourceType, keyword), {
 			setLoading: (value) => (loadingDouyinCatalog = value),
 			context: '获取抖音可选列表失败'
 		});
-		if (result) douyinCatalog = result.data.results;
+		if (result) {
+			douyinCatalog = result.data.results;
+			return douyinCatalog.length > 0;
+		}
+		return false;
 	}
 
 	async function loadYoutubeChannelPlaylists(channelUrl: string) {
@@ -736,7 +742,7 @@
 			return;
 		}
 		if (sourcePlatform === 'douyin') {
-			const isCatalogSearch = ['douyin_collection', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType);
+			const isCatalogSearch = ['douyin_theater', 'douyin_series'].includes(youtubeSourceType);
 			const response = await runRequest(
 				() =>
 					isCatalogSearch
@@ -955,6 +961,27 @@
 				showSubmissionSelection = false;
 				toast.success('已选择 UP 主', {
 					description: '正在加载其全部播放列表…'
+				});
+				return;
+			}
+			// 抖音收藏夹：先搜 UP 主，选择 UP 后加载其公开收藏夹
+			if (
+				sourcePlatform === 'douyin' &&
+				youtubeSourceType === 'douyin_collection' &&
+				result.result_type === 'douyin_user' &&
+				result.youtube_url
+			) {
+				douyinCatalogOwnerName = cleanTitle(result.title);
+				clearSearchPanel({ clearKeyword: true });
+				douyinCollectionSearchMode = false;
+				showSubmissionSelection = false;
+				void loadDouyinCatalog(result.youtube_url).then((has) => {
+					if (!has) {
+						douyinCatalogOwnerName = '';
+						toast.warning('该 UP 没有公开收藏夹');
+					} else {
+						toast.success('已选择 UP 主', { description: `找到 ${douyinCatalog.length} 个收藏夹` });
+					}
 				});
 				return;
 			}
@@ -2453,7 +2480,7 @@
 	function isYouTubeHistorySource(): boolean {
 		if (
 			sourcePlatform === 'douyin' &&
-			(youtubeSourceType === 'douyin_collection' || youtubeSourceType === 'douyin_theater' || youtubeSourceType === 'douyin_series')
+			(youtubeSourceType === 'douyin_theater' || youtubeSourceType === 'douyin_series')
 		) {
 			return false;
 		}
@@ -3554,7 +3581,9 @@
 												: sourcePlatform === 'douyin'
 													? youtubeSourceType === 'douyin'
 														? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
-														: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
+														: youtubeSourceType === 'douyin_collection'
+															? '先搜索 UP 主，选择后加载其公开收藏夹，再选收藏夹自动填充名称和链接。'
+															: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
 													: '搜索并选择结果后，将自动填充名称、链接和当前来源类型的快捷路径模板。'}
 										</p>
 									</div>
@@ -5284,7 +5313,7 @@
 						<SidePanel
 							isMobile={isCompactLayout}
 							title={youtubeSourceType === 'douyin_collection'
-								? '我的抖音收藏夹'
+								? (douyinCatalogOwnerName ? `${douyinCatalogOwnerName} 的收藏夹` : '我的抖音收藏夹')
 								: youtubeSourceType === 'douyin_theater'
 									? '抖音放映厅'
 									: '抖音短剧'}
