@@ -338,6 +338,7 @@ export interface VideoInfo {
 	valid: boolean;
 	is_charge_video: boolean;
 	is_image_post?: boolean;
+	is_story?: boolean; // 抖音日常 story 作品
 	image_urls?: string[];
 	bangumi_title?: string; // 番剧真实标题，用于番剧类型视频的显示
 	url?: string; // 平台原始视频地址（外部平台使用）

@@ -81,6 +81,7 @@ mod m20260802_000004_add_youtube_scan_deleted;
 mod m20260804_000001_add_external_episode_number;
 mod m20260807_000001_add_youtube_video_charge_flags;
 mod m20260821_000001_add_video_skip_reason;
+mod m20260826_000001_add_youtube_video_story;
 
 pub struct Migrator;
 
@@ -169,6 +170,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260804_000001_add_external_episode_number::Migration),
             Box::new(m20260807_000001_add_youtube_video_charge_flags::Migration),
             Box::new(m20260821_000001_add_video_skip_reason::Migration),
+            Box::new(m20260826_000001_add_youtube_video_story::Migration),
         ]
     }
 }

@@ -379,6 +379,8 @@ pub struct VideoInfo {
     pub valid: bool,
     pub is_charge_video: bool,
     pub is_image_post: bool,
+    #[serde(default)]
+    pub is_story: bool, // 抖音「日常」（story）作品标记
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -416,6 +418,7 @@ impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> f
             valid,
             is_charge_video,
             is_image_post: false,
+            is_story: false,
             image_urls: Vec::new(),
             bangumi_title: None, // 默认为None，将在API层根据视频类型填充
             url: None,

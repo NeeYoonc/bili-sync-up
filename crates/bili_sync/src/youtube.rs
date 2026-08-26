@@ -1911,6 +1911,7 @@ async fn unified_youtube_parts(
             valid: true,
             is_charge_video: video.is_charge_video,
             is_image_post,
+            is_story: is_douyin_source(source) && video.is_story,
             image_urls,
             bangumi_title: None,
             url: Some(video.url.clone()),
@@ -2704,10 +2705,12 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
         {
             deleted_video_ids.remove(&post.id);
             if existing.is_image_post != post.is_image_post
+                || existing.is_story != post.is_story
                 || existing.episode_number != post.episode_number
             {
                 let mut active: youtube_video::ActiveModel = existing.into();
                 active.is_image_post = Set(post.is_image_post);
+                active.is_story = Set(post.is_story);
                 active.episode_number = Set(post.episode_number);
                 active.updated_at = Set(now_standard_string());
                 active.update(db).await?;
@@ -2764,6 +2767,7 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
             duration_seconds: Set(post.duration_seconds),
             episode_number: Set(post.episode_number),
             is_image_post: Set(post.is_image_post),
+            is_story: Set(post.is_story),
             download_status: Set("pending".to_string()),
             output_path: Set(None),
             error_message: Set(None),

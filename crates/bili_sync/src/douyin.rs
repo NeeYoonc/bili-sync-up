@@ -49,6 +49,11 @@ const DOUYIN_COLLECTIONS_API: &str = "https://www.douyin.com/aweme/v1/web/collec
 // 移动端（aweme.snssdk.com）携带 sec_owner_user_id + 设备参数即可读取他人公开收藏夹。
 const DOUYIN_MOBILE_COLLECTS_API: &str = "https://aweme.snssdk.com/aweme/v1/collects/list/";
 const DOUYIN_MOBILE_COLLECTION_VIDEOS_API: &str = "https://aweme.snssdk.com/aweme/v1/collects/video/list/";
+// 移动端用户资料接口：携带登录 Cookie 可读取任意用户的数字 uid（日常接口需要 to_uid）。
+const DOUYIN_MOBILE_PROFILE_API: &str = "https://aweme.snssdk.com/aweme/v1/user/profile/other/";
+// 移动端日常（story）接口：UP 的「日常」作品仅在抖音 App 有接口，网页版无对应入口。
+// 需要登录 Cookie；最近 7 天在 active_data.data，更早的按月份在 month_list。
+const DOUYIN_MOBILE_STORY_API: &str = "https://aweme.snssdk.com/aweme/v1/story/profile/list/";
 /// 移动端接口使用 App UA + 伪造设备参数即可匿名访问公开收藏夹。
 const DOUYIN_MOBILE_USER_AGENT: &str = "Dalvik/2.1.0 (Linux; U; Android 9; NX789J Build/PQ3A.190605.05141530)";
 const DOUYIN_COLLECTION_VIDEOS_API: &str = "https://www.douyin.com/aweme/v1/web/collects/video/list/";
@@ -271,6 +276,8 @@ pub struct DouyinPost {
     pub episode_number: Option<i32>,
     pub digg_count: i64,
     pub is_image_post: bool,
+    /// 是否为抖音「日常」（story）作品（仅在 App 接口出现，作者源扫描时合并）。
+    pub is_story: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1482,7 +1489,38 @@ pub async fn fetch_source_posts(
     match source_type.trim().to_ascii_lowercase().as_str() {
         "douyin" => {
             let sec_uid = resolve_sec_user_id(source_url).await?;
-            fetch_posts_until(&sec_uid, limit, stop_when_known).await
+            let mut posts = fetch_posts_until(&sec_uid, limit, stop_when_known).await?;
+            // 合并作者「日常」（story）：日常仅在抖音 App 有接口，网页版无入口。
+            // 日常拉取失败不影响普通作品扫描，仅记录告警；成功则按 aweme_id 去重追加。
+            match fetch_user_stories(&sec_uid, limit).await {
+                Ok(stories) => {
+                    // 「日常」是最近 7 天发布的最新内容，插入列表开头优先展示，
+                    // 避免日常作品被分页 limit 截断到作品列表末尾。
+                    let story_count = stories.len();
+                    let mut known: HashSet<String> =
+                        posts.iter().map(|post| post.id.clone()).collect();
+                    let mut merged = Vec::with_capacity(posts.len() + story_count);
+                    for story in stories {
+                        if known.insert(story.id.clone()) {
+                            merged.push(story);
+                        }
+                    }
+                    merged.extend(posts);
+                    posts = merged;
+                    info!(
+                        sec_user_id = %sec_uid,
+                        story_count,
+                        total = posts.len(),
+                        "抖音作者作品已合并「日常」列表"
+                    );
+                }
+                Err(error) => warn!(
+                    sec_user_id = %sec_uid,
+                    error = %error,
+                    "抖音作者「日常」拉取失败，已跳过（不影响作品扫描）"
+                ),
+            }
+            Ok(posts)
         }
         "douyin_liked" => fetch_liked_posts(limit).await,
         "douyin_collection" => {
@@ -1671,6 +1709,140 @@ async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost
         tokio::time::sleep(douyin_page_delay().await).await;
     }
     Ok(posts)
+}
+
+/// 移动端获取目标用户的数字 uid（「日常」story 接口使用 to_uid 而非 sec_uid）。
+async fn mobile_user_uid(sec_uid: &str) -> Result<String> {
+    let cookie = cookie_header()?;
+    let client = reqwest::Client::builder()
+        .user_agent(DOUYIN_MOBILE_USER_AGENT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let mut pairs = mobile_device_params();
+    pairs.push(("sec_user_id", sec_uid.to_string()));
+    let url = reqwest::Url::parse_with_params(DOUYIN_MOBILE_PROFILE_API, &pairs)?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .context("请求抖音移动端用户资料接口失败")?;
+    if !response.status().is_success() {
+        bail!("抖音移动端用户资料接口返回 HTTP {}", response.status());
+    }
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .context("解析抖音移动端用户资料响应失败")?;
+    ensure_douyin_status_ok(&json, "获取抖音作者 uid")?;
+    json.get("user")
+        .and_then(|user| text(user, &["uid"]))
+        .context("抖音移动端用户资料缺少 uid")
+}
+
+/// 拉取抖音作者的「日常」（story）原始作品项（标准 aweme JSON）。
+///
+/// 日常仅在抖音 App 有接口（story/profile/list），网页版没有对应入口，因此
+/// 必须携带登录 Cookie 请求移动端接口。最近 7 天在 active_data.data，更早的
+/// 按月份在 month_list；分页去重后返回原始作品项，供扫描与下载详情复用。
+async fn fetch_story_items(sec_uid: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+    let uid = mobile_user_uid(sec_uid).await?;
+    let cookie = cookie_header()?;
+    let client = reqwest::Client::builder()
+        .user_agent(DOUYIN_MOBILE_USER_AGENT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let mut offset = 0i64;
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..100 {
+        let page_size = page_size_for(limit, items.len());
+        let mut pairs = mobile_device_params();
+        pairs.extend([
+            ("to_uid", uid.clone()),
+            ("offset", offset.to_string()),
+            ("story_ttl", "7".to_string()),
+            ("active_data_size", page_size.to_string()),
+            ("month_data_size", "4".to_string()),
+            ("insert_ids", String::new()),
+            ("delete_ids", String::new()),
+        ]);
+        let url = reqwest::Url::parse_with_params(DOUYIN_MOBILE_STORY_API, &pairs)?;
+        let response = client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::COOKIE, cookie.clone())
+            .send()
+            .await
+            .context("请求抖音移动端日常接口失败")?;
+        if !response.status().is_success() {
+            bail!("抖音移动端日常接口返回 HTTP {}", response.status());
+        }
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .context("解析抖音移动端日常响应失败")?;
+        ensure_douyin_status_ok(&json, "获取抖音作者日常")?;
+        for item in story_items(&json) {
+            if let Some(id) = text(item, &["aweme_id", "group_id"]) {
+                if seen.insert(id.to_string()) {
+                    items.push(item.clone());
+                }
+            }
+        }
+        if items.len() >= limit {
+            break;
+        }
+        let next = json.get("next_offset").and_then(value_as_i64).unwrap_or(offset);
+        if next == offset || !json.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        offset = next;
+        tokio::time::sleep(douyin_page_delay().await).await;
+    }
+    Ok(items)
+}
+
+/// 拉取抖音作者的「日常」（story）作品列表。
+async fn fetch_user_stories(sec_uid: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+    let items = fetch_story_items(sec_uid, limit).await?;
+    let mut posts = Vec::new();
+    let mut seen = HashSet::new();
+    for item in &items {
+        if let Some(post) = parse_post(item) {
+            if seen.insert(post.id.clone()) {
+                posts.push(post);
+            }
+        }
+    }
+    Ok(posts)
+}
+
+/// 提取日常接口返回的作品列表：最近 7 天在 active_data.data；
+/// 更早的按月份分组在 month_list（可能为按月份嵌套的对象，防御性兼容）。
+fn story_items(json: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let mut items = Vec::new();
+    if let Some(data) = json
+        .get("active_data")
+        .and_then(|v| v.get("data"))
+        .and_then(serde_json::Value::as_array)
+    {
+        items.extend(data.iter());
+    }
+    if let Some(months) = json.get("month_list").and_then(serde_json::Value::as_array) {
+        for month in months {
+            if let Some(data) = month.get("data").and_then(serde_json::Value::as_array) {
+                items.extend(data.iter());
+            } else if month.is_object() && !month.get("aweme_id").is_none() {
+                // 扁平结构兜底：month_list 直接是 aweme 数组时，元素自身即作品。
+                items.push(month);
+            }
+        }
+    }
+    items
 }
 
 async fn fetch_watch_later_posts(limit: usize) -> Result<Vec<DouyinPost>> {
@@ -1907,7 +2079,12 @@ pub(crate) async fn fetch_aweme_detail_for_source(
             let series_id = numeric_id(source_url).context("无法从短剧链接识别短剧 ID")?;
             fetch_series_aweme_detail(series_id, aweme_id).await
         }
-        _ => return fetch_aweme_detail(aweme_id).await,
+        _ => {
+            if source_type == "douyin" {
+                return fetch_douyin_author_detail(source_url, aweme_id).await;
+            }
+            fetch_aweme_detail(aweme_id).await.map(Some)
+        }
     };
 
     match source_result {
@@ -1918,6 +2095,34 @@ pub(crate) async fn fetch_aweme_detail_for_source(
         Err(source_error) => fetch_aweme_detail(aweme_id)
             .await
             .with_context(|| format!("读取抖音来源列表中的作品详情失败：{source_error:#}")),
+    }
+}
+
+/// 抖音作者源的作品详情：普通 Web 详情接口优先；对「日常」（story）作品，
+/// 普通详情接口会返回空详情（日常在独立的 story 数据空间），此时回退到
+/// 移动端日常列表接口按 aweme_id 查找，让图文日常能拿到原图与配乐直链。
+async fn fetch_douyin_author_detail(source_url: &str, aweme_id: &str) -> Result<serde_json::Value> {
+    match fetch_aweme_detail(aweme_id).await {
+        Ok(detail) => Ok(detail),
+        Err(regular_error) => {
+            let fallback = async {
+                let sec_uid = resolve_sec_user_id(source_url).await?;
+                let items = fetch_story_items(&sec_uid, 200).await?;
+                find_aweme_in_items(&items, aweme_id).context("日常列表中没有找到该作品")
+            }
+            .await;
+            match fallback {
+                Ok(item) => Ok(item),
+                Err(fallback_error) => {
+                    debug!(
+                        aweme_id,
+                        fallback_error = %fallback_error,
+                        "抖音作者「日常」详情回退失败，返回普通详情接口错误"
+                    );
+                    Err(regular_error)
+                }
+            }
+        }
     }
 }
 
@@ -2104,6 +2309,12 @@ fn parse_post(item: &serde_json::Value) -> Option<DouyinPost> {
         .get("images")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|images| !images.is_empty());
+    let is_story = item
+        .get("is_story")
+        .and_then(serde_json::Value::as_i64)
+        .is_some_and(|value| value > 0)
+        || text(item, &["is_story"])
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let id = text(item, &["aweme_id", "group_id"])?;
     let author = item.get("author");
     let timestamp = item.get("create_time").and_then(serde_json::Value::as_i64);
@@ -2142,6 +2353,7 @@ fn parse_post(item: &serde_json::Value) -> Option<DouyinPost> {
             .and_then(|statistics| integer(statistics, &["digg_count"]))
             .unwrap_or_default(),
         is_image_post,
+        is_story,
         episode_number: None,
     })
 }
@@ -4063,6 +4275,7 @@ mod tests {
                 episode_number: None,
                 digg_count: 0,
                 is_image_post: false,
+                is_story: false,
             }
         }
         let known: HashSet<String> = ["1", "2", "3"].into_iter().map(str::to_string).collect();

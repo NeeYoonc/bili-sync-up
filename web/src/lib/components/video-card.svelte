@@ -334,7 +334,7 @@
 				on:error={handleCoverImageError}
 			/>
 			<!-- 类型标识和选择框统一排列在封面左上角 -->
-			{#if selectionMode || video.is_image_post || video.is_charge_video || video.skip_reason}
+			{#if selectionMode || video.is_image_post || video.is_story || video.is_charge_video || video.skip_reason}
 				<div class="absolute top-2 left-2 z-20 flex max-w-[calc(100%-88px)] flex-wrap items-center gap-1.5">
 					{#if selectionMode}
 					<input
@@ -348,6 +348,11 @@
 					{#if video.is_image_post}
 						<Badge class="bg-fuchsia-600 text-xs text-white shadow-md hover:bg-fuchsia-600" title="抖音图文作品">
 							图文
+						</Badge>
+					{/if}
+					{#if video.is_story}
+						<Badge class="bg-cyan-600 text-xs text-white shadow-md hover:bg-cyan-600" title="抖音日常作品">
+							日常
 						</Badge>
 					{/if}
 					{#if video.is_charge_video}
@@ -401,9 +406,14 @@
 					class="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
 				/>
 			{/if}
-			{#if (coverFailed || mode !== 'default') && video.is_image_post}
+			{#if (coverFailed || mode !== 'default') && (video.is_image_post || video.is_story)}
 				<Badge class="mt-0.5 shrink-0 bg-fuchsia-600 text-xs text-white hover:bg-fuchsia-600" title="抖音图文作品">
 					图文
+				</Badge>
+			{/if}
+			{#if (coverFailed || mode !== 'default') && video.is_story}
+				<Badge class="mt-0.5 shrink-0 bg-cyan-600 text-xs text-white hover:bg-cyan-600" title="抖音日常作品">
+					日常
 				</Badge>
 			{/if}
 			{#if (coverFailed || mode !== 'default') && video.is_charge_video}

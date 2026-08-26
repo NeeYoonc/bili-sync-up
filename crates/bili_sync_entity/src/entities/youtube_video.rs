@@ -16,6 +16,8 @@ pub struct Model {
     pub duration_seconds: Option<i32>,
     pub episode_number: Option<i32>,
     pub is_image_post: bool,
+    /// 是否为抖音「日常」（story）作品：仅在抖音 App 有接口，扫描作者源时合并。
+    pub is_story: bool,
     pub is_charge_video: bool,
     pub charge_can_play: bool,
     pub download_status: String,
