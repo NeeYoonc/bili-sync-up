@@ -195,6 +195,9 @@ pub enum VideoInfo {
         #[serde(default, deserialize_with = "deserialize_optional_duration_seconds")]
         duration: Option<i32>,
         attr: i32,
+        /// 收藏夹接口返回的当前分P数（用于检测已收藏多P视频是否新增分P）
+        #[serde(default)]
+        page: i32,
     },
     /// 从稍后再看接口获取的视频信息
     WatchLater {
@@ -232,6 +235,9 @@ pub enum VideoInfo {
         /// UP主信息，从arc.author中提取
         #[serde(rename = "arc")]
         arc: Option<serde_json::Value>,
+        /// 所属视频合集ID（收藏夹展开合集时写入，用于后续增量发现新增分集）
+        #[serde(default)]
+        season_id: Option<String>,
     },
     // 从用户投稿接口获取的视频信息
     Submission {
@@ -315,6 +321,59 @@ mod tests {
             "缺少 pages 的 view 数据应解析为 Collection，实际: {:?}",
             std::mem::discriminant(&info)
         );
+    }
+
+    /// 收藏夹接口返回的 medias 条目应能解析出当前分P数（page 字段），
+    /// 这是检测已收藏多P视频新增分P的基础。
+    #[test]
+    fn favorite_item_parses_page_count() {
+        let data = json!({
+            "id": 123456,
+            "type": 2,
+            "title": "测试多P视频",
+            "intro": "",
+            "cover": "https://example.com/cover.jpg",
+            "upper": { "mid": 1, "name": "UP主", "face": "" },
+            "ctime": 1620000000,
+            "fav_time": 1620000000,
+            "pubtime": 1620000000,
+            "duration": 100,
+            "attr": 0,
+            "bv_id": "BV1test",
+            "bvid": "BV1test",
+            "page": 16
+        });
+        let info: VideoInfo = serde_json::from_value(data).expect("收藏夹条目应能解析");
+        match info {
+            VideoInfo::Favorite { bvid, page, .. } => {
+                assert_eq!(bvid, "BV1test");
+                assert_eq!(page, 16);
+            }
+            other => panic!("应解析为 Favorite 变体，实际: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    /// 收藏夹接口未返回 page 字段时按 0 处理（历史字段缺失的容错）
+    #[test]
+    fn favorite_item_defaults_page_count_to_zero() {
+        let data = json!({
+            "id": 123456,
+            "type": 2,
+            "title": "测试视频",
+            "intro": "",
+            "cover": "https://example.com/cover.jpg",
+            "upper": { "mid": 1, "name": "UP主", "face": "" },
+            "ctime": 1620000000,
+            "fav_time": 1620000000,
+            "pubtime": 1620000000,
+            "attr": 0,
+            "bvid": "BV1test"
+        });
+        let info: VideoInfo = serde_json::from_value(data).expect("收藏夹条目应能解析");
+        match info {
+            VideoInfo::Favorite { page, .. } => assert_eq!(page, 0),
+            other => panic!("应解析为 Favorite 变体，实际: {:?}", std::mem::discriminant(&other)),
+        }
     }
 
     /// 正常 view 数据应解析为 Detail（回归保护）

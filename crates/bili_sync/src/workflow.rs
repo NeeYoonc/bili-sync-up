@@ -305,8 +305,10 @@ use crate::error::{DownloadAbortError, DownloadAbortReason, ExecutionStatus, Pro
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
-    create_pages, create_videos, filter_unfilled_videos, filter_unhandled_video_pages,
-    get_failed_videos_in_current_cycle, update_pages_model, update_videos_model,
+    check_favorite_multipage_videos_for_new_parts, check_favorite_videos_for_new_parts,
+    collect_favorite_page_counts, create_pages, create_videos, filter_unfilled_videos,
+    filter_unhandled_video_pages, get_failed_videos_in_current_cycle, recheck_favorite_collections,
+    update_pages_model, update_videos_model,
 };
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
@@ -1625,7 +1627,16 @@ pub async fn refresh_video_source<'a>(
             })
             .collect();
 
+        // 收藏夹源：先收集 B站 当前分P数（仅当这批数据包含收藏夹条目时非空）
+        let favorite_page_map = collect_favorite_page_counts(&videos_info);
+
         create_videos(videos_info, video_source, connection).await?;
+
+        // 收藏夹源：对比 B站 当前分P数与本地记录，检测已收藏多P视频是否新增分P；
+        // 若检测到新增，重置 single_page/download_status 以重新拉取详情并下载新分P。
+        if !favorite_page_map.is_empty() {
+            check_favorite_videos_for_new_parts(favorite_page_map, video_source, connection).await?;
+        }
 
         // 获取插入后的视频数量，计算实际新增数量
         let after_count = get_video_count_for_source(video_source, connection).await?;
@@ -1753,6 +1764,31 @@ pub async fn refresh_video_source<'a>(
             .update_latest_row_at(beijing_datetime_string)
             .save(connection)
             .await?;
+    }
+
+    // 收藏夹源：巡检已入库的多P视频是否新增了分P、以及收藏夹内合集是否新增了分集。
+    // 增量扫描只能发现「新收藏」的视频，而多P视频新增分P、合集新增分集都不会改变
+    // 收藏时间，因此这里每轮对存量内容做限量巡检，发现更新即重置/入库，
+    // 使其进入本轮详情填充并下载新分P/新分集。
+    if let VideoSourceEnum::Favorite(_) = video_source {
+        if !(token.is_cancelled() || crate::task::TASK_CONTROLLER.is_paused()) {
+            match check_favorite_multipage_videos_for_new_parts(bili_client, video_source, connection).await {
+                Ok(checked_count) => {
+                    if checked_count > 0 {
+                        debug!("收藏夹多P视频分P巡检：本轮重置 {} 个视频以拉取新分P", checked_count);
+                    }
+                }
+                Err(err) => warn!("收藏夹多P视频分P巡检失败（不影响本轮扫描）: {:#}", err),
+            }
+            match recheck_favorite_collections(bili_client, video_source, connection).await {
+                Ok(added_count) => {
+                    if added_count > 0 {
+                        debug!("收藏夹合集分集巡检：本轮新增入库 {} 个分集", added_count);
+                    }
+                }
+                Err(err) => warn!("收藏夹合集分集巡检失败（不影响本轮扫描）: {:#}", err),
+            }
+        }
     }
 
     // 番剧源：更新缓存

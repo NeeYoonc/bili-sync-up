@@ -1,11 +1,12 @@
 use anyhow::{anyhow, Context, Result};
 use bili_sync_entity::*;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use once_cell::sync::Lazy;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{OnConflict, SimpleExpr};
 use sea_orm::DatabaseTransaction;
-use sea_orm::{QuerySelect, Set, Unchanged};
+use sea_orm::{QueryOrder, QuerySelect, Set, Unchanged};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,7 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
 use tracing::{debug, info, warn};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
-use crate::bilibili::{PageInfo, VideoInfo};
+use crate::bilibili::{BiliClient, Collection, CollectionItem, CollectionType, PageInfo, Video, VideoInfo};
 use crate::utils::live_updates::notify_videos_changed;
 use crate::utils::status::STATUS_COMPLETED;
 
@@ -978,6 +979,352 @@ pub async fn create_videos(
     Ok(())
 }
 
+/// 从收藏夹扫描得到的 VideoInfo 中收集 bvid -> B站 当前分P数 的映射。
+///
+/// 仅统计类型为普通视频（type=2）且 B站 返回了有效分P数的条目；
+/// 合集（type=21）条目已在收藏夹流中展开为每一集，不在此处理。
+pub fn collect_favorite_page_counts(videos_info: &[VideoInfo]) -> HashMap<String, i32> {
+    let mut map = HashMap::new();
+    for info in videos_info {
+        if let VideoInfo::Favorite { bvid, page, .. } = info {
+            if *page > 0 && !bvid.is_empty() {
+                map.insert(bvid.clone(), *page);
+            }
+        }
+    }
+    map
+}
+
+/// 收藏夹源：对比 B站 收藏夹接口返回的当前分P数与本地已存在视频的分P数，
+/// 若发现 UP主 新增了分P（例如合集类视频持续更新分P），重置该视频的
+/// single_page/download_status，使其重新进入“详情填充”阶段拉取最新分P列表，
+/// 从而新增并下载这些分P。
+pub async fn check_favorite_videos_for_new_parts(
+    api_page_map: HashMap<String, i32>,
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<()> {
+    let VideoSourceEnum::Favorite(favorite_source) = video_source else {
+        return Ok(());
+    };
+    if api_page_map.is_empty() {
+        return Ok(());
+    }
+
+    let bvids: Vec<String> = api_page_map.keys().cloned().collect();
+    let existing = video::Entity::find()
+        .filter(video::Column::Bvid.is_in(bvids))
+        .filter(video_source.filter_expr())
+        .find_with_related(page::Entity)
+        .all(connection)
+        .await
+        .context("查询收藏夹视频分P数失败")?;
+
+    let mut updated = 0usize;
+    for (video_model, pages) in existing {
+        if video_model.deleted != 0 || !video_model.valid {
+            continue;
+        }
+        let Some(&api_page) = api_page_map.get(&video_model.bvid) else {
+            continue;
+        };
+        let local_page_count = pages.len() as i32;
+        // 新入库尚未填充详情的视频（本地 0 分P）不需要重置，详情填充会自动处理
+        if local_page_count == 0 {
+            continue;
+        }
+        if reset_video_if_parts_increased(
+            &video_model,
+            local_page_count,
+            api_page,
+            &favorite_source.name,
+            connection,
+        )
+        .await?
+        {
+            updated += 1;
+        }
+    }
+    if updated > 0 {
+        notify_videos_changed();
+    }
+    Ok(())
+}
+
+/// 对比当前分P数与本地已入库分P数，发现变多则重置视频的
+/// single_page/download_status，使其重新进入详情填充阶段拉取最新分P并下载。
+/// 返回是否执行了重置。
+async fn reset_video_if_parts_increased(
+    video_model: &video::Model,
+    local_page_count: i32,
+    current_page_count: i32,
+    favorite_name: &str,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    if current_page_count <= local_page_count {
+        return Ok(false);
+    }
+    info!(
+        "收藏夹「{}」视频 {} ({}) 检测到新增分P（本地 {} -> B站 {}），重新拉取详情并下载新分P",
+        favorite_name,
+        video_model.name,
+        video_model.bvid,
+        local_page_count,
+        current_page_count
+    );
+    let update = video::ActiveModel {
+        id: Unchanged(video_model.id),
+        single_page: Set(None),
+        download_status: Set(0),
+        valid: Set(true),
+        ..Default::default()
+    };
+    update.save(connection).await?;
+    Ok(true)
+}
+
+/// 收藏夹源：每轮限量巡检已入库的多P视频是否新增了分P。
+///
+/// 增量扫描只会看到「新收藏」的条目，而多P视频新增分P不会改变收藏时间
+/// （fav_time），旧收藏里持续更新的合集类视频永远进不了增量窗口。
+/// 这里直接查库找出该收藏夹下已填充详情的多P视频，每轮轮转抽查一部分
+/// （默认每轮 10 个），用 view 接口对比当前分P数与本地记录，发现新增就
+/// 重置视频以重新拉取详情并下载新分P。返回本轮重置的视频数量。
+pub async fn check_favorite_multipage_videos_for_new_parts(
+    bili_client: &BiliClient,
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<usize> {
+    let VideoSourceEnum::Favorite(favorite_source) = video_source else {
+        return Ok(0);
+    };
+
+    // 每轮最多巡检的多P视频数量，控制对 B站 的请求量
+    const BATCH: usize = 10;
+
+    let mut videos = video::Entity::find()
+        .filter(video_source.filter_expr())
+        .filter(video::Column::SinglePage.eq(false))
+        .filter(video::Column::Valid.eq(true))
+        .filter(video::Column::Deleted.eq(0))
+        .filter(video::Column::AutoDownload.eq(true))
+        .order_by_asc(video::Column::Id)
+        .all(connection)
+        .await
+        .context("查询收藏夹多P视频失败")?;
+
+    if videos.is_empty() {
+        return Ok(0);
+    }
+
+    // 每个收藏夹源各自记录上次巡检位置，每轮从不同位置取一批，循环覆盖全部多P视频
+    let offset = {
+        let mut offsets = FAVORITE_MULTIPAGE_CHECK_OFFSETS.lock().await;
+        let entry = offsets.entry(favorite_source.id).or_insert(0);
+        let current = *entry;
+        *entry = (current + BATCH) % videos.len();
+        current
+    };
+    videos.rotate_left(offset);
+
+    let mut updated = 0usize;
+    for video_model in videos.into_iter().take(BATCH) {
+        let local_page_count = page::Entity::find()
+            .filter(page::Column::VideoId.eq(video_model.id))
+            .count(connection)
+            .await
+            .context("查询视频分P数失败")? as i32;
+
+        let current_page_count = match Video::new(bili_client, video_model.bvid.clone()).get_view_info().await {
+            Ok(VideoInfo::Detail { pages, .. }) => pages.len() as i32,
+            // 特殊状态视频（数据异常/已失效）会解析为其他变体，跳过即可
+            Ok(_) => continue,
+            Err(err) => {
+                debug!(
+                    "收藏夹「{}」多P视频 {} 分P巡检失败（跳过）: {:#}",
+                    favorite_source.name, video_model.bvid, err
+                );
+                continue;
+            }
+        };
+
+        if reset_video_if_parts_increased(
+            &video_model,
+            local_page_count,
+            current_page_count,
+            &favorite_source.name,
+            connection,
+        )
+        .await?
+        {
+            updated += 1;
+        }
+    }
+
+    if updated > 0 {
+        notify_videos_changed();
+    }
+    Ok(updated)
+}
+
+/// 收藏夹源：每轮重新拉取收藏夹内已入库的视频合集（type=21）的分集列表，
+/// 发现新增分集（新 bvid）时自动入库，使合集后续新增分集也能增量同步。
+/// 返回本轮新增的分集数量。
+pub async fn recheck_favorite_collections(
+    bili_client: &BiliClient,
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<usize> {
+    let VideoSourceEnum::Favorite(favorite_source) = video_source else {
+        return Ok(0);
+    };
+
+    // 每轮最多巡检的合集数量，避免一次性拉取过多合集触发风控
+    const COLLECTION_BATCH: usize = 3;
+
+    // 找出该收藏夹内已入库的合集（season_id 非空），按合集去重
+    let collection_videos = video::Entity::find()
+        .filter(video_source.filter_expr())
+        .filter(video::Column::SeasonId.is_not_null())
+        .filter(video::Column::SeasonId.ne(""))
+        .all(connection)
+        .await
+        .context("查询收藏夹内合集视频失败")?;
+
+    let mut handled = HashSet::new();
+    let mut collections: Vec<(String, i64)> = Vec::new();
+    for video_model in collection_videos {
+        let Some(season_id) = video_model.season_id.clone() else {
+            continue;
+        };
+        // 同一合集（season_id + upper_id）只处理一次
+        let collection_key = format!("{}:{}", season_id, video_model.upper_id);
+        if handled.insert(collection_key) {
+            collections.push((season_id, video_model.upper_id));
+        }
+    }
+    if collections.is_empty() {
+        return Ok(0);
+    }
+
+    // 轮转偏移：每个收藏夹源各自记录上次巡检位置，每轮取一批合集，循环覆盖
+    let offset = {
+        let mut offsets = FAVORITE_COLLECTION_CHECK_OFFSETS.lock().await;
+        let entry = offsets.entry(favorite_source.id).or_insert(0);
+        let current = *entry;
+        *entry = (current + COLLECTION_BATCH) % collections.len();
+        current
+    };
+    collections.rotate_left(offset);
+
+    let mut new_episode_count = 0usize;
+    debug!(
+        "收藏夹「{}」合集分集巡检：共 {} 个合集，本轮检查 {} 个",
+        favorite_source.name,
+        collections.len(),
+        COLLECTION_BATCH.min(collections.len())
+    );
+    for (season_id, upper_id) in collections.into_iter().take(COLLECTION_BATCH) {
+
+        let collection_item = CollectionItem {
+            mid: upper_id.to_string(),
+            sid: season_id.clone(),
+            collection_type: CollectionType::Season,
+        };
+        let collection = Collection::new(bili_client, &collection_item);
+        let stream = collection.into_video_stream();
+        futures::pin_mut!(stream);
+
+        let mut fetched: Vec<VideoInfo> = Vec::new();
+        while let Some(res) = stream.next().await {
+            match res {
+                Ok(mut episode) => {
+                    if let VideoInfo::Collection { season_id: sid, arc, .. } = &mut episode {
+                        *sid = Some(season_id.clone());
+                        // 合集分集接口返回的条目不带 author 字段，这里把合集作者 mid 补进去，
+                        // 保证入库时 upper_id 正确（否则详情填充会因 upper_id=0 误判归属而清空 season_id）。
+                        if arc.is_none() {
+                            *arc = Some(serde_json::json!({}));
+                        }
+                        if let Some(arc_value) = arc.as_mut() {
+                            if arc_value["author"].is_null() {
+                                arc_value["author"] = serde_json::json!({
+                                    "mid": upper_id,
+                                    "name": "",
+                                    "face": "",
+                                });
+                            }
+                        }
+                    }
+                    fetched.push(episode);
+                }
+                Err(err) => {
+                    warn!(
+                        "收藏夹「{}」合集 {} 分集巡检失败（本轮跳过）: {:#}",
+                        favorite_source.name, season_id, err
+                    );
+                    break;
+                }
+            }
+        }
+        if fetched.is_empty() {
+            continue;
+        }
+
+        // 找出该收藏夹内已存在的 bvid，筛出新增分集
+        let fetched_bvids: Vec<String> = fetched
+            .iter()
+            .map(|v| match v {
+                VideoInfo::Collection { bvid, .. } => bvid.clone(),
+                _ => String::new(),
+            })
+            .filter(|b| !b.is_empty())
+            .collect();
+        let existing_bvids: HashSet<String> = video::Entity::find()
+            .filter(video_source.filter_expr())
+            .filter(video::Column::Bvid.is_in(fetched_bvids.clone()))
+            .all(connection)
+            .await?
+            .into_iter()
+            .map(|v| v.bvid)
+            .collect();
+
+        let new_episodes: Vec<VideoInfo> = fetched
+            .into_iter()
+            .filter(|v| {
+                let bvid = match v {
+                    VideoInfo::Collection { bvid, .. } => bvid.as_str(),
+                    _ => return false,
+                };
+                !bvid.is_empty() && !existing_bvids.contains(bvid)
+            })
+            .collect();
+
+        if !new_episodes.is_empty() {
+            let added_here = new_episodes.len();
+            info!(
+                "收藏夹「{}」合集 {} 发现 {} 个新增分集，自动入库",
+                favorite_source.name, season_id, added_here
+            );
+            create_videos(new_episodes, video_source, connection).await?;
+            new_episode_count += added_here;
+        }
+    }
+
+    if new_episode_count > 0 {
+        notify_videos_changed();
+    }
+    Ok(new_episode_count)
+}
+
+/// 收藏夹多P视频分P巡检的轮转偏移（source_id -> 已巡检到的位置）
+static FAVORITE_MULTIPAGE_CHECK_OFFSETS: Lazy<AsyncMutex<HashMap<i32, usize>>> =
+    Lazy::new(|| AsyncMutex::new(HashMap::new()));
+
+/// 收藏夹合集分集巡检的轮转偏移（source_id -> 已巡检到的位置）
+static FAVORITE_COLLECTION_CHECK_OFFSETS: Lazy<AsyncMutex<HashMap<i32, usize>>> =
+    Lazy::new(|| AsyncMutex::new(HashMap::new()));
+
 /// 尝试创建 Page Model，基于 cid 判断是否已存在
 ///
 /// 处理逻辑：
@@ -1469,6 +1816,202 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    /// collect_favorite_page_counts 只收集 type=2 普通视频的分P数，
+    /// 且忽略 page<=0 或 bvid 为空的条目（合集已在收藏夹流中展开）。
+    #[test]
+    fn collect_favorite_page_counts_filters_valid_entries() {
+        fn mk_favorite(bvid: &str, vtype: i32, page: i32) -> VideoInfo {
+            serde_json::from_value(serde_json::json!({
+                "id": 1,
+                "type": vtype,
+                "title": "测试",
+                "intro": "",
+                "cover": "",
+                "upper": { "mid": 1, "name": "UP主", "face": "" },
+                "ctime": 1620000000,
+                "fav_time": 1620000000,
+                "pubtime": 1620000000,
+                "duration": 60,
+                "attr": 0,
+                "bvid": bvid,
+                "bv_id": bvid,
+                "page": page,
+            }))
+            .expect("收藏夹条目应能解析")
+        }
+
+        let videos = vec![
+            mk_favorite("BV1multi", 2, 16),
+            mk_favorite("BV1single", 2, 1),
+            mk_favorite("", 2, 5),      // bvid 为空：忽略
+            mk_favorite("BV1zero", 2, 0), // page 为 0：忽略
+        ];
+        let map = collect_favorite_page_counts(&videos);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("BV1multi"), Some(&16));
+        assert_eq!(map.get("BV1single"), Some(&1));
+    }
+
+    /// reset_video_if_parts_increased：当前分P数大于本地时重置视频，否则不动。
+    #[tokio::test]
+    async fn reset_video_if_parts_increased_only_resets_when_count_grew() {
+        use chrono::TimeZone;
+        let db = create_test_db("favorite-reset-helper").await;
+        let ts = chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+
+        let video_id = 3001;
+        video::ActiveModel {
+            id: Set(video_id),
+            collection_id: Set(None),
+            favorite_id: Set(Some(1)),
+            watch_later_id: Set(None),
+            submission_id: Set(None),
+            source_id: Set(None),
+            source_type: Set(None),
+            upper_id: Set(1),
+            upper_name: Set("UP主".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set("多P视频".to_string()),
+            path: Set("/tmp/video".to_string()),
+            category: Set(2),
+            bvid: Set("BV1CV4y1e7qF".to_string()),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(ts.naive_utc()),
+            pubtime: Set(ts.naive_utc()),
+            favtime: Set(ts.naive_utc()),
+            download_status: Set(3),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(false)),
+            created_at: Set("2026-08-01 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(true),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
+        }
+        .insert(&db)
+        .await
+        .expect("应能插入视频");
+
+        let video = video::Entity::find_by_id(video_id)
+            .one(&db)
+            .await
+            .expect("查询应成功")
+            .expect("视频应存在");
+
+        // 未增加（6 <= 6）：不重置
+        let reset = reset_video_if_parts_increased(&video, 6, 6, "测试收藏夹", &db)
+            .await
+            .expect("比较应成功");
+        assert!(!reset, "分P数未增加时不应重置");
+        let after = video::Entity::find_by_id(video_id)
+            .one(&db)
+            .await
+            .expect("查询应成功")
+            .expect("视频应存在");
+        assert_eq!(after.single_page, Some(false));
+        assert_eq!(after.download_status, 3);
+
+        // 增加（4 -> 6）：重置
+        let reset = reset_video_if_parts_increased(&video, 4, 6, "测试收藏夹", &db)
+            .await
+            .expect("比较应成功");
+        assert!(reset, "分P数增加时应重置");
+        let after = video::Entity::find_by_id(video_id)
+            .one(&db)
+            .await
+            .expect("查询应成功")
+            .expect("视频应存在");
+        assert_eq!(after.single_page, None, "应重置 single_page 以重新拉取详情");
+        assert_eq!(after.download_status, 0, "应重置下载状态");
+    }
+
+    /// Collection 变体经 into_simple_model 入库时应保留 season_id，
+    /// 这是收藏夹合集分集巡检追踪合集的基础。
+    #[test]
+    fn collection_into_simple_model_keeps_season_id() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        let info = VideoInfo::Collection {
+            bvid: "BV1H2421A7kz".to_string(),
+            cover: String::new(),
+            ctime: ts,
+            pubtime: ts,
+            title: "测试分集".to_string(),
+            duration: Some(60),
+            arc: Some(serde_json::json!({"author": {"mid": 7920565}})),
+            season_id: Some("2337331".to_string()),
+        };
+        let model = info.into_simple_model();
+        match model.season_id {
+            sea_orm::ActiveValue::Set(Some(v)) => assert_eq!(v, "2337331"),
+            other => panic!("season_id 应被保留，实际: {:?}", other),
+        }
+    }
+
+    /// 分P巡检对非收藏夹源直接返回 0，不发起任何请求。
+    #[tokio::test]
+    async fn check_favorite_multipage_videos_skips_non_favorite_sources() {
+        let db = create_test_db("favorite-multipage-guard").await;
+        let source = VideoSourceEnum::WatchLater(
+            watch_later::Model {
+                id: 1,
+                path: "/tmp/wl".to_string(),
+                created_at: "2026-08-01 00:00:00".to_string(),
+                latest_row_at: "1970-01-01 00:00:00".to_string(),
+                enabled: true,
+                scan_deleted_videos: false,
+                scan_deleted_videos_once: false,
+                filter_option: None,
+                keyword_filters: None,
+                keyword_filter_mode: None,
+                blacklist_keywords: None,
+                whitelist_keywords: None,
+                keyword_case_sensitive: false,
+                min_duration_seconds: None,
+                max_duration_seconds: None,
+                published_after: None,
+                published_before: None,
+                audio_only: false,
+                audio_only_m4a_only: false,
+                flat_folder: false,
+                split_chapters_after_download: false,
+                download_charge_videos: true,
+                download_danmaku: true,
+                download_subtitle: true,
+                download_ai_subtitle: true,
+                ai_subtitle_language: "zh-CN".to_string(),
+                ai_rename: false,
+                ai_rename_video_prompt: String::new(),
+                ai_rename_audio_prompt: String::new(),
+                ai_rename_enable_multi_page: false,
+                ai_rename_enable_collection: false,
+                ai_rename_enable_bangumi: false,
+                ai_rename_rename_parent_dir: false,
+            },
+        );
+        let client = crate::bilibili::BiliClient::new(String::new());
+        let count = check_favorite_multipage_videos_for_new_parts(&client, &source, &db)
+            .await
+            .expect("非收藏夹源应直接返回 0");
+        assert_eq!(count, 0);
+    }
+
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
         dir.push(format!("bili-sync-model-{}-{}", prefix, uuid::Uuid::new_v4()));
@@ -1584,6 +2127,175 @@ mod tests {
         .insert(db)
         .await
         .expect("应能插入测试分页");
+    }
+
+    /// 收藏夹源检测到 B站 当前分P数大于本地分P数时，应重置视频
+    /// 的 single_page/download_status，使其重新进入详情填充阶段。
+    #[tokio::test]
+    async fn check_favorite_videos_for_new_parts_resets_video_when_page_count_increased() {
+        use crate::bilibili::VideoInfo;
+        use chrono::TimeZone;
+
+        let db = create_test_db("favorite-page-reset").await;
+        let ts = chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+
+        // 插入收藏夹源
+        let fav_id = 10001;
+        favorite::ActiveModel {
+            id: Set(fav_id),
+            f_id: Set(1087857200),
+            name: Set("测试收藏夹".to_string()),
+            path: Set("/tmp/fav".to_string()),
+            created_at: Set("2026-08-01 00:00:00".to_string()),
+            latest_row_at: Set("1970-01-01 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
+            filter_option: Set(None),
+            keyword_filters: Set(None),
+            keyword_filter_mode: Set(None),
+            blacklist_keywords: Set(None),
+            whitelist_keywords: Set(None),
+            keyword_case_sensitive: Set(false),
+            min_duration_seconds: Set(None),
+            max_duration_seconds: Set(None),
+            published_after: Set(None),
+            published_before: Set(None),
+            audio_only: Set(false),
+            audio_only_m4a_only: Set(false),
+            flat_folder: Set(false),
+            split_chapters_after_download: Set(false),
+            download_charge_videos: Set(true),
+            download_danmaku: Set(true),
+            download_subtitle: Set(true),
+            download_ai_subtitle: Set(true),
+            ai_subtitle_language: Set("zh-CN".to_string()),
+            ai_rename: Set(false),
+            ai_rename_video_prompt: Set(String::new()),
+            ai_rename_audio_prompt: Set(String::new()),
+            ai_rename_enable_multi_page: Set(false),
+            ai_rename_enable_collection: Set(false),
+            ai_rename_enable_bangumi: Set(false),
+            ai_rename_rename_parent_dir: Set(false),
+        }
+        .insert(&db)
+        .await
+        .expect("应能插入收藏夹源");
+
+        // 插入一个已填充详情的多P视频（本地 4 个分P）
+        let video_id = 2001;
+        video::ActiveModel {
+            id: Set(video_id),
+            collection_id: Set(None),
+            favorite_id: Set(Some(fav_id)),
+            watch_later_id: Set(None),
+            submission_id: Set(None),
+            source_id: Set(None),
+            source_type: Set(None),
+            upper_id: Set(1),
+            upper_name: Set("UP主".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set("多P视频".to_string()),
+            path: Set("/tmp/fav/video".to_string()),
+            category: Set(2),
+            bvid: Set("BV1CV4y1e7qF".to_string()),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(ts.naive_utc()),
+            pubtime: Set(ts.naive_utc()),
+            favtime: Set(ts.naive_utc()),
+            download_status: Set(3), // 已完成的下载状态
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(false)),
+            created_at: Set("2026-08-01 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(true),
+            cid: Set(Some(1224527561)),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
+        }
+        .insert(&db)
+        .await
+        .expect("应能插入视频");
+
+        // 插入 4 个已存在分P
+        for i in 1..=4 {
+            page::ActiveModel {
+                id: NotSet,
+                video_id: Set(video_id),
+                cid: Set(1000 + i64::from(i)),
+                pid: Set(i),
+                name: Set(format!("P{i}")),
+                width: Set(None),
+                height: Set(None),
+                duration: Set(60),
+                image: Set(None),
+                download_status: Set(3),
+                path: Set(Some(format!("/tmp/fav/video/P{i}.mp4"))),
+                file_size_bytes: Set(Some(100)),
+                video_stream_size_bytes: Set(None),
+                audio_stream_size_bytes: Set(None),
+                created_at: Set("2026-08-01 00:00:00".to_string()),
+                play_video_streams: Set(None),
+                play_audio_streams: Set(None),
+                play_subtitle_streams: Set(None),
+                play_streams_updated_at: Set(None),
+                danmaku_last_synced_at: Set(None),
+                danmaku_sync_generation: Set(0),
+                danmaku_cid_snapshot: Set(None),
+                danmaku_last_write_count: Set(0),
+                ai_renamed: NotSet,
+            }
+            .insert(&db)
+            .await
+            .expect("应能插入分P");
+        }
+
+        let source = VideoSourceEnum::Favorite(
+            favorite::Entity::find_by_id(fav_id)
+                .one(&db)
+                .await
+                .expect("查询收藏夹源应成功")
+                .expect("收藏夹源应存在"),
+        );
+        let page_map = collect_favorite_page_counts(&[serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "type": 2,
+            "title": "多P视频",
+            "intro": "",
+            "cover": "",
+            "upper": { "mid": 1, "name": "UP主", "face": "" },
+            "ctime": 1620000000,
+            "fav_time": 1620000000,
+            "pubtime": 1620000000,
+            "attr": 0,
+            "bvid": "BV1CV4y1e7qF",
+            "page": 6,
+        })).expect("收藏夹条目应能解析")]);
+
+        assert_eq!(page_map.get("BV1CV4y1e7qF"), Some(&6));
+        check_favorite_videos_for_new_parts(page_map, &source, &db)
+            .await
+            .expect("分P检测应成功");
+
+        let updated = video::Entity::find_by_id(video_id).one(&db).await.expect("应能找到视频");
+        let updated = updated.expect("视频应存在");
+        assert_eq!(updated.single_page, None, "检测到新增分P后应重置 single_page 以重新拉取详情");
+        assert_eq!(updated.download_status, 0, "检测到新增分P后应重置下载状态");
     }
 
     fn create_file_with_size(root: &Path, name: &str, size: usize) -> String {

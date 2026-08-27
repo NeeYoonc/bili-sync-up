@@ -3,8 +3,8 @@ use std::pin::Pin;
 
 use crate::utils::time_format::{now_standard_string, parse_time_string};
 use anyhow::{Context, Result};
-use bili_sync_entity::*;
 use chrono::Utc;
+use bili_sync_entity::*;
 use futures::Stream;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{OnConflict, SimpleExpr};
@@ -46,7 +46,9 @@ impl VideoSource for favorite::Model {
     }
 
     fn should_take(&self, release_datetime: &chrono::DateTime<Utc>, latest_row_at_string: &str) -> bool {
-        // 收藏夹接口按收藏时间（fav_time）从新到旧排序，可以做增量截断。
+        // 收藏夹接口按收藏时间（fav_time）从新到旧排序，这里仍保持增量扫描。
+        // 已收藏多P视频新增分P（fav_time 不变、不会进入增量窗口）由
+        // check_favorite_multipage_videos_for_new_parts 每轮限量巡检处理。
         // 但当开启“扫描已删除视频”时，需要全量拉取以确保正确性。
         if self.scan_deleted_videos || self.scan_deleted_videos_once {
             return true;

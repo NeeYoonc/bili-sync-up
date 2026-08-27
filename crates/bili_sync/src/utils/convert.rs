@@ -37,6 +37,7 @@ impl VideoInfo {
                 pubtime,
                 title,
                 arc,
+                season_id,
                 ..
             } => {
                 // 从arc中提取upper信息
@@ -62,6 +63,7 @@ impl VideoInfo {
                     upper_id: Set(upper_id.unwrap_or_default()),
                     upper_name: Set(upper_name.unwrap_or_default()),
                     upper_face: Set(upper_face.unwrap_or_default()),
+                    season_id: Set(season_id),
                     cid: Set(None), // 后续通过get_view_info填充
                     ..default
                 }
