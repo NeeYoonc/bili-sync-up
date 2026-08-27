@@ -1,5 +1,5 @@
 use core::str;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -25,6 +25,8 @@ const MIN_SEGMENT_SIZE: u64 = 1024 * 1024;
 const GOOGLEVIDEO_SEGMENT_SIZE: u64 = 4 * 1024 * 1024;
 const GOOGLEVIDEO_MAX_CONNECTIONS: usize = 4;
 const RANGE_DOWNLOAD_ATTEMPTS: usize = 3;
+// 断点续传状态文件后缀（记录已完成分片，供失败后继续下载）
+const RESUME_SIDECAR_SUFFIX: &str = ".resume";
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
 const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -278,7 +280,7 @@ impl Downloader {
                             host,
                             path = %path.display(),
                             error = %format!("{e:#}"),
-                            "资源「{}」原生多线程下载失败，改用原生单连接下载",
+                            "资源「{}」原生多线程分片下载失败，改用断点续传顺序补下",
                             path.display()
                         );
                     }
@@ -287,15 +289,17 @@ impl Downloader {
         }
 
         // googlevideo 直链拒绝无 Range 的完整 GET（403/掐断连接），必须走有界 Range。
-        let result = if is_googlevideo_url(url) {
-            self.fetch_googlevideo_single(url, path, referer).await
+        if is_googlevideo_url(url) {
+            let result = self.fetch_googlevideo_single(url, path, referer).await;
+            if result.is_err() {
+                let _ = fs::remove_file(path).await;
+            }
+            result
         } else {
-            self.fetch_single(url, path, referer, None).await
-        };
-        if result.is_err() {
-            let _ = fs::remove_file(path).await;
+            // 断点续传：并发分片失败后按顺序补下未完成分片；
+            // 失败时保留已下载数据与分片状态，下次继续而不是从头下载。
+            self.fetch_range_resume(url, path, referer, None).await
         }
-        result
     }
 
     /// googlevideo 直链拒绝无 Range 的完整 GET（403/掐断连接），多线程分片又因
@@ -339,6 +343,92 @@ impl Downloader {
             )
             .await?;
         }
+        Ok(())
+    }
+
+    /// 断点续传兜底：并发分片失败后，按顺序补下未完成分片。
+    /// 已完成分片记录在 `.resume` 状态文件中；若本次仍失败，保留部分数据与
+    /// 状态，下次下载（包括上层刷新直链后的重试）会继续而不是从头开始。
+    async fn fetch_range_resume(
+        &self,
+        url: &str,
+        path: &Path,
+        referer: Option<&str>,
+        cookie: Option<&str>,
+    ) -> Result<()> {
+        let (total_size, range_supported) = self.get_size_and_range_support(url, referer, cookie).await?;
+        if total_size == 0 || !range_supported {
+            // 不支持 Range 分片：退回全量单连接下载
+            return self.fetch_single(url, path, referer, cookie).await;
+        }
+        // 与并发分片使用相同的分片方式，保证断点状态中的分片能精确命中
+        let config = crate::config::reload_config();
+        let threads = config.concurrent_limit.parallel_download.threads.max(1);
+        let (_, ranges) = build_parallel_ranges(total_size, threads, false, 0);
+        if ranges.is_empty() {
+            return self.fetch_single(url, path, referer, cookie).await;
+        }
+
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).await?;
+            }
+        }
+
+        let sidecar = resume_sidecar_path(path);
+        let existing_len = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
+        let completed: HashSet<(u64, u64)> = if existing_len == total_size {
+            load_completed_ranges(&sidecar, url).await
+        } else {
+            // 文件缺失或大小不一致：丢弃旧状态，重新全量下载
+            remove_sidecar(&sidecar).await;
+            HashSet::new()
+        };
+        if existing_len != total_size {
+            let file = File::create(path).await?;
+            file.set_len(total_size).await?;
+        }
+
+        let pending: Vec<(u64, u64)> = ranges
+            .iter()
+            .copied()
+            .filter(|range| !completed.contains(range))
+            .collect();
+        if !pending.is_empty() {
+            ensure_resume_fingerprint(&sidecar, url).await;
+        }
+
+        for (start, end) in pending {
+            download_range_to_file_with_retry(
+                self.client.clone(),
+                url,
+                path,
+                start,
+                end,
+                RANGE_DOWNLOAD_ATTEMPTS,
+                referer,
+                cookie,
+            )
+            .await?;
+            append_completed_range(&sidecar, start, end).await;
+        }
+
+        let size = tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        ensure!(
+            size == total_size,
+            "断点续传后文件大小不一致: {} != {}",
+            size,
+            total_size
+        );
+
+        // 封面/头像等普通资源成功后清理断点状态，避免残留 `.resume` 文件
+        if !is_media_stream_tmp_path(path) {
+            remove_sidecar(&sidecar).await;
+        }
+
         Ok(())
     }
 
@@ -511,6 +601,54 @@ impl Downloader {
         }
 
         let total_mb = total_size as f64 / 1024.0 / 1024.0;
+
+        // 断点续传：读取已完成分片状态，仅下载未完成分片（B站等非 googlevideo 媒体）。
+        let is_resumable = !is_googlevideo;
+        let sidecar = resume_sidecar_path(path);
+        let existing_len = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
+        let completed: HashSet<(u64, u64)> = if is_resumable {
+            if existing_len == total_size {
+                load_completed_ranges(&sidecar, url).await
+            } else {
+                // 文件缺失或大小不一致：丢弃旧状态，重新全量下载
+                remove_sidecar(&sidecar).await;
+                HashSet::new()
+            }
+        } else {
+            remove_sidecar(&sidecar).await;
+            HashSet::new()
+        };
+        let pending_ranges: Vec<(u64, u64)> = ranges
+            .iter()
+            .copied()
+            .filter(|range| !completed.contains(range))
+            .collect();
+
+        if existing_len != total_size {
+            // 预创建并设置目标文件大小，便于随机写入
+            let file = File::create(path).await?;
+            file.set_len(total_size).await?;
+        }
+
+        if pending_ranges.is_empty() {
+            // 所有分片此前已全部完成（断点续传命中）
+            if is_resumable && is_media_stream_tmp_path(path) {
+                // 音视频流：保留状态文件，若后续音频下载失败并重试，可再次快速跳过已全部分片
+            } else {
+                remove_sidecar(&sidecar).await;
+            }
+            return Ok(());
+        }
+
+        if !completed.is_empty() {
+            info!(
+                "断点续传: 文件「{}」已存在 {} 个完成分片，继续下载剩余 {} 个分片",
+                path.display(),
+                completed.len(),
+                pending_ranges.len()
+            );
+        }
+
         info!(
             "原生多线程下载启用: 文件「{}」, 大小={:.2}MB, 分片数={}, 并发连接={}",
             path.display(),
@@ -519,24 +657,29 @@ impl Downloader {
             concurrency
         );
 
-        // 预创建并设置目标文件大小，便于随机写入
-        {
-            let file = File::create(path).await?;
-            file.set_len(total_size).await?;
+        if is_resumable {
+            ensure_resume_fingerprint(&sidecar, url).await;
         }
+        let completed_bytes: u64 = ranges
+            .iter()
+            .filter(|range| completed.contains(range))
+            .map(|(start, end)| end.saturating_sub(*start) + 1)
+            .sum();
 
         let url_owned = url.to_string();
         let path_owned = path.to_path_buf();
+        let sidecar_owned = sidecar.clone();
         let referer_owned = referer.map(str::to_string);
         let cookie_owned = cookie.map(str::to_string);
-        let tasks = futures::stream::iter(ranges.into_iter().map(|(part_start, part_end)| {
+        let tasks = futures::stream::iter(pending_ranges.into_iter().map(|(part_start, part_end)| {
             let client = self.client.clone();
             let url = url_owned.clone();
             let path = path_owned.clone();
+            let sidecar = sidecar_owned.clone();
             let referer = referer_owned.clone();
             let cookie = cookie_owned.clone();
             async move {
-                download_range_to_file_with_retry(
+                let result = download_range_to_file_with_retry(
                     client,
                     &url,
                     &path,
@@ -546,7 +689,12 @@ impl Downloader {
                     referer.as_deref(),
                     cookie.as_deref(),
                 )
-                .await
+                .await;
+                if result.is_ok() {
+                    // 记录已完成分片：失败时保留状态，下次可断点续传
+                    append_completed_range(&sidecar, part_start, part_end).await;
+                }
+                result
             }
         }))
         .buffer_unordered(concurrency)
@@ -557,11 +705,18 @@ impl Downloader {
             downloaded = downloaded.saturating_add(result?);
         }
         ensure!(
-            downloaded == total_size,
-            "分片下载大小不一致: {} != {}",
+            downloaded + completed_bytes == total_size,
+            "分片下载大小不一致: {} + {} != {}",
             downloaded,
+            completed_bytes,
             total_size
         );
+
+        // googlevideo 或封面/头像等普通资源不留断点状态；
+        // 只有音视频流临时文件保留状态，供上层合并失败/重试时续传
+        if !is_resumable || !is_media_stream_tmp_path(path) {
+            remove_sidecar(&sidecar).await;
+        }
 
         Ok(())
     }
@@ -725,10 +880,10 @@ impl Downloader {
                             host,
                             path = %path.display(),
                             reason = %format!("{error:#}"),
-                            "Cookie 媒体「{}」无法进行 Range 分片，改用原生单连接下载",
+                            "Cookie 媒体「{}」并发分片失败，改用断点续传顺序补下",
                             path.display()
                         );
-                        self.fetch_single(url, path, Some(referer), Some(cookie)).await
+                        self.fetch_range_resume(url, path, Some(referer), Some(cookie)).await
                     }
                 }
             } else {
@@ -737,7 +892,7 @@ impl Downloader {
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) => {
-                    let _ = fs::remove_file(path).await;
+                    // 保留部分下载数据与断点状态，下次重试可续传而不是从头下载
                     warn!("下载资源「{}」失败: {error:#}", path.display());
                     last_error = Some(error);
                 }
@@ -923,6 +1078,87 @@ impl Downloader {
     }
 }
 
+/// 是否为音视频流临时文件（`.tmp_video` / `.tmp_audio`）。
+/// 只有这类文件下载成功后保留断点续传状态（供音频失败/重试复用）；
+/// 封面、头像等普通资源成功后应清理状态，避免残留 `.resume` 文件。
+fn is_media_stream_tmp_path(path: &Path) -> bool {
+    let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+    name.ends_with(".tmp_video") || name.ends_with(".tmp_audio")
+}
+
+/// 断点续传状态文件路径：目标文件 + `.resume` 后缀。
+pub(crate) fn resume_sidecar_path(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(RESUME_SIDECAR_SUFFIX);
+    PathBuf::from(os)
+}
+
+/// 内容指纹：取 URL 的路径部分（不含域名与签名参数），同一媒体在不同 CDN 节点、
+/// 不同签名/过期时间下路径保持稳定；内容变更（如清晰度变化）时路径变化，
+/// 可据此使旧断点状态失效，避免续传续到错误内容。
+fn url_path_fingerprint(url: &str) -> String {
+    Url::parse(url)
+        .map(|parsed| parsed.path().to_string())
+        .unwrap_or_else(|_| url.to_string())
+}
+
+fn parse_range_line(line: &str) -> Option<(u64, u64)> {
+    let mut it = line.splitn(2, ',');
+    let start = it.next()?.trim().parse::<u64>().ok()?;
+    let end = it.next()?.trim().parse::<u64>().ok()?;
+    Some((start, end))
+}
+
+/// 读取断点续传状态：首行为内容指纹，后续每行为一个已完成分片 `start,end`。
+/// 指纹不匹配（内容已变化）时视为失效并清空状态。
+async fn load_completed_ranges(sidecar: &Path, url: &str) -> HashSet<(u64, u64)> {
+    let mut result = HashSet::new();
+    let content = match fs::read_to_string(sidecar).await {
+        Ok(c) => c,
+        Err(_) => return result,
+    };
+    let fingerprint = url_path_fingerprint(url);
+    let mut lines = content.lines();
+    match lines.next() {
+        Some(line) if line.trim() == fingerprint => {}
+        _ => {
+            let _ = fs::remove_file(sidecar).await;
+            return result;
+        }
+    }
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((start, end)) = parse_range_line(line) {
+            result.insert((start, end));
+        }
+    }
+    result
+}
+
+/// 确保状态文件首行是指纹行（新文件或指纹变化时重建）。
+async fn ensure_resume_fingerprint(sidecar: &Path, url: &str) {
+    let fingerprint = url_path_fingerprint(url);
+    let content = fs::read_to_string(sidecar).await.unwrap_or_default();
+    if !content.lines().next().is_some_and(|line| line.trim() == fingerprint) {
+        let _ = fs::write(sidecar, format!("{fingerprint}\n")).await;
+    }
+}
+
+/// 追加一个已完成分片（`start,end`），供断点续传跳过。
+async fn append_completed_range(sidecar: &Path, start: u64, end: u64) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(sidecar).await {
+        let _ = file.write_all(format!("{start},{end}\n").as_bytes()).await;
+        let _ = file.flush().await;
+    }
+}
+
+async fn remove_sidecar(sidecar: &Path) {
+    let _ = fs::remove_file(sidecar).await;
+}
+
 fn build_parallel_ranges(
     total_size: u64,
     threads: usize,
@@ -984,7 +1220,9 @@ async fn download_range_to_file_with_retry(
             Ok(downloaded) => return Ok(downloaded),
             Err(error) if is_certificate_name_mismatch_error(&error) => return Err(error),
             Err(error) => {
-                warn!(
+                // 分片失败后会重试并由上层断点续传/回退处理，属预期情况；
+                // 仅记录 debug，避免 CDN 掐流时刷屏 warn。
+                debug!(
                     start,
                     end,
                     attempt,
@@ -1577,5 +1815,331 @@ mod tests {
 
         assert!(!args.iter().any(|arg| arg == "-f"));
         assert_eq!(args.last().map(String::as_str), Some("out.m4a"));
+    }
+
+    #[test]
+    fn resume_sidecar_path_appends_suffix() {
+        let path = Path::new("/tmp/video/P01.P1.tmp_video");
+        assert_eq!(
+            resume_sidecar_path(path).to_string_lossy(),
+            "/tmp/video/P01.P1.tmp_video.resume"
+        );
+    }
+
+    #[test]
+    fn url_path_fingerprint_ignores_host_and_query() {
+        let a = url_path_fingerprint(
+            "https://xy1.mcdn.bilivideo.cn:8082/v1/resource/upgcxcode/15/52/x.m4s?deadline=100&sign=abc",
+        );
+        let b = url_path_fingerprint(
+            "https://xy2.mcdn.bilivideo.cn/v1/resource/upgcxcode/15/52/x.m4s?deadline=200&sign=xyz",
+        );
+        assert_eq!(a, "/v1/resource/upgcxcode/15/52/x.m4s");
+        assert_eq!(a, b);
+        assert_ne!(a, url_path_fingerprint("https://cdn.example/v1/resource/other.m4s"));
+    }
+
+    #[test]
+    fn parse_range_line_accepts_valid_and_rejects_bad() {
+        assert_eq!(parse_range_line("0,1048575"), Some((0, 1048575)));
+        assert_eq!(parse_range_line(" 1048576 , 2097151 "), Some((1048576, 2097151)));
+        assert_eq!(parse_range_line("abc,123"), None);
+        assert_eq!(parse_range_line("123"), None);
+        assert_eq!(parse_range_line(""), None);
+    }
+
+    /// 本地 Range 测试服务器：支持 HEAD / 206 Range，可指定某个分片持续失败，
+    /// 并记录每个收到的 Range 请求，用于验证断点续传只补缺失分片。
+    async fn spawn_range_test_server(
+        data: Vec<u8>,
+        drop_on_start: Option<u64>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let fail_start = Arc::new(AtomicUsize::new(usize::MAX));
+        let fail_left = Arc::new(AtomicUsize::new(0));
+        let data_len = data.len() as u64;
+
+        let requested_ret = requested.clone();
+        let fail_start_ret = fail_start.clone();
+        let fail_left_ret = fail_left.clone();
+        tokio::spawn(async move {
+            loop {
+                let (socket, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let data = data.clone();
+                let requested = requested.clone();
+                let fail_start = fail_start.clone();
+                let fail_left = fail_left.clone();
+                let drop_on_start = drop_on_start;
+                tokio::spawn(async move {
+                    let mut socket = socket;
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 2048];
+                    loop {
+                        let n = match socket.read(&mut tmp).await {
+                            Ok(n) if n > 0 => n,
+                            _ => return,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&buf);
+                    let first_line = text.lines().next().unwrap_or("").to_string();
+                    let is_head = first_line.starts_with("HEAD");
+                    let start_end: Option<(u64, u64)> = text.lines().find_map(|line| {
+                        let line = line.trim_start();
+                        let lowered = line.to_ascii_lowercase();
+                        let value = lowered.strip_prefix("range: bytes=")?;
+                        let mut it = value.split('-');
+                        let a = it.next()?.trim().parse::<u64>().ok()?;
+                        let b = it.next()?.trim().parse::<u64>().ok()?;
+                        Some((a, b))
+                    });
+
+                    if let Some((s, e)) = start_end {
+                        requested.lock().unwrap().push((s, e));
+                        if Some(s) == drop_on_start {
+                            // 模拟 CDN 节点挂掉/断网：不响应、直接断开连接并停止服务
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            let _ = socket.shutdown().await;
+                            return;
+                        }
+                        if s as usize == fail_start.load(Ordering::SeqCst) {
+                            let left = fail_left.load(Ordering::SeqCst);
+                            if left > 0 {
+                                fail_left.store(left - 1, Ordering::SeqCst);
+                                let _ = socket
+                                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                                    .await;
+                                let _ = socket.shutdown().await;
+                                return;
+                            }
+                        }
+                    }
+
+                    if is_head {
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                            data_len
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if let Some((s, e)) = start_end {
+                        if e < s || e >= data_len {
+                            let _ = socket
+                                .write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                                .await;
+                        } else {
+                            let body = &data[s as usize..=e as usize];
+                            let resp = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                                s, e, data_len, body.len()
+                            );
+                            let _ = socket.write_all(resp.as_bytes()).await;
+                            let _ = socket.write_all(body).await;
+                        }
+                    } else {
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                            data_len
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        let _ = socket.write_all(&data).await;
+                    }
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        (
+            format!("http://{}/res/test.m4s", addr),
+            requested_ret,
+            fail_start_ret,
+            fail_left_ret,
+        )
+    }
+
+    #[tokio::test]
+    async fn parallel_download_resumes_after_range_failures() {
+        use std::sync::atomic::Ordering;
+
+        let data: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let (url, requested, fail_start, fail_left) = spawn_range_test_server(data.clone(), None).await;
+        let dir = std::env::temp_dir().join(format!("bili-resume-int-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir).await;
+        let path = dir.join("video.tmp_video");
+        let downloader = Downloader::new(Client::new());
+
+        // 让首个分片 (0..2MB) 持续失败：3 次重试均失败 → 并发下载整体失败
+        fail_start.store(0, Ordering::SeqCst);
+        fail_left.store(10, Ordering::SeqCst);
+        let first = downloader.fetch_parallel(&url, &path, 4, None, None).await;
+        assert!(first.is_err(), "分片持续失败时并发下载应返回错误");
+
+        // 断点状态应保留，且首个失败分片未被标记完成
+        let sidecar = resume_sidecar_path(&path);
+        let completed = load_completed_ranges(&sidecar, &url).await;
+        assert!(!completed.is_empty(), "失败后应保留已完成分片状态");
+        assert!(
+            !completed.contains(&(0, 2 * 1024 * 1024 - 1)),
+            "失败分片不应被标记完成"
+        );
+
+        // 修复 server 后再次下载：应只请求缺失分片并续传成功
+        fail_start.store(usize::MAX, Ordering::SeqCst);
+        let requested_before = requested.lock().unwrap().len();
+        downloader
+            .fetch_parallel(&url, &path, 4, None, None)
+            .await
+            .expect("断点续传应成功");
+
+        // 文件完整且内容与源一致（无空洞、无错位）
+        let written = fs::read(&path).await.unwrap();
+        assert_eq!(written, data, "续传后文件内容应与源完全一致");
+
+        // 续传只请求了缺失的首个分片
+        let reqs = requested.lock().unwrap();
+        let second_round = &reqs[requested_before..];
+        assert!(!second_round.is_empty(), "续传应至少请求一次缺失分片");
+        assert!(
+            second_round.iter().all(|(s, _)| *s == 0),
+            "续传应只请求缺失的首个分片，实际请求: {:?}",
+            second_round
+        );
+
+        let _ = fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn parallel_download_success_keeps_full_range_state() {
+        let data: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let (url, _requested, _fail_start, _fail_left) = spawn_range_test_server(data.clone(), None).await;
+        let dir = std::env::temp_dir().join(format!("bili-resume-ok-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir).await;
+        let path = dir.join("video.tmp_video");
+        let downloader = Downloader::new(Client::new());
+
+        downloader
+            .fetch_parallel(&url, &path, 4, None, None)
+            .await
+            .expect("正常下载应成功");
+
+        let written = fs::read(&path).await.unwrap();
+        assert_eq!(written, data);
+
+        // B站路径成功后保留全部 4 个分片状态，供音频失败/重试时续传命中
+        let sidecar = resume_sidecar_path(&path);
+        let completed = load_completed_ranges(&sidecar, &url).await;
+        assert_eq!(completed.len(), 4, "成功下载后应记录全部完成分片");
+
+        let _ = fs::remove_dir_all(&dir).await;
+    }
+
+    /// 真实断连→重连：下载中 CDN 节点直接挂掉（连接被断开、服务器停止服务），
+    /// 已下分片保留；换新节点重连后只补缺失分片，最终文件逐字节一致。
+    #[tokio::test]
+    async fn parallel_download_resumes_after_connection_drop() {
+        let data: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        // 服务器 A：收到首个分片 (0..2MB) 请求时直接断开连接并停止服务（模拟节点挂掉）
+        let (url_a, requested, _fail_start, _fail_left) =
+            spawn_range_test_server(data.clone(), Some(0)).await;
+        let dir = std::env::temp_dir().join(format!("bili-resume-drop-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir).await;
+        let path = dir.join("video.tmp_video");
+        let downloader = Downloader::new(Client::new());
+
+        // 第一次下载：首个分片连接被断开且服务器已停止 → 重试仍失败 → 整体报错
+        println!(
+            "[1] 开始真实下载 {} ({} MiB, 4 分片), 服务器 A: {}",
+            path.display(),
+            data.len() / 1024 / 1024,
+            url_a
+        );
+        let first = downloader.fetch_parallel(&url_a, &path, 4, None, None).await;
+        assert!(first.is_err(), "节点断开后并发下载应返回错误");
+        let first_err = format!("{:#}", first.unwrap_err());
+        assert!(
+            first_err.to_lowercase().contains("error"),
+            "错误应来自网络层连接失败"
+        );
+        println!("[2] 分片 (0..2MiB) 连接被断开、服务器 A 停止服务 -> 下载失败: {}", first_err.lines().next().unwrap_or(""));
+
+        // 断点状态保留：首个分片未完成，其余分片已完成
+        let sidecar = resume_sidecar_path(&path);
+        let completed = load_completed_ranges(&sidecar, &url_a).await;
+        assert!(!completed.is_empty(), "断连后应保留已完成分片状态");
+        assert!(
+            !completed.contains(&(0, 2 * 1024 * 1024 - 1)),
+            "断连分片不应被标记完成"
+        );
+        println!(
+            "[3] 断连后已落盘 {} 个分片状态（首分片未完成）; 文件大小={} MiB",
+            completed.len(),
+            tokio::fs::metadata(&path).await.map(|m| m.len() / 1024 / 1024).unwrap_or(0)
+        );
+
+        // 服务器 B：同一内容、同一 URL 路径，换端口（等价换 CDN 节点）重新提供服务
+        let (url_b, requested_b, _fs, _fl) = spawn_range_test_server(data.clone(), None).await;
+        println!("[4] 服务器 B(同内容同路径, 换节点) 就绪: {}", url_b);
+        downloader
+            .fetch_parallel(&url_b, &path, 4, None, None)
+            .await
+            .expect("换节点重连续传应成功");
+        println!(
+            "[5] 重连后服务器 B 收到的 Range 请求: {:?}",
+            requested_b.lock().unwrap()
+        );
+
+        // 最终文件与源逐字节一致
+        let written = fs::read(&path).await.unwrap();
+        assert_eq!(written, data, "重连续传后文件内容应与源完全一致");
+
+        // 服务器 B 只收到了缺失分片的请求
+        let reqs = requested_b.lock().unwrap();
+        assert!(!reqs.is_empty(), "重连后应至少请求一次缺失分片");
+        assert!(
+            reqs.iter().all(|(s, _)| *s == 0),
+            "重连应只请求缺失的首个分片，实际请求: {:?}",
+            reqs
+        );
+
+        let _ = fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn resume_state_roundtrip_with_fingerprint() {
+        let dir = std::env::temp_dir().join(format!("bili-resume-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir).await;
+        let sidecar = resume_sidecar_path(&dir.join("video.tmp_video"));
+        let url = "https://cdn.example/v1/resource/upgcxcode/1/2/x.m4s?deadline=1&sign=a";
+
+        ensure_resume_fingerprint(&sidecar, url).await;
+        append_completed_range(&sidecar, 0, 100).await;
+        append_completed_range(&sidecar, 101, 200).await;
+
+        let loaded = load_completed_ranges(&sidecar, url).await;
+        assert!(loaded.contains(&(0, 100)));
+        assert!(loaded.contains(&(101, 200)));
+
+        // 指纹不一致：状态失效并清空
+        let other_url = "https://cdn.example/v1/resource/upgcxcode/9/9/other.m4s?x=1";
+        let loaded2 = load_completed_ranges(&sidecar, other_url).await;
+        assert!(loaded2.is_empty());
+
+        let _ = fs::remove_dir_all(&dir).await;
     }
 }

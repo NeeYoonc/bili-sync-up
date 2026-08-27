@@ -8696,6 +8696,8 @@ async fn download_page_video_from_streams(
                 warn!("未找到独立音频流，将下载视频流");
                 let urls = video_stream.urls();
                 let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                // 单流下载完成即最终文件，清理可能遗留的断点续传状态
+                let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(page_path)).await;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
             }
         }
@@ -8791,11 +8793,8 @@ async fn download_page_video_from_streams(
                                 error!("音频流下载失败: {:#}", e);
                             }
                         }
-                        // 异步删除临时视频文件
-                        let video_path_clone = tmp_video_path.clone();
-                        tokio::spawn(async move {
-                            let _ = fs::remove_file(&video_path_clone).await;
-                        });
+                        // 保留已下载完成的视频临时文件：重试时走断点续传复用。
+                        // 之前用 tokio::spawn 异步删除会与重试下载产生竞态，误删新文件。
                         e
                     })?;
 
@@ -8814,9 +8813,11 @@ async fn download_page_video_from_streams(
                     {
                         warn!("检测到文件损坏，清理临时文件并标记为重试: {}", error_msg);
 
-                        // 立即清理损坏的临时文件
+                        // 立即清理损坏的临时文件与断点续传状态
                         let _ = fs::remove_file(&tmp_video_path).await;
                         let _ = fs::remove_file(&tmp_audio_path).await;
+                        let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_video_path)).await;
+                        let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_audio_path)).await;
 
                         // 返回特殊错误，让上层重试下载
                         return Err(anyhow::anyhow!(
@@ -8824,16 +8825,20 @@ async fn download_page_video_from_streams(
                             error_msg
                         ));
                     } else {
-                        // 其他类型的合并错误，清理临时文件后直接返回
+                        // 其他类型的合并错误，清理临时文件与断点续传状态后直接返回
                         let _ = fs::remove_file(&tmp_video_path).await;
                         let _ = fs::remove_file(&tmp_audio_path).await;
+                        let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_video_path)).await;
+                        let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_audio_path)).await;
                         return Err(e);
                     }
                 }
 
-                // 合并成功，清理临时文件
-                let _ = fs::remove_file(tmp_video_path).await;
-                let _ = fs::remove_file(tmp_audio_path).await;
+                // 合并成功，清理临时文件与断点续传状态
+                let _ = fs::remove_file(&tmp_video_path).await;
+                let _ = fs::remove_file(&tmp_audio_path).await;
+                let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_video_path)).await;
+                let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_audio_path)).await;
 
                 // 获取合并后文件大小，如果失败则使用视频和音频大小之和
                 let final_size = tokio::fs::metadata(page_path)
