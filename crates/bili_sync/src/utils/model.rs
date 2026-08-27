@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use bili_sync_entity::*;
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use once_cell::sync::Lazy;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{OnConflict, SimpleExpr};
@@ -15,7 +14,7 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
 use tracing::{debug, info, warn};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
-use crate::bilibili::{BiliClient, Collection, CollectionItem, CollectionType, PageInfo, Video, VideoInfo};
+use crate::bilibili::{BiliClient, PageInfo, Video, VideoInfo};
 use crate::utils::live_updates::notify_videos_changed;
 use crate::utils::status::STATUS_COMPLETED;
 
@@ -1167,162 +1166,8 @@ pub async fn check_favorite_multipage_videos_for_new_parts(
     Ok(updated)
 }
 
-/// 收藏夹源：每轮重新拉取收藏夹内已入库的视频合集（type=21）的分集列表，
-/// 发现新增分集（新 bvid）时自动入库，使合集后续新增分集也能增量同步。
-/// 返回本轮新增的分集数量。
-pub async fn recheck_favorite_collections(
-    bili_client: &BiliClient,
-    video_source: &VideoSourceEnum,
-    connection: &DatabaseConnection,
-) -> Result<usize> {
-    let VideoSourceEnum::Favorite(favorite_source) = video_source else {
-        return Ok(0);
-    };
-
-    // 每轮最多巡检的合集数量，避免一次性拉取过多合集触发风控
-    const COLLECTION_BATCH: usize = 3;
-
-    // 找出该收藏夹内已入库的合集（season_id 非空），按合集去重
-    let collection_videos = video::Entity::find()
-        .filter(video_source.filter_expr())
-        .filter(video::Column::SeasonId.is_not_null())
-        .filter(video::Column::SeasonId.ne(""))
-        .all(connection)
-        .await
-        .context("查询收藏夹内合集视频失败")?;
-
-    let mut handled = HashSet::new();
-    let mut collections: Vec<(String, i64)> = Vec::new();
-    for video_model in collection_videos {
-        let Some(season_id) = video_model.season_id.clone() else {
-            continue;
-        };
-        // 同一合集（season_id + upper_id）只处理一次
-        let collection_key = format!("{}:{}", season_id, video_model.upper_id);
-        if handled.insert(collection_key) {
-            collections.push((season_id, video_model.upper_id));
-        }
-    }
-    if collections.is_empty() {
-        return Ok(0);
-    }
-
-    // 轮转偏移：每个收藏夹源各自记录上次巡检位置，每轮取一批合集，循环覆盖
-    let offset = {
-        let mut offsets = FAVORITE_COLLECTION_CHECK_OFFSETS.lock().await;
-        let entry = offsets.entry(favorite_source.id).or_insert(0);
-        let current = *entry;
-        *entry = (current + COLLECTION_BATCH) % collections.len();
-        current
-    };
-    collections.rotate_left(offset);
-
-    let mut new_episode_count = 0usize;
-    debug!(
-        "收藏夹「{}」合集分集巡检：共 {} 个合集，本轮检查 {} 个",
-        favorite_source.name,
-        collections.len(),
-        COLLECTION_BATCH.min(collections.len())
-    );
-    for (season_id, upper_id) in collections.into_iter().take(COLLECTION_BATCH) {
-
-        let collection_item = CollectionItem {
-            mid: upper_id.to_string(),
-            sid: season_id.clone(),
-            collection_type: CollectionType::Season,
-        };
-        let collection = Collection::new(bili_client, &collection_item);
-        let stream = collection.into_video_stream();
-        futures::pin_mut!(stream);
-
-        let mut fetched: Vec<VideoInfo> = Vec::new();
-        while let Some(res) = stream.next().await {
-            match res {
-                Ok(mut episode) => {
-                    if let VideoInfo::Collection { season_id: sid, arc, .. } = &mut episode {
-                        *sid = Some(season_id.clone());
-                        // 合集分集接口返回的条目不带 author 字段，这里把合集作者 mid 补进去，
-                        // 保证入库时 upper_id 正确（否则详情填充会因 upper_id=0 误判归属而清空 season_id）。
-                        if arc.is_none() {
-                            *arc = Some(serde_json::json!({}));
-                        }
-                        if let Some(arc_value) = arc.as_mut() {
-                            if arc_value["author"].is_null() {
-                                arc_value["author"] = serde_json::json!({
-                                    "mid": upper_id,
-                                    "name": "",
-                                    "face": "",
-                                });
-                            }
-                        }
-                    }
-                    fetched.push(episode);
-                }
-                Err(err) => {
-                    warn!(
-                        "收藏夹「{}」合集 {} 分集巡检失败（本轮跳过）: {:#}",
-                        favorite_source.name, season_id, err
-                    );
-                    break;
-                }
-            }
-        }
-        if fetched.is_empty() {
-            continue;
-        }
-
-        // 找出该收藏夹内已存在的 bvid，筛出新增分集
-        let fetched_bvids: Vec<String> = fetched
-            .iter()
-            .map(|v| match v {
-                VideoInfo::Collection { bvid, .. } => bvid.clone(),
-                _ => String::new(),
-            })
-            .filter(|b| !b.is_empty())
-            .collect();
-        let existing_bvids: HashSet<String> = video::Entity::find()
-            .filter(video_source.filter_expr())
-            .filter(video::Column::Bvid.is_in(fetched_bvids.clone()))
-            .all(connection)
-            .await?
-            .into_iter()
-            .map(|v| v.bvid)
-            .collect();
-
-        let new_episodes: Vec<VideoInfo> = fetched
-            .into_iter()
-            .filter(|v| {
-                let bvid = match v {
-                    VideoInfo::Collection { bvid, .. } => bvid.as_str(),
-                    _ => return false,
-                };
-                !bvid.is_empty() && !existing_bvids.contains(bvid)
-            })
-            .collect();
-
-        if !new_episodes.is_empty() {
-            let added_here = new_episodes.len();
-            info!(
-                "收藏夹「{}」合集 {} 发现 {} 个新增分集，自动入库",
-                favorite_source.name, season_id, added_here
-            );
-            create_videos(new_episodes, video_source, connection).await?;
-            new_episode_count += added_here;
-        }
-    }
-
-    if new_episode_count > 0 {
-        notify_videos_changed();
-    }
-    Ok(new_episode_count)
-}
-
 /// 收藏夹多P视频分P巡检的轮转偏移（source_id -> 已巡检到的位置）
 static FAVORITE_MULTIPAGE_CHECK_OFFSETS: Lazy<AsyncMutex<HashMap<i32, usize>>> =
-    Lazy::new(|| AsyncMutex::new(HashMap::new()));
-
-/// 收藏夹合集分集巡检的轮转偏移（source_id -> 已巡检到的位置）
-static FAVORITE_COLLECTION_CHECK_OFFSETS: Lazy<AsyncMutex<HashMap<i32, usize>>> =
     Lazy::new(|| AsyncMutex::new(HashMap::new()));
 
 /// 尝试创建 Page Model，基于 cid 判断是否已存在

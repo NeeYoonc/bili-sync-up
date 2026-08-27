@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use async_stream::try_stream;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use crate::bilibili::{BiliClient, Collection, CollectionItem, CollectionType, Validate, VideoInfo};
+use crate::bilibili::{BiliClient, Validate, VideoInfo};
 pub struct FavoriteList<'a> {
     client: &'a BiliClient,
     fid: String,
@@ -68,8 +68,8 @@ impl<'a> FavoriteList<'a> {
     // 拿到收藏夹的所有权，返回一个收藏夹下的视频流
     //
     // 注意：收藏夹内可能收藏了「视频合集」（type=21），此时条目本身没有 bvid，
-    // 只有合集 id 和 UP主 mid。这里会将合集展开为其中的每一集（VideoInfo::Collection），
-    // 这样合集后续新增分集时才能在收藏夹扫描中被发现并下载。
+    // 只有合集 id 和 UP主 mid。收藏源只同步「收藏的视频」，合集分集请单独添加
+    // 合集源，因此这里直接跳过合集条目，不再展开为每一集。
     pub fn into_video_stream(self) -> impl Stream<Item = Result<VideoInfo>> + 'a {
         try_stream! {
             let mut page = 1;
@@ -95,21 +95,14 @@ impl<'a> FavoriteList<'a> {
                 }
                 let medias = medias.as_array_mut().context("medias is not an array")?;
                 for media in medias.iter_mut() {
-                    // 视频合集（type=21）：收藏夹收藏了整个合集，展开为合集内的每一集
+                    // 视频合集（type=21）条目本身没有 bvid，不是「收藏的视频」。
+                    // 收藏源只同步收藏的视频，合集分集请单独添加合集源，这里直接跳过。
                     if media["type"].as_i64() == Some(21) {
-                        match expand_favorite_collection(self.client, media).await {
-                            Ok(episodes) => {
-                                for episode in episodes {
-                                    yield episode;
-                                }
-                            }
-                            Err(err) => {
-                                warn!(
-                                    "收藏夹 {} 中的视频合集展开失败，本轮跳过该合集: {:#}",
-                                    self.fid, err
-                                );
-                            }
-                        }
+                        let title = media["title"].as_str().unwrap_or("未知名合集");
+                        debug!(
+                            "收藏夹 {} 中的视频合集「{}」(type=21) 不展开下载，跳过该条目",
+                            self.fid, title
+                        );
                         continue;
                     }
                     let video_info: VideoInfo = serde_json::from_value(media.take()).with_context(|| {
@@ -132,48 +125,3 @@ impl<'a> FavoriteList<'a> {
     }
 }
 
-/// 将收藏夹中的视频合集条目（type=21）展开为合集内的每一集。
-async fn expand_favorite_collection(client: &BiliClient, media: &Value) -> Result<Vec<VideoInfo>> {
-    let season_id = media["id"].as_i64().context("视频合集条目缺少 id")?;
-    let upper_mid = media["upper"]["mid"].as_i64().context("视频合集条目缺少 upper.mid")?;
-    // B站对已失效的合集返回 upper.mid=0，此时合集详情接口必然 404，
-    // 直接按“已失效合集”处理，不需要再发起请求。
-    if upper_mid <= 0 {
-        let title = media["title"].as_str().unwrap_or("已失效合集");
-        debug!("收藏夹中的合集已失效，跳过展开: title={}, season_id={}", title, season_id);
-        return Ok(Vec::new());
-    }
-    let collection_item = CollectionItem {
-        mid: upper_mid.to_string(),
-        sid: season_id.to_string(),
-        collection_type: CollectionType::Season,
-    };
-    let collection = Collection::new(client, &collection_item);
-    let season_id_str = season_id.to_string();
-    let mut episodes = Vec::new();
-    let stream = collection.into_video_stream();
-    futures::pin_mut!(stream);
-    while let Some(episode) = stream.next().await {
-        let mut episode = episode?;
-        if let VideoInfo::Collection { season_id, arc, .. } = &mut episode {
-            // 记录合集ID，便于后续增量扫描发现合集新增分集
-            *season_id = Some(season_id_str.clone());
-            // 合集分集接口返回的条目不带 author 字段，这里把合集作者 mid 补进去，
-            // 保证入库时 upper_id 正确，后续合集分集巡检才能重建合集请求。
-            if arc.is_none() {
-                *arc = Some(serde_json::json!({}));
-            }
-            if let Some(arc_value) = arc.as_mut() {
-                if arc_value["author"].is_null() {
-                    arc_value["author"] = serde_json::json!({
-                        "mid": upper_mid,
-                        "name": media["upper"]["name"].as_str().unwrap_or(""),
-                        "face": media["upper"]["face"].as_str().unwrap_or(""),
-                    });
-                }
-            }
-        }
-        episodes.push(episode);
-    }
-    Ok(episodes)
-}
