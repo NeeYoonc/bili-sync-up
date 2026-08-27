@@ -1650,9 +1650,39 @@ async fn fetch_liked_posts(limit: usize) -> Result<Vec<DouyinPost>> {
     Ok(posts)
 }
 
+/// 拉取抖音收藏夹作品。
+///
+/// 公开收藏夹用移动端接口匿名即可读取，不依赖登录 Cookie；但部分收藏夹是
+/// 私有/需登录可见的，匿名请求会返回 status_code=4。此时若已导入抖音登录
+/// 凭证，自动带 Cookie 重新拉取，保证私有收藏夹也能正常扫描。
 async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+    match fetch_collection_posts_inner(id, limit, None).await {
+        Ok(posts) => Ok(posts),
+        Err(anonymous_error) => {
+            let Some(cookie) = optional_cookie_header() else {
+                return Err(anyhow!(
+                    "获取抖音收藏夹作品失败（{anonymous_error:#}）：该收藏夹可能为私有/需登录可见，请先在设置页导入抖音登录凭证后重试"
+                ));
+            };
+            fetch_collection_posts_inner(id, limit, Some(&cookie))
+                .await
+                .with_context(|| {
+                    format!(
+                        "匿名读取抖音收藏夹失败（{anonymous_error:#}），带登录 Cookie 重试也失败"
+                    )
+                })
+        }
+    }
+}
+
+async fn fetch_collection_posts_inner(
+    id: &str,
+    limit: usize,
+    cookie: Option<&str>,
+) -> Result<Vec<DouyinPost>> {
     // 移动端 collects/video/list 匿名即可读取任意公开收藏夹，不依赖登录 Cookie，
     // 因此这里不走网页版 signed_get（后者要求浏览器会话与 secsdk 签名）。
+    // 私有收藏夹匿名会返回 status_code=4，由外层在已导入 Cookie 时带登录态重试。
     let client = reqwest::Client::builder()
         .user_agent(DOUYIN_MOBILE_USER_AGENT)
         .timeout(REQUEST_TIMEOUT)
@@ -1670,9 +1700,13 @@ async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost
             ("count", page_size.to_string()),
         ]);
         let url = reqwest::Url::parse_with_params(DOUYIN_MOBILE_COLLECTION_VIDEOS_API, &pairs)?;
-        let response = client
+        let mut request = client
             .get(url)
-            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json");
+        if let Some(cookie) = cookie {
+            request = request.header(reqwest::header::COOKIE, cookie);
+        }
+        let response = request
             .send()
             .await
             .context("请求抖音移动端收藏夹作品接口失败")?;
@@ -2918,6 +2952,19 @@ fn client() -> Result<reqwest::Client> {
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()?)
+}
+
+/// 已导入抖音登录凭证时返回 Cookie 请求头，未导入返回 None。
+/// 供「匿名优先、登录兜底」的接口（如移动端收藏夹作品）使用。
+fn optional_cookie_header() -> Option<String> {
+    let values = cookie_values();
+    (!values.is_empty()).then(|| {
+        values
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
 }
 
 pub(crate) fn cookie_header() -> Result<String> {
