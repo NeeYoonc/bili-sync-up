@@ -51,6 +51,7 @@
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import BellIcon from '@lucide/svelte/icons/bell';
 	import ListVideoIcon from '@lucide/svelte/icons/list-video';
+	import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
 
 	// 认证状态
 	let isAuthenticated = false;
@@ -67,6 +68,7 @@
 	let loadingLatestIngests = false;
 	let loadingTaskRefresh = false;
 	let showIngestSheet = false;
+	let showDownloadsSheet = false;
 	type IngestView = 'latest' | 'recent';
 	let ingestView: IngestView = 'latest';
 	type IngestPlatform = 'all' | 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
@@ -332,6 +334,9 @@
 		if (item.total_bytes <= 0) return 0;
 		return Math.min(100, Math.round((item.downloaded_bytes / item.total_bytes) * 100));
 	}
+
+	// 卡片只显示第一个正在下载的任务，其余点「⋯」在弹窗里看
+	$: primaryDownload = downloads.length > 0 ? downloads[0] : null;
 
 	// 剩余时间可读化
 	function formatEta(seconds: number): string {
@@ -977,48 +982,52 @@
 									</div>
 								</div>
 
-								<!-- 正在下载实时进度 -->
+																<!-- 正在下载实时进度 -->
 								<div class="mt-4 space-y-2 border-t pt-3">
-									<div class="flex items-center justify-between text-sm">
-										<span>正在下载（{downloads.length}）</span>
+									<div class="flex items-center justify-between">
+										<span class="text-sm">正在下载{downloads.length > 0 ? `（${downloads.length}）` : ''}</span>
+										{#if downloads.length > 0}
+										<Button
+										size="sm"
+										variant="ghost"
+										class="h-6 w-6 p-0"
+										title="查看全部下载"
+										onclick={() => (showDownloadsSheet = true)}
+										>
+										<MoreHorizontalIcon class="h-4 w-4" />
+										</Button>
+										{/if}
 									</div>
-									{#if downloads.length === 0}
-										<div class="text-muted-foreground text-xs">当前无下载任务</div>
-									{:else}
-									{#each downloads as item (item.key)}
+									{#if primaryDownload}
 										<div class="hover:bg-muted/40 rounded-md border p-2 transition-colors">
 										<div class="flex items-center justify-between gap-2">
-										<span class="truncate text-xs font-medium" title={item.title}>
-										{item.title}
+										<span class="truncate text-xs font-medium" title={primaryDownload.title}>
+										{primaryDownload.title}
 										</span>
-										<span class="flex shrink-0 items-center gap-1">
-										<Badge variant="outline" class="px-1.5 py-0 text-[10px]">
-										{INGEST_PLATFORM_LABEL[item.platform]}
-										</Badge>
-										{#if item.phase}
-										<Badge variant="secondary" class="px-1.5 py-0 text-[10px]">
-										{item.phase}
+										{#if primaryDownload.phase}
+										<Badge variant="secondary" class="shrink-0 px-1.5 py-0 text-[10px]">
+										{primaryDownload.phase}
 										</Badge>
 										{/if}
-										</span>
 										</div>
 										<div class="mt-1.5 flex items-center gap-2">
-										<Progress value={downloadPercent(item)} class="h-1.5 flex-1" />
+										<Progress value={downloadPercent(primaryDownload)} class="h-1.5 flex-1" />
 										<span class="text-muted-foreground w-10 shrink-0 text-right text-[10px]">
-										{item.total_bytes > 0 ? `${downloadPercent(item)}%` : '--'}
+										{primaryDownload.total_bytes > 0 ? `${downloadPercent(primaryDownload)}%` : '--'}
 										</span>
 										</div>
 										<div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-[10px]">
-										<span>{formatBytes(item.downloaded_bytes)}{item.total_bytes > 0 ? ` / ${formatBytes(item.total_bytes)}` : ''}</span>
-										{#if item.speed_bps > 0}<span>{formatSpeed(item.speed_bps)}</span>{/if}
-										{#if item.eta_seconds}<span>剩余约 {formatEta(item.eta_seconds)}</span>{/if}
+										<span>{formatBytes(primaryDownload.downloaded_bytes)}{primaryDownload.total_bytes > 0 ? ` / ${formatBytes(primaryDownload.total_bytes)}` : ''}</span>
+										{#if primaryDownload.speed_bps > 0}<span>{formatSpeed(primaryDownload.speed_bps)}</span>{/if}
+										{#if primaryDownload.eta_seconds}<span>剩余约 {formatEta(primaryDownload.eta_seconds)}</span>{/if}
 										</div>
 										</div>
-									{/each}
+									{:else}
+										<div class="text-muted-foreground text-xs">当前无下载任务</div>
 									{/if}
 								</div>
 
-								<!-- 任务控制按钮 -->
+<!-- 任务控制按钮 -->
 								{#if taskControlStatus}
 									<div class="grid grid-cols-2 gap-2">
 										<Button
@@ -1313,6 +1322,49 @@
 											<span class="hidden sm:inline">失败</span>
 										</div>
 									{/if}
+								</div>
+							</div>
+						</div>
+					{/each}
+				{/if}
+			</div>
+		</Dialog.Content>
+	</Dialog.Root>
+
+	<!-- 全部下载 Dialog 弹窗 -->
+	<Dialog.Root bind:open={showDownloadsSheet}>
+		<Dialog.Content class="sm:max-w-2xl">
+			<Dialog.Header>
+				<Dialog.Title>正在下载（{downloads.length}）</Dialog.Title>
+			</Dialog.Header>
+			<div class="mt-3 max-h-[60vh] space-y-2 overflow-auto">
+				{#if downloads.length === 0}
+					<EmptyState title="暂无下载任务" class="border-0 bg-transparent py-8" />
+				{:else}
+					{#each downloads as item (item.key)}
+						<div class="hover:bg-muted/30 rounded-lg border p-3 transition-colors">
+							<div class="min-w-0 flex-1">
+								<div class="flex items-center gap-2">
+									<div class="truncate font-medium" title={item.title}>{item.title}</div>
+									<Badge variant="outline" class="shrink-0 px-1.5 py-0 text-[10px]">
+										{INGEST_PLATFORM_LABEL[item.platform]}
+									</Badge>
+									{#if item.phase}
+										<Badge variant="secondary" class="shrink-0 px-1.5 py-0 text-[10px]">{item.phase}</Badge>
+									{/if}
+								</div>
+								<div class="mt-2 flex items-center gap-2">
+									<Progress value={downloadPercent(item)} class="h-2 flex-1" />
+									<span class="text-muted-foreground w-12 shrink-0 text-right text-xs">
+										{item.total_bytes > 0 ? `${downloadPercent(item)}%` : '--'}
+									</span>
+								</div>
+								<div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-xs">
+									<span>{formatBytes(item.downloaded_bytes)}{item.total_bytes > 0 ? ` / ${formatBytes(item.total_bytes)}` : ''}</span>
+									{#if item.speed_bps > 0}<span>{formatSpeed(item.speed_bps)}</span>{/if}
+									{#if item.eta_seconds}<span>剩余约 {formatEta(item.eta_seconds)}</span>{/if}
+									<span>·</span>
+									<span>开始于 {item.started_at}</span>
 								</div>
 							</div>
 						</div>
