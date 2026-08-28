@@ -357,6 +357,9 @@ impl Downloader {
         cookie: Option<&str>,
     ) -> Result<()> {
         let (total_size, range_supported) = self.get_size_and_range_support(url, referer, cookie).await?;
+        crate::download_progress::DOWNLOAD_PROGRESS
+            .set_stream_total(&path.display().to_string(), total_size)
+            .await;
         if total_size == 0 || !range_supported {
             // 不支持 Range 分片：退回全量单连接下载
             return self.fetch_single(url, path, referer, cookie).await;
@@ -398,6 +401,14 @@ impl Downloader {
             ensure_resume_fingerprint(&sidecar, url).await;
         }
 
+        // 进度：续传已完成的字节作为基数，顺序补下时逐片累加
+        let progress_base: u64 = ranges
+            .iter()
+            .filter(|range| completed.contains(range))
+            .map(|(start, end)| end.saturating_sub(*start) + 1)
+            .sum();
+        let mut progress_done = progress_base;
+        let progress_path = path.display().to_string();
         for (start, end) in pending {
             download_range_to_file_with_retry(
                 self.client.clone(),
@@ -411,6 +422,10 @@ impl Downloader {
             )
             .await?;
             append_completed_range(&sidecar, start, end).await;
+            progress_done = progress_done.saturating_add(end.saturating_sub(start) + 1);
+            crate::download_progress::DOWNLOAD_PROGRESS
+                .report_bytes(&progress_path, progress_done)
+                .await;
         }
 
         let size = tokio::fs::metadata(path)
@@ -563,6 +578,9 @@ impl Downloader {
         }
 
         let (total_size, range_supported) = self.get_size_and_range_support(url, referer, cookie).await?;
+        crate::download_progress::DOWNLOAD_PROGRESS
+            .set_stream_total(&path.display().to_string(), total_size)
+            .await;
         ensure!(total_size > 0, "无法获取文件大小");
         ensure!(
             total_size >= min_parallel_size,
@@ -597,6 +615,9 @@ impl Downloader {
                 cookie,
             )
             .await?;
+            crate::download_progress::DOWNLOAD_PROGRESS
+                .report_bytes(&path.display().to_string(), total_size)
+                .await;
             return Ok(());
         }
 
@@ -665,6 +686,9 @@ impl Downloader {
             .filter(|range| completed.contains(range))
             .map(|(start, end)| end.saturating_sub(*start) + 1)
             .sum();
+        // 进度：并发分片累计已下载字节（含续传已完成部分）
+        let downloaded_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(completed_bytes));
+        let progress_path = path.display().to_string();
 
         let url_owned = url.to_string();
         let path_owned = path.to_path_buf();
@@ -678,6 +702,8 @@ impl Downloader {
             let sidecar = sidecar_owned.clone();
             let referer = referer_owned.clone();
             let cookie = cookie_owned.clone();
+            let downloaded_counter = downloaded_counter.clone();
+            let progress_path = progress_path.clone();
             async move {
                 let result = download_range_to_file_with_retry(
                     client,
@@ -693,6 +719,12 @@ impl Downloader {
                 if result.is_ok() {
                     // 记录已完成分片：失败时保留状态，下次可断点续传
                     append_completed_range(&sidecar, part_start, part_end).await;
+                    // 进度：分片完成后累加已下载字节
+                    let len = part_end.saturating_sub(part_start) + 1;
+                    let acc = downloaded_counter.fetch_add(len, std::sync::atomic::Ordering::Relaxed) + len;
+                    crate::download_progress::DOWNLOAD_PROGRESS
+                        .report_bytes(&progress_path, acc)
+                        .await;
                 }
                 result
             }
@@ -1286,6 +1318,10 @@ async fn download_range_to_file(
     let mut received = 0u64;
     let mut stream = resp.bytes_stream();
     let mut first_chunk = true;
+    // 进度：分片下载过程中按约 250ms 节流上报「文件内绝对偏移」，
+    // 让首页进度条平滑增长而不是等整个分片下完才跳一次。
+    let progress_path = path.display().to_string();
+    let mut last_progress_report = std::time::Instant::now();
     loop {
         let wait = if first_chunk {
             FIRST_BYTE_TIMEOUT
@@ -1301,6 +1337,12 @@ async fn download_range_to_file(
             Ok(chunk) => {
                 file.write_all(&chunk).await?;
                 received += chunk.len() as u64;
+                if last_progress_report.elapsed() >= Duration::from_millis(250) {
+                    last_progress_report = std::time::Instant::now();
+                    crate::download_progress::DOWNLOAD_PROGRESS
+                        .report_bytes(&progress_path, start.saturating_add(received))
+                        .await;
+                }
             }
             Err(error) if received >= expected && contains_tls_close_notify_eof(&error.to_string()) => {
                 warn!(
@@ -1312,6 +1354,10 @@ async fn download_range_to_file(
             Err(error) => return Err(error.into()),
         }
     }
+    // 分片完整接收：上报最终偏移（与分片完成时的累计上报一致，取 max）
+    crate::download_progress::DOWNLOAD_PROGRESS
+        .report_bytes(&progress_path, start.saturating_add(received))
+        .await;
     file.flush().await?;
 
     ensure!(

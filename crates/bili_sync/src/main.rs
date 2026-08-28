@@ -12,6 +12,7 @@ mod database;
 mod db_maintenance;
 mod douyin;
 mod douyin_sign;
+mod download_progress;
 mod downloader;
 mod error;
 mod external_media;

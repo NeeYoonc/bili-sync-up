@@ -2462,7 +2462,18 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     }
     let tiktok = crate::tiktok::is_tiktok_source(source);
     let mut command = ytdlp_command();
-    command.args(["--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]);
+    command.args([
+        "--flat-playlist",
+        "--dump-json",
+        "--ignore-errors",
+        "--no-warnings",
+        // 出口网络挂起/被风控时快速失败：socket 20 秒无数据即超时，重试限制为 3 次，
+        // 避免 yt-dlp 默认 10 次重试把单源扫描拖到数分钟（硬超时见下方）。
+        "--socket-timeout",
+        "20",
+        "--retries",
+        "3",
+    ]);
     append_ytdlp_runtime(&mut command);
     if tiktok {
         // 公开内容无需登录；仅在导入过 TikTok cookies 时携带，不混用 YouTube/抖音 Cookie。
@@ -2482,7 +2493,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         source.url.clone()
     };
     command.arg(&scan_url);
-    let output = tokio::time::timeout(Duration::from_secs(10 * 60), command.output())
+    let output = tokio::time::timeout(Duration::from_secs(5 * 60), command.output())
         .await
         .map_err(|_| anyhow!("扫描 {} 来源超时", source_platform_label(source)))??;
     if !output.status.success() {
@@ -2909,6 +2920,19 @@ async fn download_video(
         return Ok(());
     }
     let platform_label = source_platform_label(&source);
+    // 首页「正在下载」进度：外源无分片字节进度，先注册阶段与状态（完成/失败时自动清理）
+    let progress_key = format!("youtube:{}", video.id);
+    let progress_platform = if is_douyin_source(&source) {
+        "douyin"
+    } else if crate::tiktok::is_tiktok_source(&source) {
+        "tiktok"
+    } else {
+        "youtube"
+    };
+    let _progress_guard = crate::workflow::DownloadProgressGuard::new(progress_key.clone());
+    crate::download_progress::DOWNLOAD_PROGRESS
+        .begin_task(&progress_key, progress_platform, &video.title, "下载中", "")
+        .await;
     loop {
         info!(
             platform = platform_label,

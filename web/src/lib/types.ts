@@ -1406,6 +1406,20 @@ export interface TaskStatus {
 	next_run?: string;
 }
 
+// 首页「正在下载」实时进度
+export interface DownloadProgressItem {
+	key: string;
+	platform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
+	title: string;
+	phase: string;
+	file_name: string;
+	downloaded_bytes: number;
+	total_bytes: number;
+	speed_bps: number;
+	eta_seconds: number | null;
+	started_at: string;
+}
+
 // 首页最新入库
 export interface LatestIngestItem {
 	video_id: number;

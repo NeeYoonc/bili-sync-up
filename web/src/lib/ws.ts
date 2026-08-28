@@ -1,16 +1,18 @@
 import { toast } from 'svelte-sonner';
-import type { SysInfo, TaskStatus } from './types';
+import type { DownloadProgressItem, SysInfo, TaskStatus } from './types';
 
 // 支持的事件类型
 export enum EventType {
 	Tasks = 'tasks',
-	SysInfo = 'sysInfo'
+	SysInfo = 'sysInfo',
+	Downloads = 'downloads'
 }
 
 // 服务器事件响应格式
 interface ServerEvent {
 	tasks?: TaskStatus;
 	sysInfo?: SysInfo;
+	downloads?: DownloadProgressItem[];
 }
 
 // 客户端事件请求格式
@@ -19,6 +21,7 @@ type ClientEvent = { subscribe: EventType } | { unsubscribe: EventType };
 // 回调函数类型定义
 type TasksCallback = (data: TaskStatus) => void;
 type SysInfoCallback = (data: SysInfo) => void;
+type DownloadsCallback = (data: DownloadProgressItem[]) => void;
 type ErrorCallback = (error: Event) => void;
 
 export class WebSocketManager {
@@ -33,6 +36,7 @@ export class WebSocketManager {
 
 	private tasksSubscribers: Set<TasksCallback> = new Set();
 	private sysInfoSubscribers: Set<SysInfoCallback> = new Set();
+	private downloadsSubscribers: Set<DownloadsCallback> = new Set();
 	private errorSubscribers: Set<ErrorCallback> = new Set();
 
 	private subscribedEvents: Set<EventType> = new Set();
@@ -105,6 +109,8 @@ export class WebSocketManager {
 				this.notifyTasksSubscribers(data.tasks);
 			} else if (data.sysInfo !== undefined) {
 				this.notifySysInfoSubscribers(data.sysInfo);
+			} else if (data.downloads !== undefined) {
+				this.notifyDownloadsSubscribers(data.downloads);
 			}
 		} catch (error) {
 			console.error('Failed to parse WebSocket message:', error, event.data);
@@ -204,6 +210,21 @@ export class WebSocketManager {
 		};
 	}
 
+	public subscribeToDownloads(callback: DownloadsCallback): () => void {
+		this.downloadsSubscribers.add(callback);
+
+		if (this.downloadsSubscribers.size === 1) {
+			this.subscribe(EventType.Downloads);
+		}
+
+		return () => {
+			this.downloadsSubscribers.delete(callback);
+			if (this.downloadsSubscribers.size === 0) {
+				this.unsubscribe(EventType.Downloads);
+			}
+		};
+	}
+
 	private notifyTasksSubscribers(data: TaskStatus): void {
 		this.tasksSubscribers.forEach((callback) => {
 			try {
@@ -220,6 +241,16 @@ export class WebSocketManager {
 				callback(data);
 			} catch (error) {
 				console.error('Error in sysInfo subscriber callback:', error);
+			}
+		});
+	}
+
+	private notifyDownloadsSubscribers(data: DownloadProgressItem[]): void {
+		this.downloadsSubscribers.forEach((callback) => {
+			try {
+				callback(data);
+			} catch (error) {
+				console.error('Error in downloads subscriber callback:', error);
 			}
 		});
 	}

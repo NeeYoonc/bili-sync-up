@@ -88,6 +88,7 @@ use crate::api::handler::{
     get_config_migration_status,
     get_current_user,
     get_dashboard_data,
+    get_downloads_progress,
     get_hot_reload_status,
     get_latest_ingests,
     get_log_files,
@@ -402,6 +403,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/logs/files", get(get_log_files))
         .route("/api/logs/download", get(download_log_file))
         .route("/api/queue-status", get(get_queue_status))
+        .route("/api/downloads/progress", get(get_downloads_progress))
         .route("/api/queue/tasks/{task_id}", delete(cancel_queue_task))
         .route("/api/proxy/image", get(proxy_image))
         .route("/api/task-control/status", get(get_task_control_status))

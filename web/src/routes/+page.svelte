@@ -21,7 +21,8 @@
 		SysInfo,
 		TaskStatus,
 		TaskControlStatusResponse,
-		LatestIngestItem
+		LatestIngestItem,
+		DownloadProgressItem
 	} from '$lib/types';
 	import AuthLogin from '$lib/components/auth-login.svelte';
 	import InitialSetup from '$lib/components/initial-setup.svelte';
@@ -74,6 +75,8 @@
 	let monitoringPlatform: MonitoringPlatform = 'bilibili';
 	let unsubscribeSysInfo: (() => void) | null = null;
 	let unsubscribeTasks: (() => void) | null = null;
+	let unsubscribeDownloads: (() => void) | null = null;
+	let downloads: DownloadProgressItem[] = [];
 
 	function formatBytes(bytes: number): string {
 		if (bytes === 0) return '0 B';
@@ -320,6 +323,34 @@
 		await loadDashboard();
 		// 加载最新入库
 		await loadIngests('latest');
+		// 加载当前下载进度
+		await loadDownloads();
+	}
+
+	// 下载进度百分比（0-100），总大小未知时返回 0
+	function downloadPercent(item: DownloadProgressItem): number {
+		if (item.total_bytes <= 0) return 0;
+		return Math.min(100, Math.round((item.downloaded_bytes / item.total_bytes) * 100));
+	}
+
+	// 剩余时间可读化
+	function formatEta(seconds: number): string {
+		if (seconds < 60) return `${seconds} 秒`;
+		const minutes = Math.floor(seconds / 60);
+		const secs = seconds % 60;
+		if (minutes < 60) return `${minutes} 分${secs > 0 ? ` ${secs} 秒` : ''}`;
+		const hours = Math.floor(minutes / 60);
+		return `${hours} 小时${minutes % 60 > 0 ? ` ${minutes % 60} 分` : ''}`;
+	}
+
+	// 加载当前下载进度
+	async function loadDownloads() {
+		try {
+			const response = await api.getDownloadsProgress();
+			downloads = response.data || [];
+		} catch (error) {
+			console.error('加载下载进度失败:', error);
+		}
 	}
 
 	onMount(() => {
@@ -331,6 +362,9 @@
 		});
 		unsubscribeTasks = wsManager.subscribeToTasks((data: TaskStatus) => {
 			taskStatus = data;
+		});
+		unsubscribeDownloads = wsManager.subscribeToDownloads((data: DownloadProgressItem[]) => {
+			downloads = data;
 		});
 
 		// 检查认证状态
@@ -350,6 +384,10 @@
 		if (unsubscribeTasks) {
 			unsubscribeTasks();
 			unsubscribeTasks = null;
+		}
+		if (unsubscribeDownloads) {
+			unsubscribeDownloads();
+			unsubscribeDownloads = null;
 		}
 	});
 
@@ -937,6 +975,47 @@
 											{formatTime(taskStatus.next_run)}
 										</span>
 									</div>
+								</div>
+
+								<!-- 正在下载实时进度 -->
+								<div class="mt-4 space-y-2 border-t pt-3">
+									<div class="flex items-center justify-between text-sm">
+										<span>正在下载（{downloads.length}）</span>
+									</div>
+									{#if downloads.length === 0}
+										<div class="text-muted-foreground text-xs">当前无下载任务</div>
+									{:else}
+									{#each downloads as item (item.key)}
+										<div class="hover:bg-muted/40 rounded-md border p-2 transition-colors">
+										<div class="flex items-center justify-between gap-2">
+										<span class="truncate text-xs font-medium" title={item.title}>
+										{item.title}
+										</span>
+										<span class="flex shrink-0 items-center gap-1">
+										<Badge variant="outline" class="px-1.5 py-0 text-[10px]">
+										{INGEST_PLATFORM_LABEL[item.platform]}
+										</Badge>
+										{#if item.phase}
+										<Badge variant="secondary" class="px-1.5 py-0 text-[10px]">
+										{item.phase}
+										</Badge>
+										{/if}
+										</span>
+										</div>
+										<div class="mt-1.5 flex items-center gap-2">
+										<Progress value={downloadPercent(item)} class="h-1.5 flex-1" />
+										<span class="text-muted-foreground w-10 shrink-0 text-right text-[10px]">
+										{item.total_bytes > 0 ? `${downloadPercent(item)}%` : '--'}
+										</span>
+										</div>
+										<div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-[10px]">
+										<span>{formatBytes(item.downloaded_bytes)}{item.total_bytes > 0 ? ` / ${formatBytes(item.total_bytes)}` : ''}</span>
+										{#if item.speed_bps > 0}<span>{formatSpeed(item.speed_bps)}</span>{/if}
+										{#if item.eta_seconds}<span>剩余约 {formatEta(item.eta_seconds)}</span>{/if}
+										</div>
+										</div>
+									{/each}
+									{/if}
 								</div>
 
 								<!-- 任务控制按钮 -->

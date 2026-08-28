@@ -22,6 +22,8 @@ use tracing::{debug, error};
 use uuid::Uuid;
 
 use crate::api::response::SysInfo;
+use crate::download_progress::DownloadProgressItem;
+use crate::utils::live_updates;
 use crate::utils::task_notifier::{TaskStatus, TASK_STATUS_NOTIFIER};
 
 static WEBSOCKET_HANDLER: LazyLock<WebSocketHandler> = LazyLock::new(WebSocketHandler::new);
@@ -40,6 +42,7 @@ async fn websocket_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
 enum EventType {
     Tasks,
     SysInfo,
+    Downloads,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +57,7 @@ enum ClientEvent {
 enum ServerEvent {
     Tasks(Arc<TaskStatus>),
     SysInfo(Arc<SysInfo>),
+    Downloads(Arc<Vec<DownloadProgressItem>>),
 }
 
 struct WebSocketHandler {
@@ -96,6 +100,7 @@ impl WebSocketHandler {
         uuid: Uuid,
     ) {
         let mut task_handle = None;
+        let mut download_handle = None;
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg {
                 match serde_json::from_str::<ClientEvent>(&text) {
@@ -116,6 +121,28 @@ impl WebSocketHandler {
                             }
                         }
                         EventType::SysInfo => self.add_sysinfo_subscriber(uuid, tx.clone()).await,
+                        EventType::Downloads => {
+                            if download_handle
+                                .as_ref()
+                                .is_none_or(|h: &JoinHandle<()>| h.is_finished())
+                            {
+                                let tx_clone = tx.clone();
+                                download_handle = Some(tokio::spawn(async move {
+                                    let mut stream = live_updates::subscribe_downloads_changed();
+                                    loop {
+                                        let items = Arc::new(
+                                            crate::download_progress::DOWNLOAD_PROGRESS.snapshot().await,
+                                        );
+                                        if tx_clone.send(ServerEvent::Downloads(items)).await.is_err() {
+                                            break;
+                                        }
+                                        if stream.changed().await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }));
+                            }
+                        }
                     },
                     Ok(ClientEvent::Unsubscribe(event_type)) => match event_type {
                         EventType::Tasks => {
@@ -126,6 +153,11 @@ impl WebSocketHandler {
                         EventType::SysInfo => {
                             self.remove_sysinfo_subscriber(uuid).await;
                         }
+                        EventType::Downloads => {
+                            if let Some(handle) = download_handle.take() {
+                                handle.abort();
+                            }
+                        }
                     },
                     Err(e) => {
                         error!("Failed to parse client message: {:?}", e);
@@ -134,6 +166,9 @@ impl WebSocketHandler {
             }
         }
         if let Some(handle) = task_handle {
+            handle.abort();
+        }
+        if let Some(handle) = download_handle {
             handle.abort();
         }
         self.remove_sysinfo_subscriber(uuid).await;

@@ -1522,12 +1522,12 @@ pub async fn fetch_source_posts(
             }
             Ok(posts)
         }
-        "douyin_liked" => fetch_liked_posts(limit).await,
+        "douyin_liked" => fetch_liked_posts(limit, stop_when_known).await,
         "douyin_collection" => {
             let id = resolve_collection_id(source_url).await?;
-            fetch_collection_posts(&id, limit).await
+            fetch_collection_posts(&id, limit, stop_when_known).await
         }
-        "douyin_watch_later" => fetch_watch_later_posts(limit).await,
+        "douyin_watch_later" => fetch_watch_later_posts(limit, stop_when_known).await,
         "douyin_theater" => {
             let id = numeric_id(source_url).context("无法从放映厅详情链接识别专辑 ID")?;
             fetch_theater_posts(id, limit).await
@@ -1618,7 +1618,10 @@ async fn current_user_ids() -> Result<(String, String)> {
     ))
 }
 
-async fn fetch_liked_posts(limit: usize) -> Result<Vec<DouyinPost>> {
+async fn fetch_liked_posts(
+    limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
+) -> Result<Vec<DouyinPost>> {
     let (_, sec_uid) = current_user_ids().await?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
@@ -1636,7 +1639,19 @@ async fn fetch_liked_posts(limit: usize) -> Result<Vec<DouyinPost>> {
         ]);
         let response = signed_get_without_webid(DOUYIN_FAVORITE_API, pairs).await?;
         ensure_douyin_status_ok(&response, "获取我的喜欢")?;
-        append_awemes(&response, "aweme_list", &mut posts, &mut seen);
+        let mut page_posts = Vec::new();
+        let mut page_seen = HashSet::new();
+        append_awemes(&response, "aweme_list", &mut page_posts, &mut page_seen);
+        // 增量优先：整页都是已知视频时提前停止翻页（与作者源一致），
+        // 避免我的喜欢上千条时每轮全量翻页、拖慢扫描并触发限流。
+        if all_posts_known(&page_posts, stop_when_known) {
+            break;
+        }
+        for post in page_posts {
+            if seen.insert(post.id.clone()) {
+                posts.push(post);
+            }
+        }
         if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
             break;
         }
@@ -1655,8 +1670,12 @@ async fn fetch_liked_posts(limit: usize) -> Result<Vec<DouyinPost>> {
 /// 公开收藏夹用移动端接口匿名即可读取，不依赖登录 Cookie；但部分收藏夹是
 /// 私有/需登录可见的，匿名请求会返回 status_code=4。此时若已导入抖音登录
 /// 凭证，自动带 Cookie 重新拉取，保证私有收藏夹也能正常扫描。
-async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
-    match fetch_collection_posts_inner(id, limit, None).await {
+async fn fetch_collection_posts(
+    id: &str,
+    limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
+) -> Result<Vec<DouyinPost>> {
+    match fetch_collection_posts_inner(id, limit, stop_when_known, None).await {
         Ok(posts) => Ok(posts),
         Err(anonymous_error) => {
             let Some(cookie) = optional_cookie_header() else {
@@ -1664,7 +1683,7 @@ async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost
                     "获取抖音收藏夹作品失败（{anonymous_error:#}）：该收藏夹可能为私有/需登录可见，请先在设置页导入抖音登录凭证后重试"
                 ));
             };
-            fetch_collection_posts_inner(id, limit, Some(&cookie))
+            fetch_collection_posts_inner(id, limit, stop_when_known, Some(&cookie))
                 .await
                 .with_context(|| {
                     format!(
@@ -1678,6 +1697,7 @@ async fn fetch_collection_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost
 async fn fetch_collection_posts_inner(
     id: &str,
     limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
     cookie: Option<&str>,
 ) -> Result<Vec<DouyinPost>> {
     // 移动端 collects/video/list 匿名即可读取任意公开收藏夹，不依赖登录 Cookie，
@@ -1718,18 +1738,26 @@ async fn fetch_collection_posts_inner(
             .await
             .context("解析抖音移动端收藏夹作品响应失败")?;
         ensure_douyin_status_ok(&response, "获取抖音收藏夹作品")?;
+        let mut page_posts = Vec::new();
         for item in response
             .get("aweme_list")
             .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
         {
-            if let Some(mut post) = parse_post(item) {
-                if seen.insert(post.id.clone()) {
-                    // 收藏夹没有可靠的返回顺序，集号从标题解析（如“第1集/第x话”）。
-                    post.episode_number = extract_episode_number(&post.title);
-                    posts.push(post);
-                }
+            if let Some(post) = parse_post(item) {
+                page_posts.push(post);
+            }
+        }
+        // 增量优先：整页都是已知视频时提前停止翻页
+        if all_posts_known(&page_posts, stop_when_known) {
+            break;
+        }
+        for mut post in page_posts {
+            if seen.insert(post.id.clone()) {
+                // 收藏夹没有可靠的返回顺序，集号从标题解析（如“第1集/第x话”）。
+                post.episode_number = extract_episode_number(&post.title);
+                posts.push(post);
             }
         }
         if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
@@ -1879,7 +1907,10 @@ fn story_items(json: &serde_json::Value) -> Vec<&serde_json::Value> {
     items
 }
 
-async fn fetch_watch_later_posts(limit: usize) -> Result<Vec<DouyinPost>> {
+async fn fetch_watch_later_posts(
+    limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
+) -> Result<Vec<DouyinPost>> {
     let mut offset = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
@@ -1894,7 +1925,18 @@ async fn fetch_watch_later_posts(limit: usize) -> Result<Vec<DouyinPost>> {
         ]);
         let response = signed_get(DOUYIN_WATCH_LATER_API, pairs).await?;
         ensure_douyin_status_ok(&response, "获取抖音稍后再看")?;
-        append_awemes(&response, "items", &mut posts, &mut seen);
+        let mut page_posts = Vec::new();
+        let mut page_seen = HashSet::new();
+        append_awemes(&response, "items", &mut page_posts, &mut page_seen);
+        // 增量优先：整页都是已知视频时提前停止翻页
+        if all_posts_known(&page_posts, stop_when_known) {
+            break;
+        }
+        for post in page_posts {
+            if seen.insert(post.id.clone()) {
+                posts.push(post);
+            }
+        }
         if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
             break;
         }

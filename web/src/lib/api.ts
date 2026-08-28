@@ -1066,6 +1066,13 @@ class ApiClient {
 	}
 
 	/**
+	 * 获取当前下载任务实时进度（首页「正在下载」）
+	 */
+	async getDownloadsProgress(): Promise<ApiResponse<import('./types').DownloadProgressItem[]>> {
+		return this.get<import('./types').DownloadProgressItem[]>('/downloads/progress');
+	}
+
+	/**
 	 * 取消队列中的待处理任务
 	 * @param taskId 任务ID
 	 */
@@ -1623,6 +1630,7 @@ export const api = {
 	 * 获取队列状态
 	 */
 	getQueueStatus: () => apiClient.getQueueStatus(),
+	getDownloadsProgress: () => apiClient.getDownloadsProgress(),
 
 	/**
 	 * 取消队列中的待处理任务

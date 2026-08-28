@@ -1279,7 +1279,10 @@ fn decode_tiktok_body(body: &str) -> Result<serde_json::Value> {
     serde_json::from_slice(&decoded).context("解析解码后的 TikTok 我的喜欢响应失败")
 }
 
-async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
+async fn fetch_tiktok_favorites(
+    limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
+) -> Result<Vec<TikTokPost>> {
     // 极简请求（与实测可用的 tiktok_personal_lists.py 一致）：仅需 cookies.txt 登录态
     // + secUid，不携带签名与浏览器参数。关键前提是出口 IP 未被 TikTok 风控：
     // 本机直连 IP 被标记时该接口返回 HTTP 200 空 body，配置外源代理
@@ -1305,15 +1308,22 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
             );
         }
         let payload = decode_tiktok_body(&body)?;
-        let mut page_has_items = false;
+        let mut page_posts = Vec::new();
         if let Some(items) = payload.get("itemList").and_then(serde_json::Value::as_array) {
             for item in items {
                 if let Some(post) = parse_tiktok_item(item) {
-                    page_has_items = true;
-                    if seen.insert(post.id.clone()) {
-                        posts.push(post);
-                    }
+                    page_posts.push(post);
                 }
+            }
+        }
+        // 增量优先：整页都是已知视频时提前停止翻页（与作者源一致），
+        // 避免“我的喜欢”上千条时每轮全量翻页数十页、拖慢扫描并触发限流。
+        if all_tiktok_posts_known(&page_posts, stop_when_known) {
+            break;
+        }
+        for post in page_posts {
+            if seen.insert(post.id.clone()) {
+                posts.push(post);
             }
         }
         if posts.len() >= limit
@@ -1321,13 +1331,10 @@ async fn fetch_tiktok_favorites(limit: usize) -> Result<Vec<TikTokPost>> {
         {
             break;
         }
-        if !page_has_items {
-            if posts.is_empty() {
-                bail!(
-                    "TikTok 我的喜欢接口未返回视频列表：请确认已导入最新 cookies.txt 且账号 secUid 正确；若出口 IP 被 TikTok 风控，请在设置页配置外源代理（proxy/youtube_proxy）后重试"
-                );
-            }
-            break;
+        if posts.is_empty() {
+            bail!(
+                "TikTok 我的喜欢接口未返回视频列表：请确认已导入最新 cookies.txt 且账号 secUid 正确；若出口 IP 被 TikTok 风控，请在设置页配置外源代理（proxy/youtube_proxy）后重试"
+            );
         }
         let next = payload
             .get("cursor")
@@ -1349,7 +1356,10 @@ pub async fn scan_tiktok_favorite_source(
     db: &DatabaseConnection,
     source: &youtube_source::Model,
 ) -> Result<u64> {
-    let posts = fetch_tiktok_favorites(usize::MAX).await?;
+    let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
+    let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
+    let stop_when_known = (!scan_deleted_videos).then_some(&known_video_ids);
+    let posts = fetch_tiktok_favorites(usize::MAX, stop_when_known).await?;
     persist_tiktok_posts(db, source, posts).await
 }
 
@@ -1762,7 +1772,7 @@ async fn fetch_tiktok_favorite_videos(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
-    let mut posts = fetch_tiktok_favorites(usize::MAX).await.map_err(ApiError::from)?;
+    let mut posts = fetch_tiktok_favorites(usize::MAX, None).await.map_err(ApiError::from)?;
     posts.sort_by_key(|post| post.timestamp.unwrap_or_default());
     posts.reverse();
     let mut videos = Vec::new();
@@ -2486,7 +2496,10 @@ async fn fetch_tiktok_collect_preview() -> Result<Option<(i64, String)>> {
 ///
 /// 与“我的喜欢”（/api/favorite/item_list/）一致：极简参数 + cookies.txt 登录态
 /// 即可服务端直连（实测无需浏览器签名），前提是出口 IP 未被 TikTok 风控。
-async fn fetch_tiktok_collect_videos(limit: usize) -> Result<Vec<TikTokPost>> {
+async fn fetch_tiktok_collect_videos(
+    limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
+) -> Result<Vec<TikTokPost>> {
     let sec_uid = tiktok_login_sec_uid().await?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
@@ -2507,15 +2520,21 @@ async fn fetch_tiktok_collect_videos(limit: usize) -> Result<Vec<TikTokPost>> {
             );
         }
         let payload = decode_tiktok_body(&body)?;
-        let mut page_has_items = false;
+        let mut page_posts = Vec::new();
         if let Some(items) = payload.get("itemList").and_then(serde_json::Value::as_array) {
             for item in items {
                 if let Some(post) = parse_tiktok_item(item) {
-                    page_has_items = true;
-                    if seen.insert(post.id.clone()) {
-                        posts.push(post);
-                    }
+                    page_posts.push(post);
                 }
+            }
+        }
+        // 增量优先：整页都是已知视频时提前停止翻页
+        if all_tiktok_posts_known(&page_posts, stop_when_known) {
+            break;
+        }
+        for post in page_posts {
+            if seen.insert(post.id.clone()) {
+                posts.push(post);
             }
         }
         if posts.len() >= limit
@@ -2523,13 +2542,10 @@ async fn fetch_tiktok_collect_videos(limit: usize) -> Result<Vec<TikTokPost>> {
         {
             break;
         }
-        if !page_has_items {
-            if posts.is_empty() {
-                bail!(
-                    "TikTok 收藏接口未返回视频列表：请确认已导入最新 cookies.txt 且账号 secUid 正确；若出口 IP 被 TikTok 风控，请在设置页配置外源代理（proxy/youtube_proxy）后重试"
-                );
-            }
-            break;
+        if posts.is_empty() {
+            bail!(
+                "TikTok 收藏接口未返回视频列表：请确认已导入最新 cookies.txt 且账号 secUid 正确；若出口 IP 被 TikTok 风控，请在设置页配置外源代理（proxy/youtube_proxy）后重试"
+            );
         }
         let next = payload
             .get("cursor")
@@ -2547,7 +2563,11 @@ async fn fetch_tiktok_collect_videos(limit: usize) -> Result<Vec<TikTokPost>> {
 }
 
 /// 拉取一个播放列表（收藏夹）内的全部视频。
-async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result<Vec<TikTokPost>> {
+async fn fetch_tiktok_playlist_videos(
+    playlist_id: &str,
+    limit: usize,
+    stop_when_known: Option<&HashSet<String>>,
+) -> Result<Vec<TikTokPost>> {
     let cookie = tiktok_cookie_header()?;
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let mut cursor = 0i64;
@@ -2593,13 +2613,21 @@ async fn fetch_tiktok_playlist_videos(playlist_id: &str, limit: usize) -> Result
             break;
         }
         let payload = decode_tiktok_body(&body)?;
+        let mut page_posts = Vec::new();
         if let Some(items) = payload.get("itemList").and_then(serde_json::Value::as_array) {
             for item in items {
                 if let Some(post) = parse_tiktok_item(item) {
-                    if seen.insert(post.id.clone()) {
-                        posts.push(post);
-                    }
+                    page_posts.push(post);
                 }
+            }
+        }
+        // 增量优先：整页都是已知视频时提前停止翻页
+        if all_tiktok_posts_known(&page_posts, stop_when_known) {
+            break;
+        }
+        for post in page_posts {
+            if seen.insert(post.id.clone()) {
+                posts.push(post);
             }
         }
         if posts.len() >= limit
@@ -2627,14 +2655,17 @@ pub async fn scan_tiktok_collection_source(
     db: &DatabaseConnection,
     source: &youtube_source::Model,
 ) -> Result<u64> {
+    let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
+    let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
+    let stop_when_known = (!scan_deleted_videos).then_some(&known_video_ids);
     // “全部收藏”兜底入口（get_tiktok_playlists 对自有账号返回的标记链接）：
     // 直接走 /api/user/collect/item_list/ 拉取当前账号收藏的全部视频。
     let posts = if source.url.to_ascii_lowercase().contains("/collect/favorites") {
-        fetch_tiktok_collect_videos(usize::MAX).await?
+        fetch_tiktok_collect_videos(usize::MAX, stop_when_known).await?
     } else {
         let playlist_id = numeric_playlist_id(&source.url)
             .context("无法从 TikTok 播放列表链接识别播放列表 ID")?;
-        fetch_tiktok_playlist_videos(playlist_id, usize::MAX).await?
+        fetch_tiktok_playlist_videos(playlist_id, usize::MAX, stop_when_known).await?
     };
     persist_tiktok_posts(db, source, posts).await
 }

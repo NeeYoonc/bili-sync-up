@@ -7848,10 +7848,61 @@ pub async fn fetch_page_poster(
     Ok(ExecutionStatus::Succeeded)
 }
 
+/// 下载进度 RAII 清理器：作用域结束（无论成败）后异步移除首页「正在下载」进度条目。
+pub(crate) struct DownloadProgressGuard {
+    key: String,
+}
+
+impl DownloadProgressGuard {
+    pub(crate) fn new(key: String) -> Self {
+        Self { key }
+    }
+}
+
+impl Drop for DownloadProgressGuard {
+    fn drop(&mut self) {
+        let key = self.key.clone();
+        tokio::spawn(async move {
+            crate::download_progress::DOWNLOAD_PROGRESS.finish_task(&key).await;
+        });
+    }
+}
+
 /// 下载单个流文件并返回文件大小（使用UnifiedDownloader智能选择下载方式）
 ///
-/// 同时会把本次下载的 bytes 与耗时写入内存「入库事件」统计，用于首页展示平均下载速度。
-async fn download_stream(downloader: &UnifiedDownloader, video_id: i32, urls: &[&str], path: &Path) -> Result<u64> {
+/// 同时会把本次下载的 bytes 与耗时写入内存「入库事件」统计，用于首页展示平均下载速度；
+/// 并在首页「正在下载」进度区注册实时进度（分片下载器会持续上报字节）。
+async fn download_stream(
+    downloader: &UnifiedDownloader,
+    progress_key: &str,
+    progress_platform: &str,
+    progress_title: &str,
+    progress_phase: &str,
+    progress_file_name: &str,
+    urls: &[&str],
+    path: &Path,
+) -> Result<u64> {
+    // 注册首页下载进度：幂等，每个流下载前刷新任务阶段
+    let path_str = path.display().to_string();
+    crate::download_progress::DOWNLOAD_PROGRESS
+        .begin_task(
+            progress_key,
+            progress_platform,
+            progress_title,
+            progress_phase,
+            progress_file_name,
+        )
+        .await;
+    crate::download_progress::DOWNLOAD_PROGRESS
+        .attach_stream(progress_key, &path_str, 0)
+        .await;
+    // 从进度任务键解析 video_id（格式：bilibili:{video_id}:{page_id}），
+    // 供下载完成后的「入库事件」平均速度统计使用。
+    let video_id = progress_key
+        .strip_prefix("bilibili:")
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(0);
     // 直接使用UnifiedDownloader，它会智能选择aria2或原生下载器
     // aria2本身就支持多线程，原生下载器作为备选方案使用单线程
     let start = std::time::Instant::now();
@@ -8496,6 +8547,18 @@ async fn download_page_video_from_streams(
     audio_only: bool,
     filter_option: &FilterOption,
 ) -> Result<PageVideoFetchResult> {
+    // 首页「正在下载」进度：任务键 = 视频ID:分页ID，标题/文件名用于展示
+    let progress_key = format!("bilibili:{}:{}", video_model.id, page_id);
+    let progress_title = video_model.name.clone();
+    let progress_file_name = page_path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| page_path.display().to_string());
+    // 函数返回（无论成败）后自动清理进度条目
+    let _progress_guard = DownloadProgressGuard::new(progress_key.clone());
+    crate::download_progress::DOWNLOAD_PROGRESS
+        .begin_task(&progress_key, "bilibili", &progress_title, "准备下载", &progress_file_name)
+        .await;
     // 按需创建保存目录（只在实际下载时创建）
     ensure_parent_dir_for_file(page_path).await?;
 
@@ -8676,7 +8739,10 @@ async fn download_page_video_from_streams(
                 // 混合流无法提取纯音频，警告并使用混合流
                 warn!("混合流不支持纯音频提取，将下载完整内容");
                 let urls = mix_stream.urls();
-                let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                let downloaded_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                )
+                .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
             BestStream::VideoAudio {
@@ -8685,7 +8751,10 @@ async fn download_page_video_from_streams(
             } => {
                 // 直接下载音频流
                 let audio_urls = audio_stream.urls();
-                let downloaded_size = download_stream(downloader, video_model.id, &audio_urls, page_path).await?;
+                let downloaded_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载音频流", &progress_file_name, &audio_urls, page_path,
+                )
+                .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
             BestStream::VideoAudio {
@@ -8695,7 +8764,10 @@ async fn download_page_video_from_streams(
                 // 没有独立音频流，警告并使用视频流（可能包含音频）
                 warn!("未找到独立音频流，将下载视频流");
                 let urls = video_stream.urls();
-                let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                let downloaded_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                )
+                .await?;
                 // 单流下载完成即最终文件，清理可能遗留的断点续传状态
                 let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(page_path)).await;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
@@ -8710,7 +8782,13 @@ async fn download_page_video_from_streams(
                     crate::bilibili::Stream::Flv(_) => {
                         let tmp_mix_path = page_path.with_extension("tmp_flv");
                         let urls = mix_stream.urls();
-                        let downloaded_size = download_stream(downloader, video_model.id, &urls, &tmp_mix_path).await?;
+                        let downloaded_size = download_stream(
+                            downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, &tmp_mix_path,
+                        )
+                        .await?;
+                        crate::download_progress::DOWNLOAD_PROGRESS
+                            .set_phase(&progress_key, "转封装中")
+                            .await;
                         let final_size = match crate::downloader::remux_with_ffmpeg(&tmp_mix_path, page_path).await {
                             Ok(()) => {
                                 let _ = fs::remove_file(&tmp_mix_path).await;
@@ -8734,7 +8812,10 @@ async fn download_page_video_from_streams(
                     }
                     _ => {
                         let urls = mix_stream.urls();
-                        let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                        let downloaded_size = download_stream(
+                            downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                        )
+                        .await?;
                         (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
                     }
                 }
@@ -8744,7 +8825,10 @@ async fn download_page_video_from_streams(
                 audio: None,
             } => {
                 let urls = video_stream.urls();
-                let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                let downloaded_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                )
+                .await?;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
             }
             BestStream::VideoAudio {
@@ -8757,8 +8841,10 @@ async fn download_page_video_from_streams(
                 );
 
                 let video_urls = video_stream.urls();
-                let video_size = download_stream(downloader, video_model.id, &video_urls, &tmp_video_path)
-                    .await
+                let video_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载视频流", &progress_file_name, &video_urls, &tmp_video_path,
+                )
+                .await
                     .map_err(|e| {
                         // 使用错误分类器进行统一处理
                         let classified_error = crate::error::ErrorClassifier::classify_error(&e);
@@ -8777,8 +8863,10 @@ async fn download_page_video_from_streams(
                     })?;
 
                 let audio_urls = audio_stream.urls();
-                let audio_size = download_stream(downloader, video_model.id, &audio_urls, &tmp_audio_path)
-                    .await
+                let audio_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载音频流", &progress_file_name, &audio_urls, &tmp_audio_path,
+                )
+                .await
                     .map_err(|e| {
                         // 使用错误分类器进行统一处理
                         let classified_error = crate::error::ErrorClassifier::classify_error(&e);
@@ -8799,6 +8887,9 @@ async fn download_page_video_from_streams(
                     })?;
 
                 // 增强的音视频合并，带损坏文件检测和重试机制
+                crate::download_progress::DOWNLOAD_PROGRESS
+                    .set_phase(&progress_key, "合并中")
+                    .await;
                 let res = downloader.merge(&tmp_video_path, &tmp_audio_path, page_path).await;
 
                 // 合并失败时的智能处理

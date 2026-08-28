@@ -24,6 +24,7 @@ impl ChangeNotifier {
 static VIDEO_CHANGE_NOTIFIER: Lazy<ChangeNotifier> = Lazy::new(ChangeNotifier::new);
 static VIDEO_SOURCE_CHANGE_NOTIFIER: Lazy<ChangeNotifier> = Lazy::new(ChangeNotifier::new);
 static QUEUE_STATUS_CHANGE_NOTIFIER: Lazy<ChangeNotifier> = Lazy::new(ChangeNotifier::new);
+static DOWNLOADS_CHANGE_NOTIFIER: Lazy<ChangeNotifier> = Lazy::new(ChangeNotifier::new);
 
 pub fn subscribe_videos_changed() -> watch::Receiver<u64> {
     VIDEO_CHANGE_NOTIFIER.subscribe()
@@ -47,4 +48,12 @@ pub fn subscribe_queue_status_changed() -> watch::Receiver<u64> {
 
 pub fn notify_queue_status_changed() {
     QUEUE_STATUS_CHANGE_NOTIFIER.notify();
+}
+
+pub fn subscribe_downloads_changed() -> watch::Receiver<u64> {
+    DOWNLOADS_CHANGE_NOTIFIER.subscribe()
+}
+
+pub fn notify_downloads_changed() {
+    DOWNLOADS_CHANGE_NOTIFIER.notify();
 }
