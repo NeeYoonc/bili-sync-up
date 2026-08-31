@@ -537,6 +537,13 @@
 			{ name: '{{ctime}}', desc: '视频创建时间' }
 		],
 		page: [
+			{ name: '{{title}}', desc: '视频标题（单P/多P模板可用）' },
+			{ name: '{{bvid}}', desc: 'BV号（视频编号，单P/多P模板可用）' },
+			{ name: '{{upper_name}}', desc: 'UP主名称（单P/多P模板可用）' },
+			{ name: '{{upper_mid}}', desc: 'UP主ID（单P/多P模板可用）' },
+			{ name: '{{pubtime}}', desc: '视频发布时间（单P/多P模板可用）' },
+			{ name: '{{fav_time}}', desc: '视频收藏时间（单P/多P模板可用）' },
+			{ name: '{{show_title}}', desc: '节目标题（与title相同）' },
 			{ name: '{{ptitle}}', desc: '分页标题（页面名称）' },
 			{ name: '{{long_title}}', desc: '分页长标题（非番剧可用）' },
 			{ name: '{{pid}}', desc: '分页页号' },

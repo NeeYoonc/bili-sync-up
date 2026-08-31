@@ -3181,6 +3181,24 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
         audio_files.len()
     );
 
+    // 收集多P视频独占文件夹（整个视频文件夹的 AI 重命名）。
+    // 仅在多P视频已启用 AI 重命名时收集，且要求「重命名上级目录」已开启。
+    let folder_renames: Vec<crate::utils::ai_rename::FolderToRename> = if video_source.ai_rename_enable_multi_page()
+        && cfg.ai_rename.rename_parent_dir
+        && video_source.ai_rename_rename_parent_dir()
+    {
+        ai_rename::collect_multi_page_folders(connection, &videos_with_pages, video_source.flat_folder(), true).await
+    } else {
+        Vec::new()
+    };
+    if !folder_renames.is_empty() {
+        info!(
+            "[{}] 收集到 {} 个多P视频文件夹待重命名",
+            source_key,
+            folder_renames.len()
+        );
+    }
+
     // 第二阶段：按批次处理视频文件（每批 10 个）
     let batch_size = 10;
     let video_prompt_hint = if !video_prompt_override.is_empty() {
@@ -3250,6 +3268,57 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
             Err(e) => {
                 warn!("[{}] 音频批次 {} API 调用失败: {}", source_key, batch_idx + 1, e);
                 failed_count += batch.len();
+            }
+        }
+    }
+
+    // 处理多P视频文件夹重命名（在文件重命名之后执行，避免路径中途失效）
+    if !folder_renames.is_empty() {
+        info!(
+            "[{}] 开始处理 {} 个多P视频文件夹的重命名",
+            source_key,
+            folder_renames.len()
+        );
+        for (batch_idx, batch) in folder_renames.chunks(batch_size).enumerate() {
+            info!(
+                "[{}] 处理文件夹批次 {}/{}: {} 个文件夹",
+                source_key,
+                batch_idx + 1,
+                (folder_renames.len() + batch_size - 1) / batch_size,
+                batch.len()
+            );
+            match ai_rename::ai_generate_folder_names_batch(
+                &cfg.ai_rename,
+                &source_key,
+                batch,
+                video_prompt_hint,
+            )
+            .await
+            {
+                Ok(new_names) => {
+                    for (folder, new_name) in batch.iter().zip(new_names.iter()) {
+                        match ai_rename::apply_ai_rename_folder(connection, &source_key, folder, new_name).await {
+                            Ok(true) => renamed_count += 1,
+                            Ok(false) => skipped_count += 1,
+                            Err(e) => {
+                                warn!(
+                                    "[{}] 文件夹重命名失败 {}: {}",
+                                    source_key, folder.current_name, e
+                                );
+                                failed_count += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "[{}] 文件夹批次 {} AI 调用失败: {}",
+                        source_key,
+                        batch_idx + 1,
+                        e
+                    );
+                    failed_count += batch.len();
+                }
             }
         }
     }
@@ -15598,6 +15667,98 @@ mod tests {
         assert!(matches!(result.status, ExecutionStatus::Succeeded));
         assert_eq!(result.file_size_bytes, None);
         assert!(!page_path.exists(), "关闭充电视频下载不应创建媒体或占位文件");
+    }
+
+    #[tokio::test]
+    async fn apply_ai_rename_folder_updates_filesystem_and_db_paths() {
+        use crate::utils::ai_rename::{apply_ai_rename_folder, AiRenameContext, FolderToRename};
+        use bili_sync_entity::page;
+        use bili_sync_entity::video;
+        use sea_orm::QueryFilter;
+
+        let db = create_test_db("ai-rename-folder").await;
+        let root = unique_temp_dir("ai-rename-folder-root");
+        let folder = root.join("旧文件夹");
+        let p1 = folder.join("P01.mp4");
+        let p2 = folder.join("P02.mp4");
+        std::fs::create_dir_all(&folder).expect("应能创建临时文件夹");
+        std::fs::write(&p1, b"x").expect("应能创建测试文件");
+        std::fs::write(&p2, b"x").expect("应能创建测试文件");
+
+        // 插入多P视频（single_page=false）与两个分页
+        insert_test_video_with_status(&db, 1, 1, 0).await;
+        {
+            let db_video = video::Entity::find_by_id(1)
+                .one(&db)
+                .await
+                .expect("应能查询测试视频")
+                .expect("测试视频应存在");
+            let mut active_video: video::ActiveModel = db_video.into();
+            active_video.path = Set(folder.to_string_lossy().to_string());
+            active_video.single_page = Set(Some(false));
+            active_video.update(&db).await.expect("应能更新测试视频");
+        }
+        insert_test_page_with_status(&db, 1, 1, 0).await;
+        insert_test_page_with_status(&db, 2, 1, 0).await;
+        for (page_id, path) in [(1, &p1), (2, &p2)] {
+            let db_page = page::Entity::find_by_id(page_id)
+                .one(&db)
+                .await
+                .expect("应能查询测试分页")
+                .expect("测试分页应存在");
+            let mut active_page: page::ActiveModel = db_page.into();
+            active_page.path = Set(Some(path.to_string_lossy().to_string()));
+            active_page.update(&db).await.expect("应能更新分页路径");
+        }
+
+        let folder_info = FolderToRename {
+            path: folder.clone(),
+            current_name: "旧文件夹".to_string(),
+            ctx: AiRenameContext {
+                title: "测试视频".to_string(),
+                owner: "测试UP".to_string(),
+                bvid: "BVTEST0000000001".to_string(),
+                ..Default::default()
+            },
+            video_id: 1,
+            bvid: "BVTEST0000000001".to_string(),
+        };
+
+        let renamed = apply_ai_rename_folder(&db, "test", &folder_info, "新文件夹名")
+            .await
+            .expect("应能重命名文件夹");
+        assert!(renamed, "应执行文件夹重命名");
+
+        // 文件系统：文件夹已改名，分页文件仍在
+        let new_folder = root.join("新文件夹名");
+        assert!(new_folder.is_dir(), "新文件夹应存在");
+        assert!(!folder.exists(), "旧文件夹应不存在");
+        assert!(new_folder.join("P01.mp4").is_file(), "P01 应跟随移动到新文件夹");
+        assert!(new_folder.join("P02.mp4").is_file(), "P02 应跟随移动到新文件夹");
+
+        // 数据库：video.path 与所有 page.path 都已同步更新
+        let db_video = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询测试视频")
+            .expect("测试视频应存在");
+        assert_eq!(db_video.path, new_folder.to_string_lossy().to_string());
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.eq(1))
+            .all(&db)
+            .await
+            .expect("应能查询分页");
+        assert_eq!(pages.len(), 2, "应有 2 个分页");
+        for db_page in pages {
+            let path = db_page.path.expect("分页路径应存在");
+            assert!(
+                path.starts_with(&new_folder.to_string_lossy().to_string()),
+                "分页路径应更新到新文件夹: {path}"
+            );
+            assert!(std::path::Path::new(&path).is_file(), "分页文件应存在于新路径: {path}");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     async fn insert_test_submission(

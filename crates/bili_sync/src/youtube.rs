@@ -1852,6 +1852,31 @@ async fn youtube_artifact_status(video: &youtube_video::Model, source: &youtube_
     if video.download_status == "skipped" {
         return ([7, 7, 7, 7, 7], [7, 7, 7, 7, 7]);
     }
+    // 已完成：与 B 站一致，任务状态跟随数据库而不是磁盘文件系统。已下载的外源视频
+    // 即使媒体文件被移走/清理，卡片仍保持“全部完成”，不会重新变回“进行中/未开始”。
+    // 弹幕/字幕等可选子任务仍按是否存在对应告警决定是否降级展示。
+    if video.download_status == "completed" {
+        let warning = video.error_message.as_deref().unwrap_or("");
+        let page_status = [
+            7,
+            7,
+            7,
+            optional_status(
+                danmaku_ok,
+                warning.contains(if is_douyin_source(source) {
+                    "弹幕"
+                } else {
+                    "直播聊天"
+                }),
+            ),
+            if source.download_subtitle {
+                optional_status(subtitle_ok, warning.contains("字幕"))
+            } else {
+                7
+            },
+        ];
+        return ([7, 7, 7, 7, 7], page_status);
+    }
     let video_status = [
         status(cover_ok),
         status(nfo_ok),
@@ -3290,6 +3315,16 @@ async fn ai_rename_external_file(
     video_prompt: Option<&str>,
     audio_prompt: Option<&str>,
 ) -> Result<PathBuf> {
+    // 抖音短剧/放映厅/合集按番剧结构命名（S01E01 + Season 01），文件名与目录
+    // 都是媒体库识别结构的一部分，不允许 AI 重命名，避免破坏剧集组织。
+    if is_episodic_douyin_source(source) {
+        debug!(
+            "{}剧集源「{}」跳过 AI 重命名（保持 S01E01/Season 结构）",
+            source_platform_label(source),
+            source.name
+        );
+        return Ok(downloaded.output_path.clone());
+    }
     let config = crate::config::reload_config().ai_rename;
     let file = external_ai_file(source, video, downloaded, 1)?;
     let prompt = if file.ctx.is_audio {
@@ -3345,6 +3380,24 @@ pub async fn ai_rename_external_history(
     let config = crate::config::reload_config().ai_rename;
     let platform = source_platform_label(source);
     let source_key = format!("{}_{}", source_platform(source), source.id);
+    // 抖音短剧/放映厅/合集按番剧结构命名（S01E01 + Season 01），不允许 AI
+    // 重命名，避免破坏剧集组织与媒体库识别。
+    if is_episodic_douyin_source(&source) {
+        let skipped = youtube_video::Entity::find()
+            .filter(youtube_video::Column::SourceId.eq(source.id))
+            .filter(youtube_video::Column::DownloadStatus.eq("completed"))
+            .count(db)
+            .await
+            .unwrap_or(0);
+        info!(
+            "{}剧集源「{}」跳过历史 AI 重命名（保持 S01E01/Season 结构），跳过 {} 个已完成文件",
+            platform,
+            source.name,
+            skipped
+        );
+        result.skipped_count += skipped as usize;
+        return Ok(result);
+    }
     let mut video_files: Vec<FileToRename> = Vec::new();
     let mut audio_files: Vec<FileToRename> = Vec::new();
     let videos = youtube_video::Entity::find()
@@ -6557,6 +6610,86 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::Path;
+
+    fn sample_external_source(source_type: &str) -> super::youtube_source::Model {
+        super::youtube_source::Model {
+            id: 1,
+            source_type: source_type.to_string(),
+            name: "测试源".to_string(),
+            url: "https://www.douyin.com/video/123".to_string(),
+            path: "Z:/__not_exists__".to_string(),
+            enabled: true,
+            audio_only: false,
+            audio_only_m4a_only: false,
+            flat_folder: false,
+            download_danmaku: false,
+            download_subtitle: false,
+            ai_subtitle_language: String::new(),
+            ai_rename: false,
+            ai_rename_video_prompt: String::new(),
+            ai_rename_audio_prompt: String::new(),
+            ai_rename_enable_multi_page: false,
+            ai_rename_enable_collection: false,
+            ai_rename_enable_bangumi: false,
+            ai_rename_rename_parent_dir: false,
+            filter_option: None,
+            blacklist_keywords: None,
+            whitelist_keywords: None,
+            keyword_case_sensitive: false,
+            min_duration_seconds: None,
+            max_duration_seconds: None,
+            published_after: None,
+            published_before: None,
+            selected_videos: None,
+            selected_channels: None,
+            known_video_ids: None,
+            scan_deleted_videos: false,
+            scan_deleted_videos_once: false,
+            deleted_video_ids: None,
+            last_scan_at: None,
+            created_at: "2026-01-01 00:00:00".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_external_video_stays_completed_when_file_moved() {
+        // 已下载完成的外源视频：即使媒体文件被移走（output_path 不存在），
+        // 卡片状态也应保持“全部完成”，与 B 站行为一致，而不是变成“进行中”。
+        let video = super::youtube_video::Model {
+            id: 1,
+            source_id: 1,
+            youtube_id: "abc123".to_string(),
+            url: "https://www.douyin.com/video/123".to_string(),
+            title: "测试视频".to_string(),
+            uploader: "测试UP".to_string(),
+            thumbnail: None,
+            published_at: Some("20260101".to_string()),
+            duration_seconds: Some(60),
+            episode_number: None,
+            is_image_post: false,
+            is_story: false,
+            is_charge_video: false,
+            charge_can_play: false,
+            download_status: "completed".to_string(),
+            retry_count: 0,
+            output_path: Some("Z:/__not_exists__/abc123.mp4".to_string()),
+            error_message: None,
+            created_at: "2026-01-01 00:00:00".to_string(),
+            updated_at: "2026-01-01 00:00:00".to_string(),
+        };
+        let source = sample_external_source("douyin");
+        let (video_status, page_status) = super::youtube_artifact_status(&video, &source).await;
+        assert_eq!(video_status, [7, 7, 7, 7, 7], "已完成的视频文件被移走后应保持全部完成");
+        assert_eq!(page_status, [7, 7, 7, 7, 7], "分页状态同样应保持全部完成");
+    }
+
+    #[test]
+    fn episodic_douyin_source_is_detected() {
+        assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_theater")));
+        assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_series")));
+        assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_collection")));
+        assert!(!super::is_episodic_douyin_source(&sample_external_source("douyin")));
+    }
     #[test]
     fn validates_types_and_urls() {
         assert_eq!(normalize_source_type("playlist").unwrap(), "playlist");
