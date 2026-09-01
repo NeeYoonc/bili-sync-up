@@ -3450,11 +3450,25 @@ async fn apply_ai_rename(
         return Ok(false);
     }
 
+    // 视频文件按命名模板补全 AI 名字中缺失的变量内容（如 {{bvid}}/{{pubtime}}），
+    // 单P用 page_name、多P用 multi_page_name、番剧用 bangumi_name；音频不附加
+    let page_template = if file.ctx.is_bangumi {
+        cfg.bangumi_name.as_ref()
+    } else if !file.single_page {
+        cfg.multi_page_name.as_ref()
+    } else {
+        cfg.page_name.as_ref()
+    };
+    let mut final_stem = if file.ctx.is_audio {
+        new_stem.to_string()
+    } else {
+        ai_rename::append_missing_template_variables(new_stem, page_template, &file.ctx)
+    };
+    let base_stem = final_stem.clone();
     // 检查目标文件是否已存在，若冲突则追加 bvid
-    let mut final_stem = new_stem.to_string();
     let mut new_path = page_path.with_file_name(format!("{}.{}", final_stem, file.ext));
     if new_path.exists() && new_path != page_path {
-        final_stem = format!("{}-{}", new_stem, file.bvid);
+        final_stem = format!("{}-{}", base_stem, file.bvid);
         new_path = page_path.with_file_name(format!("{}.{}", final_stem, file.ext));
         info!(
             "[{}] AI 重命名检测到文件冲突，追加BV号: {} -> {}",
@@ -3472,9 +3486,9 @@ async fn apply_ai_rename(
         warn!("[{}] AI 重命名侧车文件失败: {}", source_key, e);
     }
 
-    // 更新 NFO 文件内容
+    // 更新 NFO 文件内容（标题用 AI 名，不含补全/去重后缀）
     let new_nfo_path = new_path.with_extension("nfo");
-    if let Err(e) = ai_rename::update_nfo_content(&new_nfo_path, &final_stem) {
+    if let Err(e) = ai_rename::update_nfo_content(&new_nfo_path, new_stem) {
         warn!("[{}] AI 更新NFO内容失败: {}", source_key, e);
     }
 
@@ -3488,9 +3502,20 @@ async fn apply_ai_rename(
     let final_path = if should_rename_folder {
         if let Some(old_dir) = new_path.parent() {
             if let Some(parent_dir) = old_dir.parent() {
-                let mut target_dir = parent_dir.join(&final_stem);
+                // 单P文件夹补全缺失的模板变量（如 {{bvid}}/{{pubtime}}），避免 AI 重命名把变量内容清除掉。
+                // 依次按「视频文件夹命名模板」与「单P文件名模板」补全：视频模板未配置这些变量时，
+                // 单P文件名模板（默认 {{pubtime}}-{{bvid}}）中的变量仍会附加到文件夹名上。
+                let folder_stem = if file.ctx.is_audio {
+                    final_stem.clone()
+                } else if file.ctx.is_bangumi {
+                    ai_rename::append_missing_template_variables(&final_stem, cfg.bangumi_folder_name.as_ref(), &file.ctx)
+                } else {
+                    let with_folder = ai_rename::append_missing_template_variables(&final_stem, cfg.video_name.as_ref(), &file.ctx);
+                    ai_rename::append_missing_template_variables(&with_folder, cfg.page_name.as_ref(), &file.ctx)
+                };
+                let mut target_dir = parent_dir.join(&folder_stem);
                 if target_dir.exists() && target_dir != old_dir {
-                    target_dir = parent_dir.join(format!("{}-{}", &final_stem, file.bvid));
+                    target_dir = parent_dir.join(format!("{}-{}", &folder_stem, file.bvid));
                 }
 
                 if target_dir != old_dir {

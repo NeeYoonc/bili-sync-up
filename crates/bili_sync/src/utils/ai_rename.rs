@@ -1294,6 +1294,87 @@ mod tests {
         );
     }
     #[test]
+    fn append_missing_template_variables_appends_missing_bvid_and_pubtime_with_template_separators() {
+        use std::collections::HashMap;
+        let ctx = AiRenameContext {
+            title: "多P联调测试视频".to_string(),
+            owner: "联调UP".to_string(),
+            bvid: "BV1xx0000000000".to_string(),
+            pubdate: "20260801000000".to_string(),
+            pid: 2,
+            part_name: "第二P高潮".to_string(),
+            ..Default::default()
+        };
+        // 模板使用 ] 分隔符：标题已包含在 AI 名中，BV号/发布时间缺失应附加
+        let out = super::append_missing_template_variables(
+            "联调UP-多P联调测试视频-来源-1080p",
+            "{{title}}]{{bvid}}]{{pubtime}}",
+            &ctx,
+        );
+        assert_eq!(out, "联调UP-多P联调测试视频-来源-1080p]BV1xx0000000000]20260801000000");
+        assert!(!out.contains("{{"), "不应残留模板占位符: {out}");
+
+        // 已包含全部变量时不重复附加
+        let out2 = super::append_missing_template_variables(
+            "联调UP-多P联调测试视频]BV1xx0000000000]20260801000000",
+            "{{title}}]{{bvid}}]{{pubtime}}",
+            &ctx,
+        );
+        assert_eq!(out2, "联调UP-多P联调测试视频]BV1xx0000000000]20260801000000");
+    }
+
+    #[test]
+    fn append_missing_template_variables_uses_default_page_name_style() {
+        let ctx = AiRenameContext {
+            title: "测试标题".to_string(),
+            owner: "测试UP".to_string(),
+            bvid: "BV116421f7rM".to_string(),
+            pubdate: "20240609200216".to_string(),
+            ..Default::default()
+        };
+        // 默认单P文件名模板 {{pubtime}}-{{bvid}}
+        let out = super::append_missing_template_variables("测试UP-测试标题-来源-1080p", "{{pubtime}}-{{bvid}}", &ctx);
+        assert_eq!(out, "测试UP-测试标题-来源-1080p-20240609200216-BV116421f7rM");
+
+        // 空模板 / 空名字：原样返回
+        assert_eq!(super::append_missing_template_variables("名字", "", &ctx), "名字");
+        assert_eq!(super::append_missing_template_variables("", "{{bvid}}", &ctx), "");
+    }
+
+    #[test]
+    fn single_page_folder_name_appends_page_name_vars_when_video_template_lacks_them() {
+        let ctx = AiRenameContext {
+            title: "测试标题".to_string(),
+            owner: "测试UP".to_string(),
+            bvid: "BV116421f7rM".to_string(),
+            pubdate: "20240609200216".to_string(),
+            ..Default::default()
+        };
+        let base = "测试UP-测试标题-来源-1080p";
+        // 用户当前 video_name = "{{upper_name}}"：不含 bvid/pubtime，按视频模板补全无变化
+        let with_video = super::append_missing_template_variables(base, "{{upper_name}}", &ctx);
+        assert_eq!(with_video, base);
+        // 再按单P文件名模板（默认 {{pubtime}}-{{bvid}}）补全 → 附加 -pubtime-bvid
+        let folder = super::append_missing_template_variables(&with_video, "{{pubtime}}-{{bvid}}", &ctx);
+        assert_eq!(folder, "测试UP-测试标题-来源-1080p-20240609200216-BV116421f7rM");
+    }
+
+    #[test]
+    fn append_missing_template_variables_ignores_structure_vars_for_multi_page_default() {
+        let ctx = AiRenameContext {
+            title: "测试标题".to_string(),
+            bvid: "BV116421f7rM".to_string(),
+            pubdate: "20240609200216".to_string(),
+            pid: 3,
+            part_name: "第三P".to_string(),
+            ..Default::default()
+        };
+        // 多P默认模板 P{{pid_pad}}.{{ptitle}} 只含结构变量，不应附加任何内容
+        let out = super::append_missing_template_variables("测试UP-测试标题-P3-1080p", "P{{pid_pad}}.{{ptitle}}", &ctx);
+        assert_eq!(out, "测试UP-测试标题-P3-1080p");
+    }
+
+    #[test]
     #[ignore = "需要真实 AI API 凭证与网络，用于人工联调（设置 BILI_SYNC_CONFIG_DIR 指向含 ai_rename 配置的临时库）"]
     fn live_ai_api_multi_page_and_bangumi_one_to_one() {
         use std::path::PathBuf;
@@ -1309,6 +1390,20 @@ mod tests {
             println!(
                 "真实 AI 联调: provider={} model={} base_url={}",
                 cfg.provider, cfg.model, cfg.base_url
+            );
+            let (page_template, multi_page_template, video_template, bangumi_template, bangumi_folder_template) =
+                crate::config::with_config(|bundle| {
+                    (
+                        bundle.config.page_name.to_string(),
+                        bundle.config.multi_page_name.to_string(),
+                        bundle.config.video_name.to_string(),
+                        bundle.config.bangumi_name.to_string(),
+                        bundle.config.bangumi_folder_name.to_string(),
+                    )
+                });
+            println!(
+                "模板: page_name='{}' multi_page_name='{}' video_name='{}' bangumi_name='{}'",
+                page_template, multi_page_template, video_template, bangumi_template
             );
 
             let prompt_hint = "作者-标题-P序号-清晰度；用 - 连接";
@@ -1373,6 +1468,49 @@ mod tests {
             }
             assert_eq!(names.len(), 2, "多P 返回数量必须与文件数一致");
             assert_ne!(names[0], names[1], "两个分P 的文件名不能相同");
+            let mp_folder = super::append_missing_template_variables(&names[0], &multi_page_template, &files_multi[0].ctx);
+            println!("多P 文件夹补全后（multi_page_name）: {}", mp_folder);
+
+            // 场景1.5：单P（1 个分页，无多P序号）——按 page_name 补全 bvid/pubtime
+            let single_ctx = AiRenameContext {
+                title: "单P联调测试视频".to_string(),
+                owner: "联调UP".to_string(),
+                source_type: "投稿".to_string(),
+                dimension: "1920x1080".to_string(),
+                pid: 1,
+                part_name: "单P内容".to_string(),
+                is_multi_page: false,
+                is_bangumi: false,
+                bvid: "BV1SINGLE00001".to_string(),
+                pubdate: "20260801000000".to_string(),
+                ..Default::default()
+            };
+            let single_file = FileToRename {
+                path: PathBuf::from("single.mp4"),
+                current_stem: "single".to_string(),
+                ext: "mp4".to_string(),
+                ctx: single_ctx.clone(),
+                page_id: 21,
+                video_id: 21,
+                bvid: "BV1SINGLE00001".to_string(),
+                single_page: true,
+                flat_folder: false,
+            };
+            let single_names = super::ai_generate_filenames_batch(&cfg, "live-test-single", &[single_file], prompt_hint)
+                .await
+                .expect("单P 真实 AI 调用失败");
+            println!("=== 单P 真实返回（{} 个） ===", single_names.len());
+            for (i, n) in single_names.iter().enumerate() {
+                println!("  {} -> {}", i + 1, n);
+            }
+            let single_file_name = super::append_missing_template_variables(&single_names[0], &page_template, &single_ctx);
+            println!("单P 文件补全后（page_name）: {}", single_file_name);
+            let single_folder_name = super::append_missing_template_variables(
+                &super::append_missing_template_variables(&single_names[0], &video_template, &single_ctx),
+                &page_template,
+                &single_ctx,
+            );
+            println!("单P 文件夹补全后（video_name+page_name）: {}", single_folder_name);
 
             // 场景2：番剧（2 集）——应返回 2 个一一对应的文件名并保留 S01E01 序号语义
             let files_bangumi = vec![
@@ -1432,6 +1570,10 @@ mod tests {
             }
             assert_eq!(names.len(), 2, "番剧 返回数量必须与集数一致");
             assert_ne!(names[0], names[1], "两集的文件名不能相同");
+            let bg_file = super::append_missing_template_variables(&names[0], &bangumi_template, &files_bangumi[0].ctx);
+            println!("番剧 文件补全后（bangumi_name）: {}", bg_file);
+            let bg_folder = super::append_missing_template_variables(&names[0], &bangumi_folder_template, &files_bangumi[0].ctx);
+            println!("番剧 文件夹补全后（bangumi_folder_name）: {}", bg_folder);
         });
     }
 
@@ -1735,8 +1877,17 @@ pub async fn apply_ai_rename_folder(
         );
         return Ok(false);
     }
+    // 多P/番剧文件夹按对应命名模板补全 AI 名字中缺失的模板变量（如 {{bvid}}/{{pubtime}}），
+    // 保持多P视频模板规则命名，避免重命名把变量内容清除掉
+    let global_config = crate::config::reload_config();
+    let folder_template = if source_key.starts_with("bangumi") {
+        global_config.bangumi_folder_name.as_ref()
+    } else {
+        global_config.multi_page_name.as_ref()
+    };
+    let enriched_name = append_missing_template_variables(new_name, folder_template, &folder.ctx);
     // 清理非法字符，防止 AI 生成路径分隔符或非法文件名
-    let safe_name = crate::utils::filenamify::filenamify(new_name);
+    let safe_name = crate::utils::filenamify::filenamify(&enriched_name);
     let safe_name = safe_name.trim().to_string();
     if safe_name.is_empty() || safe_name == folder.current_name {
         debug!(
@@ -2105,6 +2256,90 @@ pub async fn batch_rename_history_files(
     Ok(result)
 }
 
+/// 可参与「缺失变量补全」的模板变量（信息类变量）。
+/// 结构类变量（{{pid_pad}}/{{ptitle}}/{{season_pad}}/{{episode_pad}} 等）由 AI 通过提示词
+/// 保留序号语义，不在此处重复附加，避免破坏 P/S 序号结构。
+const APPENDABLE_TEMPLATE_VARS: &[&str] = &[
+    "bvid",
+    "pubtime",
+    "fav_time",
+    "ctime",
+    "year",
+    "upper_mid",
+    "show_title",
+    "dimension",
+    "duration",
+    "sort_index",
+    "episode_number",
+];
+
+/// 从 AI 重命名上下文构建可补全的模板变量值表
+fn ctx_to_appendable_vars(ctx: &AiRenameContext) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    if !ctx.bvid.is_empty() {
+        vars.insert("bvid".to_string(), ctx.bvid.clone());
+    }
+    if !ctx.pubdate.is_empty() {
+        vars.insert("pubtime".to_string(), ctx.pubdate.clone());
+    }
+    if !ctx.dimension.is_empty() {
+        vars.insert("dimension".to_string(), ctx.dimension.clone());
+    }
+    if ctx.duration > 0 {
+        vars.insert("duration".to_string(), ctx.duration.to_string());
+    }
+    if let Some(idx) = ctx.sort_index {
+        vars.insert("sort_index".to_string(), idx.to_string());
+    }
+    if let Some(ep) = ctx.episode_number {
+        vars.insert("episode_number".to_string(), ep.to_string());
+    }
+    vars
+}
+
+/// 按命名模板把 AI 生成的名字中缺失的模板变量内容附加到末尾，保留模板的字面分隔符。
+///
+/// 例如模板 `{{title}}]{{bvid}}]{{pubtime}}`、AI 名 `作者-标题-1080p` 缺 BV 号与发布时间时，
+/// 结果为 `作者-标题-1080p]BV1xxxx]20260801`；已包含的变量值不会重复附加。
+/// 结构类变量（{{pid_pad}}/{{ptitle}} 等）不在补全范围，避免破坏 P/S 序号结构。
+pub fn append_missing_template_variables(ai_name: &str, template: &str, ctx: &AiRenameContext) -> String {
+    let mut out = ai_name.trim().to_string();
+    if out.is_empty() || template.trim().is_empty() {
+        return out;
+    }
+    let vars = ctx_to_appendable_vars(ctx);
+    let mut rest = template;
+    let mut literal = String::new();
+    while let Some(start) = rest.find("{{") {
+        literal.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                let var = after[..end].trim();
+                if APPENDABLE_TEMPLATE_VARS.contains(&var) {
+                    if let Some(raw) = vars.get(var) {
+                        let value = raw.trim();
+                        if !value.is_empty() && !out.contains(value) {
+                            let mut sep = literal.replace(['/', '\\'], "").trim().to_string();
+                            if sep.is_empty() {
+                                sep.push('-');
+                            }
+                            if !out.ends_with(&sep) {
+                                out.push_str(&sep);
+                            }
+                            out.push_str(value);
+                        }
+                    }
+                }
+                literal.clear();
+                rest = &after[end + 2..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
 /// 应用单个文件的重命名
 async fn apply_rename(
     connection: &DatabaseConnection,
@@ -2115,6 +2350,16 @@ async fn apply_rename(
     result: &mut BatchRenameResult,
 ) {
     use bili_sync_entity::{page, video};
+
+    // 读取全局命名模板：按视频类型选择补全规则（单P用 page_name，多P用 multi_page_name，番剧用 bangumi_name）
+    let global_config = crate::config::reload_config();
+    let page_template = if file.ctx.is_bangumi {
+        global_config.bangumi_name.as_ref()
+    } else if !file.single_page {
+        global_config.multi_page_name.as_ref()
+    } else {
+        global_config.page_name.as_ref()
+    };
 
     // 文件名相同则跳过
     if new_stem == file.current_stem {
@@ -2132,14 +2377,20 @@ async fn apply_rename(
 
     // 构建新路径（处理重复文件名）
     let parent = file.path.parent().unwrap_or(Path::new("."));
-    let mut final_stem = new_stem.to_string();
+    // 视频文件：按命名模板补全 AI 名字中缺失的变量内容（如 {{bvid}}/{{pubtime}}），音频不附加
+    let mut final_stem = if file.ctx.is_audio {
+        new_stem.to_string()
+    } else {
+        append_missing_template_variables(new_stem, page_template, &file.ctx)
+    };
+    let base_stem = final_stem.clone();
     let mut new_filename = format!("{}.{}", final_stem, file.ext);
     let mut new_path = parent.join(&new_filename);
 
     // 如果目标文件已存在，添加后缀使其唯一
     let mut suffix = 1;
     while new_path.exists() {
-        final_stem = format!("{}-{}", new_stem, suffix);
+        final_stem = format!("{}-{}", base_stem, suffix);
         new_filename = format!("{}.{}", final_stem, file.ext);
         new_path = parent.join(&new_filename);
         suffix += 1;
@@ -2184,7 +2435,7 @@ async fn apply_rename(
 
     // 更新NFO文件内容（标题标签）
     let nfo_path = parent.join(format!("{}.nfo", final_stem));
-    if let Err(e) = update_nfo_content(&nfo_path, &final_stem) {
+    if let Err(e) = update_nfo_content(&nfo_path, new_stem) {
         warn!("[{}] 更新NFO内容失败: {}", source_key, e);
     }
 
@@ -2196,10 +2447,21 @@ async fn apply_rename(
     let final_path = if should_rename_folder {
         if let Some(old_dir) = new_path.parent() {
             if let Some(parent_dir) = old_dir.parent() {
-                let mut target_dir = parent_dir.join(&final_stem);
+                // 单P文件夹补全缺失的模板变量（如 {{bvid}}/{{pubtime}}），避免 AI 重命名把变量内容清除掉。
+                // 依次按「视频文件夹命名模板」与「单P文件名模板」补全：视频模板未配置这些变量时，
+                // 单P文件名模板（默认 {{pubtime}}-{{bvid}}）中的变量仍会附加到文件夹名上。
+                let folder_stem = if file.ctx.is_audio {
+                    final_stem.clone()
+                } else if file.ctx.is_bangumi {
+                    append_missing_template_variables(&final_stem, global_config.bangumi_folder_name.as_ref(), &file.ctx)
+                } else {
+                    let with_folder = append_missing_template_variables(&final_stem, global_config.video_name.as_ref(), &file.ctx);
+                    append_missing_template_variables(&with_folder, global_config.page_name.as_ref(), &file.ctx)
+                };
+                let mut target_dir = parent_dir.join(&folder_stem);
                 // 如果目标目录已存在且不是当前目录，追加 bvid 避免冲突
                 if target_dir.exists() && target_dir != old_dir {
-                    target_dir = parent_dir.join(format!("{}-{}", &final_stem, file.bvid));
+                    target_dir = parent_dir.join(format!("{}-{}", &folder_stem, file.bvid));
                 }
 
                 if target_dir != old_dir {
