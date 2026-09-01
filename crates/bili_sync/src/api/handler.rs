@@ -22097,6 +22097,29 @@ pub async fn ai_rename_history(
         info!("[{}] 音频提示词: {}", source_key, audio_prompt);
     }
 
+    // 根据源类型计算目录结构提示（帮助 AI 按单P/多P/番剧/多P结构生成与文件一一对应的文件名）
+    let structure_hint = match source_type.as_str() {
+        "bangumi" => {
+            if config.bangumi_use_season_structure {
+                "番剧Season结构"
+            } else {
+                "番剧季文件夹"
+            }
+        }
+        "collection" => match config.collection_folder_mode.as_ref() {
+            "unified" => "合集统一模式（SxxExx）",
+            "up_seasonal" => "UP分季结构（SxxExx）",
+            _ => "",
+        },
+        _ => {
+            if config.multi_page_use_season_structure {
+                "Season 结构"
+            } else {
+                ""
+            }
+        }
+    };
+
     // 执行批量重命名
     let result = batch_rename_history_files(
         db.as_ref(),
@@ -22106,6 +22129,7 @@ pub async fn ai_rename_history(
         &video_prompt,
         &audio_prompt,
         flat_folder,
+        structure_hint,
     )
     .await;
 

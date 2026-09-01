@@ -55,6 +55,12 @@ pub struct AiRenameContext {
     pub sort_index: Option<i32>,
     /// B站视频ID（BV号）
     pub bvid: String,
+    /// 是否为多P视频（多个分页）
+    pub is_multi_page: bool,
+    /// 是否为番剧
+    pub is_bangumi: bool,
+    /// 目录结构描述（如 "Season 结构" / "合集统一模式" / "UP分季结构"；空表示无特殊结构）
+    pub structure: String,
 }
 
 impl AiRenameContext {
@@ -126,6 +132,17 @@ impl AiRenameContext {
         }
         if self.is_audio {
             info["模式"] = serde_json::json!("仅音频");
+        }
+        // 类型标记：帮助 AI 识别单P/多P/番剧，从而生成与文件一一对应的文件名
+        if self.is_bangumi {
+            info["类型"] = serde_json::json!("番剧");
+        } else if self.is_multi_page {
+            info["类型"] = serde_json::json!("多P视频");
+        } else {
+            info["类型"] = serde_json::json!("单P视频");
+        }
+        if !self.structure.is_empty() {
+            info["目录结构"] = serde_json::json!(self.structure);
         }
 
         let json_str = serde_json::to_string_pretty(&info).unwrap_or_default();
@@ -672,17 +689,11 @@ pub struct FolderToRename {
 ///
 /// # 返回
 /// - 新文件名列表（与输入顺序对应）
-pub async fn ai_generate_filenames_batch(
-    cfg: &AiRenameConfig,
-    source_key: &str,
-    files: &[FileToRename],
-    prompt_hint: &str,
-) -> Result<Vec<String>> {
-    if files.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // 构建批量 prompt
+/// 构建批量文件名的 AI prompt（纯函数，便于测试）
+///
+/// 每个文件条目包含序号、当前文件名和带类型/结构标记的视频信息，
+/// 并明确要求 AI 返回与文件一一对应的文件名。
+fn build_batch_filenames_prompt(files: &[FileToRename], prompt_hint: &str) -> String {
     let mut file_list = String::new();
     for (i, file) in files.iter().enumerate() {
         let video_info = file.ctx.to_json_string();
@@ -694,17 +705,33 @@ pub async fn ai_generate_filenames_batch(
         ));
     }
 
-    let full_prompt = format!(
+    format!(
         "请为以下 {} 个视频文件生成新的文件名。\n\
+        【重要】返回的文件名数量必须与文件数量完全一致（{} 个），第 N 个文件名必须与第 N 个文件一一对应，不得打乱顺序、不得合并、不得遗漏任何一个文件！\n\
+        【重要】多P/番剧等带序号结构的文件，生成的名字必须保留原有序号信息（如 P1/P2 或 S01E01），用于区分同一视频的不同分页/剧集；不同类型（单P/多P/番剧）按各自类型生成对应格式的文件名。\n\
         【重要】严格按照用户指定的命名格式生成，不要添加格式中未要求的任何信息！\n\
         严格按照 JSON 数组格式返回，只输出文件名（不含扩展名），不要解释：\n\
         [\"文件名1\", \"文件名2\", ...]\n\n\
         用户指定的命名格式：{}\n\n\
         文件列表（仅供参考，只提取格式中需要的字段；如信息缺失可访问API参考链接获取）：\n{}",
         files.len(),
+        files.len(),
         prompt_hint,
         file_list
-    );
+    )
+}
+
+pub async fn ai_generate_filenames_batch(
+    cfg: &AiRenameConfig,
+    source_key: &str,
+    files: &[FileToRename],
+    prompt_hint: &str,
+) -> Result<Vec<String>> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let full_prompt = build_batch_filenames_prompt(files, prompt_hint);
 
     // 根据 provider 选择实现
     if cfg.provider == "deepseek-web" {
@@ -741,12 +768,15 @@ pub async fn ai_generate_folder_names_batch(
 
     let full_prompt = format!(
         "请为以下 {} 个视频的文件夹生成新的文件夹名（是整个视频的文件夹，不是单个文件）。\n\
+        【重要】返回的文件夹名数量必须与文件夹数量完全一致（{} 个），第 N 个文件夹名必须与第 N 个文件夹一一对应，不得打乱顺序、不得遗漏任何一个文件夹！\n\
+        【重要】多P/番剧等视频文件夹的命名，需要与内部分页/剧集文件配套，保留必要的序号语义。\n\
         【重要】严格按照用户指定的命名格式生成，不要添加格式中未要求的任何信息！\n\
         【重要】只输出文件夹名本身，不要包含路径分隔符（/ 或 \\\\），不要包含扩展名！\n\
         严格按照 JSON 数组格式返回，只输出文件夹名，不要解释：\n\
         [\"文件夹名1\", \"文件夹名2\", ...]\n\n\
         用户指定的命名格式：{}\n\n\
         文件夹列表（仅供参考，只提取格式中需要的字段；如信息缺失可访问API参考链接获取）：\n{}",
+        folders.len(),
         folders.len(),
         prompt_hint,
         folder_list
@@ -1137,8 +1167,100 @@ fn parse_batch_response(response: &str, expected_count: usize) -> Result<Vec<Str
 mod tests {
     use super::parse_batch_response;
     use super::{
-        deepseek_thinking_override, extract_chat_content, AiRenameConfig, ChatMessageResponse, ChatResponse, Choice,
+        deepseek_thinking_override, extract_chat_content, AiRenameConfig, AiRenameContext, ChatMessageResponse,
+        ChatResponse, Choice, FileToRename,
     };
+
+    #[test]
+    fn ai_context_json_marks_multi_page_and_bangumi() {
+        let ctx = AiRenameContext {
+            title: "测试视频".to_string(),
+            owner: "测试UP".to_string(),
+            source_type: "投稿".to_string(),
+            is_multi_page: true,
+            is_bangumi: false,
+            structure: "Season 结构".to_string(),
+            pid: 2,
+            part_name: "P2 内容".to_string(),
+            ..Default::default()
+        };
+        let json = ctx.to_json_string();
+        assert!(json.contains("多P视频"), "应标记多P类型: {json}");
+        assert!(json.contains("Season 结构"), "应标记目录结构: {json}");
+        assert!(json.contains("P2"), "应包含分P信息: {json}");
+
+        let bangumi = AiRenameContext {
+            title: "番剧视频".to_string(),
+            owner: "番剧".to_string(),
+            source_type: "番剧".to_string(),
+            is_bangumi: true,
+            structure: "番剧Season结构".to_string(),
+            ..Default::default()
+        };
+        let json = bangumi.to_json_string();
+        assert!(json.contains("番剧"), "应标记番剧类型: {json}");
+        assert!(json.contains("番剧Season结构"), "应标记番剧结构: {json}");
+
+        let single = AiRenameContext {
+            title: "单P".to_string(),
+            owner: "UP".to_string(),
+            source_type: "投稿".to_string(),
+            ..Default::default()
+        };
+        let json = single.to_json_string();
+        assert!(json.contains("单P视频"), "应标记单P类型: {json}");
+    }
+
+    #[test]
+    fn batch_filenames_prompt_enforces_one_to_one_and_marks_types() {
+        let file1 = FileToRename {
+            path: std::path::PathBuf::from("P01.mp4"),
+            current_stem: "P01".to_string(),
+            ext: "mp4".to_string(),
+            ctx: AiRenameContext {
+                title: "多P测试".to_string(),
+                owner: "UP".to_string(),
+                source_type: "投稿".to_string(),
+                is_multi_page: true,
+                structure: "Season 结构".to_string(),
+                pid: 1,
+                part_name: "P1 开场".to_string(),
+                ..Default::default()
+            },
+            page_id: 1,
+            video_id: 1,
+            bvid: "BV1".to_string(),
+            single_page: false,
+            flat_folder: false,
+        };
+        let file2 = FileToRename {
+            path: std::path::PathBuf::from("P02.mp4"),
+            current_stem: "P02".to_string(),
+            ext: "mp4".to_string(),
+            ctx: AiRenameContext {
+                title: "多P测试".to_string(),
+                owner: "UP".to_string(),
+                source_type: "投稿".to_string(),
+                is_multi_page: true,
+                structure: "Season 结构".to_string(),
+                pid: 2,
+                part_name: "P2 内容".to_string(),
+                ..Default::default()
+            },
+            page_id: 2,
+            video_id: 1,
+            bvid: "BV1".to_string(),
+            single_page: false,
+            flat_folder: false,
+        };
+        let prompt = super::build_batch_filenames_prompt(&[file1, file2], "作者-标题-序号");
+        assert!(prompt.contains("一一对应"), "应包含一一对应约束");
+        assert!(prompt.contains("数量必须与文件数量完全一致"), "应包含数量一致约束");
+        assert!(prompt.contains("多P视频"), "条目应标记多P类型");
+        assert!(prompt.contains("Season 结构"), "条目应标记结构");
+        assert!(prompt.contains("1. 当前文件名: P01"), "应包含文件1条目");
+        assert!(prompt.contains("2. 当前文件名: P02"), "应包含文件2条目");
+    }
 
     #[test]
     fn parse_batch_response_accepts_json_array() {
@@ -1389,6 +1511,9 @@ pub async fn collect_multi_page_folders(
             is_audio: false,
             sort_index: None,
             bvid: video_model.bvid.clone(),
+            is_multi_page: true,
+            is_bangumi: false,
+            structure: "多P视频文件夹".to_string(),
         };
         out.push(FolderToRename {
             path: video_folder,
@@ -1599,6 +1724,7 @@ pub async fn batch_rename_history_files(
     video_prompt: &str,
     audio_prompt: &str,
     flat_folder: bool,
+    structure_hint: &str,
 ) -> Result<BatchRenameResult> {
     let mut result = BatchRenameResult::default();
 
@@ -1684,6 +1810,9 @@ pub async fn batch_rename_history_files(
                 is_audio,
                 sort_index: Some(current_sort_index),
                 bvid: video.bvid.clone(),
+                is_multi_page: !is_single_page_video,
+                is_bangumi: source_key.starts_with("bangumi"),
+                structure: structure_hint.to_string(),
             };
 
             let file_info = FileToRename {

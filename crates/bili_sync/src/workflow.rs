@@ -3171,6 +3171,25 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
 
             let is_audio = matches!(file_ext.as_str(), "m4a" | "mp3" | "flac" | "aac" | "ogg");
 
+            // 计算该视频的目录结构描述（帮助 AI 按结构生成与文件一一对应的文件名）
+            let structure = if is_bangumi {
+                if cfg.bangumi_use_season_structure {
+                    "番剧Season结构".to_string()
+                } else {
+                    "番剧季文件夹".to_string()
+                }
+            } else if is_collection {
+                match cfg.collection_folder_mode.as_ref() {
+                    "unified" => "合集统一模式（SxxExx）".to_string(),
+                    "up_seasonal" => "UP分季结构（SxxExx）".to_string(),
+                    _ => String::new(),
+                }
+            } else if is_multi_page && cfg.multi_page_use_season_structure {
+                "Season 结构".to_string()
+            } else {
+                String::new()
+            };
+
             // 构建 AI 重命名上下文
             let ctx = AiRenameContext {
                 title: video_model.name.clone(),
@@ -3193,6 +3212,9 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
                 is_audio,
                 sort_index: None,
                 bvid: video_model.bvid.clone(),
+                is_multi_page,
+                is_bangumi,
+                structure,
             };
 
             let file_info = FileToRename {
