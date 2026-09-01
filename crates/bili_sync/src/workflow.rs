@@ -2614,6 +2614,44 @@ pub async fn fetch_video_details(
     Ok(())
 }
 
+/// 删除残留的空目录链（用于未达到最低下载标准的跳过视频）
+///
+/// 从 `start_dir`（视频文件夹）开始，若目录为空则删除，并逐级向上清理空的父目录
+/// （如 UP 目录），直到遇到非空目录或到达 `stop_at`（视频源根目录）为止。
+/// 视频源根目录本身不会被删除。返回删除的目录数量。
+async fn cleanup_empty_dir_chain(start_dir: &Path, stop_at: &Path, label: &str) -> Result<usize> {
+    let mut removed = 0usize;
+    let mut current = start_dir.to_path_buf();
+    loop {
+        // 越界保护：不删除视频源根目录本身，也不删除根目录之外的路径
+        if current == stop_at || !current.starts_with(stop_at) {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            break;
+        };
+        if entries.flatten().next().is_some() {
+            // 目录非空，停止向上清理
+            break;
+        }
+        match std::fs::remove_dir(&current) {
+            Ok(()) => {
+                info!("已删除空文件夹: {}（{}）", current.display(), label);
+                removed += 1;
+            }
+            Err(e) => {
+                debug!("删除空文件夹失败: {} - {}", current.display(), e);
+                break;
+            }
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent.to_path_buf();
+    }
+    Ok(removed)
+}
+
 /// 清理旧版本遗留的"已完成但未达最低下载标准"视频附属文件。
 /// 旧版本在视频因未达到最低分辨率被跳过时仍会生成封面/NFO/弹幕/字幕等文件，
 /// 新版不再生成；此处对已完成跳过的单P视频目录做一次性磁盘清理，避免历史残留。
@@ -2624,7 +2662,6 @@ async fn cleanup_completed_skipped_video_sidecars(
     let videos = video::Entity::find()
         .filter(video::Column::Valid.eq(true))
         .filter(video::Column::Deleted.eq(0))
-        .filter(video::Column::SinglePage.eq(true))
         .filter(video::Column::DownloadStatus.gte(STATUS_COMPLETED))
         .filter(video::Column::SkipReason.is_not_null())
         .filter(video::Column::SkipReason.ne(""))
@@ -2690,6 +2727,10 @@ async fn cleanup_completed_skipped_video_sidecars(
                 sidecar_count
             );
         }
+        // 删除残留的空视频文件夹及空父目录（如 UP 目录），直到视频源根目录为止。
+        // 仅删除空目录：目录内仍存在其他文件/子文件夹时自动停止，不会误删共享目录。
+        let removed_dirs = cleanup_empty_dir_chain(dir, video_source.path(), "未达最低下载标准视频残留").await?;
+        removed += removed_dirs;
     }
     Ok(removed)
 }
@@ -7341,6 +7382,15 @@ async fn download_page(
             "视频「{}」第 {} 页未达到最低下载标准，已跳过封面/NFO/弹幕/字幕等附属文件",
             &video_model.name, page_model.pid
         );
+        // 删除本页跳过产生的空视频文件夹及空父目录（直到视频源根目录），
+        // 避免未达到最低下载标准的视频残留空文件夹。
+        if let Some(video_dir) = video_path.parent() {
+            if let Err(err) =
+                cleanup_empty_dir_chain(video_dir, video_source.path(), "未达最低下载标准视频残留").await
+            {
+                debug!("清理未达最低下载标准视频的空文件夹失败: {:#}", err);
+            }
+        }
         (
             Ok(ExecutionStatus::Skipped),
             Ok(ExecutionStatus::Skipped),
@@ -15757,6 +15807,161 @@ mod tests {
             );
             assert!(std::path::Path::new(&path).is_file(), "分页文件应存在于新路径: {path}");
         }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn cleanup_empty_dir_chain_removes_empty_dirs_but_keeps_source_root() {
+        let root = unique_temp_dir("cleanup-empty-chain");
+        let up_dir = root.join("UP名");
+        let video_dir = up_dir.join("视频文件夹");
+        std::fs::create_dir_all(&video_dir).expect("应能创建测试目录");
+
+        // 空目录链：视频文件夹 + UP 目录都应删除，源根保留
+        let removed = cleanup_empty_dir_chain(&video_dir, &root, "测试")
+            .await
+            .expect("应能清理空目录链");
+        assert_eq!(removed, 2, "视频文件夹与 UP 目录都应删除");
+        assert!(!video_dir.exists(), "空视频文件夹应被删除");
+        assert!(!up_dir.exists(), "空 UP 目录应被删除");
+        assert!(root.exists(), "视频源根目录应保留");
+
+        // 含文件的目录不删除
+        let up_dir2 = root.join("UP名2");
+        let video_dir2 = up_dir2.join("视频文件夹2");
+        std::fs::create_dir_all(&video_dir2).expect("应能创建测试目录");
+        std::fs::write(video_dir2.join("P01.mp4"), b"x").expect("应能写入测试文件");
+        let removed = cleanup_empty_dir_chain(&video_dir2, &root, "测试")
+            .await
+            .expect("应能清理空目录链");
+        assert_eq!(removed, 0, "含文件的视频文件夹不应被删除");
+        assert!(video_dir2.is_dir(), "含文件的视频文件夹应保留");
+        assert!(up_dir2.is_dir(), "含子内容的 UP 目录应保留");
+
+        // start == stop：不删除源根
+        let removed = cleanup_empty_dir_chain(&root, &root, "测试")
+            .await
+            .expect("应能清理空目录链");
+        assert_eq!(removed, 0, "源根目录不应被删除");
+        assert!(root.exists(), "源根目录应保留");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn cleanup_skipped_video_sidecars_removes_empty_up_dir() {
+        use bili_sync_entity::{favorite, video};
+        use crate::adapter::VideoSourceEnum;
+
+        let db = create_test_db("cleanup-skipped-dirs").await;
+        let root = unique_temp_dir("cleanup-skipped-dirs-root");
+        let up_dir = root.join("软糯小面包");
+        std::fs::create_dir_all(&up_dir).expect("应能创建测试空目录");
+
+        // 收藏夹源（路径即源根目录）
+        let fav = favorite::ActiveModel {
+            id: Set(1),
+            f_id: Set(100),
+            name: Set("测试 老剧".to_string()),
+            path: Set(root.to_string_lossy().to_string()),
+            created_at: Set("2026-01-01 00:00:00".to_string()),
+            latest_row_at: Set("2026-01-01 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
+            filter_option: Set(None),
+            keyword_filters: Set(None),
+            keyword_filter_mode: Set(None),
+            blacklist_keywords: Set(None),
+            whitelist_keywords: Set(None),
+            keyword_case_sensitive: Set(false),
+            min_duration_seconds: Set(None),
+            max_duration_seconds: Set(None),
+            published_after: Set(None),
+            published_before: Set(None),
+            audio_only: Set(false),
+            audio_only_m4a_only: Set(false),
+            flat_folder: Set(false),
+            split_chapters_after_download: Set(false),
+            download_charge_videos: Set(true),
+            download_danmaku: Set(false),
+            download_subtitle: Set(false),
+            download_ai_subtitle: Set(false),
+            ai_subtitle_language: Set("zh-CN".to_string()),
+            ai_rename: Set(false),
+            ai_rename_video_prompt: Set(String::new()),
+            ai_rename_audio_prompt: Set(String::new()),
+            ai_rename_enable_multi_page: Set(false),
+            ai_rename_enable_collection: Set(false),
+            ai_rename_enable_bangumi: Set(false),
+            ai_rename_rename_parent_dir: Set(false),
+        }
+        .insert(&db)
+        .await
+        .expect("应能插入测试收藏夹源");
+
+        // 未达最低下载标准（已跳过）的单P视频：状态全 7，skip_reason 非空，path 指向空目录
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let skipped_status: u32 = VideoStatus::from([STATUS_OK; 5]).into();
+        video::ActiveModel {
+            id: Set(1),
+            collection_id: Set(None),
+            favorite_id: Set(Some(1)),
+            watch_later_id: Set(None),
+            submission_id: Set(None),
+            source_id: Set(None),
+            source_type: Set(None),
+            upper_id: Set(1000),
+            upper_name: Set("软糯小面包".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set("测试视频".to_string()),
+            path: Set(up_dir.to_string_lossy().to_string()),
+            category: Set(1),
+            bvid: Set("BV1PK411W7bE".to_string()),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(now),
+            pubtime: Set(now),
+            favtime: Set(now),
+            download_status: Set(skipped_status),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-01-01 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(true),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+            skip_reason: Set(Some("未达到设定的最低分辨率（最低 Quality720p，实际最高 Quality480p），已跳过下载".to_string())),
+        }
+        .insert(&db)
+        .await
+        .expect("应能插入测试视频");
+
+        let source = VideoSourceEnum::Favorite(fav.clone());
+        let removed = cleanup_completed_skipped_video_sidecars(&source, &db)
+            .await
+            .expect("应能清理跳过视频残留");
+        assert!(removed >= 1, "应至少删除残留的空目录，实际删除 {} 个", removed);
+        assert!(!up_dir.exists(), "未达最低下载标准视频的空 UP 目录应被删除");
+        assert!(root.exists(), "视频源根目录应保留");
 
         let _ = std::fs::remove_dir_all(&root);
     }
