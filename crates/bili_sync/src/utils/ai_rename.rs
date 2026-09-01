@@ -1293,6 +1293,148 @@ mod tests {
             ]
         );
     }
+    #[test]
+    #[ignore = "需要真实 AI API 凭证与网络，用于人工联调（设置 BILI_SYNC_CONFIG_DIR 指向含 ai_rename 配置的临时库）"]
+    fn live_ai_api_multi_page_and_bangumi_one_to_one() {
+        use std::path::PathBuf;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let db = crate::database::setup_database().await;
+            crate::config::init_config_with_database(db).await.expect("初始化配置失败");
+            let cfg = crate::config::with_config(|bundle| bundle.config.ai_rename.clone());
+            if !cfg.enabled || cfg.api_key.is_none() {
+                panic!("AI 重命名未启用或缺少 API key，无法进行真实联调");
+            }
+            println!(
+                "真实 AI 联调: provider={} model={} base_url={}",
+                cfg.provider, cfg.model, cfg.base_url
+            );
+
+            let prompt_hint = "作者-标题-P序号-清晰度；用 - 连接";
+
+            // 场景1：多P视频（同一视频 2 个分P）——应返回 2 个一一对应的文件名并保留 P1/P2 序号
+            let files_multi = vec![
+                FileToRename {
+                    path: PathBuf::from("P1.mp4"),
+                    current_stem: "P1".to_string(),
+                    ext: "mp4".to_string(),
+                    ctx: AiRenameContext {
+                        title: "多P联调测试视频".to_string(),
+                        owner: "联调UP".to_string(),
+                        source_type: "投稿".to_string(),
+                        dimension: "1920x1080".to_string(),
+                        pid: 1,
+                        part_name: "第一P开场".to_string(),
+                        is_multi_page: true,
+                        is_bangumi: false,
+                        structure: "Season 结构".to_string(),
+                        bvid: "BV_TESTM01".to_string(),
+                        ..Default::default()
+                    },
+                    page_id: 1,
+                    video_id: 1,
+                    bvid: "BV_TESTM01".to_string(),
+                    single_page: false,
+                    flat_folder: false,
+                },
+                FileToRename {
+                    path: PathBuf::from("P2.mp4"),
+                    current_stem: "P2".to_string(),
+                    ext: "mp4".to_string(),
+                    ctx: AiRenameContext {
+                        title: "多P联调测试视频".to_string(),
+                        owner: "联调UP".to_string(),
+                        source_type: "投稿".to_string(),
+                        dimension: "1920x1080".to_string(),
+                        pid: 2,
+                        part_name: "第二P高潮".to_string(),
+                        is_multi_page: true,
+                        is_bangumi: false,
+                        structure: "Season 结构".to_string(),
+                        bvid: "BV_TESTM01".to_string(),
+                        ..Default::default()
+                    },
+                    page_id: 2,
+                    video_id: 1,
+                    bvid: "BV_TESTM01".to_string(),
+                    single_page: false,
+                    flat_folder: false,
+                },
+            ];
+            let full_prompt = super::build_batch_filenames_prompt(&files_multi, prompt_hint);
+            println!("=== 多P 发送给 AI 的完整 prompt ===\n{}", full_prompt);
+            let names = super::ai_generate_filenames_batch(&cfg, "live-test-multip", &files_multi, prompt_hint)
+                .await
+                .expect("多P 真实 AI 调用失败");
+            println!("=== 多P 真实返回（{} 个） ===", names.len());
+            for (i, n) in names.iter().enumerate() {
+                println!("  {} -> {}", i + 1, n);
+            }
+            assert_eq!(names.len(), 2, "多P 返回数量必须与文件数一致");
+            assert_ne!(names[0], names[1], "两个分P 的文件名不能相同");
+
+            // 场景2：番剧（2 集）——应返回 2 个一一对应的文件名并保留 S01E01 序号语义
+            let files_bangumi = vec![
+                FileToRename {
+                    path: PathBuf::from("S01E01.mp4"),
+                    current_stem: "S01E01".to_string(),
+                    ext: "mp4".to_string(),
+                    ctx: AiRenameContext {
+                        title: "联调番剧第一季".to_string(),
+                        owner: "番剧官方".to_string(),
+                        source_type: "番剧".to_string(),
+                        dimension: "1920x1080".to_string(),
+                        episode_number: Some(1),
+                        is_multi_page: false,
+                        is_bangumi: true,
+                        structure: "番剧Season结构".to_string(),
+                        bvid: "BV_TESTB01".to_string(),
+                        ..Default::default()
+                    },
+                    page_id: 11,
+                    video_id: 11,
+                    bvid: "BV_TESTB01".to_string(),
+                    single_page: false,
+                    flat_folder: false,
+                },
+                FileToRename {
+                    path: PathBuf::from("S01E02.mp4"),
+                    current_stem: "S01E02".to_string(),
+                    ext: "mp4".to_string(),
+                    ctx: AiRenameContext {
+                        title: "联调番剧第一季".to_string(),
+                        owner: "番剧官方".to_string(),
+                        source_type: "番剧".to_string(),
+                        dimension: "1920x1080".to_string(),
+                        episode_number: Some(2),
+                        is_multi_page: false,
+                        is_bangumi: true,
+                        structure: "番剧Season结构".to_string(),
+                        bvid: "BV_TESTB01".to_string(),
+                        ..Default::default()
+                    },
+                    page_id: 12,
+                    video_id: 11,
+                    bvid: "BV_TESTB01".to_string(),
+                    single_page: false,
+                    flat_folder: false,
+                },
+            ];
+            let full_prompt = super::build_batch_filenames_prompt(&files_bangumi, prompt_hint);
+            println!("=== 番剧 发送给 AI 的完整 prompt ===\n{}", full_prompt);
+            let names = super::ai_generate_filenames_batch(&cfg, "live-test-bangumi", &files_bangumi, prompt_hint)
+                .await
+                .expect("番剧 真实 AI 调用失败");
+            println!("=== 番剧 真实返回（{} 个） ===", names.len());
+            for (i, n) in names.iter().enumerate() {
+                println!("  {} -> {}", i + 1, n);
+            }
+            assert_eq!(names.len(), 2, "番剧 返回数量必须与集数一致");
+            assert_ne!(names[0], names[1], "两集的文件名不能相同");
+        });
+    }
+
 
     #[test]
     fn resolves_multi_page_video_folder() {
