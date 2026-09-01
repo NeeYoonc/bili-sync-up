@@ -96,7 +96,7 @@
 				<div class="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-100">
 					<p class="font-medium">电脑端登录后直接传输</p>
 					<ol class="mt-2 list-decimal space-y-1 pl-5">
-						<li>加载登录助手并连接当前 Bili Sync 设置页。</li>
+						<li>加载登录助手并连接当前 Bili Sync-up 设置页。</li>
 						<li>点击“打开抖音”，在同一电脑浏览器登录抖音。</li>
 						<li>点击“传输抖音登录状态”。Docker 会直接收到 Cookie 与「我的喜欢/收藏夹」签名会话，不需要内嵌浏览器。</li>
 					</ol>

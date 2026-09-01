@@ -32,10 +32,10 @@
 			on:click={handleLogoClick}
 		>
 			<div class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-lg">
-				<img src="/favicon.png" alt="Bili Sync" class="h-6 w-6" />
+				<img src="/favicon.png" alt="Bili Sync-up" class="h-6 w-6" />
 			</div>
 			<div class="grid flex-1 text-left text-sm leading-tight">
-				<span class="truncate font-semibold">Bili Sync</span>
+				<span class="truncate font-semibold">Bili Sync-up</span>
 				<span class="text-muted-foreground truncate text-xs">视频管理系统</span>
 			</div>
 		</a>

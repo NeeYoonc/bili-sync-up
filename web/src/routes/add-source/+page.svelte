@@ -3412,7 +3412,7 @@
 				? '添加抖音视频源'
 				: sourcePlatform === 'tiktok'
 					? '添加 TikTok 视频源'
-					: '添加视频源'} - Bili Sync</title>
+					: '添加视频源'} - Bili Sync-up</title>
 </svelte:head>
 
 <div class="py-2">

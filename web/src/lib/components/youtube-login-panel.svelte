@@ -126,7 +126,7 @@
 				<div
 					class="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-100"
 				>
-					<p class="font-medium">电脑端登录并传输到 Bili Sync</p>
+					<p class="font-medium">电脑端登录并传输到 Bili Sync-up</p>
 					<ol class="mt-2 list-decimal space-y-1 pl-5">
 						<li>下载并解压登录助手，在电脑端 Chrome 或 Edge 中加载该扩展。</li>
 						<li>保持本设置页打开，点击助手的“连接当前页面”。</li>
@@ -135,7 +135,7 @@
 					</ol>
 					<p class="mt-2 text-xs opacity-80">
 						助手只读取 youtube.com 和 google.com 中维持 YouTube 会话的 Cookie，并调用现有导入接口传输到当前
-						Bili Sync；不会传输 Google 密码，也不需要 Docker 内嵌浏览器。
+						Bili Sync-up；不会传输 Google 密码，也不需要 Docker 内嵌浏览器。
 					</p>
 				</div>
 

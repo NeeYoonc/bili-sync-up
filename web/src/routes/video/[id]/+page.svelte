@@ -757,7 +757,7 @@
 </script>
 
 <svelte:head>
-	<title>{videoData?.video.name || '视频详情'} - Bili Sync</title>
+	<title>{videoData?.video.name || '视频详情'} - Bili Sync-up</title>
 </svelte:head>
 
 {#if loading}

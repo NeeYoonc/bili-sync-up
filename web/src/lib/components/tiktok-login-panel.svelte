@@ -136,7 +136,7 @@
 				<div class="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-100">
 					<p class="font-medium">电脑端登录后直接传输（推荐）</p>
 					<ol class="mt-2 list-decimal space-y-1 pl-5">
-						<li>加载登录助手并连接当前 Bili Sync 设置页。</li>
+						<li>加载登录助手并连接当前 Bili Sync-up 设置页。</li>
 						<li>点击“打开 TikTok”，在同一电脑浏览器登录 TikTok。</li>
 						<li>点击“传输 TikTok 登录状态”，传输登录 Cookie（cookies.txt）。</li>
 						<li>我的喜欢/关注列表仅需 cookies.txt 即可拉取；如返回空响应，请更换干净的出口 IP 或在设置页配置外源代理。</li>

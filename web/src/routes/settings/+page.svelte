@@ -1826,7 +1826,7 @@
 </script>
 
 <svelte:head>
-	<title>设置 - Bili Sync</title>
+	<title>设置 - Bili Sync-up</title>
 </svelte:head>
 
 <div class="py-2">
@@ -4832,7 +4832,7 @@
 			>
 				<h4 class="mb-3 font-medium text-purple-800 dark:text-purple-400">推送内容示例</h4>
 				<div class="space-y-2 font-mono text-sm text-purple-700 dark:text-purple-300">
-					<p><strong>标题：</strong>Bili Sync 扫描完成</p>
+					<p><strong>标题：</strong>Bili Sync-up 扫描完成</p>
 					<p><strong>内容：</strong></p>
 					<div class="ml-4 space-y-1">
 						<p>📊 扫描摘要</p>
