@@ -4164,6 +4164,120 @@ fn is_youtube_auth_required_error(error: &anyhow::Error) -> bool {
     .any(|needle| text.contains(needle))
 }
 
+/// 在格式列表中选择最佳独立视频流（视频/音频分离时使用）。
+/// `allow_vp9` 为 true 时允许 VP9 编码作为最高画质兜底。
+fn select_best_youtube_video_stream(
+    formats: &[ExternalMediaFormat],
+    filter: &FilterOption,
+    min_height: i32,
+    max_height: i32,
+    allow_vp9: bool,
+) -> Option<ExternalMediaFormat> {
+    formats
+        .iter()
+        .filter(|format| {
+            if !is_http_format(format) || !has_video(format) || has_audio(format) {
+                return false;
+            }
+            if allow_vp9 {
+                youtube_video_allowed_with_vp9_fallback(format, filter)
+            } else {
+                youtube_video_allowed(format, filter)
+            }
+        })
+        .cloned()
+        .max_by_key(|format| {
+            let height = format_quality_height(format);
+            let in_range = height >= min_height && height <= max_height;
+            let under_max = height <= max_height;
+            (
+                i32::from(in_range),
+                i32::from(under_max),
+                if under_max { height } else { -height },
+                -(youtube_codec_rank(format.vcodec.as_deref(), &filter.codecs) as i32),
+                format.fps.unwrap_or_default() as i32,
+                format.tbr.unwrap_or_default() as i32,
+            )
+        })
+}
+
+/// 在格式列表中选择最佳混合流（音视频一体时使用），同样支持 VP9 兜底。
+fn select_best_youtube_mixed_stream(
+    formats: &[ExternalMediaFormat],
+    filter: &FilterOption,
+    min_height: i32,
+    max_height: i32,
+    min_audio_bitrate: i32,
+    max_audio_bitrate: i32,
+    allow_vp9: bool,
+) -> Option<ExternalMediaFormat> {
+    formats
+        .iter()
+        .filter(|format| {
+            if !is_http_format(format) || !has_video(format) || !has_audio(format) {
+                return false;
+            }
+            if !youtube_audio_allowed(format, filter) {
+                return false;
+            }
+            if allow_vp9 {
+                youtube_video_allowed_with_vp9_fallback(format, filter)
+            } else {
+                youtube_video_allowed(format, filter)
+            }
+        })
+        .cloned()
+        .max_by_key(|format| {
+            let height = format_quality_height(format);
+            let in_range = height >= min_height && height <= max_height;
+            let under_max = height <= max_height;
+            let audio_bitrate = youtube_audio_bitrate(format);
+            let audio_in_range = audio_bitrate >= min_audio_bitrate && audio_bitrate <= max_audio_bitrate;
+            (
+                i32::from(in_range),
+                i32::from(audio_in_range),
+                i32::from(under_max),
+                if under_max { height } else { -height },
+                -(youtube_codec_rank(format.vcodec.as_deref(), &filter.codecs) as i32),
+                format.tbr.unwrap_or_default() as i32,
+            )
+        })
+}
+
+/// VP9 兜底升级：strict 为偏好编码下的选择，relaxed 为允许 VP9 后的选择；
+/// 当 relaxed 能提供更高分辨率时升级并记录日志（保持设备兼容：同分辨率仍优先偏好编码）。
+fn upgrade_with_vp9_fallback(
+    strict: Option<ExternalMediaFormat>,
+    relaxed: Option<ExternalMediaFormat>,
+    platform: &str,
+) -> Option<ExternalMediaFormat> {
+    match (strict, relaxed) {
+        (Some(strict), Some(relaxed)) if format_quality_height(&relaxed) > format_quality_height(&strict) => {
+            info!(
+                platform,
+                strict_height = format_quality_height(&strict),
+                vp9_height = format_quality_height(&relaxed),
+                "{}视频最高画质仅有 VP9 编码（偏好编码最高 {}p，VP9 可达 {}p），已自动放行以保证最高画质",
+                platform,
+                format_quality_height(&strict),
+                format_quality_height(&relaxed)
+            );
+            Some(relaxed)
+        }
+        (None, Some(relaxed)) => {
+            info!(
+                platform,
+                vp9_height = format_quality_height(&relaxed),
+                "{}视频可用格式均为 VP9 编码（偏好编码无可用流），已自动放行最高画质 {}p",
+                platform,
+                format_quality_height(&relaxed)
+            );
+            Some(relaxed)
+        }
+        (strict, _) => strict,
+    }
+}
+
 fn select_youtube_streams(
     formats: &[ExternalMediaFormat],
     filter: &FilterOption,
@@ -4192,27 +4306,25 @@ fn select_youtube_streams(
     let min_height = youtube_quality_height(filter.video_min_quality);
     let max_height = youtube_quality_height(filter.video_max_quality);
     if audio_only {
-        let mixed = formats
-            .iter()
-            .filter(|format| {
-                is_http_format(format)
-                    && has_video(format)
-                    && has_audio(format)
-                    && youtube_video_allowed(format, filter)
-                    && youtube_audio_allowed(format, filter)
-            })
-            .max_by_key(|format| {
-                let height = format_quality_height(format);
-                let in_range = height >= min_height && height <= max_height;
-                let under_max = height <= max_height;
-                (
-                    i32::from(in_range),
-                    i32::from(under_max),
-                    if under_max { height } else { -height },
-                    format.tbr.unwrap_or_default() as i32,
-                )
-            })
-            .cloned();
+        let strict_mixed = select_best_youtube_mixed_stream(
+            formats,
+            filter,
+            min_height,
+            max_height,
+            min_audio_bitrate,
+            max_audio_bitrate,
+            false,
+        );
+        let relaxed_mixed = select_best_youtube_mixed_stream(
+            formats,
+            filter,
+            min_height,
+            max_height,
+            min_audio_bitrate,
+            max_audio_bitrate,
+            true,
+        );
+        let mixed = upgrade_with_vp9_fallback(strict_mixed, relaxed_mixed, platform);
         return Ok(SelectedStreams {
             video: None,
             audio,
@@ -4220,50 +4332,30 @@ fn select_youtube_streams(
         });
     }
 
-    let video = formats
-        .iter()
-        .filter(|format| {
-            is_http_format(format) && has_video(format) && !has_audio(format) && youtube_video_allowed(format, filter)
-        })
-        .max_by_key(|format| {
-            let height = format_quality_height(format);
-            let in_range = height >= min_height && height <= max_height;
-            let under_max = height <= max_height;
-            (
-                i32::from(in_range),
-                i32::from(under_max),
-                if under_max { height } else { -height },
-                -(youtube_codec_rank(format.vcodec.as_deref(), &filter.codecs) as i32),
-                format.fps.unwrap_or_default() as i32,
-                format.tbr.unwrap_or_default() as i32,
-            )
-        })
-        .cloned();
-    let mixed = formats
-        .iter()
-        .filter(|format| {
-            is_http_format(format)
-                && has_video(format)
-                && has_audio(format)
-                && youtube_video_allowed(format, filter)
-                && youtube_audio_allowed(format, filter)
-        })
-        .max_by_key(|format| {
-            let height = format_quality_height(format);
-            let in_range = height >= min_height && height <= max_height;
-            let under_max = height <= max_height;
-            let audio_bitrate = youtube_audio_bitrate(format);
-            let audio_in_range = audio_bitrate >= min_audio_bitrate && audio_bitrate <= max_audio_bitrate;
-            (
-                i32::from(in_range),
-                i32::from(audio_in_range),
-                i32::from(under_max),
-                if under_max { height } else { -height },
-                -(youtube_codec_rank(format.vcodec.as_deref(), &filter.codecs) as i32),
-                format.tbr.unwrap_or_default() as i32,
-            )
-        })
-        .cloned();
+    // 先按用户编码偏好选择；若偏好编码无法达到更高分辨率，自动放行 VP9 保证最高画质
+    let strict_video = select_best_youtube_video_stream(formats, filter, min_height, max_height, false);
+    let relaxed_video = select_best_youtube_video_stream(formats, filter, min_height, max_height, true);
+    let video = upgrade_with_vp9_fallback(strict_video, relaxed_video, platform);
+
+    let strict_mixed = select_best_youtube_mixed_stream(
+        formats,
+        filter,
+        min_height,
+        max_height,
+        min_audio_bitrate,
+        max_audio_bitrate,
+        false,
+    );
+    let relaxed_mixed = select_best_youtube_mixed_stream(
+        formats,
+        filter,
+        min_height,
+        max_height,
+        min_audio_bitrate,
+        max_audio_bitrate,
+        true,
+    );
+    let mixed = upgrade_with_vp9_fallback(strict_mixed, relaxed_mixed, platform);
     if video.is_none() && mixed.is_none() {
         let ids = formats
             .iter()
@@ -4297,11 +4389,13 @@ fn selected_effective_video_height(selected: &SelectedStreams) -> Option<i32> {
     }
 }
 
-fn youtube_video_allowed(format: &ExternalMediaFormat, filter: &FilterOption) -> bool {
-    let codec_allowed = youtube_codec(format.vcodec.as_deref()).is_some_and(|codec| filter.codecs.contains(&codec));
-    if !codec_allowed {
-        return false;
-    }
+/// 编码是否命中用户的编码偏好列表。
+fn youtube_codec_allowed(codec: Option<&str>, filter: &FilterOption) -> bool {
+    youtube_codec(codec).is_some_and(|codec| filter.codecs.contains(&codec))
+}
+
+/// 格式的 HDR/Dolby 元数据过滤（与编码偏好无关）。
+fn youtube_video_metadata_allowed(format: &ExternalMediaFormat, filter: &FilterOption) -> bool {
     let dynamic_range = format.dynamic_range.as_deref().unwrap_or("SDR").to_ascii_uppercase();
     if filter.no_hdr && dynamic_range != "SDR" {
         return false;
@@ -4310,6 +4404,22 @@ fn youtube_video_allowed(format: &ExternalMediaFormat, filter: &FilterOption) ->
         return false;
     }
     true
+}
+
+fn youtube_video_allowed(format: &ExternalMediaFormat, filter: &FilterOption) -> bool {
+    youtube_codec_allowed(format.vcodec.as_deref(), filter) && youtube_video_metadata_allowed(format, filter)
+}
+
+/// 是否为 VP9 编码（YouTube 的 1440p/4K/8K 常见编码，偏好列表里没有时作为最高画质兜底）。
+fn is_youtube_vp9(codec: Option<&str>) -> bool {
+    let codec = codec.unwrap_or_default().to_ascii_lowercase();
+    codec.starts_with("vp9") || codec.starts_with("vp09")
+}
+
+/// 编码偏好 + VP9 兜底：命中偏好列表，或为 VP9（仅在偏好编码无法达到更高分辨率时使用）。
+fn youtube_video_allowed_with_vp9_fallback(format: &ExternalMediaFormat, filter: &FilterOption) -> bool {
+    (youtube_codec_allowed(format.vcodec.as_deref(), filter) || is_youtube_vp9(format.vcodec.as_deref()))
+        && youtube_video_metadata_allowed(format, filter)
 }
 
 fn youtube_audio_allowed(format: &ExternalMediaFormat, filter: &FilterOption) -> bool {
@@ -6696,6 +6806,213 @@ mod tests {
         assert_eq!(resolve_source_url("subscriptions", None).unwrap(), SUBSCRIPTIONS_URL);
         assert!(is_youtube_url("https://www.youtube.com/watch?v=abc"));
         assert!(!is_youtube_url("https://youtube.example.com"));
+    }
+
+    #[test]
+    fn youtube_stream_selection_falls_back_to_vp9_for_highest_quality() {
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
+        use super::ExternalMediaFormat;
+
+        let filter = FilterOption {
+            video_max_quality: VideoQuality::Quality8k,
+            video_min_quality: VideoQuality::Quality720p,
+            audio_max_quality: AudioQuality::QualityHiRES,
+            audio_min_quality: AudioQuality::Quality64k,
+            codecs: vec![VideoCodecs::AV1, VideoCodecs::AVC, VideoCodecs::HEV],
+            ..Default::default()
+        };
+        let vfmt = |id: &str, h: i32, vcodec: &str| ExternalMediaFormat {
+            format_id: Some(id.to_string()),
+            url: Some(format!("https://example.com/{id}")),
+            protocol: Some("https".to_string()),
+            ext: Some("webm".to_string()),
+            vcodec: Some(vcodec.to_string()),
+            acodec: Some("none".to_string()),
+            width: Some(if h > 0 { h * 16 / 9 } else { 0 }),
+            height: Some(h),
+            fps: Some(30.0),
+            tbr: Some(5000.0),
+            vbr: Some(4000.0),
+            abr: None,
+            dynamic_range: Some("SDR".to_string()),
+            decryption_key: None,
+            fallback_urls: Vec::new(),
+        };
+        let afmt = |id: &str, abr: i32| ExternalMediaFormat {
+            format_id: Some(id.to_string()),
+            url: Some(format!("https://example.com/{id}")),
+            protocol: Some("https".to_string()),
+            ext: Some("m4a".to_string()),
+            vcodec: Some("none".to_string()),
+            acodec: Some("mp4a.40.2".to_string()),
+            width: None,
+            height: None,
+            fps: None,
+            tbr: Some(abr as f64),
+            vbr: None,
+            abr: Some(abr as f64),
+            dynamic_range: Some("SDR".to_string()),
+            decryption_key: None,
+            fallback_urls: Vec::new(),
+        };
+        // 4K 只有 VP9（无 AV1/HEVC 4K），偏好编码最高只有 1440p AV1 / 1080p AVC
+        let formats = vec![
+            vfmt("401", 2160, "vp9.2"),
+            vfmt("400", 2160, "vp9"),
+            vfmt("399", 1440, "vp9"),
+            vfmt("308", 1440, "av01.0.05M.08"),
+            vfmt("303", 1080, "vp9"),
+            vfmt("136", 1080, "avc1.64001f"),
+            afmt("140", 128),
+        ];
+        let selected = super::select_youtube_streams(&formats, &filter, false, "YouTube").expect("选择应成功");
+        let v = selected.video.expect("应选出视频流");
+        assert_eq!(v.height, Some(2160), "应自动放行 VP9 4K: vcodec={:?}", v.vcodec);
+        assert!(v.vcodec.as_deref().unwrap_or_default().starts_with("vp9"));
+        assert!(selected.audio.is_some(), "音频流应正常选择");
+    }
+
+    #[test]
+    fn youtube_stream_selection_prefers_allowed_codec_at_same_height() {
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
+        use super::ExternalMediaFormat;
+
+        let filter = FilterOption {
+            video_max_quality: VideoQuality::Quality8k,
+            video_min_quality: VideoQuality::Quality720p,
+            audio_max_quality: AudioQuality::QualityHiRES,
+            audio_min_quality: AudioQuality::Quality64k,
+            codecs: vec![VideoCodecs::AV1, VideoCodecs::AVC, VideoCodecs::HEV],
+            ..Default::default()
+        };
+        let vfmt = |id: &str, h: i32, vcodec: &str| ExternalMediaFormat {
+            format_id: Some(id.to_string()),
+            url: Some(format!("https://example.com/{id}")),
+            protocol: Some("https".to_string()),
+            ext: Some("webm".to_string()),
+            vcodec: Some(vcodec.to_string()),
+            acodec: Some("none".to_string()),
+            width: Some(h * 16 / 9),
+            height: Some(h),
+            fps: Some(30.0),
+            tbr: Some(5000.0),
+            vbr: Some(4000.0),
+            abr: None,
+            dynamic_range: Some("SDR".to_string()),
+            decryption_key: None,
+            fallback_urls: Vec::new(),
+        };
+        let afmt = || ExternalMediaFormat {
+            format_id: Some("140".to_string()),
+            url: Some("https://example.com/a".to_string()),
+            protocol: Some("https".to_string()),
+            ext: Some("m4a".to_string()),
+            vcodec: Some("none".to_string()),
+            acodec: Some("mp4a.40.2".to_string()),
+            width: None,
+            height: None,
+            fps: None,
+            tbr: Some(128.0),
+            vbr: None,
+            abr: Some(128.0),
+            dynamic_range: Some("SDR".to_string()),
+            decryption_key: None,
+            fallback_urls: Vec::new(),
+        };
+        // 4K 同时有 AV1 与 VP9：同分辨率应保持用户偏好编码 AV1，而非 VP9
+        let formats = vec![
+            vfmt("401", 2160, "vp9.2"),
+            vfmt("400", 2160, "vp9"),
+            vfmt("400-av1", 2160, "av01.0.08M.08"),
+            vfmt("136", 1080, "avc1.64001f"),
+            afmt(),
+        ];
+        let selected = super::select_youtube_streams(&formats, &filter, false, "YouTube").expect("选择应成功");
+        let v = selected.video.expect("应选出视频流");
+        assert_eq!(v.height, Some(2160));
+        assert!(
+            v.vcodec.as_deref().unwrap_or_default().starts_with("av01"),
+            "同分辨率应优先偏好编码 AV1，实际: {:?}",
+            v.vcodec
+        );
+    }
+
+    #[test]
+    fn youtube_stream_selection_vp9_fallback_respects_no_hdr_and_max_height() {
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
+        use super::ExternalMediaFormat;
+
+        let vfmt = |id: &str, h: i32, vcodec: &str, dr: &str| ExternalMediaFormat {
+            format_id: Some(id.to_string()),
+            url: Some(format!("https://example.com/{id}")),
+            protocol: Some("https".to_string()),
+            ext: Some("webm".to_string()),
+            vcodec: Some(vcodec.to_string()),
+            acodec: Some("none".to_string()),
+            width: Some(h * 16 / 9),
+            height: Some(h),
+            fps: Some(30.0),
+            tbr: Some(5000.0),
+            vbr: Some(4000.0),
+            abr: None,
+            dynamic_range: Some(dr.to_string()),
+            decryption_key: None,
+            fallback_urls: Vec::new(),
+        };
+        let afmt = || ExternalMediaFormat {
+            format_id: Some("140".to_string()),
+            url: Some("https://example.com/a".to_string()),
+            protocol: Some("https".to_string()),
+            ext: Some("m4a".to_string()),
+            vcodec: Some("none".to_string()),
+            acodec: Some("mp4a.40.2".to_string()),
+            width: None,
+            height: None,
+            fps: None,
+            tbr: Some(128.0),
+            vbr: None,
+            abr: Some(128.0),
+            dynamic_range: Some("SDR".to_string()),
+            decryption_key: None,
+            fallback_urls: Vec::new(),
+        };
+
+        // 开启 no_hdr：4K 仅有 HDR VP9 时不应放行，应选 SDR 1080p AVC
+        let filter = FilterOption {
+            video_max_quality: VideoQuality::Quality8k,
+            video_min_quality: VideoQuality::Quality720p,
+            audio_max_quality: AudioQuality::QualityHiRES,
+            audio_min_quality: AudioQuality::Quality64k,
+            codecs: vec![VideoCodecs::AV1, VideoCodecs::AVC, VideoCodecs::HEV],
+            no_hdr: true,
+            ..Default::default()
+        };
+        let formats = vec![
+            vfmt("401", 2160, "vp9.2", "HDR"),
+            vfmt("136", 1080, "avc1.64001f", "SDR"),
+            afmt(),
+        ];
+        let selected = super::select_youtube_streams(&formats, &filter, false, "YouTube").expect("选择应成功");
+        let v = selected.video.expect("应选出视频流");
+        assert_eq!(v.height, Some(1080), "no_hdr 时不应放行 HDR VP9");
+
+        // 8K VP9 超出现有偏好编码高度时，应升级到 8K
+        let filter = FilterOption {
+            video_max_quality: VideoQuality::Quality8k,
+            video_min_quality: VideoQuality::Quality720p,
+            audio_max_quality: AudioQuality::QualityHiRES,
+            audio_min_quality: AudioQuality::Quality64k,
+            codecs: vec![VideoCodecs::AV1, VideoCodecs::AVC, VideoCodecs::HEV],
+            ..Default::default()
+        };
+        let formats = vec![
+            vfmt("402", 4320, "vp9.2", "SDR"),
+            vfmt("401", 2160, "av01.0.08M.08", "SDR"),
+            afmt(),
+        ];
+        let selected = super::select_youtube_streams(&formats, &filter, false, "YouTube").expect("选择应成功");
+        let v = selected.video.expect("应选出视频流");
+        assert_eq!(v.height, Some(4320), "8K VP9 应作为最高画质放行");
     }
 
     #[test]
