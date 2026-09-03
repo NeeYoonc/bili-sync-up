@@ -5044,6 +5044,60 @@ async fn download_youtube_cover(
     Ok(())
 }
 
+/// 构建单视频（movie）NFO XML。
+///
+/// - `studio`：平台名（如 YouTube/抖音），写入 `<studio>`；
+/// - `aired`：上传时间，分别写入 `<year>/<premiered>/<aired>`。
+/// 注意 `<aired>` 与 `<studio>` 两个标签的参数顺序不能写反，
+/// 否则会出现"工作室=日期、首播=平台名"的错位。
+fn build_youtube_movie_nfo_xml(
+    title: &str,
+    description: &str,
+    platform: &str,
+    studio: &str,
+    id: &str,
+    aired: chrono::NaiveDateTime,
+    uploader: &str,
+    thumbnail: &str,
+    video_url: &str,
+) -> String {
+    let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n\
+<movie>\n\
+    <title>{}</title>\n\
+    <originaltitle>{}</originaltitle>\n\
+    <sorttitle>{}</sorttitle>\n\
+    <plot>{}</plot>\n\
+    <uniqueid type=\"{}\" default=\"true\">{}</uniqueid>\n\
+    <year>{}</year>\n\
+    <premiered>{}</premiered>\n\
+    <aired>{}</aired>\n\
+    <studio>{}</studio>\n\
+    <director>{}</director>\n\
+    <actor><name>{}</name><role>频道</role></actor>\n\
+    <thumb aspect=\"poster\">{}</thumb>\n\
+    <fanart><thumb>{}</thumb></fanart>\n\
+    <website>{}</website>\n\
+</movie>\n",
+        escape(title),
+        escape(title),
+        escape(title),
+        escape(description),
+        escape(platform),
+        escape(id),
+        aired.format("%Y"),
+        aired.format("%Y-%m-%d"),
+        aired.format("%Y-%m-%d"),
+        escape(studio),
+        escape(uploader),
+        escape(uploader),
+        escape(thumbnail),
+        escape(thumbnail),
+        escape(video_url),
+    )
+}
+
 async fn generate_youtube_nfo(
     metadata: &ExternalMediaMetadata,
     output_path: &Path,
@@ -5067,44 +5121,20 @@ async fn generate_youtube_nfo(
         .as_deref()
         .and_then(parse_youtube_upload_date)
         .unwrap_or_else(crate::utils::time_format::now_naive);
-    let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     let thumbnail = metadata.thumbnail.as_deref().unwrap_or_default();
     let description = metadata.description.as_deref().unwrap_or_default();
     let platform = source_platform(source);
     let studio = if platform == "douyin" { "抖音" } else { "YouTube" };
-    let xml = format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n\
-<movie>\n\
-    <title>{}</title>\n\
-    <originaltitle>{}</originaltitle>\n\
-    <sorttitle>{}</sorttitle>\n\
-    <plot>{}</plot>\n\
-    <uniqueid type=\"{}\" default=\"true\">{}</uniqueid>\n\
-    <year>{}</year>\n\
-    <premiered>{}</premiered>\n\
-    <aired>{}</aired>\n\
-    <studio>{}</studio>\n\
-    <director>{}</director>\n\
-    <actor><name>{}</name><role>频道</role></actor>\n\
-    <thumb aspect=\"poster\">{}</thumb>\n\
-    <fanart><thumb>{}</thumb></fanart>\n\
-    <website>{}</website>\n\
-</movie>\n",
-        escape(title),
-        escape(title),
-        escape(title),
-        escape(description),
-        escape(platform),
-        escape(&metadata.id),
-        aired.format("%Y"),
-        aired.format("%Y-%m-%d"),
-        escape(studio),
-        aired.format("%Y-%m-%d"),
-        escape(uploader),
-        escape(uploader),
-        escape(thumbnail),
-        escape(thumbnail),
-        escape(video_url),
+    let xml = build_youtube_movie_nfo_xml(
+        title,
+        description,
+        platform,
+        studio,
+        &metadata.id,
+        aired,
+        uploader,
+        thumbnail,
+        video_url,
     );
     let temporary = nfo_path.with_extension("nfo.download");
     tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
@@ -7013,6 +7043,33 @@ mod tests {
         let selected = super::select_youtube_streams(&formats, &filter, false, "YouTube").expect("选择应成功");
         let v = selected.video.expect("应选出视频流");
         assert_eq!(v.height, Some(4320), "8K VP9 应作为最高画质放行");
+    }
+
+    #[test]
+    fn youtube_movie_nfo_studio_uses_platform_not_date() {
+        // 回归测试：<aired> 填日期、<studio> 填平台名，二者不能写反。
+        let aired = chrono::NaiveDate::from_ymd_opt(2026, 9, 1)
+            .expect("有效日期")
+            .and_hms_opt(0, 0, 0)
+            .expect("有效时间");
+        let xml = super::build_youtube_movie_nfo_xml(
+            "测试视频",
+            "简介",
+            "YouTube",
+            "YouTube",
+            "dQw4w9WgXcQ",
+            aired,
+            "测试频道",
+            "https://example.com/thumb.jpg",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        );
+        assert!(xml.contains("<studio>YouTube</studio>"), "studio 应为平台名: {xml}");
+        assert!(xml.contains("<aired>2026-09-01</aired>"), "aired 应为日期: {xml}");
+        assert!(xml.contains("<premiered>2026-09-01</premiered>"), "premiered 应为日期: {xml}");
+        assert!(xml.contains("<year>2026</year>"), "year 应为年份: {xml}");
+        assert!(!xml.contains("<studio>2026-09-01</studio>"), "studio 不应是日期: {xml}");
+        assert!(!xml.contains("<aired>YouTube</aired>"), "aired 不应是平台名: {xml}");
+        assert!(xml.contains("<director>测试频道</director>"), "director 应为频道: {xml}");
     }
 
     #[test]
