@@ -3581,6 +3581,7 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
         automatic_captions: std::collections::HashMap::new(),
         images: Vec::new(),
         music_urls: Vec::new(),
+        creators: None,
     })
 }
 

@@ -3547,6 +3547,7 @@ async fn download_youtube_media(
                 automatic_captions: HashMap::new(),
                 images: Vec::new(),
                 music_urls: Vec::new(),
+                creators: None,
             };
             let placeholder_title = video.title.clone();
             let placeholder_uploader = if video.uploader.trim().is_empty() {
@@ -5044,10 +5045,39 @@ async fn download_youtube_cover(
     Ok(())
 }
 
+/// 从 yt-dlp `creators` 中提取「联合创作者」频道名（主上传频道之外的名字）。
+///
+/// yt-dlp 在联合投稿视频上会返回「主频道 + 合作频道」的完整列表；但音乐视频的
+/// `creators` 也可能是表演者名单。仅当列表至少两位时才视为联合投稿，再去掉与
+/// 主频道相同的名字并去重，避免把单作者音乐视频的表演者当合作频道重复列出。
+fn youtube_co_creators(metadata: &ExternalMediaMetadata, uploader: &str) -> Vec<String> {
+    let Some(creators) = metadata.creators.as_deref() else {
+        return Vec::new();
+    };
+    if creators.len() < 2 {
+        return Vec::new();
+    }
+    let main = uploader.trim();
+    let mut seen = HashSet::new();
+    let mut extras = Vec::new();
+    for name in creators {
+        let name = name.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case(main) {
+            continue;
+        }
+        if seen.insert(name.to_lowercase()) {
+            extras.push(name.to_string());
+        }
+    }
+    extras
+}
+
 /// 构建单视频（movie）NFO XML。
 ///
 /// - `studio`：平台名（如 YouTube/抖音），写入 `<studio>`；
 /// - `aired`：上传时间，分别写入 `<year>/<premiered>/<aired>`。
+/// - `uploader`：主频道，写入 `<director>` 并作为第一个 `<actor>`；
+/// - `co_creators`：联合投稿的合作频道名，逐个补写 `<actor>`。
 /// 注意 `<aired>` 与 `<studio>` 两个标签的参数顺序不能写反，
 /// 否则会出现"工作室=日期、首播=平台名"的错位。
 fn build_youtube_movie_nfo_xml(
@@ -5058,10 +5088,17 @@ fn build_youtube_movie_nfo_xml(
     id: &str,
     aired: chrono::NaiveDateTime,
     uploader: &str,
+    co_creators: &[String],
     thumbnail: &str,
     video_url: &str,
 ) -> String {
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
+    let actor_lines = std::iter::once(uploader)
+        .chain(co_creators.iter().map(String::as_str))
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| format!("    <actor><name>{}</name><role>频道</role></actor>", escape(name)))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n\
 <movie>\n\
@@ -5075,7 +5112,7 @@ fn build_youtube_movie_nfo_xml(
     <aired>{}</aired>\n\
     <studio>{}</studio>\n\
     <director>{}</director>\n\
-    <actor><name>{}</name><role>频道</role></actor>\n\
+{actor_lines}\n\
     <thumb aspect=\"poster\">{}</thumb>\n\
     <fanart><thumb>{}</thumb></fanart>\n\
     <website>{}</website>\n\
@@ -5090,7 +5127,6 @@ fn build_youtube_movie_nfo_xml(
         aired.format("%Y-%m-%d"),
         aired.format("%Y-%m-%d"),
         escape(studio),
-        escape(uploader),
         escape(uploader),
         escape(thumbnail),
         escape(thumbnail),
@@ -5125,6 +5161,7 @@ async fn generate_youtube_nfo(
     let description = metadata.description.as_deref().unwrap_or_default();
     let platform = source_platform(source);
     let studio = source_platform_label(source);
+    let co_creators = youtube_co_creators(metadata, uploader);
     let xml = build_youtube_movie_nfo_xml(
         title,
         description,
@@ -5133,6 +5170,7 @@ async fn generate_youtube_nfo(
         &metadata.id,
         aired,
         uploader,
+        &co_creators,
         thumbnail,
         video_url,
     );
@@ -7060,6 +7098,7 @@ mod tests {
             "dQw4w9WgXcQ",
             aired,
             "测试频道",
+            &[],
             "https://example.com/thumb.jpg",
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         );
@@ -7070,6 +7109,58 @@ mod tests {
         assert!(!xml.contains("<studio>2026-09-01</studio>"), "studio 不应是日期: {xml}");
         assert!(!xml.contains("<aired>YouTube</aired>"), "aired 不应是平台名: {xml}");
         assert!(xml.contains("<director>测试频道</director>"), "director 应为频道: {xml}");
+    }
+
+    #[test]
+    fn youtube_movie_nfo_includes_co_creators_as_actors() {
+        // 回归测试：联合投稿视频的合作频道应逐个补写为 <actor>，主频道仅出现一次。
+        let aired = chrono::NaiveDate::from_ymd_opt(2026, 9, 1)
+            .expect("有效日期")
+            .and_hms_opt(0, 0, 0)
+            .expect("有效时间");
+        let xml = super::build_youtube_movie_nfo_xml(
+            "联合投稿测试",
+            "简介",
+            "YouTube",
+            "YouTube",
+            "vid123",
+            aired,
+            "主频道",
+            &["合作频道A".to_string(), "合作频道B".to_string()],
+            "https://example.com/thumb.jpg",
+            "https://www.youtube.com/watch?v=vid123",
+        );
+        assert_eq!(xml.matches("<actor>").count(), 3, "主频道+2个合作频道共3个 actor: {xml}");
+        assert!(xml.contains("<actor><name>主频道</name><role>频道</role></actor>"), "{xml}");
+        assert!(xml.contains("<actor><name>合作频道A</name><role>频道</role></actor>"), "{xml}");
+        assert!(xml.contains("<actor><name>合作频道B</name><role>频道</role></actor>"), "{xml}");
+        assert!(xml.contains("<director>主频道</director>"), "director 应为主频道: {xml}");
+        assert_eq!(xml.matches("主频道").count(), 2, "主频道只在 director 与第一个 actor 出现: {xml}");
+    }
+
+    #[test]
+    fn youtube_co_creators_filters_main_channel_and_deduplicates() {
+        use crate::external_media::ExternalMediaMetadata;
+        // 单作者视频（creators 只有主频道，或音乐视频只有表演者）不补加 actor。
+        let metadata: ExternalMediaMetadata =
+            serde_json::from_str(r#"{"id":"v1","creators":["主频道"]}"#).expect("metadata 应可解析");
+        assert_eq!(super::youtube_co_creators(&metadata, "主频道"), Vec::<String>::new());
+        let metadata: ExternalMediaMetadata =
+            serde_json::from_str(r#"{"id":"v1","creators":["音乐人"]}"#).expect("metadata 应可解析");
+        assert_eq!(super::youtube_co_creators(&metadata, "主频道VEVO"), Vec::<String>::new());
+        // 联合投稿：保留合作频道，去掉主频道与重复项（忽略大小写与首尾空格）。
+        let metadata: ExternalMediaMetadata = serde_json::from_str(
+            r#"{"id":"v1","creators":["主频道","合作频道A","合作频道B","合作频道A"," 合作频道B  "]}"#,
+        )
+        .expect("metadata 应可解析");
+        assert_eq!(
+            super::youtube_co_creators(&metadata, "主频道"),
+            vec!["合作频道A".to_string(), "合作频道B".to_string()]
+        );
+        // 未返回 creators 字段时为空。
+        let metadata: ExternalMediaMetadata =
+            serde_json::from_str(r#"{"id":"v1"}"#).expect("metadata 应可解析");
+        assert_eq!(super::youtube_co_creators(&metadata, "主频道"), Vec::<String>::new());
     }
 
     #[test]
@@ -7328,6 +7419,7 @@ mod tests {
             automatic_captions: HashMap::new(),
             images: Vec::new(),
             music_urls: Vec::new(),
+            creators: None,
         };
         let path = super::youtube_output_path(&source, &video, &metadata, "第三集标题", "作者").unwrap();
         let expected = Path::new("F:/Downloads/测试")

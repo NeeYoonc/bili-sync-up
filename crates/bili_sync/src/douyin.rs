@@ -3552,6 +3552,7 @@ async fn extract_metadata_native(
         automatic_captions: HashMap::new(),
         images,
         music_urls,
+        creators: None,
     })
 }
 

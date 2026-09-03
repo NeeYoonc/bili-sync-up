@@ -32,6 +32,10 @@ pub(crate) struct ExternalMediaMetadata {
     /// 图文作品的配乐备选地址；普通视频为空。
     #[serde(default)]
     pub(crate) music_urls: Vec<String>,
+    /// YouTube 联合投稿/合作创作频道名列表（yt-dlp `creators`），第一位通常是主频道；
+    /// 非联合投稿或 yt-dlp 未返回该字段时为空。
+    #[serde(default)]
+    pub(crate) creators: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
