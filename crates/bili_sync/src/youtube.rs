@@ -4737,7 +4737,7 @@ async fn ensure_youtube_series_sidecars(
 fn generate_youtube_tvshow_nfo(source: &youtube_source::Model, metadata: &ExternalMediaMetadata) -> String {
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     let platform = source_platform(source);
-    let studio = if platform == "douyin" { "抖音" } else { "YouTube" };
+    let studio = source_platform_label(source);
     let description = metadata.description.as_deref().unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>
@@ -5124,7 +5124,7 @@ async fn generate_youtube_nfo(
     let thumbnail = metadata.thumbnail.as_deref().unwrap_or_default();
     let description = metadata.description.as_deref().unwrap_or_default();
     let platform = source_platform(source);
-    let studio = if platform == "douyin" { "抖音" } else { "YouTube" };
+    let studio = source_platform_label(source);
     let xml = build_youtube_movie_nfo_xml(
         title,
         description,
@@ -7070,6 +7070,19 @@ mod tests {
         assert!(!xml.contains("<studio>2026-09-01</studio>"), "studio 不应是日期: {xml}");
         assert!(!xml.contains("<aired>YouTube</aired>"), "aired 不应是平台名: {xml}");
         assert!(xml.contains("<director>测试频道</director>"), "director 应为频道: {xml}");
+    }
+
+    #[test]
+    fn youtube_tvshow_nfo_studio_uses_platform_label_for_tiktok() {
+        // TikTok 剧集 NFO：工作室应为 "TikTok"、uniqueid type 应为 "tiktok"，
+        // 而不是被写成 "YouTube"。
+        let source = sample_external_source("tiktok_collection");
+        let metadata: crate::external_media::ExternalMediaMetadata =
+            serde_json::from_str(r#"{"id":"vid1"}"#).expect("metadata 应可构造");
+        let xml = super::generate_youtube_tvshow_nfo(&source, &metadata);
+        assert!(xml.contains("<studio>TikTok</studio>"), "TikTok tvshow studio 应为 TikTok: {xml}");
+        assert!(xml.contains(r#"<uniqueid type="tiktok""#), "TikTok tvshow uniqueid type 应为 tiktok: {xml}");
+        assert!(!xml.contains("<studio>YouTube</studio>"), "TikTok tvshow studio 不应是 YouTube: {xml}");
     }
 
     #[test]
