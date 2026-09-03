@@ -20,6 +20,11 @@ pub struct Model {
     pub is_story: bool,
     pub is_charge_video: bool,
     pub charge_can_play: bool,
+    /// 与 B 站 video.download_status 同构的子任务状态位（u32，每 3bit 一个任务，
+    /// bit31 为整条完成标记）：[视频封面, 视频信息(NFO), UP头像, UP主信息, 分P下载]。
+    pub video_task_status: u32,
+    /// 单页（分页）子任务状态位：[视频封面, 视频内容, 单集NFO, 视频弹幕/直播, 视频字幕]。
+    pub page_task_status: u32,
     pub download_status: String,
     pub retry_count: i32,
     pub output_path: Option<String>,

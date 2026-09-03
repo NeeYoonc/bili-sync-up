@@ -43,6 +43,7 @@ use crate::external_media::{ExternalMediaFormat, ExternalMediaMetadata, External
 use crate::task::TASK_CONTROLLER;
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::live_updates::{notify_queue_status_changed, notify_video_sources_changed, notify_videos_changed};
+use crate::utils::status::{PageStatus, STATUS_OK, VideoStatus};
 use crate::utils::time_format::now_standard_string;
 
 const YTDLP_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1796,113 +1797,59 @@ fn youtube_upper_paths(uploader: &str) -> (PathBuf, PathBuf) {
     (upper_dir.join("folder.jpg"), upper_dir.join("person.nfo"))
 }
 
-fn youtube_failure_status(video: &youtube_video::Model) -> u32 {
-    if video.download_status == "failed" {
-        video.retry_count.clamp(1, 6) as u32
+/// 外源视频的“任务状态位”与 B 站完全同构（u32，从低位起每 3bit 一个子任务，
+/// bit31 为整条完成标记）：
+/// 视频级：[视频封面, 视频信息(NFO), UP头像, UP主信息, 分P下载]；
+/// 分页级：[视频封面, 视频内容, 单集NFO, 弹幕/直播, 字幕]。
+/// 数值 0=未开始，1..=4=失败次数，7(STATUS_OK)=已完成。
+
+fn youtube_video_status(video: &youtube_video::Model) -> VideoStatus {
+    VideoStatus::from(video.video_task_status)
+}
+
+fn youtube_page_status(video: &youtube_video::Model) -> PageStatus {
+    PageStatus::from(video.page_task_status)
+}
+
+/// 由状态位派生出整条视频的文本状态（兼容既有扫描/筛选/队列逻辑）。
+/// skipped 等特殊文本由调用方在写完状态位后单独保留。
+fn youtube_text_from_task_status(video_task_status: u32, page_task_status: u32) -> String {
+    let video_status = VideoStatus::from(video_task_status);
+    let page_status = PageStatus::from(page_task_status);
+    let mut any_pending = false;
+    let mut any_failed = false;
+    for index in 0..5 {
+        for status in [video_status.get(index), page_status.get(index)] {
+            if status == 0 {
+                any_pending = true;
+            } else if status < STATUS_OK {
+                any_failed = true;
+            }
+        }
+    }
+    if any_failed {
+        "failed".to_string()
+    } else if any_pending {
+        "pending".to_string()
     } else {
-        0
+        "completed".to_string()
     }
 }
 
-async fn youtube_artifact_status(video: &youtube_video::Model, source: &youtube_source::Model) -> ([u32; 5], [u32; 5]) {
-    let failure = youtube_failure_status(video);
-    let completed = video.download_status == "completed" || video.download_status == "skipped";
-    let output = video.output_path.as_deref().map(PathBuf::from);
-    let charge_locked = video.is_charge_video && !video.charge_can_play;
-    let media_ok = charge_locked
-        || output
-            .as_ref()
-            .is_some_and(|path| path.is_file() && std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0));
-    let cover_ok = output
-        .as_ref()
-        .and_then(|path| youtube_sidecar_path(path, "-thumb.jpg").ok())
-        .is_some_and(|path| path.is_file());
-    let nfo_ok = output.as_ref().is_some_and(|path| path.with_extension("nfo").is_file());
-    let subtitle_ok = match output.as_ref() {
-        Some(path) => youtube_subtitle_exists(path).await.unwrap_or(false),
-        None => false,
-    };
-    let danmaku_ok = output.as_ref().is_some_and(|path| {
-        if is_douyin_source(source) {
-            path.with_extension("ass").is_file() || path.with_extension("danmaku.checked").is_file()
-        } else {
-            (path.with_extension("live_chat.json").is_file() && path.with_extension("ass").is_file())
-                || path.with_extension("live_chat.checked").is_file()
-        }
-    });
-    let (face_path, person_nfo_path) = youtube_upper_paths(&video.uploader);
-    let face_ok = face_path.is_file();
-    let person_ok = person_nfo_path.is_file();
-    let status = |ok: bool| if ok { 7 } else { failure };
-    let optional_status = |ok: bool, warning: bool| {
-        if ok || (completed && !warning) {
-            7
-        } else {
-            failure
-        }
-    };
-    let warning = video.error_message.as_deref().unwrap_or("");
+/// 全部子任务已完成的状态位编码（视频级与分页级同为 5 个子任务，编码值相同）。
+fn youtube_all_tasks_ok_bits() -> u32 {
+    let mut status = VideoStatus::default();
+    for index in 0..5 {
+        status.set(index, STATUS_OK);
+    }
+    status.into()
+}
 
-    // 占位（付费/加密/明确不可下载）视频：与 B 站充电视频占位一致，任务整体视为已完成，
-    // 不再对封面/NFO/头像等子任务显示“未开始”。
-    if charge_locked {
-        return ([7, 7, 7, 7, 7], [7, 7, 7, 7, 7]);
-    }
-    // 主动跳过（未达最低分辨率等）：在视频卡片中视为已完成，警告信息由队列页展示。
-    if video.download_status == "skipped" {
-        return ([7, 7, 7, 7, 7], [7, 7, 7, 7, 7]);
-    }
-    // 已完成：与 B 站一致，任务状态跟随数据库而不是磁盘文件系统。已下载的外源视频
-    // 即使媒体文件被移走/清理，卡片仍保持“全部完成”，不会重新变回“进行中/未开始”。
-    // 弹幕/字幕等可选子任务仍按是否存在对应告警决定是否降级展示。
-    if video.download_status == "completed" {
-        let warning = video.error_message.as_deref().unwrap_or("");
-        let page_status = [
-            7,
-            7,
-            7,
-            optional_status(
-                danmaku_ok,
-                warning.contains(if is_douyin_source(source) {
-                    "弹幕"
-                } else {
-                    "直播聊天"
-                }),
-            ),
-            if source.download_subtitle {
-                optional_status(subtitle_ok, warning.contains("字幕"))
-            } else {
-                7
-            },
-        ];
-        return ([7, 7, 7, 7, 7], page_status);
-    }
-    let video_status = [
-        status(cover_ok),
-        status(nfo_ok),
-        status(face_ok),
-        status(person_ok),
-        status(media_ok),
-    ];
-    let page_status = [
-        status(cover_ok),
-        status(media_ok),
-        status(nfo_ok),
-        optional_status(
-            danmaku_ok,
-            warning.contains(if is_douyin_source(source) {
-                "弹幕"
-            } else {
-                "直播聊天"
-            }),
-        ),
-        if source.download_subtitle {
-            optional_status(subtitle_ok, warning.contains("字幕"))
-        } else {
-            7
-        },
-    ];
-    (video_status, page_status)
+/// 外源视频任务状态直接从数据库状态位读取（与 B 站一致），不再由磁盘文件反推。
+/// 已完成视频即使媒体文件被移走/清理，任务位仍是完成，卡片不会退回“未下载”。
+async fn youtube_artifact_status(video: &youtube_video::Model, source: &youtube_source::Model) -> ([u32; 5], [u32; 5]) {
+    let _ = source;
+    (youtube_video_status(video).into(), youtube_page_status(video).into())
 }
 
 async fn unified_youtube_parts(
@@ -2069,6 +2016,149 @@ pub async fn get_unified_youtube_video(db: &DatabaseConnection, id: i32) -> Resu
     })
 }
 
+/// 需要当场重建的外源附属文件类型（由 worker 在“只重跑附属文件”时使用）。
+#[derive(Debug, Clone, Copy, Default)]
+struct YoutubeArtifactRegen {
+    cover: bool,
+    nfo: bool,
+    upper_face: bool,
+    upper_info: bool,
+}
+
+impl YoutubeArtifactRegen {
+    fn any(&self) -> bool {
+        self.cover || self.nfo || self.upper_face || self.upper_info
+    }
+}
+
+/// 删除某个外源任务对应的本地产物。重置时把“已完成(7)”的任务打回“未开始(0)”后，
+/// 需要删掉已存在的文件，worker 下一轮才会真正重新生成（与 B 站“重置即重跑”一致）。
+async fn remove_youtube_task_artifact(
+    video: &youtube_video::Model,
+    source: &youtube_source::Model,
+    video_indexes: &[usize],
+    page_indexes: &[usize],
+) -> Result<()> {
+    let mut cover = false;
+    let mut nfo = false;
+    let mut upper_face = false;
+    let mut upper_info = false;
+    let mut media = false;
+    for &index in video_indexes {
+        match index {
+            0 => cover = true,
+            1 => nfo = true,
+            2 => upper_face = true,
+            3 => upper_info = true,
+            4 => media = true,
+            _ => {}
+        }
+    }
+    for &index in page_indexes {
+        match index {
+            0 => cover = true,
+            1 => media = true,
+            2 => nfo = true,
+            _ => {}
+        }
+    }
+    if let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) {
+        let output_path = PathBuf::from(output_path);
+        if cover {
+            if let Ok(thumb) = youtube_sidecar_path(&output_path, "-thumb.jpg") {
+                remove_file_if_exists(&thumb).await?;
+            }
+            if let Ok(fanart) = youtube_sidecar_path(&output_path, "-fanart.jpg") {
+                remove_file_if_exists(&fanart).await?;
+            }
+        }
+        if nfo {
+            let nfo_path = output_path.with_extension("nfo");
+            remove_file_if_exists(&nfo_path).await?;
+            // 抖音短剧/放映厅/合集是番剧结构，剧集根目录还有 tvshow.nfo。
+            if is_episodic_douyin_source(source) {
+                if let Some(series_dir) = output_path.parent().and_then(|dir| dir.parent()) {
+                    let tvshow = series_dir.join("tvshow.nfo");
+                    remove_file_if_exists(&tvshow).await?;
+                }
+            }
+        }
+        if media {
+            remove_file_if_exists(&output_path).await?;
+        }
+    }
+    if upper_face || upper_info {
+        let (face_path, person_nfo_path) = youtube_upper_paths(&video.uploader);
+        if upper_face {
+            remove_file_if_exists(&face_path).await?;
+        }
+        if upper_info {
+            remove_file_if_exists(&person_nfo_path).await?;
+        }
+    }
+    Ok(())
+}
+
+/// 按 B 站语义整体重置一条外源视频的任务状态位并落库。
+///
+/// - force=true：重置所有非 0 状态（含已完成）；
+/// - force=false：只重置失败状态；文本 failed/付费不可播的旧任务也视为需要重置。
+/// 返回是否发生了重置。
+async fn reset_youtube_video_task_bits(
+    db: &DatabaseConnection,
+    video: youtube_video::Model,
+    force: bool,
+) -> Result<bool> {
+    let source = youtube_source::Entity::find_by_id(video.source_id)
+        .one(db)
+        .await?
+        .ok_or_else(|| anyhow!("视频源不存在（source_id={}）", video.source_id))?;
+    let was_failed = video.download_status == "failed";
+    let charge_blocked = video.is_charge_video && !video.charge_can_play;
+
+    let mut video_status = VideoStatus::from(video.video_task_status);
+    let mut page_status = PageStatus::from(video.page_task_status);
+    let old_video = video_status;
+    let old_page = page_status;
+    let bit_changed = if force || charge_blocked {
+        video_status.reset_all() | page_status.reset_all()
+    } else {
+        video_status.reset_failed() | page_status.reset_failed()
+    };
+    if !bit_changed && !was_failed && !charge_blocked {
+        return Ok(false);
+    }
+
+    // 被从“已完成”打回“未开始”的任务索引 → 删除旧产物，下一轮 worker 重新生成。
+    let mut video_indexes = Vec::new();
+    let mut page_indexes = Vec::new();
+    for index in 0..5 {
+        if old_video.get(index) == STATUS_OK && video_status.get(index) == 0 {
+            video_indexes.push(index);
+        }
+        if old_page.get(index) == STATUS_OK && page_status.get(index) == 0 {
+            page_indexes.push(index);
+        }
+    }
+    if !(video_indexes.is_empty() && page_indexes.is_empty()) {
+        remove_youtube_task_artifact(&video, &source, &video_indexes, &page_indexes).await?;
+    }
+
+    let video_bits: u32 = video_status.into();
+    let page_bits: u32 = page_status.into();
+    let mut active: youtube_video::ActiveModel = video.into();
+    active.video_task_status = Set(video_bits);
+    active.page_task_status = Set(page_bits);
+    active.download_status = Set(youtube_text_from_task_status(video_bits, page_bits));
+    active.retry_count = Set(0);
+    active.error_message = Set(None);
+    active.is_charge_video = Set(false);
+    active.charge_can_play = Set(false);
+    active.updated_at = Set(now_standard_string());
+    active.update(db).await?;
+    Ok(true)
+}
+
 pub async fn reset_unified_youtube_video(
     db: &DatabaseConnection,
     id: i32,
@@ -2078,23 +2168,15 @@ pub async fn reset_unified_youtube_video(
         .one(db)
         .await?
         .ok_or_else(|| anyhow!("YouTube 视频不存在: {}", id))?;
-    let should_reset = force || video.download_status == "failed" || (video.is_charge_video && !video.charge_can_play);
-    if should_reset {
-        let mut active: youtube_video::ActiveModel = video.into();
-        active.download_status = Set("pending".to_string());
-        active.retry_count = Set(0);
-        active.is_charge_video = Set(false);
-        active.charge_can_play = Set(false);
-        active.error_message = Set(None);
-        active.updated_at = Set(now_standard_string());
-        active.update(db).await?;
+    let resetted = reset_youtube_video_task_bits(db, video, force).await?;
+    if resetted {
         notify_videos_changed();
         notify_queue_status_changed();
         crate::task::resume_scanning();
     }
     let response = get_unified_youtube_video(db, id).await?;
     Ok(ResetVideoResponse {
-        resetted: should_reset,
+        resetted,
         video: response.video,
         pages: response.pages,
     })
@@ -2108,15 +2190,7 @@ pub async fn reset_all_unified_youtube_videos(
     let force = params.force.unwrap_or(false);
     let mut count = 0usize;
     for (video, _, _) in rows {
-        if force || video.download_status == "failed" || (video.is_charge_video && !video.charge_can_play) {
-            let mut active: youtube_video::ActiveModel = video.into();
-            active.download_status = Set("pending".to_string());
-            active.retry_count = Set(0);
-            active.is_charge_video = Set(false);
-            active.charge_can_play = Set(false);
-            active.error_message = Set(None);
-            active.updated_at = Set(now_standard_string());
-            active.update(db).await?;
+        if reset_youtube_video_task_bits(db, video, force).await? {
             count += 1;
         }
     }
@@ -2132,80 +2206,158 @@ pub async fn reset_all_unified_youtube_videos(
     })
 }
 
-/// 外源“编辑状态 / 按任务批量重置”中会当场重建的附属文件种类。
-///
-/// 外源视频数据库只有整条视频一个状态（不像 B 站有独立的子任务状态位），
-/// “视频封面/视频信息(NFO)/UP头像/UP主信息”只是按本地文件实时推导出来的展示项。
-/// 因此把这类子任务重置为“未开始”时，直接删掉对应文件并用最新元数据当场重建，
-/// 不再把整条视频打成 pending —— 否则媒体文件被移走后会被重新下载，
-/// 卡片也会重新显示“未下载”。
-#[derive(Debug, Clone, Copy, Default)]
-struct YoutubeArtifactRegen {
-    cover: bool,
-    nfo: bool,
-    upper_face: bool,
-    upper_info: bool,
-    /// 请求同时要求重跑媒体本体（分P下载/视频内容）→ 走原整体重置流程。
-    media: bool,
-    /// 请求里出现了本实现尚不能当场重建的任务（弹幕/字幕等）→ 回退原流程。
-    unsupported: bool,
-}
-
-impl YoutubeArtifactRegen {
-    fn any(&self) -> bool {
-        self.cover || self.nfo || self.upper_face || self.upper_info
+pub async fn reset_specific_unified_youtube_tasks(
+    db: &DatabaseConnection,
+    request: &ResetSpecificTasksRequest,
+) -> Result<ResetAllVideosResponse, ApiError> {
+    let mut video_indexes = if request.video_task_indexes.is_empty() {
+        request.task_indexes.clone()
+    } else {
+        request.video_task_indexes.clone()
+    };
+    video_indexes.sort_unstable();
+    video_indexes.dedup();
+    let mut page_indexes = request.page_task_indexes.clone();
+    page_indexes.sort_unstable();
+    page_indexes.dedup();
+    if video_indexes.is_empty() && page_indexes.is_empty() {
+        return Err(anyhow!("至少需要选择一个要重置的任务").into());
     }
-}
+    let force = request.force.unwrap_or(false);
 
-/// 把视频级/分页级任务索引折算成外源附属文件重跑项。
-///
-/// 视频级索引：封面0 / 视频信息1 / UP头像2 / UP主信息3 / 分P下载4。
-/// 分页级索引：封面0 / 视频内容1 / 单集NFO2 / 弹幕(直播)3 / 字幕4。
-fn youtube_regen_from_indexes(video_indexes: &[usize], page_indexes: &[usize]) -> YoutubeArtifactRegen {
-    let mut regen = YoutubeArtifactRegen::default();
-    for &index in video_indexes {
-        match index {
-            0 => regen.cover = true,
-            1 => regen.nfo = true,
-            2 => regen.upper_face = true,
-            3 => regen.upper_info = true,
-            4 => regen.media = true,
-            _ => regen.unsupported = true,
+    let params = VideosRequest {
+        platform: request.platform.clone().or_else(|| Some("youtube".to_string())),
+        youtube: request.youtube,
+        query: request.query.clone(),
+        show_failed_only: request.show_failed_only,
+        force: Some(force),
+        ..Default::default()
+    };
+    let rows = filtered_youtube_models(db, &params).await?;
+    let mut count = 0usize;
+    for (video, source, _) in rows {
+        let mut video_status = VideoStatus::from(video.video_task_status);
+        let mut page_status = PageStatus::from(video.page_task_status);
+        let mut changed = false;
+        let mut cleared_video = Vec::new();
+        let mut cleared_page = Vec::new();
+        for &index in &video_indexes {
+            if index < 5 {
+                let current = video_status.get(index);
+                let should_reset = if force { current != 0 } else { (1..6).contains(&current) };
+                if should_reset {
+                    if current == STATUS_OK {
+                        cleared_video.push(index);
+                    }
+                    video_status.set(index, 0);
+                    changed = true;
+                }
+            }
         }
-    }
-    for &index in page_indexes {
-        match index {
-            0 => regen.cover = true,
-            1 => regen.media = true,
-            2 => regen.nfo = true,
-            _ => regen.unsupported = true,
+        for &index in &page_indexes {
+            if index < 5 {
+                let current = page_status.get(index);
+                let should_reset = if force { current != 0 } else { (1..6).contains(&current) };
+                if should_reset {
+                    if current == STATUS_OK {
+                        cleared_page.push(index);
+                    }
+                    page_status.set(index, 0);
+                    changed = true;
+                }
+            }
         }
+        if !changed {
+            continue;
+        }
+        // 从“已完成”打回“未开始”的任务删掉旧产物，worker 下一轮重新生成。
+        if !(cleared_video.is_empty() && cleared_page.is_empty()) {
+            remove_youtube_task_artifact(&video, &source, &cleared_video, &cleared_page).await?;
+        }
+        let video_bits: u32 = video_status.into();
+        let page_bits: u32 = page_status.into();
+        let mut active: youtube_video::ActiveModel = video.into();
+        active.video_task_status = Set(video_bits);
+        active.page_task_status = Set(page_bits);
+        active.download_status = Set(youtube_text_from_task_status(video_bits, page_bits));
+        active.retry_count = Set(0);
+        active.error_message = Set(None);
+        active.updated_at = Set(now_standard_string());
+        active.update(db).await?;
+        count += 1;
     }
-    regen
+    if count > 0 {
+        notify_videos_changed();
+        notify_queue_status_changed();
+        crate::task::resume_scanning();
+    }
+    Ok(ResetAllVideosResponse {
+        resetted: count > 0,
+        resetted_videos_count: count,
+        resetted_pages_count: count,
+    })
 }
 
-/// 把“置为未开始”的状态更新折算成要当场重建的附属文件。
-fn youtube_regen_from_status_updates(request: &UpdateVideoStatusRequest) -> YoutubeArtifactRegen {
-    let mut video_indexes = Vec::new();
-    let mut page_indexes = Vec::new();
+pub async fn update_unified_youtube_status(
+    db: &DatabaseConnection,
+    id: i32,
+    request: &UpdateVideoStatusRequest,
+) -> Result<UpdateVideoStatusResponse, ApiError> {
+    let video = youtube_video::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or_else(|| anyhow!("YouTube 视频不存在: {}", id))?;
+    let mut video_status = VideoStatus::from(video.video_task_status);
+    let mut page_status = PageStatus::from(video.page_task_status);
+    let mut changed = false;
+
+    // 与 B 站 update_video_status 一致：直接覆盖对应子任务状态位。
     for update in &request.video_updates {
-        if update.status_value == 0 {
-            video_indexes.push(update.status_index);
-        }
-    }
-    for page in &request.page_updates {
-        for update in &page.updates {
-            if update.status_value == 0 {
-                page_indexes.push(update.status_index);
+        if update.status_index < 5 {
+            if video_status.get(update.status_index) != update.status_value {
+                video_status.set(update.status_index, update.status_value);
+                changed = true;
             }
         }
     }
-    youtube_regen_from_indexes(&video_indexes, &page_indexes)
+    for page in &request.page_updates {
+        // 外源视频只有一条合成页面，page_id 即视频 id。
+        for update in &page.updates {
+            if update.status_index < 5 {
+                if page_status.get(update.status_index) != update.status_value {
+                    page_status.set(update.status_index, update.status_value);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if changed {
+        let video_bits: u32 = video_status.into();
+        let page_bits: u32 = page_status.into();
+        let mut active: youtube_video::ActiveModel = video.into();
+        active.video_task_status = Set(video_bits);
+        active.page_task_status = Set(page_bits);
+        active.download_status = Set(youtube_text_from_task_status(video_bits, page_bits));
+        active.retry_count = Set(0);
+        active.error_message = Set(None);
+        active.updated_at = Set(now_standard_string());
+        active.update(db).await?;
+        notify_videos_changed();
+        notify_queue_status_changed();
+        // 有任务回到未开始/失败 → 让 worker 下一轮处理。
+        crate::task::resume_scanning();
+    }
+    let response = get_unified_youtube_video(db, id).await?;
+    Ok(UpdateVideoStatusResponse {
+        success: true,
+        video: response.video,
+        pages: response.pages,
+    })
 }
 
-/// 当场重建外源视频的附属文件（封面/NFO/UP头像/UP主信息）。
-///
-/// - 不动整条视频的下载状态（已完成仍保持已完成）；
+/// 当场重建外源视频的附属文件（封面/NFO/UP头像/UP主信息）——供 worker 的
+/// “只重跑附属文件”路径使用。不动媒体本体。
 /// - 重建前先重新解析平台元数据，解析失败时不动现有文件；
 /// - 每个下载函数只补生成缺失的文件，因此只会重建被“重置”的那部分。
 async fn regenerate_youtube_artifacts(
@@ -2306,184 +2458,6 @@ async fn regenerate_youtube_artifacts(
             .with_context(|| format!("重新生成{platform}UP头像/UP主信息失败"))?;
     }
     Ok(())
-}
-
-pub async fn reset_specific_unified_youtube_tasks(
-    db: &DatabaseConnection,
-    request: &ResetSpecificTasksRequest,
-) -> Result<ResetAllVideosResponse, ApiError> {
-    // 外源视频只有整条视频一个整体状态（不像 B 站有每个子任务的独立状态位）。
-    // 当“强制重置 + 只选了封面/视频信息/UP头像/UP主信息”这类附属文件任务时，
-    // 直接重建对应文件即可，不再把整条视频打成 pending —— 否则媒体被移走的
-    // 已完成视频会被重新加入下载队列，卡片也会重新显示“未下载”。
-    let mut video_indexes = if request.video_task_indexes.is_empty() {
-        request.task_indexes.clone()
-    } else {
-        request.video_task_indexes.clone()
-    };
-    video_indexes.sort_unstable();
-    video_indexes.dedup();
-    let mut page_indexes = request.page_task_indexes.clone();
-    page_indexes.sort_unstable();
-    page_indexes.dedup();
-
-    let regen = youtube_regen_from_indexes(&video_indexes, &page_indexes);
-    let has_specific_indexes = !video_indexes.is_empty() || !page_indexes.is_empty();
-    if request.force.unwrap_or(false)
-        && has_specific_indexes
-        && regen.any()
-        && !regen.media
-        && !regen.unsupported
-    {
-        let params = VideosRequest {
-            platform: request.platform.clone().or_else(|| Some("youtube".to_string())),
-            youtube: request.youtube,
-            query: request.query.clone(),
-            show_failed_only: request.show_failed_only,
-            force: Some(true),
-            ..Default::default()
-        };
-        let rows = filtered_youtube_models(db, &params).await?;
-        let targets = rows
-            .into_iter()
-            .map(|(video, _, _)| video)
-            .filter(|video| {
-                video.download_status == "completed"
-                    && video
-                        .output_path
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty())
-            })
-            .collect::<Vec<_>>();
-        if targets.is_empty() {
-            // 没有“已完成”的目标（例如全部是失败任务）：退回原整体重置流程。
-            return reset_all_unified_youtube_videos(db, &params).await;
-        }
-        let db = db.clone();
-        let results = stream::iter(targets)
-            .map(|video| {
-                let db = db.clone();
-                async move {
-                    match regenerate_youtube_artifacts(&db, video.clone(), regen).await {
-                        Ok(()) => Ok(video.id),
-                        Err(error) => Err((video.id, error)),
-                    }
-                }
-            })
-            .buffered(2)
-            .collect::<Vec<_>>()
-            .await;
-        let mut resetted = 0usize;
-        let mut first_error: Option<anyhow::Error> = None;
-        for result in results {
-            match result {
-                Ok(_) => resetted += 1,
-                Err((video_id, error)) => {
-                    warn!(video_id, error = %error, "外源视频附属文件重建失败");
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-            }
-        }
-        if resetted == 0 {
-            if let Some(error) = first_error {
-                return Err(anyhow!("外源附属文件重置失败：{error:#}").into());
-            }
-            return Ok(ResetAllVideosResponse {
-                resetted: false,
-                resetted_videos_count: 0,
-                resetted_pages_count: 0,
-            });
-        }
-        if let Some(error) = first_error {
-            warn!(resetted, error = %error, "部分外源视频附属文件重建失败，其余已成功");
-        }
-        notify_videos_changed();
-        return Ok(ResetAllVideosResponse {
-            resetted: true,
-            resetted_videos_count: resetted,
-            resetted_pages_count: 0,
-        });
-    }
-
-    // 其余情况（整源重置、只重置失败任务、需要重下媒体等）沿用整体重置流程。
-    let params = VideosRequest {
-        platform: request.platform.clone().or_else(|| Some("youtube".to_string())),
-        youtube: request.youtube,
-        query: request.query.clone(),
-        show_failed_only: request.show_failed_only,
-        force: request.force,
-        ..Default::default()
-    };
-    reset_all_unified_youtube_videos(db, &params).await
-}
-
-pub async fn update_unified_youtube_status(
-    db: &DatabaseConnection,
-    id: i32,
-    request: &UpdateVideoStatusRequest,
-) -> Result<UpdateVideoStatusResponse, ApiError> {
-    let video = youtube_video::Entity::find_by_id(id)
-        .one(db)
-        .await?
-        .ok_or_else(|| anyhow!("YouTube 视频不存在: {}", id))?;
-
-    // 外源附属文件任务：把“封面/视频信息/UP头像/UP主信息”置为未开始时当场重建，
-    // 不把整条视频打成 pending（避免媒体被移走的已完成视频重新下载/显示未下载）。
-    let has_updates = !request.video_updates.is_empty() || !request.page_updates.is_empty();
-    let all_to_zero = has_updates
-        && request
-            .video_updates
-            .iter()
-            .chain(request.page_updates.iter().flat_map(|page| page.updates.iter()))
-            .all(|update| update.status_value == 0);
-    let regen = youtube_regen_from_status_updates(request);
-    if video.download_status == "completed"
-        && all_to_zero
-        && regen.any()
-        && !regen.media
-        && !regen.unsupported
-    {
-        regenerate_youtube_artifacts(db, video, regen).await?;
-        notify_videos_changed();
-        let response = get_unified_youtube_video(db, id).await?;
-        return Ok(UpdateVideoStatusResponse {
-            success: true,
-            video: response.video,
-            pages: response.pages,
-        });
-    }
-
-    let values = request
-        .video_updates
-        .iter()
-        .chain(request.page_updates.iter().flat_map(|page| page.updates.iter()))
-        .map(|update| update.status_value)
-        .collect::<Vec<_>>();
-    let status = if values.iter().any(|value| (1..=6).contains(value)) {
-        "failed"
-    } else if !values.is_empty() && values.iter().all(|value| *value == 7) {
-        "completed"
-    } else {
-        "pending"
-    };
-    let mut active: youtube_video::ActiveModel = video.into();
-    active.download_status = Set(status.to_string());
-    active.retry_count = Set(if status == "failed" { 1 } else { 0 });
-    active.error_message = Set(None);
-    active.updated_at = Set(now_standard_string());
-    active.update(db).await?;
-    notify_videos_changed();
-    if status == "pending" {
-        crate::task::resume_scanning();
-    }
-    let response = get_unified_youtube_video(db, id).await?;
-    Ok(UpdateVideoStatusResponse {
-        success: true,
-        video: response.video,
-        pages: response.pages,
-    })
 }
 
 pub async fn delete_unified_youtube_video(db: &DatabaseConnection, id: i32) -> Result<DeleteVideoResponse, ApiError> {
@@ -3229,6 +3203,75 @@ async fn download_pending(
     Ok(())
 }
 
+/// worker 的“只重跑附属文件”路径（不下载媒体）。
+/// 触发条件：媒体位（视频4/分页1）已完成，封面/NFO/UP头像/UP主信息等子任务位需要重跑。
+async fn run_youtube_sidecar_tasks(db: &DatabaseConnection, video: youtube_video::Model) -> Result<()> {
+    let Some(source) = youtube_source::Entity::find_by_id(video.source_id).one(db).await? else {
+        return Ok(());
+    };
+    let platform = source_platform_label(&source);
+    let video_run = VideoStatus::from(video.video_task_status).should_run();
+    let page_run = PageStatus::from(video.page_task_status).should_run();
+    let mut regen = YoutubeArtifactRegen::default();
+    if video_run[0] || page_run[0] {
+        regen.cover = true;
+    }
+    if video_run[1] || page_run[2] {
+        regen.nfo = true;
+    }
+    if video_run[2] {
+        regen.upper_face = true;
+    }
+    if video_run[3] {
+        regen.upper_info = true;
+    }
+    if regen.any() {
+        if let Err(error) = regenerate_youtube_artifacts(db, video.clone(), regen).await {
+            // 失败落库为 failed，不进入无限重试；用户可再次重置触发。
+            let mut active: youtube_video::ActiveModel = video.clone().into();
+            active.retry_count = Set(video.retry_count.saturating_add(1));
+            active.download_status = Set("failed".to_string());
+            active.error_message = Set(Some(format!("{error:#}")));
+            active.updated_at = Set(now_standard_string());
+            active.update(db).await?;
+            notify_videos_changed();
+            return Err(error);
+        }
+    }
+    // 成功后：本次需要重建的任务 + 禁用/未实现的可选任务全部置为已完成。
+    let mut video_status = VideoStatus::from(video.video_task_status);
+    let mut page_status = PageStatus::from(video.page_task_status);
+    for index in 0..5 {
+        if video_status.get(index) < STATUS_OK {
+            video_status.set(index, STATUS_OK);
+        }
+        if page_status.get(index) < STATUS_OK {
+            page_status.set(index, STATUS_OK);
+        }
+    }
+    let video_bits: u32 = video_status.into();
+    let page_bits: u32 = page_status.into();
+    info!(
+        platform,
+        source_id = source.id,
+        youtube_id = %video.youtube_id,
+        "{}视频源「{}」视频「{}」附属文件重建完成",
+        platform,
+        source.name,
+        video.title
+    );
+    let mut active: youtube_video::ActiveModel = video.clone().into();
+    active.video_task_status = Set(video_bits);
+    active.page_task_status = Set(page_bits);
+    active.download_status = Set(youtube_text_from_task_status(video_bits, page_bits));
+    active.retry_count = Set(0);
+    active.error_message = Set(None);
+    active.updated_at = Set(now_standard_string());
+    active.update(db).await?;
+    notify_videos_changed();
+    Ok(())
+}
+
 async fn download_video(
     db: &DatabaseConnection,
     downloader: &UnifiedDownloader,
@@ -3257,6 +3300,26 @@ async fn download_video(
     crate::download_progress::DOWNLOAD_PROGRESS
         .begin_task(&progress_key, progress_platform, &video.title, "下载中", "")
         .await;
+
+    // B 站式按位调度：媒体（视频4/分页1）已完成、只有封面/NFO/头像等附属子任务
+    // 需要重跑时，只重建附属文件，绝不重新下载媒体 —— 媒体被移走的已完成视频
+    // 也不会被重新拉回下载队列。
+    let video_status = VideoStatus::from(video.video_task_status);
+    let page_status = PageStatus::from(video.page_task_status);
+    let video_run = video_status.should_run();
+    let page_run = page_status.should_run();
+    let media_pending = video_run[4] || page_run[1];
+    let sidecar_pending = video_run[0]
+        || video_run[1]
+        || video_run[2]
+        || video_run[3]
+        || page_run[0]
+        || page_run[2]
+        || page_run[3]
+        || page_run[4];
+    if !media_pending && sidecar_pending {
+        return run_youtube_sidecar_tasks(db, video).await;
+    }
     loop {
         info!(
             platform = platform_label,
@@ -3285,6 +3348,8 @@ async fn download_video(
                     // 与 B 站充电视频一致：标记为付费/加密且当前不可播放，生成 0 字节
                     // 占位文件并把下载状态记为已完成（UI 显示充电视频徽标而非失败）。
                     let mut paid: youtube_video::ActiveModel = video.clone().into();
+                    paid.video_task_status = Set(youtube_all_tasks_ok_bits());
+                    paid.page_task_status = Set(youtube_all_tasks_ok_bits());
                     paid.download_status = Set("completed".to_string());
                     paid.retry_count = Set(0);
                     paid.is_charge_video = Set(true);
@@ -3311,6 +3376,8 @@ async fn download_video(
                     // 未达到最低分辨率等主动跳过场景：标记为 skipped 并写入警告，
                     // 不进入 failed，也不保留不存在的输出路径。
                     let mut skipped: youtube_video::ActiveModel = video.clone().into();
+                    skipped.video_task_status = Set(youtube_all_tasks_ok_bits());
+                    skipped.page_task_status = Set(youtube_all_tasks_ok_bits());
                     skipped.download_status = Set("skipped".to_string());
                     skipped.retry_count = Set(0);
                     skipped.output_path = Set(None);
@@ -3356,6 +3423,8 @@ async fn download_video(
                         }
                     }
                 }
+                active.video_task_status = Set(youtube_all_tasks_ok_bits());
+                active.page_task_status = Set(youtube_all_tasks_ok_bits());
                 active.download_status = Set("completed".to_string());
                 active.retry_count = Set(0);
                 active.output_path = Set(Some(downloaded.output_path.display().to_string()));
@@ -7147,6 +7216,8 @@ mod tests {
             is_story: false,
             is_charge_video: false,
             charge_can_play: false,
+            video_task_status: super::youtube_all_tasks_ok_bits(),
+            page_task_status: super::youtube_all_tasks_ok_bits(),
             download_status: "completed".to_string(),
             retry_count: 0,
             output_path: Some("Z:/__not_exists__/abc123.mp4".to_string()),
@@ -7463,40 +7534,45 @@ mod tests {
     }
 
     #[test]
-    fn youtube_regen_maps_artifact_indexes() {
-        // 视频级：封面0 / 视频信息1 / UP头像2 / UP主信息3；分P下载4 属媒体。
-        let regen = super::youtube_regen_from_indexes(&[0], &[]);
-        assert!(regen.cover && !regen.nfo && !regen.media && !regen.unsupported);
-        let regen = super::youtube_regen_from_indexes(&[1], &[2]);
-        assert!(regen.nfo && !regen.cover && !regen.media && !regen.unsupported, "视频信息与分页NFO都应映射为 nfo");
-        let regen = super::youtube_regen_from_indexes(&[2, 3], &[]);
-        assert!(regen.upper_face && regen.upper_info);
-        let regen = super::youtube_regen_from_indexes(&[4], &[1]);
-        assert!(regen.media && !regen.nfo, "分P下载/视频内容属媒体，回退整体重置");
-        // 弹幕/字幕目前不当作可当场重建的附属文件 → 标记 unsupported 回退原流程。
-        let regen = super::youtube_regen_from_indexes(&[], &[3, 4]);
-        assert!(regen.unsupported && !regen.any());
+    fn youtube_task_status_text_derives_like_bilibili() {
+        // 全部子任务 7 + 完成位 → completed。
+        let ok = super::youtube_all_tasks_ok_bits();
+        assert_eq!(super::youtube_text_from_task_status(ok, ok), "completed");
+        // 任一子任务为 0 → pending。
+        assert_eq!(super::youtube_text_from_task_status(0, ok), "pending");
+        assert_eq!(super::youtube_text_from_task_status(ok, 0), "pending");
+        // 子任务带失败计数 → failed。
+        let mut video = super::VideoStatus::default();
+        video.set(4, 2);
+        let video_bits: u32 = video.into();
+        assert_eq!(super::youtube_text_from_task_status(video_bits, ok), "failed");
     }
 
-    #[test]
-    fn youtube_regen_from_status_updates_ignores_completed_flags() {
-        use crate::api::request::{PageStatusUpdate, StatusUpdate, UpdateVideoStatusRequest};
-        let request = UpdateVideoStatusRequest {
-            video_updates: vec![StatusUpdate { status_index: 1, status_value: 0 }],
-            page_updates: vec![],
-        };
-        let regen = super::youtube_regen_from_status_updates(&request);
-        assert!(regen.nfo && regen.any() && !regen.media && !regen.unsupported);
-        // 标记为已完成(7) 不折算成重建请求。
-        let request = UpdateVideoStatusRequest {
-            video_updates: vec![StatusUpdate { status_index: 1, status_value: 7 }],
-            page_updates: vec![PageStatusUpdate {
-                page_id: 1,
-                updates: vec![StatusUpdate { status_index: 0, status_value: 0 }],
-            }],
-        };
-        let regen = super::youtube_regen_from_status_updates(&request);
-        assert!(regen.cover && !regen.nfo);
+    #[tokio::test]
+    async fn youtube_artifact_status_reads_task_bits_not_files() {
+        // 已下载完成的外源视频：即使媒体文件被移走，任务位仍是完成，
+        // 卡片状态保持“全部完成”（与 B 站一致），不会重新显示“未下载”。
+        let mut video = super::youtube_video::Model::default();
+        video.download_status = "completed".to_string();
+        video.output_path = Some("Z:/__not_exists__/abc123.mp4".to_string());
+        let ok = super::youtube_all_tasks_ok_bits();
+        video.video_task_status = ok;
+        video.page_task_status = ok;
+        let source = sample_external_source("douyin");
+        let (video_status, page_status) = super::youtube_artifact_status(&video, &source).await;
+        assert_eq!(video_status, [7, 7, 7, 7, 7], "已完成视频文件被移走后应保持全部完成");
+        assert_eq!(page_status, [7, 7, 7, 7, 7], "分页状态同样应保持全部完成");
+
+        // 只重置“视频信息”(视频1/分页2) → 仅该任务回到未开始，媒体(视频4)仍完成。
+        let mut video = video;
+        let mut vstatus = super::VideoStatus::from(video.video_task_status);
+        let mut pstatus = super::PageStatus::from(video.page_task_status);
+        vstatus.set(1, 0);
+        pstatus.set(2, 0);
+        video.video_task_status = vstatus.into();
+        video.page_task_status = pstatus.into();
+        let (video_status, _) = super::youtube_artifact_status(&video, &source).await;
+        assert_eq!(video_status, [7, 0, 7, 7, 7], "重置视频信息后媒体仍应为已完成");
     }
 
     #[test]

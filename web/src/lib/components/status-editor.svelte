@@ -234,7 +234,7 @@
 				</div>
 				{#if isExternal}
 					<div class="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-blue-800">
-						💡 外源视频：把<strong>封面 / 视频信息 / UP头像 / UP主信息</strong>设为“未开始”会立即重新生成对应附属文件，不会重下媒体，也不会改变整条视频的完成状态；只有重置<strong>“分P下载”</strong>才会触发媒体重新下载。
+						💡 外源视频与 B 站一致按“子任务状态”调度：把<strong>封面 / 视频信息 / UP头像 / UP主信息</strong>设为“未开始”后，下载任务会只重新生成对应附属文件，不会重下媒体、也不会动已完成的分P下载；只有把<strong>“分P下载”</strong>设为未开始才会触发媒体重新下载。
 					</div>
 				{/if}
 				<div class="status-editor-desktop-warning hidden font-medium text-red-600 sm:block">
