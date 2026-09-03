@@ -2132,10 +2132,282 @@ pub async fn reset_all_unified_youtube_videos(
     })
 }
 
+/// 外源“编辑状态 / 按任务批量重置”中会当场重建的附属文件种类。
+///
+/// 外源视频数据库只有整条视频一个状态（不像 B 站有独立的子任务状态位），
+/// “视频封面/视频信息(NFO)/UP头像/UP主信息”只是按本地文件实时推导出来的展示项。
+/// 因此把这类子任务重置为“未开始”时，直接删掉对应文件并用最新元数据当场重建，
+/// 不再把整条视频打成 pending —— 否则媒体文件被移走后会被重新下载，
+/// 卡片也会重新显示“未下载”。
+#[derive(Debug, Clone, Copy, Default)]
+struct YoutubeArtifactRegen {
+    cover: bool,
+    nfo: bool,
+    upper_face: bool,
+    upper_info: bool,
+    /// 请求同时要求重跑媒体本体（分P下载/视频内容）→ 走原整体重置流程。
+    media: bool,
+    /// 请求里出现了本实现尚不能当场重建的任务（弹幕/字幕等）→ 回退原流程。
+    unsupported: bool,
+}
+
+impl YoutubeArtifactRegen {
+    fn any(&self) -> bool {
+        self.cover || self.nfo || self.upper_face || self.upper_info
+    }
+}
+
+/// 把视频级/分页级任务索引折算成外源附属文件重跑项。
+///
+/// 视频级索引：封面0 / 视频信息1 / UP头像2 / UP主信息3 / 分P下载4。
+/// 分页级索引：封面0 / 视频内容1 / 单集NFO2 / 弹幕(直播)3 / 字幕4。
+fn youtube_regen_from_indexes(video_indexes: &[usize], page_indexes: &[usize]) -> YoutubeArtifactRegen {
+    let mut regen = YoutubeArtifactRegen::default();
+    for &index in video_indexes {
+        match index {
+            0 => regen.cover = true,
+            1 => regen.nfo = true,
+            2 => regen.upper_face = true,
+            3 => regen.upper_info = true,
+            4 => regen.media = true,
+            _ => regen.unsupported = true,
+        }
+    }
+    for &index in page_indexes {
+        match index {
+            0 => regen.cover = true,
+            1 => regen.media = true,
+            2 => regen.nfo = true,
+            _ => regen.unsupported = true,
+        }
+    }
+    regen
+}
+
+/// 把“置为未开始”的状态更新折算成要当场重建的附属文件。
+fn youtube_regen_from_status_updates(request: &UpdateVideoStatusRequest) -> YoutubeArtifactRegen {
+    let mut video_indexes = Vec::new();
+    let mut page_indexes = Vec::new();
+    for update in &request.video_updates {
+        if update.status_value == 0 {
+            video_indexes.push(update.status_index);
+        }
+    }
+    for page in &request.page_updates {
+        for update in &page.updates {
+            if update.status_value == 0 {
+                page_indexes.push(update.status_index);
+            }
+        }
+    }
+    youtube_regen_from_indexes(&video_indexes, &page_indexes)
+}
+
+/// 当场重建外源视频的附属文件（封面/NFO/UP头像/UP主信息）。
+///
+/// - 不动整条视频的下载状态（已完成仍保持已完成）；
+/// - 重建前先重新解析平台元数据，解析失败时不动现有文件；
+/// - 每个下载函数只补生成缺失的文件，因此只会重建被“重置”的那部分。
+async fn regenerate_youtube_artifacts(
+    db: &DatabaseConnection,
+    video: youtube_video::Model,
+    regen: YoutubeArtifactRegen,
+) -> Result<()> {
+    let Some(source) = youtube_source::Entity::find_by_id(video.source_id).one(db).await? else {
+        bail!("视频源不存在（source_id={}）", video.source_id);
+    };
+    let platform = source_platform_label(&source);
+    let Some(output_path) = video
+        .output_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+    else {
+        bail!("该视频还没有已下载的媒体文件，无法重建{platform}附属文件（请先完成下载）");
+    };
+    let metadata = if regen.cover || regen.nfo {
+        let metadata = extract_youtube_metadata(&video.url, Some(&source))
+            .await
+            .with_context(|| format!("重新解析{platform}元数据失败"))?;
+        Some(metadata)
+    } else {
+        None
+    };
+    if regen.cover || regen.nfo {
+        let parent = output_path
+            .parent()
+            .ok_or_else(|| anyhow!("{platform}媒体路径无效：{}", output_path.display()))?;
+        if !parent.is_dir() {
+            bail!(
+                "{platform}媒体目录不存在：{}（文件可能已被整体移走，请先恢复文件或重新下载）",
+                parent.display()
+            );
+        }
+    }
+    let downloader = TASK_CONTROLLER.get_downloader().await;
+    if regen.cover {
+        let downloader = downloader
+            .as_deref()
+            .ok_or_else(|| anyhow!("下载器尚未就绪，请稍后重试"))?;
+        let thumb = youtube_sidecar_path(&output_path, "-thumb.jpg")?;
+        let fanart = youtube_sidecar_path(&output_path, "-fanart.jpg")?;
+        remove_file_if_exists(&thumb).await?;
+        remove_file_if_exists(&fanart).await?;
+        download_youtube_cover(
+            downloader,
+            metadata.as_ref().expect("封面重建需要元数据"),
+            &output_path,
+            &source,
+        )
+        .await
+        .with_context(|| format!("重新生成{platform}封面失败"))?;
+    }
+    if regen.nfo {
+        if !crate::config::reload_config().nfo_config.enabled {
+            bail!("{platform} NFO 生成已在设置中关闭，无法重新生成（原文件未删除）");
+        }
+        let nfo_path = output_path.with_extension("nfo");
+        remove_file_if_exists(&nfo_path).await?;
+        let metadata = metadata.as_ref().expect("NFO 重建需要元数据");
+        generate_youtube_nfo(metadata, &output_path, &video.url, &video.title, &video.uploader, &source)
+            .await
+            .with_context(|| format!("重新生成{platform}视频信息/NFO失败"))?;
+        // 抖音短剧/放映厅/合集是番剧结构：单集 NFO 之外还要刷新剧集 tvshow.nfo。
+        if is_episodic_douyin_source(&source) {
+            if let (Some(season_dir), Some(downloader)) = (output_path.parent(), downloader.as_deref()) {
+                if let Some(series_dir) = season_dir.parent() {
+                    let tvshow = series_dir.join("tvshow.nfo");
+                    remove_file_if_exists(&tvshow).await?;
+                    if let Err(error) =
+                        ensure_youtube_series_sidecars(downloader, metadata, &output_path, &source).await
+                    {
+                        warn!(platform, %error, "{platform}剧集 tvshow.nfo 重建失败（单集 NFO 已更新）");
+                    }
+                }
+            }
+        }
+    }
+    if regen.upper_face || regen.upper_info {
+        let downloader = downloader
+            .as_deref()
+            .ok_or_else(|| anyhow!("下载器尚未就绪，请稍后重试"))?;
+        let (face_path, person_nfo_path) = youtube_upper_paths(&video.uploader);
+        if regen.upper_face {
+            remove_file_if_exists(&face_path).await?;
+        }
+        if regen.upper_info {
+            remove_file_if_exists(&person_nfo_path).await?;
+        }
+        let profile_url = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.channel_url.as_deref().or(metadata.uploader_url.as_deref()));
+        download_youtube_upper_face(downloader, &video.uploader, profile_url, &source)
+            .await
+            .with_context(|| format!("重新生成{platform}UP头像/UP主信息失败"))?;
+    }
+    Ok(())
+}
+
 pub async fn reset_specific_unified_youtube_tasks(
     db: &DatabaseConnection,
     request: &ResetSpecificTasksRequest,
 ) -> Result<ResetAllVideosResponse, ApiError> {
+    // 外源视频只有整条视频一个整体状态（不像 B 站有每个子任务的独立状态位）。
+    // 当“强制重置 + 只选了封面/视频信息/UP头像/UP主信息”这类附属文件任务时，
+    // 直接重建对应文件即可，不再把整条视频打成 pending —— 否则媒体被移走的
+    // 已完成视频会被重新加入下载队列，卡片也会重新显示“未下载”。
+    let mut video_indexes = if request.video_task_indexes.is_empty() {
+        request.task_indexes.clone()
+    } else {
+        request.video_task_indexes.clone()
+    };
+    video_indexes.sort_unstable();
+    video_indexes.dedup();
+    let mut page_indexes = request.page_task_indexes.clone();
+    page_indexes.sort_unstable();
+    page_indexes.dedup();
+
+    let regen = youtube_regen_from_indexes(&video_indexes, &page_indexes);
+    let has_specific_indexes = !video_indexes.is_empty() || !page_indexes.is_empty();
+    if request.force.unwrap_or(false)
+        && has_specific_indexes
+        && regen.any()
+        && !regen.media
+        && !regen.unsupported
+    {
+        let params = VideosRequest {
+            platform: request.platform.clone().or_else(|| Some("youtube".to_string())),
+            youtube: request.youtube,
+            query: request.query.clone(),
+            show_failed_only: request.show_failed_only,
+            force: Some(true),
+            ..Default::default()
+        };
+        let rows = filtered_youtube_models(db, &params).await?;
+        let targets = rows
+            .into_iter()
+            .map(|(video, _, _)| video)
+            .filter(|video| {
+                video.download_status == "completed"
+                    && video
+                        .output_path
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            // 没有“已完成”的目标（例如全部是失败任务）：退回原整体重置流程。
+            return reset_all_unified_youtube_videos(db, &params).await;
+        }
+        let db = db.clone();
+        let results = stream::iter(targets)
+            .map(|video| {
+                let db = db.clone();
+                async move {
+                    match regenerate_youtube_artifacts(&db, video.clone(), regen).await {
+                        Ok(()) => Ok(video.id),
+                        Err(error) => Err((video.id, error)),
+                    }
+                }
+            })
+            .buffered(2)
+            .collect::<Vec<_>>()
+            .await;
+        let mut resetted = 0usize;
+        let mut first_error: Option<anyhow::Error> = None;
+        for result in results {
+            match result {
+                Ok(_) => resetted += 1,
+                Err((video_id, error)) => {
+                    warn!(video_id, error = %error, "外源视频附属文件重建失败");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if resetted == 0 {
+            if let Some(error) = first_error {
+                return Err(anyhow!("外源附属文件重置失败：{error:#}").into());
+            }
+            return Ok(ResetAllVideosResponse {
+                resetted: false,
+                resetted_videos_count: 0,
+                resetted_pages_count: 0,
+            });
+        }
+        if let Some(error) = first_error {
+            warn!(resetted, error = %error, "部分外源视频附属文件重建失败，其余已成功");
+        }
+        notify_videos_changed();
+        return Ok(ResetAllVideosResponse {
+            resetted: true,
+            resetted_videos_count: resetted,
+            resetted_pages_count: 0,
+        });
+    }
+
+    // 其余情况（整源重置、只重置失败任务、需要重下媒体等）沿用整体重置流程。
     let params = VideosRequest {
         platform: request.platform.clone().or_else(|| Some("youtube".to_string())),
         youtube: request.youtube,
@@ -2156,6 +2428,33 @@ pub async fn update_unified_youtube_status(
         .one(db)
         .await?
         .ok_or_else(|| anyhow!("YouTube 视频不存在: {}", id))?;
+
+    // 外源附属文件任务：把“封面/视频信息/UP头像/UP主信息”置为未开始时当场重建，
+    // 不把整条视频打成 pending（避免媒体被移走的已完成视频重新下载/显示未下载）。
+    let has_updates = !request.video_updates.is_empty() || !request.page_updates.is_empty();
+    let all_to_zero = has_updates
+        && request
+            .video_updates
+            .iter()
+            .chain(request.page_updates.iter().flat_map(|page| page.updates.iter()))
+            .all(|update| update.status_value == 0);
+    let regen = youtube_regen_from_status_updates(request);
+    if video.download_status == "completed"
+        && all_to_zero
+        && regen.any()
+        && !regen.media
+        && !regen.unsupported
+    {
+        regenerate_youtube_artifacts(db, video, regen).await?;
+        notify_videos_changed();
+        let response = get_unified_youtube_video(db, id).await?;
+        return Ok(UpdateVideoStatusResponse {
+            success: true,
+            video: response.video,
+            pages: response.pages,
+        });
+    }
+
     let values = request
         .video_updates
         .iter()
@@ -7161,6 +7460,43 @@ mod tests {
         let metadata: ExternalMediaMetadata =
             serde_json::from_str(r#"{"id":"v1"}"#).expect("metadata 应可解析");
         assert_eq!(super::youtube_co_creators(&metadata, "主频道"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn youtube_regen_maps_artifact_indexes() {
+        // 视频级：封面0 / 视频信息1 / UP头像2 / UP主信息3；分P下载4 属媒体。
+        let regen = super::youtube_regen_from_indexes(&[0], &[]);
+        assert!(regen.cover && !regen.nfo && !regen.media && !regen.unsupported);
+        let regen = super::youtube_regen_from_indexes(&[1], &[2]);
+        assert!(regen.nfo && !regen.cover && !regen.media && !regen.unsupported, "视频信息与分页NFO都应映射为 nfo");
+        let regen = super::youtube_regen_from_indexes(&[2, 3], &[]);
+        assert!(regen.upper_face && regen.upper_info);
+        let regen = super::youtube_regen_from_indexes(&[4], &[1]);
+        assert!(regen.media && !regen.nfo, "分P下载/视频内容属媒体，回退整体重置");
+        // 弹幕/字幕目前不当作可当场重建的附属文件 → 标记 unsupported 回退原流程。
+        let regen = super::youtube_regen_from_indexes(&[], &[3, 4]);
+        assert!(regen.unsupported && !regen.any());
+    }
+
+    #[test]
+    fn youtube_regen_from_status_updates_ignores_completed_flags() {
+        use crate::api::request::{PageStatusUpdate, StatusUpdate, UpdateVideoStatusRequest};
+        let request = UpdateVideoStatusRequest {
+            video_updates: vec![StatusUpdate { status_index: 1, status_value: 0 }],
+            page_updates: vec![],
+        };
+        let regen = super::youtube_regen_from_status_updates(&request);
+        assert!(regen.nfo && regen.any() && !regen.media && !regen.unsupported);
+        // 标记为已完成(7) 不折算成重建请求。
+        let request = UpdateVideoStatusRequest {
+            video_updates: vec![StatusUpdate { status_index: 1, status_value: 7 }],
+            page_updates: vec![PageStatusUpdate {
+                page_id: 1,
+                updates: vec![StatusUpdate { status_index: 0, status_value: 0 }],
+            }],
+        };
+        let regen = super::youtube_regen_from_status_updates(&request);
+        assert!(regen.cover && !regen.nfo);
     }
 
     #[test]

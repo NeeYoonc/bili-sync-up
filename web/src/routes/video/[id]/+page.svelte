@@ -1309,6 +1309,7 @@
 			video={videoData.video}
 			pages={videoData.pages}
 			loading={statusEditorLoading}
+			isExternal={isExternal}
 			onsubmit={handleStatusEditorSubmit}
 		/>
 	{/if}
