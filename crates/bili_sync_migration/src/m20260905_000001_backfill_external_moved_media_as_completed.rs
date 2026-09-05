@@ -41,18 +41,19 @@ impl MigrationTrait for Migration {
             let Some(output_path) = output_path else { continue };
             let media = Path::new(&output_path);
             let nfo_path = media.with_extension("nfo");
+            let nfo_ok = nfo_path.is_file() && std::fs::metadata(&nfo_path).is_ok_and(|meta| meta.len() > 0);
             match std::fs::metadata(media) {
                 // 文件已不在盘上：output_path 非空即代表曾经完整下载成功过
-                //（旧版只在成功时写 output_path），媒体被移走/归档不重复下载。
-                Err(_) => ids.push(id),
+                //（旧版只在成功时写 output_path）。仅当 NFO 仍留在原地时才标完成
+                //（典型场景：视频本体被移走/替换成网盘 .strm，NFO/封面仍在媒体库）。
+                // 若 NFO 也一起消失（强制重置“全部任务”会同时删掉媒体与 NFO），
+                // 说明用户可能正在等待重新下载，保持 pending 不误标。
+                Err(_) if nfo_ok => ids.push(id),
+                Err(_) => {}
                 Ok(meta) => {
                     // 文件在盘：要求 NFO 也已生成（曾完整跑完下载流程），
                     // 避免把中断留下的半成品误标为已完成。
-                    if meta.is_file()
-                        && meta.len() > 0
-                        && nfo_path.is_file()
-                        && std::fs::metadata(&nfo_path).is_ok_and(|meta| meta.len() > 0)
-                    {
+                    if meta.is_file() && meta.len() > 0 && nfo_ok {
                         ids.push(id);
                     }
                 }
