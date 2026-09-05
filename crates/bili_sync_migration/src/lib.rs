@@ -84,6 +84,7 @@ mod m20260821_000001_add_video_skip_reason;
 mod m20260826_000001_add_youtube_video_story;
 mod m20260903_000001_add_youtube_video_task_status;
 mod m20260904_000001_backfill_external_task_status_by_files;
+mod m20260905_000001_backfill_external_moved_media_as_completed;
 
 pub struct Migrator;
 
@@ -175,6 +176,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260826_000001_add_youtube_video_story::Migration),
             Box::new(m20260903_000001_add_youtube_video_task_status::Migration),
             Box::new(m20260904_000001_backfill_external_task_status_by_files::Migration),
+            Box::new(m20260905_000001_backfill_external_moved_media_as_completed::Migration),
         ]
     }
 }
