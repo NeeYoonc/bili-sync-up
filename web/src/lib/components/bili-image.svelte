@@ -30,7 +30,26 @@
 		return url;
 	}
 
-	let imageUrl = $derived(normalizeImageUrl(src));
+	function isYouTubeImageUrl(url: string): boolean {
+		try {
+			const hostname = new URL(url).hostname.toLowerCase();
+			return ['ytimg.com', 'ggpht.com', 'googleusercontent.com', 'youtube.com', 'googlevideo.com'].some(
+				(domain) => hostname === domain || hostname.endsWith(`.${domain}`)
+			);
+		} catch {
+			return false;
+		}
+	}
+
+	function resolveImageUrl(url: string): string {
+		const normalized = normalizeImageUrl(url);
+		if (!normalized || !isYouTubeImageUrl(normalized)) return normalized;
+		// YouTube 图片也必须由后端使用 YouTube 专用代理请求，
+		// 避免添加源页面的封面/头像绕过代理由浏览器直连。
+		return `/api/proxy/image?url=${encodeURIComponent(normalized)}`;
+	}
+
+	let imageUrl = $derived(resolveImageUrl(src));
 
 	$effect(() => {
 		src;

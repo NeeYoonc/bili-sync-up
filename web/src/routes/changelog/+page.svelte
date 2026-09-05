@@ -13,14 +13,14 @@
 </script>
 
 <svelte:head>
-	<title>更新记录 - Bili Sync</title>
+	<title>更新记录 - Bili Sync-up</title>
 </svelte:head>
 
 <div class="space-y-6">
 	<div class="flex items-start justify-between gap-4">
 		<div>
 			<h1 class="text-3xl font-bold tracking-tight">更新记录</h1>
-			<p class="text-muted-foreground mt-2">查看 Bili Sync 的最新更新和改进记录</p>
+			<p class="text-muted-foreground mt-2">查看 Bili Sync-up 的最新更新和改进记录</p>
 		</div>
 		<div class="text-right">
 			<div class="text-muted-foreground text-xs">当前版本</div>

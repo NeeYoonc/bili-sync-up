@@ -54,7 +54,27 @@ import type {
 	BangumiSeasonsResponse,
 	VideoBvidResponse,
 	LatestIngestResponse,
-	BetaImageUpdateStatusResponse
+	BetaImageUpdateStatusResponse,
+	YouTubeLoginResponse,
+	YouTubeStatusResponse,
+	DouyinStatusResponse,
+	TikTokSecUidStatusResponse,
+	TikTokStatusResponse,
+	TestProxyResponse,
+	DatabaseStatusResponse,
+	DatabaseMaintenanceAction,
+	DatabaseMaintenanceResponse,
+	DatabaseBackupInfo,
+	DatabaseBackupListResponse,
+	DatabaseRestoreResponse,
+	YouTubeSearchRequest,
+	YouTubeSearchResponse,
+	YouTubeSourceVideosRequest,
+	YouTubeSource,
+	YouTubeVideo,
+	CreateYouTubeSourceRequest,
+	UpdateYouTubeSourceRequest,
+	YouTubeQueueStatusResponse
 } from './types';
 import { ErrorType } from './types';
 import { wsManager } from './ws';
@@ -101,11 +121,15 @@ class ApiClient {
 	private async request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
 		const url = `${this.baseURL}${endpoint}`;
 
+		const headers: Record<string, string> = {
+			...this.defaultHeaders,
+			...(options.headers as Record<string, string> | undefined)
+		};
+		if (typeof FormData !== 'undefined' && options.body instanceof FormData) {
+			delete headers['Content-Type'];
+		}
 		const config: RequestInit = {
-			headers: {
-				...this.defaultHeaders,
-				...options.headers
-			},
+			headers,
 			...options
 		};
 
@@ -228,6 +252,161 @@ class ApiClient {
 		return this.get<VideoSourcesResponse>('/video-sources');
 	}
 
+	/** 获取本地 yt-dlp、YouTube 登录和下载任务状态。 */
+	async getYouTubeStatus(): Promise<ApiResponse<YouTubeStatusResponse>> {
+		return this.get<YouTubeStatusResponse>('/youtube/status');
+	}
+
+	async searchYouTube(params: YouTubeSearchRequest): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/youtube/search', { ...params });
+	}
+
+	async getYouTubeSourceVideos(
+		params: YouTubeSourceVideosRequest
+	): Promise<ApiResponse<SubmissionVideosResponse>> {
+		return this.get<SubmissionVideosResponse>('/youtube/source-videos', { ...params });
+	}
+
+	/** 列出指定 YouTube 频道的全部播放列表（添加“播放列表/收藏”来源时选择）。 */
+	async getYouTubeChannelPlaylists(url: string): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/youtube/channel-playlists', { url });
+	}
+
+	/** 接收电脑端登录助手或手动选择的 Netscape cookies.txt。 */
+	async importYouTubeCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
+		return this.post<YouTubeLoginResponse>('/youtube/cookies', { cookies });
+	}
+
+	async getYouTubeSources(): Promise<ApiResponse<YouTubeSource[]>> {
+		return this.get<YouTubeSource[]>('/youtube/sources');
+	}
+	async createYouTubeSource(
+		request: CreateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.post<YouTubeSource>('/youtube/sources', request);
+	}
+	async setYouTubeSourceEnabled(id: number, enabled: boolean): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/youtube/sources/${id}/enabled`, { enabled });
+	}
+	async updateYouTubeSource(
+		id: number,
+		request: UpdateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/youtube/sources/${id}`, request);
+	}
+	async deleteYouTubeSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
+		return this.delete<boolean>(`/youtube/sources/${id}?delete_local_files=${deleteLocalFiles}`);
+	}
+	async getYouTubeVideos(): Promise<ApiResponse<YouTubeVideo[]>> {
+		return this.get<YouTubeVideo[]>('/youtube/videos');
+	}
+	async retryYouTubeVideo(id: number): Promise<ApiResponse<boolean>> {
+		return this.post<boolean>(`/youtube/videos/${id}/retry`);
+	}
+	async getYouTubeQueueStatus(): Promise<ApiResponse<YouTubeQueueStatusResponse>> {
+		return this.get<YouTubeQueueStatusResponse>('/youtube/queue-status');
+	}
+
+	async getDouyinStatus(): Promise<ApiResponse<DouyinStatusResponse>> {
+		return this.get<DouyinStatusResponse>('/douyin/status');
+	}
+	async importDouyinCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
+		return this.post<YouTubeLoginResponse>('/douyin/cookies', { cookies });
+	}
+	async searchDouyin(keyword: string): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/douyin/search', { keyword });
+	}
+	async searchTikTok(keyword: string): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/tiktok/search', { keyword });
+	}
+	async getTikTokStatus(): Promise<ApiResponse<TikTokStatusResponse>> {
+		return this.get<TikTokStatusResponse>('/tiktok/status');
+	}
+	async importTikTokCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
+		return this.post<YouTubeLoginResponse>('/tiktok/cookies', { cookies });
+	}
+	async getTikTokSecUid(): Promise<ApiResponse<TikTokSecUidStatusResponse>> {
+		return this.get<TikTokSecUidStatusResponse>('/tiktok/secuid');
+	}
+	async setTikTokSecUid(secUid: string): Promise<ApiResponse<{ success: boolean; message: string }>> {
+		return this.put<{ success: boolean; message: string }>('/tiktok/secuid', { sec_uid: secUid });
+	}
+	async getTikTokSourceVideos(params: {
+		url?: string;
+		source_type: string;
+		page?: number;
+		page_size?: number;
+		keyword?: string;
+	}): Promise<ApiResponse<SubmissionVideosResponse>> {
+		return this.get<SubmissionVideosResponse>('/tiktok/source-videos', { ...params });
+	}
+	async getTikTokPlaylists(url: string): Promise<ApiResponse<YouTubeSearchResponse>> {
+		// url 为空时后端读取当前登录账号自己的收藏夹，无需主页链接
+		return this.get<YouTubeSearchResponse>('/tiktok/playlists', { url: url.trim() || undefined });
+	}
+	async getTikTokFollowings(): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/tiktok/followings');
+	}
+	async getDouyinFollowings(): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/douyin/followings');
+	}
+	async getDouyinCatalog(
+		source_type: string,
+		keyword?: string
+	): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/douyin/catalog', { source_type, keyword });
+	}
+	async getDouyinSourceVideos(params: {
+		url: string;
+		source_type?: string;
+		page?: number;
+		page_size?: number;
+		keyword?: string;
+	}): Promise<ApiResponse<SubmissionVideosResponse>> {
+		return this.get<SubmissionVideosResponse>('/douyin/source-videos', { ...params });
+	}
+	async getDouyinSources(): Promise<ApiResponse<YouTubeSource[]>> {
+		return this.get<YouTubeSource[]>('/douyin/sources');
+	}
+	async createDouyinSource(
+		request: CreateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.post<YouTubeSource>('/douyin/sources', request);
+	}
+	async setDouyinSourceEnabled(id: number, enabled: boolean): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/douyin/sources/${id}/enabled`, { enabled });
+	}
+	async updateDouyinSource(
+		id: number,
+		request: UpdateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/douyin/sources/${id}`, request);
+	}
+	async deleteDouyinSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
+		return this.delete<boolean>(`/douyin/sources/${id}?delete_local_files=${deleteLocalFiles}`);
+	}
+
+	async getTikTokSources(): Promise<ApiResponse<YouTubeSource[]>> {
+		return this.get<YouTubeSource[]>('/tiktok/sources');
+	}
+	async createTikTokSource(
+		request: CreateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.post<YouTubeSource>('/tiktok/sources', request);
+	}
+	async setTikTokSourceEnabled(id: number, enabled: boolean): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/tiktok/sources/${id}/enabled`, { enabled });
+	}
+	async updateTikTokSource(
+		id: number,
+		request: UpdateYouTubeSourceRequest
+	): Promise<ApiResponse<YouTubeSource>> {
+		return this.put<YouTubeSource>(`/tiktok/sources/${id}`, request);
+	}
+	async deleteTikTokSource(id: number, deleteLocalFiles = false): Promise<ApiResponse<boolean>> {
+		return this.delete<boolean>(`/tiktok/sources/${id}?delete_local_files=${deleteLocalFiles}`);
+	}
+
 	/**
 	 * 获取视频列表
 	 * @param params 查询参数
@@ -240,7 +419,7 @@ class ApiClient {
 	 * 获取单个视频详情
 	 * @param id 视频 ID
 	 */
-	async getVideo(id: number): Promise<ApiResponse<VideoResponse>> {
+	async getVideo(id: string | number): Promise<ApiResponse<VideoResponse>> {
 		return this.get<VideoResponse>(`/videos/${id}`);
 	}
 
@@ -257,7 +436,10 @@ class ApiClient {
 	 * @param id 视频 ID
 	 * @param force 是否强制重置
 	 */
-	async resetVideo(id: number, force: boolean = false): Promise<ApiResponse<ResetVideoResponse>> {
+	async resetVideo(
+		id: string | number,
+		force: boolean = false
+	): Promise<ApiResponse<ResetVideoResponse>> {
 		const endpoint = force ? `/videos/${id}/reset?force=true` : `/videos/${id}/reset`;
 		return this.post<ResetVideoResponse>(endpoint);
 	}
@@ -291,7 +473,7 @@ class ApiClient {
 	 * 删除视频（软删除）
 	 * @param id 视频 ID
 	 */
-	async deleteVideo(id: number): Promise<ApiResponse<DeleteVideoResponse>> {
+	async deleteVideo(id: string | number): Promise<ApiResponse<DeleteVideoResponse>> {
 		return this.delete<DeleteVideoResponse>(`/videos/${id}`);
 	}
 
@@ -339,7 +521,7 @@ class ApiClient {
 	 */
 	async deleteVideoSource(
 		sourceType: string,
-		id: number,
+		id: string | number,
 		deleteLocalFiles: boolean = false
 	): Promise<ApiResponse<DeleteVideoSourceResponse>> {
 		return this.delete<DeleteVideoSourceResponse>(`/video-sources/${sourceType}/${id}`, {
@@ -358,6 +540,24 @@ class ApiClient {
 		id: number,
 		enabled: boolean
 	): Promise<ApiResponse<UpdateVideoSourceEnabledResponse>> {
+		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
+			const result =
+				sourceType === 'tiktok'
+					? await this.setTikTokSourceEnabled(id, enabled)
+					: sourceType === 'douyin'
+						? await this.setDouyinSourceEnabled(id, enabled)
+						: await this.setYouTubeSourceEnabled(id, enabled);
+			return {
+				status_code: result.status_code,
+				data: {
+					success: true,
+					source_id: id,
+					source_type: sourceType,
+					enabled: result.data.enabled,
+					message: enabled ? '视频源已启用' : '视频源已禁用'
+				}
+			};
+		}
 		return this.put<UpdateVideoSourceEnabledResponse>(
 			`/video-sources/${sourceType}/${id}/enabled`,
 			{ enabled }
@@ -456,6 +656,53 @@ class ApiClient {
 			message: string;
 		}>
 	> {
+		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
+			const update =
+				sourceType === 'tiktok'
+					? this.updateTikTokSource.bind(this)
+					: sourceType === 'douyin'
+						? this.updateDouyinSource.bind(this)
+						: this.updateYouTubeSource.bind(this);
+			const result = await update(id, {
+				audio_only: options.audio_only,
+				audio_only_m4a_only: options.audio_only_m4a_only,
+				flat_folder: options.flat_folder,
+				download_danmaku: options.download_danmaku,
+				download_subtitle: options.download_subtitle,
+				ai_subtitle_language: options.ai_subtitle_language,
+				filter_option: options.filter_option,
+				inherit_filter_option: options.filter_option === null
+			});
+			const source = result.data;
+			return {
+				status_code: result.status_code,
+				data: {
+					success: true,
+					source_id: id,
+					source_type: sourceType,
+					audio_only: source.audio_only,
+					audio_only_m4a_only: source.audio_only_m4a_only,
+					flat_folder: source.flat_folder,
+					split_chapters_after_download: false,
+					download_charge_videos: false,
+					download_danmaku: source.download_danmaku,
+					download_subtitle: source.download_subtitle,
+					download_ai_subtitle: source.download_subtitle,
+					ai_subtitle_language: source.ai_subtitle_language,
+					ai_rename: false,
+					ai_rename_video_prompt: '',
+					ai_rename_audio_prompt: '',
+					ai_rename_enable_multi_page: false,
+					ai_rename_enable_collection: false,
+					ai_rename_enable_bangumi: false,
+					ai_rename_rename_parent_dir: false,
+					use_dynamic_api: false,
+					collection_aggregate_enabled: false,
+					filter_option: source.filter_option,
+					message: `${sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源下载设置已更新`
+				}
+			};
+		}
 		return this.put<{
 			success: boolean;
 			source_id: number;
@@ -495,6 +742,7 @@ class ApiClient {
 		id: number,
 		params: ResetVideoSourcePathRequest
 	): Promise<ApiResponse<ResetVideoSourcePathResponse>> {
+		// YouTube/抖音/TikTok 与 B 站各类型统一走同一路径重设接口
 		return this.post<ResetVideoSourcePathResponse>(
 			`/video-sources/${sourceType}/${id}/reset-path`,
 			params
@@ -539,6 +787,35 @@ class ApiClient {
 		sourceType: string,
 		id: number
 	): Promise<ApiResponse<GetKeywordFiltersResponse>> {
+		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
+			const response =
+				sourceType === 'tiktok'
+					? await this.getTikTokSources()
+					: sourceType === 'douyin'
+						? await this.getDouyinSources()
+						: await this.getYouTubeSources();
+			const source = response.data.find((item) => item.id === id);
+			if (!source)
+				throw new Error(
+					`${sourceType === 'tiktok' ? 'TikTok' : sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源不存在`
+				);
+			return {
+				status_code: response.status_code,
+				data: {
+					success: true,
+					source_id: id,
+					source_type: sourceType,
+					blacklist_keywords: source.blacklist_keywords,
+					whitelist_keywords: source.whitelist_keywords,
+					case_sensitive: source.case_sensitive,
+					min_duration_seconds: source.min_duration_seconds ?? undefined,
+					max_duration_seconds: source.max_duration_seconds ?? undefined,
+					published_after: source.published_after ?? undefined,
+					published_before: source.published_before ?? undefined,
+					keyword_filters: []
+				}
+			};
+		}
 		return this.get<GetKeywordFiltersResponse>(
 			`/video-sources/${sourceType}/${id}/keyword-filters`
 		);
@@ -562,6 +839,34 @@ class ApiClient {
 		publishedAfter?: string,
 		publishedBefore?: string
 	): Promise<ApiResponse<UpdateKeywordFiltersResponse>> {
+		if (sourceType === 'youtube' || sourceType === 'douyin' || sourceType === 'tiktok') {
+			const update =
+				sourceType === 'tiktok'
+					? this.updateTikTokSource.bind(this)
+					: sourceType === 'douyin'
+						? this.updateDouyinSource.bind(this)
+						: this.updateYouTubeSource.bind(this);
+			const response = await update(id, {
+				blacklist_keywords: blacklistKeywords,
+				whitelist_keywords: whitelistKeywords,
+				case_sensitive: caseSensitive,
+				min_duration_seconds: minDurationSeconds ?? null,
+				max_duration_seconds: maxDurationSeconds ?? null,
+				published_after: publishedAfter || null,
+				published_before: publishedBefore || null
+			});
+			return {
+				status_code: response.status_code,
+				data: {
+					success: true,
+					source_id: id,
+					source_type: sourceType,
+					blacklist_count: response.data.blacklist_keywords.length,
+					whitelist_count: response.data.whitelist_keywords.length,
+					message: `${sourceType === 'tiktok' ? 'TikTok' : sourceType === 'douyin' ? '抖音' : 'YouTube'}视频源过滤设置已更新`
+				}
+			};
+		}
 		return this.put<UpdateKeywordFiltersResponse>(
 			`/video-sources/${sourceType}/${id}/keyword-filters`,
 			{
@@ -761,6 +1066,13 @@ class ApiClient {
 	}
 
 	/**
+	 * 获取当前下载任务实时进度（首页「正在下载」）
+	 */
+	async getDownloadsProgress(): Promise<ApiResponse<import('./types').DownloadProgressItem[]>> {
+		return this.get<import('./types').DownloadProgressItem[]>('/downloads/progress');
+	}
+
+	/**
 	 * 取消队列中的待处理任务
 	 * @param taskId 任务ID
 	 */
@@ -774,7 +1086,7 @@ class ApiClient {
 	 * @param request 状态更新请求
 	 */
 	async updateVideoStatus(
-		id: number,
+		id: string | number,
 		request: UpdateVideoStatusRequest
 	): Promise<ApiResponse<UpdateVideoStatusResponse>> {
 		return this.post<UpdateVideoStatusResponse>(`/videos/${id}/update-status`, request);
@@ -908,15 +1220,21 @@ class ApiClient {
 	/**
 	 * 获取首页最新入库列表
 	 */
-	async getLatestIngests(limit: number = 10): Promise<ApiResponse<LatestIngestResponse>> {
-		return this.get<LatestIngestResponse>('/ingest/latest', { limit });
+	async getLatestIngests(
+		limit: number = 10,
+		platform: string = 'all'
+	): Promise<ApiResponse<LatestIngestResponse>> {
+		return this.get<LatestIngestResponse>('/ingest/latest', { limit, platform });
 	}
 
 	/**
 	 * 获取首页最近处理列表
 	 */
-	async getRecentIngests(limit: number = 10): Promise<ApiResponse<LatestIngestResponse>> {
-		return this.get<LatestIngestResponse>('/ingest/recent', { limit });
+	async getRecentIngests(
+		limit: number = 10,
+		platform: string = 'all'
+	): Promise<ApiResponse<LatestIngestResponse>> {
+		return this.get<LatestIngestResponse>('/ingest/recent', { limit, platform });
 	}
 
 	/**
@@ -1012,7 +1330,7 @@ class ApiClient {
 		webhook_custom_headers?: string;
 		webhook_format?: string;
 		webhook_custom_body?: string;
-			webhook_synology_chat_template?: string;
+		webhook_synology_chat_template?: string;
 		notification_min_videos?: number;
 	}): Promise<ApiResponse<string>> {
 		return this.post<string>('/config/notification', config);
@@ -1021,23 +1339,25 @@ class ApiClient {
 	/**
 	 * 测试推送通知
 	 */
-	async testNotification(params?: {
-		custom_message?: string;
-		active_channel?: string;
-		serverchan_key?: string;
-		serverchan3_uid?: string;
-		serverchan3_sendkey?: string;
-		wecom_webhook_url?: string;
-		wecom_msgtype?: string;
-		wecom_mention_all?: boolean;
-		wecom_mentioned_list?: string[];
-		webhook_url?: string;
-		webhook_bearer_token?: string;
-		webhook_custom_headers?: string;
-		webhook_format?: string;
-		webhook_custom_body?: string;
+	async testNotification(
+		params?: {
+			custom_message?: string;
+			active_channel?: string;
+			serverchan_key?: string;
+			serverchan3_uid?: string;
+			serverchan3_sendkey?: string;
+			wecom_webhook_url?: string;
+			wecom_msgtype?: string;
+			wecom_mention_all?: boolean;
+			wecom_mentioned_list?: string[];
+			webhook_url?: string;
+			webhook_bearer_token?: string;
+			webhook_custom_headers?: string;
+			webhook_format?: string;
+			webhook_custom_body?: string;
 			webhook_synology_chat_template?: string;
-	}): Promise<
+		}
+	): Promise<
 		ApiResponse<{
 			success: boolean;
 			message: string;
@@ -1048,6 +1368,53 @@ class ApiClient {
 			message: string;
 		}>('/notification/test', params ?? {});
 	}
+
+	/**
+	 * 测试外源网络代理到谷歌官网的连通性
+	 */
+	/**
+	 * 获取数据库状态概览（设置页 → 数据库管理）
+	 */
+	async getDatabaseStatus(): Promise<ApiResponse<DatabaseStatusResponse>> {
+		return this.get<DatabaseStatusResponse>('/database/status');
+	}
+
+	/**
+	 * 执行数据库维护操作（设置页 → 数据库管理）
+	 */
+	async runDatabaseMaintenance(
+		action: DatabaseMaintenanceAction,
+		keepDays?: number
+	): Promise<ApiResponse<DatabaseMaintenanceResponse>> {
+		return this.post<DatabaseMaintenanceResponse>('/database/maintenance', {
+			action,
+			...(keepDays !== undefined ? { keep_days: keepDays } : {})
+		});
+	}
+
+	/** 获取数据库备份列表 */
+	async getDatabaseBackups(): Promise<ApiResponse<DatabaseBackupListResponse>> {
+		return this.get<DatabaseBackupListResponse>('/database/backups');
+	}
+
+	/** 安排数据库恢复（重启后生效） */
+	async restoreDatabase(backupFile: string): Promise<ApiResponse<DatabaseRestoreResponse>> {
+		return this.post<DatabaseRestoreResponse>('/database/restore', { backup_file: backupFile });
+	}
+
+	async uploadRestoreBackup(file: File, filename?: string): Promise<ApiResponse<DatabaseRestoreResponse>> {
+		const form = new FormData();
+		form.append('file', file, filename ?? file.name);
+		return this.request<DatabaseRestoreResponse>('/database/restore-upload', {
+			method: 'POST',
+			body: form
+		});
+	}
+
+	async testProxy(proxy?: string): Promise<ApiResponse<TestProxyResponse>> {
+		return this.post<TestProxyResponse>('/proxy/test', proxy !== undefined ? { proxy } : {});
+	}
+
 }
 
 // 创建默认的 API 客户端实例
@@ -1060,6 +1427,40 @@ export const api = {
 	 */
 	getVideoSources: () => apiClient.getVideoSources(),
 
+	/** 获取本地 YouTube 下载器、登录和任务状态。 */
+	getYouTubeStatus: () => apiClient.getYouTubeStatus(),
+
+	/** 从电脑端登录助手或 cookies.txt 导入 YouTube 登录状态。 */
+	importYouTubeCookies: (cookies: string) => apiClient.importYouTubeCookies(cookies),
+
+	getYouTubeSources: () => apiClient.getYouTubeSources(),
+	createYouTubeSource: (request: CreateYouTubeSourceRequest) =>
+		apiClient.createYouTubeSource(request),
+	setYouTubeSourceEnabled: (id: number, enabled: boolean) =>
+		apiClient.setYouTubeSourceEnabled(id, enabled),
+	updateYouTubeSource: (id: number, request: UpdateYouTubeSourceRequest) =>
+		apiClient.updateYouTubeSource(id, request),
+	deleteYouTubeSource: (id: number, deleteLocalFiles = false) =>
+		apiClient.deleteYouTubeSource(id, deleteLocalFiles),
+	getYouTubeVideos: () => apiClient.getYouTubeVideos(),
+	getYouTubeChannelPlaylists: (url: string) => apiClient.getYouTubeChannelPlaylists(url),
+	retryYouTubeVideo: (id: number) => apiClient.retryYouTubeVideo(id),
+	getYouTubeQueueStatus: () => apiClient.getYouTubeQueueStatus(),
+	getDouyinStatus: () => apiClient.getDouyinStatus(),
+	importDouyinCookies: (cookies: string) => apiClient.importDouyinCookies(cookies),
+	getDouyinFollowings: () => apiClient.getDouyinFollowings(),
+	getDouyinCatalog: (sourceType: string, keyword?: string) =>
+		apiClient.getDouyinCatalog(sourceType, keyword),
+	getDouyinSources: () => apiClient.getDouyinSources(),
+	createDouyinSource: (request: CreateYouTubeSourceRequest) =>
+		apiClient.createDouyinSource(request),
+	setDouyinSourceEnabled: (id: number, enabled: boolean) =>
+		apiClient.setDouyinSourceEnabled(id, enabled),
+	updateDouyinSource: (id: number, request: UpdateYouTubeSourceRequest) =>
+		apiClient.updateDouyinSource(id, request),
+	deleteDouyinSource: (id: number, deleteLocalFiles = false) =>
+		apiClient.deleteDouyinSource(id, deleteLocalFiles),
+
 	/**
 	 * 获取视频列表
 	 */
@@ -1068,7 +1469,7 @@ export const api = {
 	/**
 	 * 获取单个视频详情
 	 */
-	getVideo: (id: number) => apiClient.getVideo(id),
+	getVideo: (id: string | number) => apiClient.getVideo(id),
 
 	refreshVideoDanmaku: (id: number) => apiClient.refreshVideoDanmaku(id),
 
@@ -1077,7 +1478,7 @@ export const api = {
 	/**
 	 * 重置视频下载状态
 	 */
-	resetVideo: (id: number, force?: boolean) => apiClient.resetVideo(id, force),
+	resetVideo: (id: string | number, force?: boolean) => apiClient.resetVideo(id, force),
 
 	/**
 	 * 批量重置所有视频下载状态
@@ -1096,7 +1497,7 @@ export const api = {
 	/**
 	 * 删除视频（软删除）
 	 */
-	deleteVideo: (id: number) => apiClient.deleteVideo(id),
+	deleteVideo: (id: string | number) => apiClient.deleteVideo(id),
 
 	/**
 	 * 选择性重置特定任务
@@ -1149,6 +1550,40 @@ export const api = {
 	 * 搜索B站内容
 	 */
 	searchBilibili: (params: SearchRequest) => apiClient.searchBilibili(params),
+	searchYouTube: (params: YouTubeSearchRequest) => apiClient.searchYouTube(params),
+	getYouTubeSourceVideos: (params: YouTubeSourceVideosRequest) =>
+		apiClient.getYouTubeSourceVideos(params),
+	searchDouyin: (keyword: string) => apiClient.searchDouyin(keyword),
+	getTikTokStatus: () => apiClient.getTikTokStatus(),
+	getTikTokSecUid: () => apiClient.getTikTokSecUid(),
+	setTikTokSecUid: (secUid: string) => apiClient.setTikTokSecUid(secUid),
+	importTikTokCookies: (cookies: string) => apiClient.importTikTokCookies(cookies),
+	getTikTokSourceVideos: (params: {
+		url?: string;
+		source_type: string;
+		page?: number;
+		page_size?: number;
+		keyword?: string;
+	}) => apiClient.getTikTokSourceVideos(params),
+	getTikTokPlaylists: (url: string) => apiClient.getTikTokPlaylists(url),
+	getTikTokFollowings: () => apiClient.getTikTokFollowings(),
+	searchTikTok: (keyword: string) => apiClient.searchTikTok(keyword),
+	getTikTokSources: () => apiClient.getTikTokSources(),
+	createTikTokSource: (request: CreateYouTubeSourceRequest) =>
+		apiClient.createTikTokSource(request),
+	setTikTokSourceEnabled: (id: number, enabled: boolean) =>
+		apiClient.setTikTokSourceEnabled(id, enabled),
+	updateTikTokSource: (id: number, request: UpdateYouTubeSourceRequest) =>
+		apiClient.updateTikTokSource(id, request),
+	deleteTikTokSource: (id: number, deleteLocalFiles = false) =>
+		apiClient.deleteTikTokSource(id, deleteLocalFiles),
+	getDouyinSourceVideos: (params: {
+		url: string;
+		source_type?: string;
+		page?: number;
+		page_size?: number;
+		keyword?: string;
+	}) => apiClient.getDouyinSourceVideos(params),
 
 	/**
 	 * 获取用户收藏夹列表
@@ -1195,6 +1630,7 @@ export const api = {
 	 * 获取队列状态
 	 */
 	getQueueStatus: () => apiClient.getQueueStatus(),
+	getDownloadsProgress: () => apiClient.getDownloadsProgress(),
 
 	/**
 	 * 取消队列中的待处理任务
@@ -1204,7 +1640,7 @@ export const api = {
 	/**
 	 * 更新视频状态
 	 */
-	updateVideoStatus: (id: number, request: UpdateVideoStatusRequest) =>
+	updateVideoStatus: (id: string | number, request: UpdateVideoStatusRequest) =>
 		apiClient.updateVideoStatus(id, request),
 
 	/**
@@ -1410,12 +1846,14 @@ export const api = {
 	/**
 	 * 获取首页最新入库列表
 	 */
-	getLatestIngests: (limit: number = 10) => apiClient.getLatestIngests(limit),
+	getLatestIngests: (limit: number = 10, platform: string = 'all') =>
+		apiClient.getLatestIngests(limit, platform),
 
 	/**
 	 * 获取首页最近处理列表
 	 */
-	getRecentIngests: (limit: number = 10) => apiClient.getRecentIngests(limit),
+	getRecentIngests: (limit: number = 10, platform: string = 'all') =>
+		apiClient.getRecentIngests(limit, platform),
 
 	/**
 	 * 检查 beta 镜像是否有更新（用于角标提示）
@@ -1450,7 +1888,7 @@ export const api = {
 		webhook_custom_headers?: string;
 		webhook_format?: string;
 		webhook_custom_body?: string;
-			webhook_synology_chat_template?: string;
+		webhook_synology_chat_template?: string;
 		notification_min_videos?: number;
 	}) => apiClient.updateNotificationConfig(config),
 
@@ -1472,9 +1910,15 @@ export const api = {
 		webhook_custom_headers?: string;
 		webhook_format?: string;
 		webhook_custom_body?: string;
-			webhook_synology_chat_template?: string;
+		webhook_synology_chat_template?: string;
 	}) => apiClient.testNotification(params),
-
+	testProxy: (proxy?: string) => apiClient.testProxy(proxy),
+	getDatabaseStatus: () => apiClient.getDatabaseStatus(),
+	runDatabaseMaintenance: (action: DatabaseMaintenanceAction, keepDays?: number) =>
+		apiClient.runDatabaseMaintenance(action, keepDays),
+	getDatabaseBackups: () => apiClient.getDatabaseBackups(),
+	restoreDatabase: (backupFile: string) => apiClient.restoreDatabase(backupFile),
+	uploadRestoreBackup: (file: File, filename?: string) => apiClient.uploadRestoreBackup(file, filename),
 	/**
 	 * 订阅系统信息WebSocket事件
 	 */

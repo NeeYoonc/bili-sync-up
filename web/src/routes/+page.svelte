@@ -6,6 +6,7 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Chart from '$lib/components/ui/chart/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
+	import * as Tabs from '$lib/components/ui/tabs/index.js';
 	import MyChartTooltip from '$lib/components/custom/my-chart-tooltip.svelte';
 	import { curveMonotoneX } from 'd3-shape';
 	import { BarChart, AreaChart } from 'layerchart';
@@ -20,7 +21,8 @@
 		SysInfo,
 		TaskStatus,
 		TaskControlStatusResponse,
-		LatestIngestItem
+		LatestIngestItem,
+		DownloadProgressItem
 	} from '$lib/types';
 	import AuthLogin from '$lib/components/auth-login.svelte';
 	import InitialSetup from '$lib/components/initial-setup.svelte';
@@ -34,7 +36,7 @@
 	import FolderIcon from '@lucide/svelte/icons/folder';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import ClockIcon from '@lucide/svelte/icons/clock';
-	import VideoIcon from '@lucide/svelte/icons/video';
+		import VideoIcon from '@lucide/svelte/icons/video';
 	import TvIcon from '@lucide/svelte/icons/tv';
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
 	import CpuIcon from '@lucide/svelte/icons/cpu';
@@ -47,6 +49,9 @@
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import XCircleIcon from '@lucide/svelte/icons/x-circle';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
+	import BellIcon from '@lucide/svelte/icons/bell';
+	import ListVideoIcon from '@lucide/svelte/icons/list-video';
+	import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
 
 	// 认证状态
 	let isAuthenticated = false;
@@ -63,10 +68,17 @@
 	let loadingLatestIngests = false;
 	let loadingTaskRefresh = false;
 	let showIngestSheet = false;
+	let showDownloadsSheet = false;
 	type IngestView = 'latest' | 'recent';
 	let ingestView: IngestView = 'latest';
+	type IngestPlatform = 'all' | 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
+	let ingestPlatform: IngestPlatform = 'all';
+	type MonitoringPlatform = 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
+	let monitoringPlatform: MonitoringPlatform = 'bilibili';
 	let unsubscribeSysInfo: (() => void) | null = null;
 	let unsubscribeTasks: (() => void) | null = null;
+	let unsubscribeDownloads: (() => void) | null = null;
+	let downloads: DownloadProgressItem[] = [];
 
 	function formatBytes(bytes: number): string {
 		if (bytes === 0) return '0 B';
@@ -205,10 +217,32 @@
 		return view === 'latest' ? '最新入库' : '最近处理';
 	}
 
-	async function loadIngests(view: IngestView = ingestView) {
+	const INGEST_PLATFORM_LABEL: Record<IngestPlatform, string> = {
+		all: '全部',
+		bilibili: 'B站',
+		youtube: 'YouTube',
+		douyin: '抖音',
+		tiktok: 'TikTok'
+	};
+
+	const INGEST_PLATFORM_TABS: Array<{ value: IngestPlatform; label: string }> = [
+		{ value: 'all', label: '全部' },
+		{ value: 'bilibili', label: 'B站' },
+		{ value: 'youtube', label: 'YouTube' },
+		{ value: 'douyin', label: '抖音' },
+		{ value: 'tiktok', label: 'TikTok' }
+	];
+
+	async function loadIngests(
+		view: IngestView = ingestView,
+		platform: IngestPlatform = ingestPlatform
+	) {
 		ingestView = view;
+		ingestPlatform = platform;
 		const request =
-			view === 'latest' ? () => api.getLatestIngests(10) : () => api.getRecentIngests(10);
+			view === 'latest'
+				? () => api.getLatestIngests(10, platform)
+				: () => api.getRecentIngests(10, platform);
 		const response = await runRequest(request, {
 			setLoading: (value) => (loadingLatestIngests = value),
 			context: `加载${getIngestViewTitle(view)}失败`
@@ -291,6 +325,37 @@
 		await loadDashboard();
 		// 加载最新入库
 		await loadIngests('latest');
+		// 加载当前下载进度
+		await loadDownloads();
+	}
+
+	// 下载进度百分比（0-100），总大小未知时返回 0
+	function downloadPercent(item: DownloadProgressItem): number {
+		if (item.total_bytes <= 0) return 0;
+		return Math.min(100, Math.round((item.downloaded_bytes / item.total_bytes) * 100));
+	}
+
+	// 卡片只显示第一个正在下载的任务，其余点「⋯」在弹窗里看
+	$: primaryDownload = downloads.length > 0 ? downloads[0] : null;
+
+	// 剩余时间可读化
+	function formatEta(seconds: number): string {
+		if (seconds < 60) return `${seconds} 秒`;
+		const minutes = Math.floor(seconds / 60);
+		const secs = seconds % 60;
+		if (minutes < 60) return `${minutes} 分${secs > 0 ? ` ${secs} 秒` : ''}`;
+		const hours = Math.floor(minutes / 60);
+		return `${hours} 小时${minutes % 60 > 0 ? ` ${minutes % 60} 分` : ''}`;
+	}
+
+	// 加载当前下载进度
+	async function loadDownloads() {
+		try {
+			const response = await api.getDownloadsProgress();
+			downloads = response.data || [];
+		} catch (error) {
+			console.error('加载下载进度失败:', error);
+		}
 	}
 
 	onMount(() => {
@@ -302,6 +367,9 @@
 		});
 		unsubscribeTasks = wsManager.subscribeToTasks((data: TaskStatus) => {
 			taskStatus = data;
+		});
+		unsubscribeDownloads = wsManager.subscribeToDownloads((data: DownloadProgressItem[]) => {
+			downloads = data;
 		});
 
 		// 检查认证状态
@@ -321,6 +389,10 @@
 		if (unsubscribeTasks) {
 			unsubscribeTasks();
 			unsubscribeTasks = null;
+		}
+		if (unsubscribeDownloads) {
+			unsubscribeDownloads();
+			unsubscribeDownloads = null;
 		}
 	});
 
@@ -353,11 +425,57 @@
 
 	// 图表配置
 	const videoChartConfig = {
-		videos: {
-			label: '视频数量',
-			color: 'var(--color-slate-700)'
+		bilibili: {
+			label: 'B站',
+			color: 'var(--color-sky-600)'
+		},
+		youtube: {
+			label: 'YouTube',
+			color: 'var(--color-red-600)'
+		},
+		douyin: {
+			label: '抖音',
+			color: 'var(--color-purple-600)'
+		},
+		tiktok: {
+			label: 'TikTok',
+			color: 'var(--color-emerald-600)'
 		}
 	} satisfies Chart.ChartConfig;
+
+	// 合并各平台近七日新增视频为多序列图表数据（按天对齐，缺失补 0）
+	type DayMultiCount = {
+		day: string;
+		bilibili: number;
+		youtube: number;
+		douyin: number;
+		tiktok: number;
+	};
+	let dayMultiCounts: DayMultiCount[] = [];
+	$: if (dashboardData) {
+		const sources = [
+			dashboardData.videos_by_day,
+			dashboardData.youtube_videos_by_day ?? [],
+			dashboardData.douyin_videos_by_day ?? [],
+			dashboardData.tiktok_videos_by_day ?? []
+		];
+		const dayCount = Math.max(...sources.map((list) => list.length), 0);
+		dayMultiCounts = [];
+		for (let i = 0; i < dayCount; i++) {
+			dayMultiCounts.push({
+				day:
+					dashboardData.videos_by_day[i]?.day ??
+					dashboardData.youtube_videos_by_day[i]?.day ??
+					dashboardData.douyin_videos_by_day[i]?.day ??
+					dashboardData.tiktok_videos_by_day[i]?.day ??
+					'',
+				bilibili: dashboardData.videos_by_day[i]?.cnt ?? 0,
+				youtube: dashboardData.youtube_videos_by_day?.[i]?.cnt ?? 0,
+				douyin: dashboardData.douyin_videos_by_day?.[i]?.cnt ?? 0,
+				tiktok: dashboardData.tiktok_videos_by_day?.[i]?.cnt ?? 0
+			});
+		}
+	}
 
 	const memoryChartConfig = {
 		used: {
@@ -383,7 +501,7 @@
 </script>
 
 <svelte:head>
-	<title>首页 - Bili Sync</title>
+	<title>首页 - Bili Sync-up</title>
 </svelte:head>
 
 {#if checkingSetup}
@@ -434,7 +552,7 @@
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
 						<CardTitle
 							class="text-sm font-medium"
-							title="显示当前监听的视频源状态、下次扫描时间和监听统计"
+							title="显示当前监听的 B站、YouTube 和抖音视频源状态、下次扫描时间和监听统计"
 						>
 							当前监听
 						</CardTitle>
@@ -498,56 +616,194 @@
 									</div>
 								</div>
 
-								<!-- 具体监听项统计 -->
-								<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<HeartIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">收藏夹</span>
+								<!-- 按平台切换具体监听项统计 -->
+								<Tabs.Root bind:value={monitoringPlatform}>
+									<Tabs.List class="grid w-full max-w-lg grid-cols-4">
+										<Tabs.Trigger value="bilibili">B 站视频源</Tabs.Trigger>
+										<Tabs.Trigger value="youtube">YouTube 视频源</Tabs.Trigger>
+										<Tabs.Trigger value="douyin">抖音视频源</Tabs.Trigger>
+										<Tabs.Trigger value="tiktok">TikTok 视频源</Tabs.Trigger>
+									</Tabs.List>
+
+									{#if monitoringPlatform === 'bilibili'}
+										<div class="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<HeartIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">收藏夹</span>
+												</div>
+												<Badge variant="outline"
+													>{dashboardData.enabled_favorites} / {dashboardData.total_favorites}</Badge
+												>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<FolderIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">合集 / 列表</span>
+												</div>
+												<Badge variant="outline"
+													>{dashboardData.enabled_collections} / {dashboardData.total_collections}</Badge
+												>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<UserIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">投稿</span>
+												</div>
+												<Badge variant="outline"
+													>{dashboardData.enabled_submissions} / {dashboardData.total_submissions}</Badge
+												>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<ClockIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">稍后再看</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enable_watch_later
+														? `启用 (${dashboardData.total_watch_later})`
+														: `禁用 (${dashboardData.total_watch_later})`}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<TvIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">番剧</span>
+												</div>
+												<Badge variant="outline"
+													>{dashboardData.enabled_bangumi} / {dashboardData.total_bangumi}</Badge
+												>
+											</div>
 										</div>
-										<Badge variant="outline"
-											>{dashboardData.enabled_favorites} / {dashboardData.total_favorites}</Badge
-										>
-									</div>
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<FolderIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">合集 / 列表</span>
+									{:else if monitoringPlatform === 'youtube'}
+										<div class="mt-4">
+											<div class="grid grid-cols-2 gap-4 lg:grid-cols-3">
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<BellIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">订阅动态</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_subscriptions} / {dashboardData.total_youtube_subscriptions}
+													</Badge>
+												</div>
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<UserIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">频道</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_channels} / {dashboardData.total_youtube_channels}
+													</Badge>
+												</div>
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<ListVideoIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">播放列表</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_playlists} / {dashboardData.total_youtube_playlists}
+													</Badge>
+												</div>
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<HeartIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">喜欢的视频</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_liked} / {dashboardData.total_youtube_liked}
+													</Badge>
+												</div>
+												<div class="flex items-center justify-between">
+													<div class="flex items-center gap-2">
+														<ClockIcon class="text-muted-foreground h-4 w-4" />
+														<span class="text-sm">稍后观看</span>
+													</div>
+													<Badge variant="outline">
+														{dashboardData.enabled_youtube_watch_later} / {dashboardData.total_youtube_watch_later}
+													</Badge>
+												</div>
+											</div>
 										</div>
-										<Badge variant="outline"
-											>{dashboardData.enabled_collections} / {dashboardData.total_collections}</Badge
-										>
-									</div>
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<UserIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">投稿</span>
+									{:else if monitoringPlatform === 'douyin'}
+										<div class="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<UserIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">作者投稿</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_douyin_authors} / {dashboardData.total_douyin_authors}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<HeartIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">我的喜欢</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_liked} / {dashboardData.total_douyin_liked}</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<FolderIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">收藏夹</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_collections} / {dashboardData.total_douyin_collections}</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<ClockIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">稍后再看</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_watch_later} / {dashboardData.total_douyin_watch_later}</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<TvIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">放映厅</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_theaters} / {dashboardData.total_douyin_theaters}</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<ListVideoIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">短剧</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_series} / {dashboardData.total_douyin_series}</Badge>
+											</div>
 										</div>
-										<Badge variant="outline"
-											>{dashboardData.enabled_submissions} / {dashboardData.total_submissions}</Badge
-										>
-									</div>
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<ClockIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">稍后再看</span>
+									{:else}
+										<div class="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<UserIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">作者投稿</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_tiktok_authors} / {dashboardData.total_tiktok_authors}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<HeartIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">我的喜欢</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_tiktok_liked} / {dashboardData.total_tiktok_liked}
+												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<FolderIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">收藏夹</span>
+												</div>
+												<Badge variant="outline">
+													{dashboardData.enabled_tiktok_collections} / {dashboardData.total_tiktok_collections}
+												</Badge>
+											</div>
 										</div>
-										<Badge variant="outline">
-											{dashboardData.enable_watch_later
-												? `启用 (${dashboardData.total_watch_later})`
-												: `禁用 (${dashboardData.total_watch_later})`}
-										</Badge>
-									</div>
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-2">
-											<TvIcon class="text-muted-foreground h-4 w-4" />
-											<span class="text-sm">番剧</span>
-										</div>
-										<Badge variant="outline"
-											>{dashboardData.enabled_bangumi} / {dashboardData.total_bangumi}</Badge
-										>
-									</div>
-								</div>
+{/if}
+								</Tabs.Root>
 							</div>
 						{:else}
 							<Loading size="sm" align="start" textClass="text-sm" />
@@ -566,32 +822,64 @@
 						<VideoIcon class="text-muted-foreground h-4 w-4" />
 					</CardHeader>
 					<CardContent>
-						{#if dashboardData && dashboardData.videos_by_day.length > 0}
+						{#if dayMultiCounts.length > 0}
 							<div class="mb-4 space-y-2">
 								<div class="flex items-center justify-between text-sm">
 									<span>近七日新增视频</span>
-									<span class="font-medium"
-										>{dashboardData.videos_by_day.reduce((sum, v) => sum + v.cnt, 0)} 个</span
-									>
+									<span class="font-medium">
+										{dayMultiCounts.reduce(
+											(sum, v) => sum + v.bilibili + v.youtube + v.douyin + v.tiktok,
+											0
+										)}{' '}
+										个
+									</span>
+								</div>
+								<div class="flex flex-wrap gap-3 text-xs">
+									{#each ['bilibili', 'youtube', 'douyin', 'tiktok'] as key (key)}
+										<span class="flex items-center gap-1">
+											<span
+												class="inline-block h-2 w-2 rounded-sm"
+												style="background:{videoChartConfig[key as keyof typeof videoChartConfig].color}"
+											></span>
+											<span class="text-muted-foreground"
+												>{videoChartConfig[key as keyof typeof videoChartConfig].label}</span
+											>
+										</span>
+									{/each}
 								</div>
 							</div>
 							<Chart.Container config={videoChartConfig} class="h-[200px] w-full">
 								<BarChart
-									data={dashboardData.videos_by_day}
+									data={dayMultiCounts}
 									x="day"
 									axis="x"
 									series={[
 										{
-											key: 'cnt',
-											label: '新增视频',
-											color: videoChartConfig.videos.color
+											key: 'bilibili',
+											label: 'B站',
+											color: videoChartConfig.bilibili.color
+										},
+										{
+											key: 'youtube',
+											label: 'YouTube',
+											color: videoChartConfig.youtube.color
+										},
+										{
+											key: 'douyin',
+											label: '抖音',
+											color: videoChartConfig.douyin.color
+										},
+										{
+											key: 'tiktok',
+											label: 'TikTok',
+											color: videoChartConfig.tiktok.color
 										}
 									]}
 									props={{
 										bars: {
 											stroke: 'none',
 											rounded: 'all',
-											radius: 8,
+											radius: 6,
 											initialHeight: 0
 										},
 										highlight: { area: { fill: 'none' } },
@@ -694,7 +982,52 @@
 									</div>
 								</div>
 
-								<!-- 任务控制按钮 -->
+																<!-- 正在下载实时进度 -->
+								<div class="mt-4 space-y-2 border-t pt-3">
+									<div class="flex items-center justify-between">
+										<span class="text-sm">正在下载{downloads.length > 0 ? `（${downloads.length}）` : ''}</span>
+										{#if downloads.length > 0}
+										<Button
+										size="sm"
+										variant="ghost"
+										class="h-6 w-6 p-0"
+										title="查看全部下载"
+										onclick={() => (showDownloadsSheet = true)}
+										>
+										<MoreHorizontalIcon class="h-4 w-4" />
+										</Button>
+										{/if}
+									</div>
+									{#if primaryDownload}
+										<div class="hover:bg-muted/40 rounded-md border p-2 transition-colors">
+										<div class="flex items-center justify-between gap-2">
+										<span class="truncate text-xs font-medium" title={primaryDownload.title}>
+										{primaryDownload.title}
+										</span>
+										{#if primaryDownload.phase}
+										<Badge variant="secondary" class="shrink-0 px-1.5 py-0 text-[10px]">
+										{primaryDownload.phase}
+										</Badge>
+										{/if}
+										</div>
+										<div class="mt-1.5 flex items-center gap-2">
+										<Progress value={downloadPercent(primaryDownload)} class="h-1.5 flex-1" />
+										<span class="text-muted-foreground w-10 shrink-0 text-right text-[10px]">
+										{primaryDownload.total_bytes > 0 ? `${downloadPercent(primaryDownload)}%` : '--'}
+										</span>
+										</div>
+										<div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-[10px]">
+										<span>{formatBytes(primaryDownload.downloaded_bytes)}{primaryDownload.total_bytes > 0 ? ` / ${formatBytes(primaryDownload.total_bytes)}` : ''}</span>
+										{#if primaryDownload.speed_bps > 0}<span>{formatSpeed(primaryDownload.speed_bps)}</span>{/if}
+										{#if primaryDownload.eta_seconds}<span>剩余约 {formatEta(primaryDownload.eta_seconds)}</span>{/if}
+										</div>
+										</div>
+									{:else}
+										<div class="text-muted-foreground text-xs">当前无下载任务</div>
+									{/if}
+								</div>
+
+<!-- 任务控制按钮 -->
 								{#if taskControlStatus}
 									<div class="grid grid-cols-2 gap-2">
 										<Button
@@ -921,16 +1254,34 @@
 					</Button>
 				</Dialog.Title>
 			</Dialog.Header>
+			<div class="mt-3 flex flex-wrap gap-1.5">
+				{#each INGEST_PLATFORM_TABS as tab (tab.value)}
+					<Button
+						size="sm"
+						variant={ingestPlatform === tab.value ? 'default' : 'outline'}
+						class="h-7 px-2.5 text-xs"
+						disabled={loadingLatestIngests}
+						onclick={() => loadIngests(ingestView, tab.value)}
+					>
+						{tab.label}
+					</Button>
+				{/each}
+			</div>
 			<div class="mt-2 max-h-[60vh] space-y-2 overflow-auto">
 				{#if latestIngests.length === 0}
 					<EmptyState title={`暂无${getIngestViewTitle()}记录`} class="border-0 bg-transparent py-8" />
 				{:else}
-					{#each latestIngests as item (item.video_id)}
+					{#each latestIngests as item (item.platform + '-' + item.video_id)}
 						<div class="hover:bg-muted/30 rounded-lg border p-3 transition-colors">
 							<div class="flex items-start justify-between gap-3">
 								<div class="min-w-0 flex-1">
-									<div class="truncate font-medium" title={item.video_name}>
-										{item.video_name}
+									<div class="flex items-center gap-2">
+										<div class="truncate font-medium" title={item.video_name}>
+											{item.video_name}
+										</div>
+										<Badge variant="outline" class="shrink-0 px-1.5 py-0 text-[10px]">
+											{INGEST_PLATFORM_LABEL[item.platform]}
+										</Badge>
 									</div>
 									<div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-2 text-xs">
 										{#if item.upper_name && item.upper_name.trim() !== ''}
@@ -971,6 +1322,49 @@
 											<span class="hidden sm:inline">失败</span>
 										</div>
 									{/if}
+								</div>
+							</div>
+						</div>
+					{/each}
+				{/if}
+			</div>
+		</Dialog.Content>
+	</Dialog.Root>
+
+	<!-- 全部下载 Dialog 弹窗 -->
+	<Dialog.Root bind:open={showDownloadsSheet}>
+		<Dialog.Content class="sm:max-w-2xl">
+			<Dialog.Header>
+				<Dialog.Title>正在下载（{downloads.length}）</Dialog.Title>
+			</Dialog.Header>
+			<div class="mt-3 max-h-[60vh] space-y-2 overflow-auto">
+				{#if downloads.length === 0}
+					<EmptyState title="暂无下载任务" class="border-0 bg-transparent py-8" />
+				{:else}
+					{#each downloads as item (item.key)}
+						<div class="hover:bg-muted/30 rounded-lg border p-3 transition-colors">
+							<div class="min-w-0 flex-1">
+								<div class="flex items-center gap-2">
+									<div class="truncate font-medium" title={item.title}>{item.title}</div>
+									<Badge variant="outline" class="shrink-0 px-1.5 py-0 text-[10px]">
+										{INGEST_PLATFORM_LABEL[item.platform]}
+									</Badge>
+									{#if item.phase}
+										<Badge variant="secondary" class="shrink-0 px-1.5 py-0 text-[10px]">{item.phase}</Badge>
+									{/if}
+								</div>
+								<div class="mt-2 flex items-center gap-2">
+									<Progress value={downloadPercent(item)} class="h-2 flex-1" />
+									<span class="text-muted-foreground w-12 shrink-0 text-right text-xs">
+										{item.total_bytes > 0 ? `${downloadPercent(item)}%` : '--'}
+									</span>
+								</div>
+								<div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-xs">
+									<span>{formatBytes(item.downloaded_bytes)}{item.total_bytes > 0 ? ` / ${formatBytes(item.total_bytes)}` : ''}</span>
+									{#if item.speed_bps > 0}<span>{formatSpeed(item.speed_bps)}</span>{/if}
+									{#if item.eta_seconds}<span>剩余约 {formatEta(item.eta_seconds)}</span>{/if}
+									<span>·</span>
+									<span>开始于 {item.started_at}</span>
 								</div>
 							</div>
 						</div>

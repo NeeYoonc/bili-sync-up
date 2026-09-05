@@ -42,7 +42,7 @@ services:
       - 12345:12345
     volumes:
       - /volume1/Cloudreve/OD/20/config:/app/.config/bili-sync
-      - /volume1/Cloudreve/OD/20:/Downloads #下载目录 在前端直接/Downloads就是下载到/volume1/Cloudreve/OD/20 
+      - /volume1/Cloudreve/OD/20:/Downloads #下载目录 在前端直接/Downloads就是下载到/volume1/Cloudreve/OD/20
 
     environment:
       - TZ=Asia/Shanghai

@@ -17,6 +17,7 @@
 	export let video: VideoInfo;
 	export let pages: PageInfo[] = [];
 	export let loading = false;
+	export let isExternal = false;
 	export let onsubmit: (request: UpdateVideoStatusRequest) => void;
 
 	$: videoTaskNames = (() => {
@@ -231,6 +232,11 @@
 				<div class="status-editor-copy text-[11px] leading-4 sm:text-sm sm:leading-6">
 					修改视频和分页的下载状态。可以将任务重置为未开始状态，或者标记为已完成。
 				</div>
+				{#if isExternal}
+					<div class="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-blue-800">
+						💡 外源视频与 B 站一致按“子任务状态”调度：把<strong>封面 / 视频信息 / UP头像 / UP主信息</strong>设为“未开始”后，下载任务会只重新生成对应附属文件，不会重下媒体、也不会动已完成的分P下载；只有把<strong>“分P下载”</strong>设为未开始才会触发媒体重新下载。
+					</div>
+				{/if}
 				<div class="status-editor-desktop-warning hidden font-medium text-red-600 sm:block">
 					⚠️ 已完成任务被重置为未开始，任务重新执行时会覆盖现存文件。
 				</div>

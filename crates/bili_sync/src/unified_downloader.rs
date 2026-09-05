@@ -63,6 +63,78 @@ impl UnifiedDownloader {
         }
     }
 
+    /// 沿用当前统一下载器，仅为本次下载任务应用代理。
+    pub async fn fetch_with_fallback_with_proxy(&self, urls: &[&str], path: &Path, proxy: &str) -> Result<()> {
+        let proxy = proxy.trim();
+        if proxy.is_empty() {
+            return self.fetch_with_fallback(urls, path).await;
+        }
+        match self {
+            Self::Native(downloader) => downloader.fetch_with_fallback_with_proxy(urls, path, proxy).await,
+            Self::Aria2(downloader) => downloader.fetch_with_aria2_fallback_with_proxy(urls, path, proxy).await,
+        }
+    }
+
+    /// 下载文件并覆盖平台 Referer，原生与 aria2 路径保持一致。
+    pub async fn fetch_with_fallback_with_referer(&self, urls: &[&str], path: &Path, referer: &str) -> Result<()> {
+        match self {
+            Self::Native(downloader) => downloader.fetch_with_fallback_with_referer(urls, path, referer).await,
+            Self::Aria2(downloader) => {
+                downloader
+                    .fetch_with_aria2_fallback_with_referer(urls, path, referer)
+                    .await
+            }
+        }
+    }
+
+    /// 下载同时要求平台 Referer、网页会话 Cookie 和任务代理的媒体（TikTok 等）。
+    pub async fn fetch_with_fallback_with_referer_and_cookie_and_proxy(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: &str,
+        cookie: &str,
+        proxy: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Native(downloader) => {
+                downloader
+                    .fetch_with_fallback_with_referer_and_cookie_and_proxy(urls, path, referer, cookie, proxy)
+                    .await
+            }
+            Self::Aria2(downloader) => {
+                downloader
+                    .fetch_with_aria2_fallback_with_referer_and_cookie_and_proxy(urls, path, referer, cookie, proxy)
+                    .await
+            }
+        }
+    }
+
+    /// 下载同时要求平台 Referer 和网页会话 Cookie 的媒体。
+    pub async fn fetch_with_fallback_with_referer_and_cookie(
+        &self,
+        urls: &[&str],
+        path: &Path,
+        referer: &str,
+        cookie: &str,
+    ) -> Result<()> {
+        if cookie.trim().is_empty() {
+            return self.fetch_with_fallback_with_referer(urls, path, referer).await;
+        }
+        match self {
+            Self::Native(downloader) => {
+                downloader
+                    .fetch_with_fallback_with_referer_and_cookie(urls, path, referer, cookie)
+                    .await
+            }
+            Self::Aria2(downloader) => {
+                downloader
+                    .fetch_with_aria2_fallback_with_referer_and_cookie(urls, path, referer, cookie)
+                    .await
+            }
+        }
+    }
+
     /// 合并视频和音频文件
     pub async fn merge(&self, video_path: &Path, audio_path: &Path, output_path: &Path) -> Result<()> {
         match self {

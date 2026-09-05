@@ -49,6 +49,7 @@ pub struct Model {
     #[sea_orm(default_value = "false")]
     pub charge_can_play: bool,
     pub total_file_size_bytes: Option<i64>,
+    pub skip_reason: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

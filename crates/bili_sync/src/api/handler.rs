@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::{convert::Infallible, time::Duration as StdDuration};
 
 use anyhow::{anyhow, Context, Result};
-use axum::extract::{Extension, Json, Path, Query};
+use axum::extract::{Extension, Json, Multipart, Path, Query};
 use axum::http::{header::IF_NONE_MATCH, HeaderMap};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
@@ -13,7 +13,9 @@ use html_escape::decode_html_entities;
 
 use crate::http::headers::{create_api_headers, create_image_headers};
 use crate::utils::time_format::{now_standard_string, to_standard_string};
-use bili_sync_entity::{collection, favorite, page, submission, video, video_source, watch_later};
+use bili_sync_entity::{
+    collection, favorite, page, submission, video, video_source, watch_later, youtube_source, youtube_video,
+};
 use bili_sync_migration::Expr;
 use reqwest;
 use sea_orm::{
@@ -742,6 +744,69 @@ fn is_dangerous_path_for_deletion(path: &str) -> bool {
     false
 }
 
+fn normalized_library_path(path: &str) -> String {
+    let normalized = normalize_file_path(path).trim_end_matches('/').to_string();
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn library_paths_overlap(left: &str, right: &str) -> bool {
+    let left = normalized_library_path(left);
+    let right = normalized_library_path(right);
+    left == right || left.starts_with(&format!("{right}/")) || right.starts_with(&format!("{left}/"))
+}
+
+async fn external_source_path_is_shared(
+    conn: &impl ConnectionTrait,
+    excluded_external_source_id: i32,
+    path: &str,
+) -> Result<bool> {
+    let external_sources = youtube_source::Entity::find()
+        .filter(youtube_source::Column::Id.ne(excluded_external_source_id))
+        .all(conn)
+        .await?;
+    if external_sources
+        .iter()
+        .any(|source| library_paths_overlap(path, &source.path))
+    {
+        return Ok(true);
+    }
+
+    if collection::Entity::find()
+        .all(conn)
+        .await?
+        .iter()
+        .any(|source| library_paths_overlap(path, &source.path))
+        || favorite::Entity::find()
+            .all(conn)
+            .await?
+            .iter()
+            .any(|source| library_paths_overlap(path, &source.path))
+        || submission::Entity::find()
+            .all(conn)
+            .await?
+            .iter()
+            .any(|source| library_paths_overlap(path, &source.path))
+        || watch_later::Entity::find()
+            .all(conn)
+            .await?
+            .iter()
+            .any(|source| library_paths_overlap(path, &source.path))
+        || video_source::Entity::find()
+            .all(conn)
+            .await?
+            .iter()
+            .any(|source| library_paths_overlap(path, &source.path))
+    {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// 删除指定目录（仅当目录存在且为空）
 fn cleanup_empty_dir_if_empty(dir: &str, label: &str) {
     use std::fs;
@@ -1073,6 +1138,7 @@ mod rename_tests {
             is_charge_video: Set(false),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
         }
         .insert(db.as_ref())
         .await
@@ -1137,6 +1203,7 @@ mod rename_tests {
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+    use sea_orm::Database;
     use std::fs;
     use std::path::PathBuf;
 
@@ -1175,6 +1242,91 @@ mod cleanup_tests {
 
         assert!(base.exists(), "deleted_path 等于 stop_at 时应直接返回");
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn external_library_path_overlap_handles_windows_style_paths() {
+        assert!(library_paths_overlap(
+            r"F:\Downloads\测试douyin\作者A",
+            r"F:/Downloads/测试douyin/作者A"
+        ));
+        assert!(library_paths_overlap(
+            r"F:\Downloads\测试douyin",
+            r"F:\Downloads\测试douyin\作者A"
+        ));
+        assert!(!library_paths_overlap(
+            r"F:\Downloads\测试douyin\作者A",
+            r"F:\Downloads\测试douyin\作者B"
+        ));
+    }
+
+    #[tokio::test]
+    async fn external_non_flat_cleanup_removes_complete_source_directory() {
+        let root = unique_temp_dir("external-source-complete");
+        let base = root.join("抖音作者");
+        let video_dir = base.join("视频目录");
+        fs::create_dir_all(video_dir.join("视频-images")).unwrap();
+        let output = video_dir.join("视频.mp4");
+        fs::write(&output, b"media").unwrap();
+        fs::write(video_dir.join("视频.nfo"), b"nfo").unwrap();
+        fs::write(video_dir.join("视频-images").join("01.jpg"), b"image").unwrap();
+        fs::write(base.join("person.nfo"), b"person").unwrap();
+        fs::write(base.join("folder.jpg"), b"avatar").unwrap();
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        execute_local_source_cleanup_plan(
+            &db,
+            LocalSourceCleanupPlan::External {
+                log_name: "抖音视频源测试".to_string(),
+                platform_label: "抖音",
+                base_path: base.to_string_lossy().into_owned(),
+                flat_folder: false,
+                remove_base_dir: true,
+                output_paths: vec![output.to_string_lossy().into_owned()],
+            },
+        )
+        .await;
+
+        assert!(
+            !base.exists(),
+            "非平铺外部平台源应连同头像、person.nfo 和图文原图完整删除"
+        );
+        assert!(root.exists(), "不应删除视频源基础目录之外的父目录");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn external_flat_cleanup_preserves_shared_root_and_unrelated_files() {
+        let root = unique_temp_dir("external-source-flat");
+        fs::create_dir_all(root.join("视频-images")).unwrap();
+        let output = root.join("视频.mp4");
+        fs::write(&output, b"media").unwrap();
+        fs::write(root.join("视频.nfo"), b"nfo").unwrap();
+        fs::write(root.join("视频-thumb.jpg"), b"cover").unwrap();
+        fs::write(root.join("视频-images").join("01.jpg"), b"image").unwrap();
+        fs::write(root.join("保留.txt"), b"keep").unwrap();
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        execute_local_source_cleanup_plan(
+            &db,
+            LocalSourceCleanupPlan::External {
+                log_name: "抖音平铺视频源测试".to_string(),
+                platform_label: "抖音",
+                base_path: root.to_string_lossy().into_owned(),
+                flat_folder: true,
+                remove_base_dir: false,
+                output_paths: vec![output.to_string_lossy().into_owned()],
+            },
+        )
+        .await;
+
+        assert!(root.exists(), "平铺模式必须保留共享根目录");
+        assert!(root.join("保留.txt").exists(), "平铺模式不得删除无关文件");
+        assert!(!output.exists());
+        assert!(!root.join("视频.nfo").exists());
+        assert!(!root.join("视频-thumb.jpg").exists());
+        assert!(!root.join("视频-images").exists());
         let _ = fs::remove_dir_all(&root);
     }
 }
@@ -1318,6 +1470,7 @@ mod reset_path_tests {
             is_charge_video: false,
             charge_can_play: false,
             total_file_size_bytes: None,
+            skip_reason: None,
         }
     }
 
@@ -1722,6 +1875,7 @@ mod queue_sse_tests {
             is_charge_video: Set(false),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
         }
         .insert(db)
         .await
@@ -1850,6 +2004,7 @@ mod queue_sse_tests {
             is_charge_video: Set(is_charge_video),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
         }
         .insert(db)
         .await
@@ -2073,6 +2228,8 @@ mod queue_sse_tests {
         let response = get_videos(
             Extension(db.clone()),
             Query(VideosRequest {
+                platform: None,
+                youtube: None,
                 collection: None,
                 favorite: None,
                 submission: Some(1),
@@ -2368,7 +2525,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_downloads_progress, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -2932,6 +3089,11 @@ pub async fn get_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<VideosRequest>,
 ) -> Result<ApiResponse<VideosResponse>, ApiError> {
+    if matches!(params.platform.as_deref(), Some("youtube" | "douyin" | "tiktok")) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::get_unified_youtube_videos(db.as_ref(), &params).await?,
+        ));
+    }
     let mut query = video::Entity::find();
     let (min_height, max_height) = resolve_height_filters(&params);
 
@@ -3142,6 +3304,17 @@ pub async fn get_videos(
                     .await?
             };
 
+            // 查询视频级跳过原因（未达最低下载标准等），SeaORM 元组最多 12 列，单独按 ID 批量查询
+            let skip_reason_map: std::collections::HashMap<i32, Option<String>> = video::Entity::find()
+                .filter(video::Column::Id.is_in(raw_videos.iter().map(|(id, ..)| *id)))
+                .select_only()
+                .columns([video::Column::Id, video::Column::SkipReason])
+                .into_tuple::<(i32, Option<String>)>()
+                .all(db.as_ref())
+                .await?
+                .into_iter()
+                .collect();
+
             // 转换为VideoInfo并填充番剧标题
             let mut videos: Vec<VideoInfo> = raw_videos
                 .iter()
@@ -3160,7 +3333,7 @@ pub async fn get_videos(
                         _season_id,
                         _source_type,
                     )| {
-                        VideoInfo::from((
+                        let mut info = VideoInfo::from((
                             *id,
                             bvid.clone(),
                             name.clone(),
@@ -3171,7 +3344,9 @@ pub async fn get_videos(
                             cover.clone(),
                             *valid,
                             *is_charge_video,
-                        ))
+                        ));
+                        info.skip_reason = skip_reason_map.get(id).and_then(|v| v.clone());
+                        info
                     },
                 )
                 .collect();
@@ -3624,9 +3799,17 @@ async fn video_has_generated_chapter_pages(db: &DatabaseConnection, video_id: i3
     )
 )]
 pub async fn get_video(
-    Path(id): Path<i32>,
+    Path(resource_id): Path<String>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<VideoResponse>, ApiError> {
+    if let Some(id) = crate::youtube::unified_youtube_id(&resource_id) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::get_unified_youtube_video(db.as_ref(), id).await?,
+        ));
+    }
+    let id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
     let Some(raw_video) = video::Entity::find_by_id(id).one(db.as_ref()).await? else {
         return Err(InnerApiError::NotFound(id).into());
     };
@@ -3660,6 +3843,9 @@ pub async fn get_video(
             }
         }
     }
+    // 填充未达最低下载标准等主动跳过原因（B站视频）
+    video_info.skip_reason = raw_video.skip_reason.clone();
+
     let mut source = resolve_video_source_tag(db.as_ref(), &raw_video).await?;
     if let Some(source_tag) = source.as_mut() {
         if !source_tag.split_chapters_after_download && video_has_generated_chapter_pages(db.as_ref(), id).await? {
@@ -3808,7 +3994,7 @@ pub async fn refresh_page_danmaku(
     )
 )]
 pub async fn reset_video(
-    Path(id): Path<i32>,
+    Path(resource_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<ResetVideoResponse>, ApiError> {
@@ -3817,6 +4003,14 @@ pub async fn reset_video(
         .get("force")
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
+    if let Some(id) = crate::youtube::unified_youtube_id(&resource_id) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::reset_unified_youtube_video(db.as_ref(), id, force_reset).await?,
+        ));
+    }
+    let id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
 
     // 获取视频和分页信息
     let (video_info, pages_info) = tokio::try_join!(
@@ -3963,6 +4157,11 @@ pub async fn reset_all_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<crate::api::request::VideosRequest>,
 ) -> Result<ApiResponse<ResetAllVideosResponse>, ApiError> {
+    if matches!(params.platform.as_deref(), Some("youtube" | "douyin" | "tiktok")) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::reset_all_unified_youtube_videos(db.as_ref(), &params).await?,
+        ));
+    }
     use std::collections::HashSet;
 
     // 构建查询条件，与get_videos保持一致（但不使用分页）
@@ -4227,6 +4426,11 @@ pub async fn reset_specific_tasks(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     axum::Json(request): axum::Json<crate::api::request::ResetSpecificTasksRequest>,
 ) -> Result<ApiResponse<ResetAllVideosResponse>, ApiError> {
+    if matches!(request.platform.as_deref(), Some("youtube" | "douyin" | "tiktok")) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::reset_specific_unified_youtube_tasks(db.as_ref(), &request).await?,
+        ));
+    }
     use std::collections::HashSet;
 
     let mut video_task_indexes = if request.video_task_indexes.is_empty() {
@@ -4705,10 +4909,18 @@ pub async fn test_risk_control_handler() -> Result<ApiResponse<crate::api::respo
     )
 )]
 pub async fn update_video_status(
-    Path(id): Path<i32>,
+    Path(resource_id): Path<String>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
     axum::Json(request): axum::Json<UpdateVideoStatusRequest>,
 ) -> Result<ApiResponse<UpdateVideoStatusResponse>, ApiError> {
+    if let Some(id) = crate::youtube::unified_youtube_id(&resource_id) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::update_unified_youtube_status(db.as_ref(), id, &request).await?,
+        ));
+    }
+    let id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
     let (video_info, pages_info) = tokio::try_join!(
         video::Entity::find_by_id(id)
             .select_only()
@@ -6145,8 +6357,16 @@ pub async fn delete_video_source(
 )]
 pub async fn delete_video(
     Extension(db): Extension<Arc<DatabaseConnection>>,
-    Path(id): Path<i32>,
+    Path(resource_id): Path<String>,
 ) -> Result<ApiResponse<crate::api::response::DeleteVideoResponse>, ApiError> {
+    if let Some(id) = crate::youtube::unified_youtube_id(&resource_id) {
+        return Ok(ApiResponse::ok(
+            crate::youtube::delete_unified_youtube_video(db.as_ref(), id).await?,
+        ));
+    }
+    let id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
     let video_delete_queue_busy = crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing();
     let has_pending_video_delete_tasks = crate::task::VIDEO_DELETE_TASK_QUEUE.queue_length().await > 0;
     let scanning = crate::task::is_scanning();
@@ -6491,13 +6711,23 @@ async fn cleanup_root_metadata_if_no_media(root_dir: &std::path::Path, deleted_c
 }
 
 #[derive(Debug, Clone)]
-struct LocalSourceCleanupPlan {
-    log_name: String,
-    base_path: String,
-    base_dir_label: &'static str,
-    flat_folder: bool,
-    orphaned_videos: Vec<video::Model>,
-    pages_by_video_id: HashMap<i32, Vec<page::Model>>,
+enum LocalSourceCleanupPlan {
+    Bilibili {
+        log_name: String,
+        base_path: String,
+        base_dir_label: &'static str,
+        flat_folder: bool,
+        orphaned_videos: Vec<video::Model>,
+        pages_by_video_id: HashMap<i32, Vec<page::Model>>,
+    },
+    External {
+        log_name: String,
+        platform_label: &'static str,
+        base_path: String,
+        flat_folder: bool,
+        remove_base_dir: bool,
+        output_paths: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -6529,7 +6759,7 @@ async fn build_local_source_cleanup_plan(
         }
     }
 
-    Ok(LocalSourceCleanupPlan {
+    Ok(LocalSourceCleanupPlan::Bilibili {
         log_name,
         base_path,
         base_dir_label,
@@ -6803,14 +7033,133 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
 }
 
 async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: LocalSourceCleanupPlan) {
-    let LocalSourceCleanupPlan {
-        log_name,
-        base_path,
-        base_dir_label,
-        flat_folder,
-        orphaned_videos,
-        pages_by_video_id,
-    } = plan;
+    let (log_name, base_path, base_dir_label, flat_folder, orphaned_videos, pages_by_video_id) = match plan {
+        LocalSourceCleanupPlan::Bilibili {
+            log_name,
+            base_path,
+            base_dir_label,
+            flat_folder,
+            orphaned_videos,
+            pages_by_video_id,
+        } => (
+            log_name,
+            base_path,
+            base_dir_label,
+            flat_folder,
+            orphaned_videos,
+            pages_by_video_id,
+        ),
+        LocalSourceCleanupPlan::External {
+            log_name,
+            platform_label,
+            base_path,
+            flat_folder,
+            remove_base_dir,
+            output_paths,
+        } => {
+            if is_dangerous_path_for_deletion(&base_path) {
+                warn!(platform = platform_label, path = %base_path, "检测到危险路径，跳过{} 本地清理", log_name);
+                return;
+            }
+
+            let base = std::path::PathBuf::from(&base_path);
+            let normalized_base = normalize_file_path(&base_path).trim_end_matches('/').to_string();
+            if !flat_folder && remove_base_dir {
+                if base.is_dir() {
+                    match get_directory_size(&base_path) {
+                        Ok(size) => {
+                            let size_mb = size as f64 / 1024.0 / 1024.0;
+                            info!(platform = platform_label, path = %base.display(), size_mb, "开始删除{} 完整目录", log_name);
+                            match std::fs::remove_dir_all(&base) {
+                                Ok(()) => {
+                                    info!(platform = platform_label, path = %base.display(), "{} 完整目录已删除", log_name)
+                                }
+                                Err(error) => {
+                                    error!(platform = platform_label, path = %base.display(), %error, "删除{} 完整目录失败", log_name)
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(platform = platform_label, path = %base.display(), %error, "无法计算{} 目录大小，继续删除", log_name);
+                            match std::fs::remove_dir_all(&base) {
+                                Ok(()) => {
+                                    info!(platform = platform_label, path = %base.display(), "{} 完整目录已删除", log_name)
+                                }
+                                Err(error) => {
+                                    error!(platform = platform_label, path = %base.display(), %error, "删除{} 完整目录失败", log_name)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    info!(platform = platform_label, path = %base.display(), "{} 本地目录不存在，无需清理", log_name);
+                }
+                return;
+            }
+
+            let mut deleted_paths = HashSet::new();
+            for output_path in output_paths {
+                let output = std::path::PathBuf::from(&output_path);
+                let normalized_output = normalize_file_path(&output_path);
+                if !normalized_output.starts_with(&format!("{normalized_base}/")) {
+                    warn!(platform = platform_label, path = %output.display(), base = %base.display(), "记录路径不在视频源目录内，跳过本地清理");
+                    continue;
+                }
+
+                let Some(parent) = output.parent() else {
+                    continue;
+                };
+                if !flat_folder && parent != base && deleted_paths.insert(parent.to_path_buf()) {
+                    if parent.is_dir() {
+                        match std::fs::remove_dir_all(parent) {
+                            Ok(()) => {
+                                info!(platform = platform_label, path = %parent.display(), "{} 视频完整目录已删除", log_name)
+                            }
+                            Err(error) => {
+                                warn!(platform = platform_label, path = %parent.display(), %error, "删除{} 视频完整目录失败", log_name)
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let stem = output.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+                let Ok(entries) = std::fs::read_dir(parent) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+                    let is_recorded_file = path == output
+                        || (!stem.is_empty()
+                            && (name.starts_with(&format!("{stem}."))
+                                || name.starts_with(&format!("{stem}-thumb."))
+                                || name.starts_with(&format!("{stem}-fanart."))
+                                || name.starts_with(&format!("{stem}-poster."))));
+                    let is_image_dir = path.is_dir() && !stem.is_empty() && name == format!("{stem}-images");
+                    let result = if is_image_dir {
+                        std::fs::remove_dir_all(&path)
+                    } else if is_recorded_file && path.is_file() {
+                        std::fs::remove_file(&path)
+                    } else {
+                        continue;
+                    };
+                    match result {
+                        Ok(()) => {
+                            info!(platform = platform_label, path = %path.display(), "{} 已记录媒体或附属文件已删除", log_name)
+                        }
+                        Err(error) => {
+                            warn!(platform = platform_label, path = %path.display(), %error, "删除{} 已记录媒体或附属文件失败", log_name)
+                        }
+                    }
+                }
+            }
+
+            cleanup_empty_dir_if_empty(&base_path, &format!("{}视频源基础目录", platform_label));
+            info!(platform = platform_label, "{} 本地文件清理完成", log_name);
+            return;
+        }
+    };
 
     if is_dangerous_path_for_deletion(&base_path) {
         warn!("检测到危险路径，跳过删除: {}", base_path);
@@ -6948,7 +7297,7 @@ async fn delete_orphaned_videos_from_db(
 fn is_supported_delete_video_source_type(source_type: &str) -> bool {
     matches!(
         source_type,
-        "collection" | "favorite" | "submission" | "watch_later" | "bangumi"
+        "collection" | "favorite" | "submission" | "watch_later" | "bangumi" | "youtube" | "douyin" | "tiktok"
     )
 }
 
@@ -6959,6 +7308,9 @@ fn delete_video_source_missing_message(source_type: &str) -> String {
         "submission" => "未找到指定的UP主投稿".to_string(),
         "watch_later" => "未找到指定的稍后再看".to_string(),
         "bangumi" => "未找到指定的番剧".to_string(),
+        "youtube" => "未找到指定的 YouTube 视频源".to_string(),
+        "douyin" => "未找到指定的抖音视频源".to_string(),
+        "tiktok" => "未找到指定的 TikTok 视频源".to_string(),
         _ => format!("不支持的视频源类型: {}", source_type),
     }
 }
@@ -6970,6 +7322,19 @@ async fn delete_video_source_record_exists(db: &impl ConnectionTrait, source_typ
         "submission" => Ok(submission::Entity::find_by_id(id).one(db).await?.is_some()),
         "watch_later" => Ok(watch_later::Entity::find_by_id(id).one(db).await?.is_some()),
         "bangumi" => Ok(video_source::Entity::find_by_id(id).one(db).await?.is_some()),
+        "youtube" | "douyin" | "tiktok" => {
+            let Some(source) = youtube_source::Entity::find_by_id(id).one(db).await? else {
+                return Ok(false);
+            };
+            let actual_platform = if source.source_type.starts_with("douyin") {
+                "douyin"
+            } else if source.source_type.starts_with("tiktok") {
+                "tiktok"
+            } else {
+                "youtube"
+            };
+            Ok(actual_platform == source_type)
+        }
         _ => Err(anyhow!("不支持的视频源类型: {}", source_type)),
     }
 }
@@ -7157,6 +7522,18 @@ pub async fn delete_video_source_internal(
     let txn = crate::database::begin_traced_transaction(&db, "api.handler.delete_video_source").await?;
 
     if !delete_video_source_record_exists(&txn, source_type.as_str(), id).await? {
+        if matches!(source_type.as_str(), "youtube" | "douyin" | "tiktok") {
+            let response = crate::api::response::DeleteVideoSourceResponse {
+                success: true,
+                source_id: id,
+                source_type: source_type.clone(),
+                message: format!("{}，可能已经删除", delete_video_source_missing_message(&source_type)),
+            };
+            txn.commit().await?;
+            notify_video_sources_changed();
+            notify_videos_changed();
+            return Ok(response);
+        }
         let (response, orphan_cleanup_plan) =
             cleanup_missing_video_source_references(&txn, source_type.as_str(), id, delete_local_files).await?;
         txn.commit().await?;
@@ -7494,6 +7871,64 @@ pub async fn delete_video_source_internal(
                 source_id: id,
                 source_type: "bangumi".to_string(),
                 message: format!("番剧 {} 已成功删除", bangumi.name),
+            }
+        }
+        "youtube" | "douyin" | "tiktok" => {
+            let platform_label = if source_type == "douyin" {
+                "抖音"
+            } else if source_type == "tiktok" {
+                "TikTok"
+            } else {
+                "YouTube"
+            };
+            let source = youtube_source::Entity::find_by_id(id)
+                .one(&txn)
+                .await?
+                .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
+            let videos = youtube_video::Entity::find()
+                .filter(youtube_video::Column::SourceId.eq(id))
+                .all(&txn)
+                .await?;
+
+            if delete_local_files {
+                let remove_base_dir =
+                    !source.flat_folder && !external_source_path_is_shared(&txn, source.id, &source.path).await?;
+                if !source.flat_folder && !remove_base_dir {
+                    info!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        path = %source.path,
+                        "视频源目录与其他来源重叠，仅清理当前来源已记录的视频目录"
+                    );
+                }
+                cleanup_plan = Some(LocalSourceCleanupPlan::External {
+                    log_name: format!("{platform_label}视频源「{}」", source.name),
+                    platform_label,
+                    base_path: source.path.clone(),
+                    flat_folder: source.flat_folder,
+                    remove_base_dir,
+                    output_paths: videos.iter().filter_map(|video| video.output_path.clone()).collect(),
+                });
+            }
+
+            youtube_video::Entity::delete_many()
+                .filter(youtube_video::Column::SourceId.eq(id))
+                .exec(&txn)
+                .await?;
+            youtube_source::Entity::delete_by_id(id).exec(&txn).await?;
+
+            crate::api::response::DeleteVideoSourceResponse {
+                success: true,
+                source_id: id,
+                source_type: source_type.clone(),
+                message: if delete_local_files {
+                    format!("{platform_label}视频源 {}、下载记录及本地文件已删除", source.name)
+                } else {
+                    format!(
+                        "{platform_label}视频源 {} 和下载记录已删除，本地文件已保留",
+                        source.name
+                    )
+                },
             }
         }
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type).into()),
@@ -7996,6 +8431,59 @@ pub async fn update_video_source_scan_deleted_internal(
                 message: build_scan_deleted_message(
                     "番剧",
                     Some(&video_source.name),
+                    requested_scan_deleted_videos,
+                    requested_scan_deleted_videos_once,
+                ),
+            }
+        }
+        "youtube" | "douyin" | "tiktok" => {
+            let platform_label = if source_type == "douyin" {
+                "抖音"
+            } else if source_type == "tiktok" {
+                "TikTok"
+            } else {
+                "YouTube"
+            };
+            let source = youtube_source::Entity::find_by_id(id)
+                .one(&txn)
+                .await?
+                .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
+            let actual_platform = if source.source_type.starts_with("douyin") {
+                "douyin"
+            } else if source.source_type.starts_with("tiktok") {
+                "tiktok"
+            } else {
+                "youtube"
+            };
+            if actual_platform != source_type {
+                return Err(anyhow!("视频源平台不匹配").into());
+            }
+
+            let (scan_deleted_videos, scan_deleted_videos_once) = resolve_scan_deleted_modes(
+                source.scan_deleted_videos,
+                source.scan_deleted_videos_once,
+                requested_scan_deleted_videos,
+                requested_scan_deleted_videos_once,
+            )?;
+
+            youtube_source::Entity::update(youtube_source::ActiveModel {
+                id: sea_orm::ActiveValue::Unchanged(id),
+                scan_deleted_videos: sea_orm::Set(scan_deleted_videos),
+                scan_deleted_videos_once: sea_orm::Set(scan_deleted_videos_once),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+
+            crate::api::response::UpdateVideoSourceScanDeletedResponse {
+                success: true,
+                source_id: id,
+                source_type: actual_platform.to_string(),
+                scan_deleted_videos,
+                scan_deleted_videos_once,
+                message: build_scan_deleted_message(
+                    platform_label,
+                    Some(&source.name),
                     requested_scan_deleted_videos,
                     requested_scan_deleted_videos_once,
                 ),
@@ -8555,6 +9043,121 @@ pub async fn update_video_source_download_options_internal(
                 use_dynamic_api: false,
                 filter_option: response_filter_option,
                 message: format!("番剧 {} 的下载选项已更新", video_source.name),
+            }
+        }
+        "youtube" | "douyin" | "tiktok" => {
+            let platform_label = if source_type == "douyin" {
+                "抖音"
+            } else if source_type == "tiktok" {
+                "TikTok"
+            } else {
+                "YouTube"
+            };
+            let source = youtube_source::Entity::find_by_id(id)
+                .one(&txn)
+                .await?
+                .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
+            let actual_platform = if source.source_type.starts_with("douyin") {
+                "douyin"
+            } else if source.source_type.starts_with("tiktok") {
+                "tiktok"
+            } else {
+                "youtube"
+            };
+            if actual_platform != source_type {
+                return Err(anyhow!("视频源平台不匹配").into());
+            }
+
+            let audio_only = params.audio_only.unwrap_or(source.audio_only);
+            let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(source.audio_only_m4a_only);
+            let flat_folder = params.flat_folder.unwrap_or(source.flat_folder);
+            let download_danmaku = params.download_danmaku.unwrap_or(source.download_danmaku);
+            let download_subtitle = params.download_subtitle.unwrap_or(source.download_subtitle);
+            let ai_subtitle_language =
+                ai_subtitle_language_from_request(&params.ai_subtitle_language, &source.ai_subtitle_language);
+            let ai_rename = params.ai_rename.unwrap_or(source.ai_rename);
+            let ai_rename_video_prompt = params
+                .ai_rename_video_prompt
+                .clone()
+                .unwrap_or(source.ai_rename_video_prompt.clone());
+            let ai_rename_audio_prompt = params
+                .ai_rename_audio_prompt
+                .clone()
+                .unwrap_or(source.ai_rename_audio_prompt.clone());
+            let ai_rename_enable_multi_page = params
+                .ai_rename_enable_multi_page
+                .unwrap_or(source.ai_rename_enable_multi_page);
+            let ai_rename_enable_collection = params
+                .ai_rename_enable_collection
+                .unwrap_or(source.ai_rename_enable_collection);
+            let ai_rename_enable_bangumi = params
+                .ai_rename_enable_bangumi
+                .unwrap_or(source.ai_rename_enable_bangumi);
+            let ai_rename_rename_parent_dir = params
+                .ai_rename_rename_parent_dir
+                .unwrap_or(source.ai_rename_rename_parent_dir);
+            let filter_option = match params.filter_option.clone() {
+                Some(value) => value.map(serde_json::to_value).transpose()?,
+                None => source.filter_option.clone(),
+            };
+            let response_filter_option = filter_option
+                .clone()
+                .and_then(|value| serde_json::from_value::<FilterOption>(value).ok());
+
+            youtube_source::Entity::update(youtube_source::ActiveModel {
+                id: Unchanged(id),
+                audio_only: Set(audio_only),
+                audio_only_m4a_only: Set(audio_only_m4a_only),
+                flat_folder: Set(flat_folder),
+                download_danmaku: Set(download_danmaku),
+                download_subtitle: Set(download_subtitle),
+                ai_subtitle_language: Set(ai_subtitle_language.clone()),
+                ai_rename: Set(ai_rename),
+                ai_rename_video_prompt: Set(ai_rename_video_prompt.clone()),
+                ai_rename_audio_prompt: Set(ai_rename_audio_prompt.clone()),
+                ai_rename_enable_multi_page: Set(ai_rename_enable_multi_page),
+                ai_rename_enable_collection: Set(ai_rename_enable_collection),
+                ai_rename_enable_bangumi: Set(ai_rename_enable_bangumi),
+                ai_rename_rename_parent_dir: Set(ai_rename_rename_parent_dir),
+                filter_option: Set(filter_option),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+
+            crate::api::response::UpdateVideoSourceDownloadOptionsResponse {
+                success: true,
+                source_id: id,
+                source_type: actual_platform.to_string(),
+                collection_aggregate_enabled: false,
+                collection_aggregate_season_number: None,
+                audio_only,
+                audio_only_m4a_only,
+                flat_folder,
+                split_chapters_after_download: false,
+                download_charge_videos: false,
+                download_danmaku,
+                download_subtitle,
+                download_ai_subtitle: download_subtitle,
+                ai_subtitle_language,
+                ai_rename,
+                ai_rename_video_prompt,
+                ai_rename_audio_prompt,
+                ai_rename_enable_multi_page,
+                ai_rename_enable_collection,
+                ai_rename_enable_bangumi,
+                ai_rename_rename_parent_dir,
+                use_dynamic_api: false,
+                filter_option: response_filter_option,
+                message: format!(
+                    "{} {} 的下载选项已更新",
+                    if actual_platform == "douyin" {
+                        "抖音"
+                    } else {
+                        "YouTube"
+                    },
+                    source.name
+                ),
             }
         }
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type).into()),
@@ -9564,6 +10167,10 @@ pub async fn reset_video_source_path_internal(
                 message: format!("番剧 {} 路径重设完成", bangumi.name),
             }
         }
+        // 外部平台（YouTube/抖音/TikTok）复用同一套路径重设流程与响应格式
+        "youtube" | "douyin" | "tiktok" => {
+            crate::youtube::reset_external_source_path_shared(&txn, source_type.as_str(), id, &request).await?
+        }
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type).into()),
     };
 
@@ -10210,6 +10817,8 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         // ffmpeg 路径
         ffmpeg_path: config.ffmpeg_path.clone(),
         split_chapters_after_download: config.split_chapters_after_download,
+        proxy: config.proxy.clone(),
+        youtube_proxy: config.youtube_proxy.clone(),
         // B站凭证信息
         credential: {
             let credential = config.credential.load();
@@ -10797,6 +11406,8 @@ pub async fn update_config(
             // ffmpeg 路径
             ffmpeg_path: params.ffmpeg_path.clone(),
             split_chapters_after_download: params.split_chapters_after_download,
+            proxy: params.proxy.clone(),
+            youtube_proxy: params.youtube_proxy.clone(),
             ai_rename_rename_parent_dir: params.ai_rename_rename_parent_dir,
             task_id: task_id.clone(),
         };
@@ -10915,6 +11526,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "bangumi_quick_subscribe_path" => Some("番剧快捷订阅路径模板"),
         "ffmpeg_path" => Some("ffmpeg路径"),
         "split_chapters_after_download" => Some("下载后按章节切分"),
+        "youtube_proxy" => Some("YouTube专用代理"),
         "bind_address" => Some("服务监听地址"),
         "risk_control.enabled" => Some("风控验证开关"),
         "risk_control.mode" => Some("风控验证模式"),
@@ -11247,6 +11859,30 @@ pub async fn update_config_internal(
         if interval > 0 && interval != config.interval {
             config.interval = interval;
             updated_fields.push("interval");
+        }
+    }
+
+    // 外源网络代理：新配置写入 proxy，旧 youtube_proxy 参数仍兼容并迁移到 proxy。
+    if let Some(proxy) = params.proxy.as_deref().or(params.youtube_proxy.as_deref()) {
+        let proxy = proxy.trim().to_string();
+        if !proxy.is_empty() {
+            let parsed = reqwest::Url::parse(&proxy).map_err(|_| {
+                ApiError::from(anyhow!(
+                    "网络代理地址无效，请使用 http://、https://、socks5:// 或 socks5h:// 开头的完整地址"
+                ))
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h") || parsed.host_str().is_none() {
+                return Err(anyhow!(
+                    "网络代理地址无效，请使用 http://、https://、socks5:// 或 socks5h:// 开头的完整地址"
+                )
+                .into());
+            }
+            reqwest::Proxy::all(&proxy)
+                .map_err(|error| ApiError::from(anyhow!("网络代理地址无效：{error}")))?;
+        }
+        if proxy != config.proxy {
+            config.proxy = proxy;
+            updated_fields.push("proxy");
         }
     }
 
@@ -12348,6 +12984,16 @@ pub async fn update_config_internal(
                             "split_chapters_after_download",
                             serde_json::to_value(config.split_chapters_after_download)?,
                         )
+                        .await
+                }
+                "proxy" => {
+                    manager
+                        .update_config_item("proxy", serde_json::to_value(&config.proxy)?)
+                        .await
+                }
+                "youtube_proxy" => {
+                    manager
+                        .update_config_item("youtube_proxy", serde_json::to_value(&config.youtube_proxy)?)
                         .await
                 }
                 "bind_address" => {
@@ -14101,7 +14747,13 @@ pub async fn get_submission_videos(
     match result {
         Ok((videos, total)) => {
             let response = SubmissionVideosResponse {
-                videos,
+                videos: videos
+                    .into_iter()
+                    .map(|mut video| {
+                        video.author = None;
+                        video
+                    })
+                    .collect(),
                 total,
                 page,
                 page_size,
@@ -14531,7 +15183,7 @@ pub async fn get_log_files() -> Result<ApiResponse<LogFilesResponse>, ApiError> 
     Ok(ApiResponse::ok(LogFilesResponse { files }))
 }
 
-/// 日志文件信息
+/// 日志文件信息。
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LogFileInfo {
     pub level: String,
@@ -14540,7 +15192,7 @@ pub struct LogFileInfo {
     pub modified: u64,
 }
 
-/// 日志文件列表响应
+/// 日志文件列表响应。
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LogFilesResponse {
     pub files: Vec<LogFileInfo>,
@@ -14590,6 +15242,21 @@ pub struct CancelQueueTaskResponse {
     pub success: bool,
     pub task_id: String,
     pub message: String,
+}
+
+/// 获取当前正在下载的任务实时进度（供首页「正在下载」展示）。
+#[utoipa::path(
+    get,
+    path = "/api/downloads/progress",
+    responses(
+        (status = 200, description = "获取当前下载进度成功", body = Vec<crate::download_progress::DownloadProgressItem>),
+        (status = 500, description = "服务器内部错误", body = String)
+    )
+)]
+pub async fn get_downloads_progress() -> Result<ApiResponse<Vec<crate::download_progress::DownloadProgressItem>>, ApiError> {
+    Ok(ApiResponse::ok(
+        crate::download_progress::DOWNLOAD_PROGRESS.snapshot().await,
+    ))
 }
 
 /// 获取队列状态
@@ -15144,8 +15811,28 @@ fn local_cover_not_found_response() -> axum::response::Response {
 )]
 pub async fn get_video_local_cover(
     Extension(db): Extension<Arc<DatabaseConnection>>,
-    Path(video_id): Path<i32>,
+    Path(resource_id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
+    if let Some(video_id) = crate::youtube::unified_youtube_id(&resource_id) {
+        let Some(cover_path) = crate::youtube::unified_youtube_cover_path(db.as_ref(), video_id).await? else {
+            return Ok(local_cover_not_found_response());
+        };
+        let image_data = tokio::fs::read(&cover_path).await?;
+        let content_type = mime_guess::from_path(&cover_path)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string();
+        return Ok(axum::response::Response::builder()
+            .status(200)
+            .header("Content-Type", content_type)
+            .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+            .header("X-Image-Cache", "LOCAL")
+            .body(axum::body::Body::from(image_data))
+            .unwrap());
+    }
+    let video_id = resource_id
+        .parse::<i32>()
+        .map_err(|_| crate::api::error::InnerApiError::BadRequest("无效的视频ID".to_string()))?;
     let Some(video_model) = video::Entity::find_by_id(video_id).one(db.as_ref()).await? else {
         debug!("本地封面兜底未命中：视频不存在 video_id={}", video_id);
         return Ok(local_cover_not_found_response());
@@ -15206,6 +15893,49 @@ pub async fn get_video_local_cover(
 
 #[utoipa::path(
     get,
+    path = "/api/videos/{video_id}/images/{image_index}",
+    params(
+        ("video_id" = String, Path, description = "统一视频资源ID，例如 douyin-123"),
+        ("image_index" = usize, Path, description = "图文原图序号，从1开始")
+    ),
+    responses(
+        (status = 200, description = "抖音图文本地原图", content_type = "image/*"),
+        (status = 404, description = "没有对应的本地原图")
+    )
+)]
+pub async fn get_video_local_image(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path((resource_id, image_index)): Path<(String, usize)>,
+) -> Result<axum::response::Response, ApiError> {
+    let Some(video_id) = crate::youtube::unified_youtube_id(&resource_id) else {
+        return Ok(local_cover_not_found_response());
+    };
+    let Some(image_path) = crate::youtube::unified_youtube_image_path(db.as_ref(), video_id, image_index).await? else {
+        return Ok(local_cover_not_found_response());
+    };
+    let image_data = match tokio::fs::read(&image_path).await {
+        Ok(image_data) if !image_data.is_empty() => image_data,
+        Ok(_) => return Ok(local_cover_not_found_response()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(local_cover_not_found_response());
+        }
+        Err(error) => return Err(anyhow!("读取抖音图文原图失败: {} ({})", image_path.display(), error).into()),
+    };
+    let content_type = mime_guess::from_path(&image_path)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
+    Ok(axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", content_type)
+        .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+        .header("X-Image-Cache", "LOCAL")
+        .body(axum::body::Body::from(image_data))
+        .unwrap())
+}
+
+#[utoipa::path(
+    get,
     path = "/api/proxy/image",
     params(
         ("url" = String, Query, description = "图片URL"),
@@ -15232,10 +15962,50 @@ pub async fn proxy_image(
         headers.get(IF_NONE_MATCH).is_some()
     );
 
-    // 验证URL是否来自B站
-    if !url.contains("hdslb.com") && !url.contains("bilibili.com") {
-        debug!("图片代理拒绝非B站URL: {}", summarize_image_url(&url));
-        return Err(anyhow!("只支持B站图片URL").into());
+    // 严格按解析后的 host 白名单校验，不使用 contains，避免 SSRF。
+    let parsed_url = reqwest::Url::parse(&url).context("无效的图片 URL")?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        return Err(anyhow!("图片 URL 只支持 HTTP/HTTPS").into());
+    }
+    let host = parsed_url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow!("图片 URL 缺少主机名"))?;
+    let host_matches = |domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
+    let is_bilibili_image = ["hdslb.com", "bilibili.com"].iter().any(|domain| host_matches(domain));
+    let is_youtube_image = [
+        "ytimg.com",
+        "ggpht.com",
+        "googleusercontent.com",
+        "youtube.com",
+        "googlevideo.com",
+    ]
+    .iter()
+    .any(|domain| host_matches(domain));
+    let is_douyin_image = [
+        "douyinpic.com",
+        "douyincdn.com",
+        "byteimg.com",
+        "pstatp.com",
+        "ibytedtos.com",
+        "bytecdn.cn",
+    ]
+    .iter()
+    .any(|domain| host_matches(domain));
+    let is_tiktok_image = [
+        "tiktokcdn.com",
+        "tiktokcdn-us.com",
+        "tiktokcdn-eu.com",
+        "tiktokcdn-in.com",
+        "tiktokcdn-jp.com",
+        "tiktokcdn-global.com",
+        "tiktokv.com",
+    ]
+    .iter()
+    .any(|domain| host_matches(domain));
+    if !is_bilibili_image && !is_youtube_image && !is_douyin_image && !is_tiktok_image {
+        debug!("图片代理拒绝非白名单 URL: {}", summarize_image_url(&url));
+        return Err(anyhow!("只支持 B 站、YouTube、抖音和 TikTok 图片 URL").into());
     }
 
     let now = Utc::now();
@@ -15264,43 +16034,143 @@ pub async fn proxy_image(
         );
     }
 
-    // 创建HTTP客户端
-    let client = reqwest::Client::new();
-
-    // 请求图片，添加必要的请求头
+    // 图片回源下载：TikTok 图片 CDN（tiktokcdn）按 TLS/JA3 指纹拒绝普通 HTTP
+    // 客户端（403 Access Denied），必须走 curl-impersonate（Chrome 指纹）；
+    // YouTube 走外源代理，B 站/抖音仍用 reqwest。
     tracing::debug!("图片缓存未命中，开始回源下载: {}", summarize_image_url(&url));
 
-    let request = client.get(&url).headers(create_image_headers());
-
-    // 图片下载请求头日志已在建造器时设置
-
-    let response = request.send().await;
-    let response = match response {
-        Ok(resp) => {
-            tracing::debug!("图片下载请求成功 - 状态码: {}, URL: {}", resp.status(), resp.url());
-            resp
+    let (content_type, image_data) = if is_tiktok_image {
+        let headers: Vec<(&str, &str)> = vec![
+            ("user-agent", crate::tiktok::TIKTOK_WEB_UA),
+            ("accept", "*/*"),
+            ("accept-language", "zh-CN,zh;q=0.9,en;q=0.8"),
+            ("referer", "https://www.tiktok.com/"),
+        ];
+        // 第一次直接请求；403（直链签名过期）时通过 item/detail 刷新直链再试一次。
+        let mut target = url.clone();
+        let mut refreshed = false;
+        loop {
+            match crate::tiktok_impersonate::tiktok_impersonated_get(
+                &target,
+                &headers,
+                Duration::from_secs(45),
+            )
+            .await
+            {
+                Ok((200, body, response_headers)) => {
+                    let content_type = response_headers
+                        .iter()
+                        .find(|(name, _)| name == "content-type")
+                        .map(|(_, value)| value.clone())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| "image/jpeg".to_string());
+                    break (content_type, body);
+                }
+                Ok((status, _, _)) if status == 403 && !refreshed => {
+                    refreshed = true;
+                    match crate::tiktok::refresh_tiktok_cover_url(db.as_ref(), &url).await {
+                        Ok(Some(fresh)) if fresh != url => {
+                            debug!(
+                                "TikTok 图片直链签名过期，已刷新直链重试: {}",
+                                summarize_image_url(&url)
+                            );
+                            target = fresh;
+                            continue;
+                        }
+                        Ok(_) => {
+                            // 刷新失败：直链已过期且当前无本地封面可兜底，按“无图”优雅返回，
+                            // 避免每个过期封面都刷 ERROR（详情接口需要浏览器 BotGuard 验证）。
+                            debug!(
+                                "TikTok 图片直链过期且无可刷新直链（无本地封面兜底），返回无图: {}",
+                                summarize_image_url(&url)
+                            );
+                            return Ok(local_cover_not_found_response());
+                        }
+                        Err(error) => {
+                            debug!(error = %error, "刷新 TikTok 图片直链失败，按无图兜底返回（详情接口需要浏览器 BotGuard 验证）");
+                            return Ok(local_cover_not_found_response());
+                        }
+                    }
+                }
+                Ok((status, _, _)) => {
+                    debug!(
+                        "TikTok 图片下载非 200 状态（{}），按无图兜底返回: {}",
+                        status,
+                        summarize_image_url(&url)
+                    );
+                    return Ok(local_cover_not_found_response());
+                }
+                Err(error) => {
+                    debug!("使用 Chrome 指纹下载 TikTok 图片失败，按无图兜底返回: {error:#}");
+                    return Ok(local_cover_not_found_response());
+                }
+            }
         }
-        Err(e) => {
-            tracing::error!("图片下载请求失败 - URL: {}, 错误: {}", url, e);
-            return Err(anyhow!("请求图片失败: {}", e).into());
+    } else {
+        let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(90));
+        if is_youtube_image {
+            let external_proxy = crate::config::with_config(|bundle| {
+                let proxy = bundle.config.proxy.trim();
+                if !proxy.is_empty() {
+                    proxy.to_string()
+                } else {
+                    bundle.config.youtube_proxy.trim().to_string()
+                }
+            });
+            if !external_proxy.is_empty() {
+                client_builder = client_builder
+                    .no_proxy()
+                    .proxy(reqwest::Proxy::all(&external_proxy).context("无效的网络代理地址")?);
+            }
         }
+        let client = client_builder.build().context("创建图片 HTTP 客户端失败")?;
+
+        let mut image_headers = create_image_headers();
+        if is_youtube_image {
+            image_headers.insert(
+                reqwest::header::REFERER,
+                reqwest::header::HeaderValue::from_static("https://www.youtube.com/"),
+            );
+        } else if is_douyin_image {
+            image_headers.insert(
+                reqwest::header::REFERER,
+                reqwest::header::HeaderValue::from_static("https://www.douyin.com/"),
+            );
+        }
+        let request = client.get(parsed_url).headers(image_headers);
+
+        let response = match request.send().await {
+            Ok(resp) => {
+                tracing::debug!("图片下载请求成功 - 状态码: {}, URL: {}", resp.status(), resp.url());
+                resp
+            }
+            Err(e) => {
+                tracing::error!("图片下载请求失败 - URL: {}, 错误: {}", url, e);
+                return Err(anyhow!("请求图片失败: {}", e).into());
+            }
+        };
+
+        if !response.status().is_success() {
+            tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, response.status());
+            return Err(anyhow!("图片请求失败: {}", response.status()).into());
+        }
+
+        // 获取内容类型
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .to_string();
+
+        // 获取图片数据（统一为 Vec<u8>，与 TikTok curl-impersonate 分支一致）
+        let image_data = response
+            .bytes()
+            .await
+            .map_err(|e| anyhow!("读取图片数据失败: {}", e))?
+            .to_vec();
+        (content_type, image_data)
     };
-
-    if !response.status().is_success() {
-        tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, response.status());
-        return Err(anyhow!("图片请求失败: {}", response.status()).into());
-    }
-
-    // 获取内容类型
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
-
-    // 获取图片数据
-    let image_data = response.bytes().await.map_err(|e| anyhow!("读取图片数据失败: {}", e))?;
     let etag = proxy_image_etag(&image_data);
     debug!(
         "图片回源下载完成: url={}, content_type={}, bytes={}, etag={}",
@@ -16496,6 +17366,105 @@ pub async fn refresh_scanning_endpoint(
 pub struct LatestIngestQuery {
     /// 返回条数，默认 10，最大 100
     pub limit: Option<usize>,
+    /// 平台过滤：all / bilibili / youtube / douyin / tiktok，默认 all
+    pub platform: Option<String>,
+}
+
+/// 解析入库记录的平台过滤参数（默认 all）。
+fn resolve_ingest_platform(platform: &Option<String>) -> &'static str {
+    match platform.as_deref().unwrap_or("all") {
+        "bilibili" => "bilibili",
+        "youtube" => "youtube",
+        "douyin" => "douyin",
+        "tiktok" => "tiktok",
+        _ => "all",
+    }
+}
+
+/// 外部平台入库记录行（you_tube_video JOIN you_tube_source）。
+#[derive(sea_orm::FromQueryResult, Debug)]
+struct ExternalIngestRow {
+    video_id: i32,
+    video_name: String,
+    upper_name: String,
+    path: String,
+    ingested_at: String,
+    download_status: String,
+    platform: String,
+}
+
+/// 查询外部平台（YouTube/抖音/TikTok）入库记录，按 created_at 倒序。
+///
+/// `platform` 为 all/youtube/douyin/tiktok 之一；`only_completed` 为 true 时
+/// 只返回已完成/已跳过的视频（用于「最近处理」列表）。
+async fn fetch_external_ingests(
+    db: &DatabaseConnection,
+    platform: &str,
+    limit: usize,
+    only_completed: bool,
+) -> Result<Vec<ExternalIngestRow>, ApiError> {
+    let where_clause = match platform {
+        "youtube" => "WHERE s.source_type NOT LIKE 'douyin%' AND s.source_type NOT LIKE 'tiktok%'",
+        "douyin" => "WHERE s.source_type LIKE 'douyin%'",
+        "tiktok" => "WHERE s.source_type LIKE 'tiktok%'",
+        _ => "",
+    };
+    let completed_clause = if only_completed {
+        if where_clause.is_empty() {
+            "WHERE yv.download_status IN ('completed','skipped')"
+        } else {
+            "AND yv.download_status IN ('completed','skipped')"
+        }
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT
+            yv.id AS video_id,
+            yv.title AS video_name,
+            yv.uploader AS upper_name,
+            COALESCE(yv.output_path, yv.url) AS path,
+            yv.created_at AS ingested_at,
+            yv.download_status AS download_status,
+            CASE
+                WHEN s.source_type LIKE 'tiktok%' THEN 'tiktok'
+                WHEN s.source_type LIKE 'douyin%' THEN 'douyin'
+                ELSE 'youtube'
+            END AS platform
+        FROM you_tube_video yv
+        JOIN you_tube_source s ON yv.source_id = s.id
+        {where_clause}
+        {completed_clause}
+        ORDER BY yv.created_at DESC, yv.id DESC
+        LIMIT {limit}"
+    );
+    ExternalIngestRow::find_by_statement(sea_orm::Statement::from_string(
+        db.get_database_backend(),
+        sql,
+    ))
+    .all(db)
+    .await
+    .map_err(|e| ApiError::from(InnerApiError::from(e)))
+}
+
+/// 把外部平台入库记录行转换为响应结构。
+fn external_ingest_row_to_item(row: ExternalIngestRow) -> crate::api::response::LatestIngestItemResponse {
+    let status = match row.download_status.as_str() {
+        "completed" | "skipped" => "success",
+        "failed" => "failed",
+        _ => "pending",
+    };
+    crate::api::response::LatestIngestItemResponse {
+        video_id: row.video_id,
+        video_name: row.video_name,
+        upper_name: row.upper_name,
+        path: row.path,
+        ingested_at: row.ingested_at,
+        download_speed_bps: None,
+        status: status.to_string(),
+        series_name: None,
+        platform: row.platform,
+    }
 }
 
 fn extract_series_name_from_share_copy(share_copy: &Option<String>) -> Option<String> {
@@ -16541,6 +17510,7 @@ fn video_to_ingest_item(
         download_speed_bps,
         status: status_label_from_video(&v),
         series_name: extract_series_name_from_share_copy(&v.share_copy),
+        platform: "bilibili".to_string(),
     }
 }
 
@@ -16560,15 +17530,17 @@ fn ingest_event_to_response(e: crate::ingest_log::IngestEvent) -> crate::api::re
         download_speed_bps: e.download_speed_bps,
         status: status_str.to_string(),
         series_name: e.series_name,
+        platform: "bilibili".to_string(),
     }
 }
 
-/// 获取首页「最新入库」列表（只按数据库新增时间排序）
+/// 获取首页「最新入库」列表（按数据库新增时间排序，支持平台过滤）
 #[utoipa::path(
     get,
     path = "/api/ingest/latest",
     params(
-        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100")
+        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100"),
+        ("platform" = Option<String>, Query, description = "平台过滤：all / bilibili / youtube / douyin / tiktok，默认 all")
     ),
     responses(
         (status = 200, description = "获取成功", body = crate::api::response::LatestIngestResponse),
@@ -16580,34 +17552,51 @@ pub async fn get_latest_ingests(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<crate::api::response::LatestIngestResponse>, ApiError> {
     let limit = query.limit.unwrap_or(10).clamp(1, 100);
+    let platform = resolve_ingest_platform(&query.platform);
+    let mut items: Vec<crate::api::response::LatestIngestItemResponse> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
 
-    let videos = video::Entity::find()
-        .order_by_desc(video::Column::CreatedAt)
-        .order_by_desc(video::Column::Id)
-        .limit(limit as u64)
-        .all(db.as_ref())
-        .await
-        .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
+    if platform == "all" || platform == "bilibili" {
+        let videos = video::Entity::find()
+            .order_by_desc(video::Column::CreatedAt)
+            .order_by_desc(video::Column::Id)
+            .limit(limit as u64)
+            .all(db.as_ref())
+            .await
+            .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
+        for v in videos {
+            if seen.insert(("bilibili".to_string(), v.id)) {
+                let created_at = v.created_at.clone();
+                items.push(video_to_ingest_item(v, created_at, None));
+            }
+        }
+    }
 
-    let resp_items = videos
-        .into_iter()
-        .map(|v| {
-            let created_at = v.created_at.clone();
-            video_to_ingest_item(v, created_at, None)
-        })
-        .collect();
+    if platform == "all" || matches!(platform, "youtube" | "douyin" | "tiktok") {
+        let rows = fetch_external_ingests(db.as_ref(), platform, limit, false).await?;
+        for row in rows {
+            if seen.insert((row.platform.clone(), row.video_id)) {
+                items.push(external_ingest_row_to_item(row));
+            }
+        }
+    }
+
+    // 合并后按时间倒序，截断到 limit
+    items.sort_by(|a, b| b.ingested_at.cmp(&a.ingested_at));
+    items.truncate(limit);
 
     Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
-        items: resp_items,
+        items,
     }))
 }
 
-/// 获取首页「最近处理」列表（下载/修复/弹幕等任务完成事件）
+/// 获取首页「最近处理」列表（下载/修复/弹幕等任务完成事件，支持平台过滤）
 #[utoipa::path(
     get,
     path = "/api/ingest/recent",
     params(
-        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100")
+        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100"),
+        ("platform" = Option<String>, Query, description = "平台过滤：all / bilibili / youtube / douyin / tiktok，默认 all")
     ),
     responses(
         (status = 200, description = "获取成功", body = crate::api::response::LatestIngestResponse),
@@ -16619,54 +17608,56 @@ pub async fn get_recent_ingests(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<crate::api::response::LatestIngestResponse>, ApiError> {
     let limit = query.limit.unwrap_or(10).clamp(1, 100);
+    let platform = resolve_ingest_platform(&query.platform);
+    let mut items: Vec<crate::api::response::LatestIngestItemResponse> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
 
-    // 1) 先取内存事件（带速度）
-    let mut items = crate::ingest_log::INGEST_LOG.list_latest(limit).await;
-
-    // 2) 不足时再用 DB 补齐。DB 没有持久化“处理完成时间”，这里用新增时间兜底。
-    if items.len() < limit {
-        let need = limit - items.len();
-        let mut existing_ids = std::collections::HashSet::new();
-        for it in &items {
-            existing_ids.insert(it.video_id);
-        }
-
-        // 只查询已完成的视频（download_status >= STATUS_COMPLETED，即最高位为1）
-        let fallback = video::Entity::find()
-            .filter(video::Column::DownloadStatus.gte(crate::utils::status::STATUS_COMPLETED))
-            .order_by_desc(video::Column::CreatedAt)
-            .limit(need as u64)
-            .all(db.as_ref())
-            .await
-            .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
-
-        for v in fallback {
-            if existing_ids.contains(&v.id) {
-                continue;
+    // 1) 内存事件（B 站下载链路产生，带真实速度）
+    if platform == "all" || platform == "bilibili" {
+        for e in crate::ingest_log::INGEST_LOG.list_latest(limit).await {
+            if seen.insert(("bilibili".to_string(), e.video_id)) {
+                items.push(ingest_event_to_response(e));
             }
-            let status = status_label_from_video(&v);
-            items.push(crate::ingest_log::IngestEvent {
-                video_id: v.id,
-                video_name: v.name.clone(),
-                upper_name: v.upper_name.clone(),
-                path: v.path.clone(),
-                ingested_at: v.created_at.clone(),
-                download_speed_bps: None,
-                status: match status.as_str() {
-                    "deleted" => crate::ingest_log::IngestStatus::Deleted,
-                    "success" => crate::ingest_log::IngestStatus::Success,
-                    _ => crate::ingest_log::IngestStatus::Failed,
-                },
-                series_name: extract_series_name_from_share_copy(&v.share_copy),
-            });
         }
     }
 
-    // 3) 转响应结构
-    let resp_items = items.into_iter().map(ingest_event_to_response).collect();
+    // 2) 内存不足时用 DB 补齐
+    if items.len() < limit {
+        if platform == "all" || platform == "bilibili" {
+            let need = limit - items.len();
+            let fallback = video::Entity::find()
+                .filter(video::Column::DownloadStatus.gte(crate::utils::status::STATUS_COMPLETED))
+                .order_by_desc(video::Column::CreatedAt)
+                .limit(need as u64)
+                .all(db.as_ref())
+                .await
+                .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
+            for v in fallback {
+                if seen.insert(("bilibili".to_string(), v.id)) {
+                    let created_at = v.created_at.clone();
+                    items.push(video_to_ingest_item(v, created_at, None));
+                }
+            }
+        }
+        if platform == "all" || matches!(platform, "youtube" | "douyin" | "tiktok") {
+            let need = limit - items.len();
+            if need > 0 {
+                let rows = fetch_external_ingests(db.as_ref(), platform, need, true).await?;
+                for row in rows {
+                    if seen.insert((row.platform.clone(), row.video_id)) {
+                        items.push(external_ingest_row_to_item(row));
+                    }
+                }
+            }
+        }
+    }
+
+    // 合并后按时间倒序，截断到 limit
+    items.sort_by(|a, b| b.ingested_at.cmp(&a.ingested_at));
+    items.truncate(limit);
 
     Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
-        items: resp_items,
+        items,
     }))
 }
 
@@ -18985,6 +19976,15 @@ async fn fetch_and_cache_season_title(season_id: &str) -> Option<String> {
     None
 }
 
+/// 外部平台（YouTube/抖音/TikTok）近七日每日新增视频统计行。
+#[derive(sea_orm::FromQueryResult, Debug)]
+struct ExternalDayCountRow {
+    day: String,
+    youtube_cnt: i64,
+    douyin_cnt: i64,
+    tiktok_cnt: i64,
+}
+
 /// 获取仪表盘数据
 #[utoipa::path(
     get,
@@ -19000,7 +20000,8 @@ pub async fn get_dashboard_data(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<crate::api::response::DashBoardResponse>, ApiError> {
     let (enabled_favorites, enabled_collections, enabled_submissions, enabled_watch_later, enabled_bangumi,
-         total_favorites, total_collections, total_submissions, total_watch_later, total_bangumi, videos_by_day) = tokio::try_join!(
+         total_favorites, total_collections, total_submissions, total_watch_later, total_bangumi,
+         youtube_sources, videos_by_day, external_day_rows) = tokio::try_join!(
         favorite::Entity::find()
             .filter(favorite::Column::Enabled.eq(true))
             .count(db.as_ref()),
@@ -19029,6 +20030,8 @@ pub async fn get_dashboard_data(
         video_source::Entity::find()
             .filter(video_source::Column::Type.eq(1))
             .count(db.as_ref()),
+        youtube_source::Entity::find()
+            .all(db.as_ref()),
         crate::api::response::DayCountPair::find_by_statement(sea_orm::Statement::from_string(
             db.get_database_backend(),
             // 用 SeaORM 太复杂了，直接写个裸 SQL
@@ -19055,19 +20058,109 @@ ORDER BY
     "
         ))
         .all(db.as_ref()),
+        // 外部平台（YouTube/抖音/TikTok）近七日新增视频，按天分组统计
+        ExternalDayCountRow::find_by_statement(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "
+SELECT
+    dates.day AS day,
+    COALESCE(SUM(CASE WHEN s.source_type NOT LIKE 'tiktok%' AND s.source_type NOT LIKE 'douyin%' THEN 1 ELSE 0 END), 0) AS youtube_cnt,
+    COALESCE(SUM(CASE WHEN s.source_type LIKE 'douyin%' THEN 1 ELSE 0 END), 0) AS douyin_cnt,
+    COALESCE(SUM(CASE WHEN s.source_type LIKE 'tiktok%' THEN 1 ELSE 0 END), 0) AS tiktok_cnt
+FROM
+    (
+        SELECT
+            DATE('now', '-' || n || ' days', 'localtime') AS day
+        FROM
+            (
+                SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6
+            )
+    ) AS dates
+LEFT JOIN
+    you_tube_video yv ON DATE(yv.created_at) = dates.day
+LEFT JOIN
+    you_tube_source s ON yv.source_id = s.id
+GROUP BY
+    dates.day
+ORDER BY
+    dates.day;
+    "
+        ))
+        .all(db.as_ref()),
     )?;
+
+    // 拆分外部平台每日统计到各平台数组（日期顺序与 B 站查询一致）
+    let mut youtube_videos_by_day: Vec<crate::api::response::DayCountPair> = Vec::new();
+    let mut douyin_videos_by_day: Vec<crate::api::response::DayCountPair> = Vec::new();
+    let mut tiktok_videos_by_day: Vec<crate::api::response::DayCountPair> = Vec::new();
+    for row in external_day_rows {
+        youtube_videos_by_day.push(crate::api::response::DayCountPair {
+            day: row.day.clone(),
+            cnt: row.youtube_cnt,
+        });
+        douyin_videos_by_day.push(crate::api::response::DayCountPair {
+            day: row.day.clone(),
+            cnt: row.douyin_cnt,
+        });
+        tiktok_videos_by_day.push(crate::api::response::DayCountPair {
+            day: row.day,
+            cnt: row.tiktok_cnt,
+        });
+    }
+
+    let youtube_type_count = |source_type: &str| {
+        let matching = youtube_sources
+            .iter()
+            .filter(|source| source.source_type == source_type);
+        let total = matching.clone().count() as u64;
+        let enabled = matching.filter(|source| source.enabled).count() as u64;
+        (enabled, total)
+    };
+    let (enabled_youtube_subscriptions, total_youtube_subscriptions) = youtube_type_count("subscriptions");
+    let (enabled_youtube_channels, total_youtube_channels) = youtube_type_count("channel");
+    let (enabled_youtube_playlists, total_youtube_playlists) = youtube_type_count("playlist");
+    let (enabled_youtube_liked, total_youtube_liked) = youtube_type_count("liked");
+    let (enabled_youtube_watch_later, total_youtube_watch_later) = youtube_type_count("watch_later");
+    let (enabled_douyin_authors, total_douyin_authors) = youtube_type_count("douyin");
+    let (enabled_douyin_liked, total_douyin_liked) = youtube_type_count("douyin_liked");
+    let (enabled_douyin_collections, total_douyin_collections) = youtube_type_count("douyin_collection");
+    let (enabled_douyin_watch_later, total_douyin_watch_later) = youtube_type_count("douyin_watch_later");
+    let (enabled_douyin_theaters, total_douyin_theaters) = youtube_type_count("douyin_theater");
+    let (enabled_douyin_series, total_douyin_series) = youtube_type_count("douyin_series");
+    let (enabled_tiktok_authors, total_tiktok_authors) = youtube_type_count("tiktok");
+    let (enabled_tiktok_liked, total_tiktok_liked) = youtube_type_count("tiktok_favorite");
+    let (enabled_tiktok_collections, total_tiktok_collections) = youtube_type_count("tiktok_collection");
+    let douyin_only = youtube_sources
+        .iter()
+        .filter(|source| source.source_type.starts_with("douyin"));
+    let total_douyin_sources = douyin_only.clone().count() as u64;
+    let enabled_douyin_sources = douyin_only.filter(|source| source.enabled).count() as u64;
+    let tiktok_only = youtube_sources
+        .iter()
+        .filter(|source| source.source_type.starts_with("tiktok"));
+    let total_tiktok_sources = tiktok_only.clone().count() as u64;
+    let enabled_tiktok_sources = tiktok_only.filter(|source| source.enabled).count() as u64;
+    let youtube_only = youtube_sources
+        .iter()
+        .filter(|source| !source.source_type.starts_with("douyin") && !source.source_type.starts_with("tiktok"));
+    let total_youtube_sources = youtube_only.clone().count() as u64;
+    let enabled_youtube_sources = youtube_only.filter(|source| source.enabled).count() as u64;
+    let enabled_external_sources = enabled_youtube_sources + enabled_douyin_sources + enabled_tiktok_sources;
+    let total_external_sources = total_youtube_sources + total_douyin_sources + total_tiktok_sources;
 
     // 获取监听状态信息
     let active_sources = enabled_favorites
         + enabled_collections
         + enabled_submissions
         + enabled_bangumi
-        + if enabled_watch_later > 0 { 1 } else { 0 };
+        + if enabled_watch_later > 0 { 1 } else { 0 }
+        + enabled_external_sources;
     let total_all_sources = total_favorites
         + total_collections
         + total_submissions
         + total_bangumi
-        + if total_watch_later > 0 { 1 } else { 0 };
+        + if total_watch_later > 0 { 1 } else { 0 }
+        + total_external_sources;
     let inactive_sources = total_all_sources - active_sources;
 
     // 从任务状态获取扫描时间信息
@@ -19097,9 +20190,252 @@ ORDER BY
         total_submissions,
         total_bangumi,
         total_watch_later,
+        enabled_youtube_sources,
+        total_youtube_sources,
+        enabled_douyin_sources,
+        total_douyin_sources,
+        enabled_douyin_authors,
+        total_douyin_authors,
+        enabled_douyin_liked,
+        total_douyin_liked,
+        enabled_douyin_collections,
+        total_douyin_collections,
+        enabled_douyin_watch_later,
+        total_douyin_watch_later,
+        enabled_douyin_theaters,
+        total_douyin_theaters,
+        enabled_douyin_series,
+        total_douyin_series,
+        enabled_tiktok_sources,
+        total_tiktok_sources,
+        enabled_tiktok_authors,
+        total_tiktok_authors,
+        enabled_tiktok_liked,
+        total_tiktok_liked,
+        enabled_tiktok_collections,
+        total_tiktok_collections,
+        enabled_youtube_subscriptions,
+        total_youtube_subscriptions,
+        enabled_youtube_channels,
+        total_youtube_channels,
+        enabled_youtube_playlists,
+        total_youtube_playlists,
+        enabled_youtube_liked,
+        total_youtube_liked,
+        enabled_youtube_watch_later,
+        total_youtube_watch_later,
         videos_by_day,
+        youtube_videos_by_day,
+        douyin_videos_by_day,
+        tiktok_videos_by_day,
         monitoring_status,
     }))
+}
+
+/// 测试外源网络代理到谷歌官网的连通性。
+#[utoipa::path(
+    post,
+    path = "/api/proxy/test",
+    request_body = crate::api::request::TestProxyRequest,
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::TestProxyResponse>),
+    )
+)]
+pub async fn test_proxy_handler(
+    axum::Json(request): axum::Json<crate::api::request::TestProxyRequest>,
+) -> Result<ApiResponse<crate::api::response::TestProxyResponse>, ApiError> {
+    // 优先使用请求内临时代理（测试尚未保存的地址）；为空时使用当前保存的外源代理。
+    let proxy = request
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::config::with_config(|bundle| {
+                let proxy = bundle.config.proxy.trim();
+                if !proxy.is_empty() {
+                    proxy.to_string()
+                } else {
+                    bundle.config.youtube_proxy.trim().to_string()
+                }
+            })
+        });
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
+    if !proxy.is_empty() {
+        builder = builder
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(&proxy).map_err(|error| {
+                ApiError::from(anyhow!("网络代理地址无效：{error}"))
+            })?);
+    }
+    let client = builder
+        .build()
+        .map_err(|error| ApiError::from(anyhow!("创建代理测试客户端失败：{error}")))?;
+    let started = std::time::Instant::now();
+    match client.get("https://www.google.com/").send().await {
+        Ok(response) => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            let status = response.status().as_u16();
+            let success = response.status().is_success() || response.status().is_redirection();
+            Ok(ApiResponse::ok(crate::api::response::TestProxyResponse {
+                success,
+                latency_ms,
+                status: Some(status),
+                error: if success {
+                    None
+                } else {
+                    Some(format!("谷歌官网返回 HTTP {status}"))
+                },
+            }))
+        }
+        Err(error) => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            // 展开错误原因链，便于定位是代理握手、DNS、超时还是出口受限。
+            let mut detail = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(next) = source {
+                detail.push_str(" -> ");
+                detail.push_str(&next.to_string());
+                source = std::error::Error::source(next);
+            }
+            Ok(ApiResponse::ok(crate::api::response::TestProxyResponse {
+                success: false,
+                latency_ms,
+                status: None,
+                error: Some(detail),
+            }))
+        }
+    }
+}
+
+/// 获取数据库状态概览（设置页 → 数据库管理）。
+#[utoipa::path(
+    get,
+    path = "/api/database/status",
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseStatusResponse>),
+    )
+)]
+pub async fn get_database_status(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<crate::api::response::DatabaseStatusResponse>, ApiError> {
+    let status = crate::db_maintenance::database_status(&db).await?;
+    Ok(ApiResponse::ok(status))
+}
+
+/// 执行数据库维护操作（设置页 → 数据库管理）。
+#[utoipa::path(
+    post,
+    path = "/api/database/maintenance",
+    request_body = crate::api::request::DatabaseMaintenanceRequest,
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseMaintenanceResponse>),
+    )
+)]
+pub async fn run_database_maintenance(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    axum::Json(request): axum::Json<crate::api::request::DatabaseMaintenanceRequest>,
+) -> Result<ApiResponse<crate::api::response::DatabaseMaintenanceResponse>, ApiError> {
+    let response = crate::db_maintenance::run_maintenance(&db, request.action, request.keep_days).await?;
+    Ok(ApiResponse::ok(response))
+}
+
+/// 获取数据库备份列表（设置页 → 数据库管理）。
+#[utoipa::path(
+    get,
+    path = "/api/database/backups",
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseBackupListResponse>),
+    )
+)]
+pub async fn get_database_backups() -> Result<ApiResponse<crate::api::response::DatabaseBackupListResponse>, ApiError> {
+    Ok(ApiResponse::ok(crate::db_maintenance::list_backups().await))
+}
+
+/// 安排数据库恢复（重启后生效）。
+#[utoipa::path(
+    post,
+    path = "/api/database/restore",
+    request_body = crate::api::request::RestoreDatabaseRequest,
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseRestoreResponse>),
+    )
+)]
+pub async fn restore_database(
+    axum::Json(request): axum::Json<crate::api::request::RestoreDatabaseRequest>,
+) -> Result<ApiResponse<crate::api::response::DatabaseRestoreResponse>, ApiError> {
+    let response = crate::db_maintenance::restore_backup(&request.backup_file).await?;
+    Ok(ApiResponse::ok(response))
+}
+
+/// 上传外部备份包并安排恢复（重启后生效）。
+/// 请以 multipart 表单上传，字段名为 `file`。
+#[utoipa::path(
+    post,
+    path = "/api/database/restore-upload",
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::DatabaseRestoreResponse>),
+    )
+)]
+pub async fn restore_database_upload(
+    mut multipart: Multipart,
+) -> Result<ApiResponse<crate::api::response::DatabaseRestoreResponse>, ApiError> {
+    use tokio::io::AsyncWriteExt;
+    const MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024; // 1GB
+
+    let mut uploaded: Option<(std::path::PathBuf, String)> = None;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|err| ApiError::bad_request(format!("读取上传数据失败：{err}")))?
+    {
+        let Some(field_name) = field.name() else { continue };
+        if field_name != "file" {
+            continue;
+        }
+        let original_name = field.file_name().unwrap_or("backup.sqlite").to_string();
+        let tmp_path = std::env::temp_dir().join(format!("bili-sync-db-import-{}.sqlite", uuid::Uuid::new_v4()));
+        let mut out = tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(|err| ApiError::bad_request(format!("创建上传临时文件失败：{err}")))?;
+        let mut total: u64 = 0;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|err| ApiError::bad_request(format!("读取上传数据失败：{err}")))?
+        {
+            total = total.saturating_add(chunk.len() as u64);
+            if total > MAX_UPLOAD_BYTES {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(ApiError::bad_request("上传的备份包过大（上限 1GB）"));
+            }
+            out.write_all(&chunk)
+                .await
+                .map_err(|err| ApiError::bad_request(format!("写入上传临时文件失败：{err}")))?;
+        }
+        out.flush()
+            .await
+            .map_err(|err| ApiError::bad_request(format!("写入上传临时文件失败：{err}")))?;
+        drop(out);
+        uploaded = Some((tmp_path, original_name));
+        break;
+    }
+
+    let Some((tmp_path, original_name)) = uploaded else {
+        return Err(ApiError::bad_request("未收到上传文件（表单字段名应为 file）"));
+    };
+
+    match crate::db_maintenance::import_backup(&tmp_path, &original_name).await {
+        Ok(response) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            Ok(ApiResponse::ok(response))
+        }
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            Err(ApiError::bad_request(err.to_string()))
+        }
+    }
 }
 
 /// 测试推送通知
@@ -19113,6 +20449,7 @@ ORDER BY
         (status = 500, description = "服务器内部错误", body = String)
     )
 )]
+
 pub async fn test_notification_handler(
     axum::Json(request): axum::Json<crate::api::request::TestNotificationRequest>,
 ) -> Result<ApiResponse<crate::api::response::TestNotificationResponse>, ApiError> {
@@ -19489,8 +20826,7 @@ pub async fn update_notification_config(
                 webhook_synology_chat_template,
             )
             .map_err(ApiError::from)?;
-            notification_config.webhook_synology_chat_template =
-                Some(webhook_synology_chat_template.to_string());
+            notification_config.webhook_synology_chat_template = Some(webhook_synology_chat_template.to_string());
         }
         updated = true;
     }
@@ -20528,7 +21864,7 @@ pub async fn clear_ai_rename_cache_for_source(
     post,
     path = "/api/{source_type}/{id}/ai-rename-history",
     params(
-        ("source_type" = String, Path, description = "视频源类型 (collection/favorite/submission/watch_later/bangumi)"),
+        ("source_type" = String, Path, description = "视频源类型 (collection/favorite/submission/watch_later/bangumi/youtube/douyin)"),
         ("id" = i32, Path, description = "视频源ID"),
     ),
     request_body = crate::api::response::BatchRenameRequest,
@@ -20579,6 +21915,48 @@ pub async fn ai_rename_history(
 
     // 构建 source_key
     let source_key = format!("{}_{}", source_type, id);
+
+    if matches!(source_type.as_str(), "youtube" | "douyin" | "tiktok") {
+        let platform_label = if source_type == "douyin" {
+                "抖音"
+            } else if source_type == "tiktok" {
+                "TikTok"
+            } else {
+                "YouTube"
+            };
+        let source = youtube_source::Entity::find_by_id(id)
+            .one(db.as_ref())
+            .await?
+            .ok_or_else(|| anyhow!("未找到指定的{platform_label}视频源"))?;
+        let actual_platform = if source.source_type.starts_with("douyin") {
+            "douyin"
+        } else {
+            "youtube"
+        };
+        if actual_platform != source_type {
+            return Err(anyhow!("视频源平台不匹配").into());
+        }
+        let rename_parent_dir = req.rename_parent_dir.unwrap_or(source.ai_rename_rename_parent_dir);
+        let result = crate::youtube::ai_rename_external_history(
+            db.as_ref(),
+            &source,
+            &req.video_prompt,
+            &req.audio_prompt,
+            rename_parent_dir,
+        )
+        .await?;
+        notify_videos_changed();
+        return Ok(ApiResponse::ok(crate::api::response::BatchRenameResponse {
+            success: true,
+            renamed_count: result.renamed_count,
+            skipped_count: result.skipped_count,
+            failed_count: result.failed_count,
+            message: format!(
+                "批量重命名完成：重命名 {} 个，跳过 {} 个，失败 {} 个",
+                result.renamed_count, result.skipped_count, result.failed_count
+            ),
+        }));
+    }
 
     // 根据 source_type 获取视频源配置和视频列表
     let (video_prompt, audio_prompt, videos, flat_folder, source_rename_parent_dir) = match source_type.as_str() {
@@ -20719,6 +22097,29 @@ pub async fn ai_rename_history(
         info!("[{}] 音频提示词: {}", source_key, audio_prompt);
     }
 
+    // 根据源类型计算目录结构提示（帮助 AI 按单P/多P/番剧/多P结构生成与文件一一对应的文件名）
+    let structure_hint = match source_type.as_str() {
+        "bangumi" => {
+            if config.bangumi_use_season_structure {
+                "番剧Season结构"
+            } else {
+                "番剧季文件夹"
+            }
+        }
+        "collection" => match config.collection_folder_mode.as_ref() {
+            "unified" => "合集统一模式（SxxExx）",
+            "up_seasonal" => "UP分季结构（SxxExx）",
+            _ => "",
+        },
+        _ => {
+            if config.multi_page_use_season_structure {
+                "Season 结构"
+            } else {
+                ""
+            }
+        }
+    };
+
     // 执行批量重命名
     let result = batch_rename_history_files(
         db.as_ref(),
@@ -20728,6 +22129,7 @@ pub async fn ai_rename_history(
         &video_prompt,
         &audio_prompt,
         flat_folder,
+        structure_hint,
     )
     .await;
 

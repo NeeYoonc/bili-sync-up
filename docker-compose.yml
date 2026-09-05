@@ -1,3 +1,24 @@
+# 可选：TikTok「我的喜欢/关注列表」浏览器会话模拟用的远程 Chromium（Docker/群晖无本机 Chrome 时使用）。
+# 注意：Chromium M113+ 移除了 --remote-debugging-address，CDP 固定只监听容器内
+# 127.0.0.1:9222，外部无法直接访问。必须挂载 docker/tiktok-chrome-init 里的
+# 10-cdp-socat.sh（linuxserver 镜像启动时会执行 /custom-cont-init.d 下的脚本），
+# 用 socat 把 CDP 转发到 0.0.0.0:9223，然后在设置页填入 http://<本机IP>:9223。
+# chromium:
+#   image: lscr.io/linuxserver/chromium:latest
+#   container_name: chromium
+#   environment:
+#     - PUID=1000
+#     - PGID=1000
+#     - TZ=Asia/Shanghai
+#     - CHROME_CLI=--remote-debugging-port=9222 --remote-allow-origins=*
+#   ports:
+#     - "9223:9223"
+#   volumes:
+#     - ./config/chromium:/config
+#     - ./docker/tiktok-chrome-init:/custom-cont-init.d
+#   shm_size: "1gb"
+#   restart: unless-stopped
+
 services:
   bili-sync:
     # image: bili-sync:latest
@@ -36,4 +57,4 @@ services:
     #       memory: 2G
     #     reservations:
     #       cpus: '0.5'
-    #       memory: 500M 
+    #       memory: 500M

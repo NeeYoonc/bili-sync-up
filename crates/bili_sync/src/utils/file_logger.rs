@@ -141,8 +141,8 @@ impl FileLogWriter {
     }
 
     fn cleanup_old_logs(log_dir: &Path) -> anyhow::Result<()> {
-        // 只保留“今天”和“昨天”的日志文件
-        let keep_from_date = Local::now().date_naive() - chrono::Duration::days(1);
+        // 保留最近 7 天（与“数据库管理 → 清理旧日志”的手动策略一致）
+        let keep_from_date = Local::now().date_naive() - chrono::Duration::days(6);
 
         if let Ok(entries) = fs::read_dir(log_dir) {
             for entry in entries.flatten() {
@@ -158,7 +158,7 @@ impl FileLogWriter {
                                     .unwrap_or_else(Local::now);
 
                                 if modified_datetime.date_naive() < keep_from_date {
-                                    // 删除超过30天的日志文件
+                                    // 删除保留期外的旧日志文件
                                     let _ = fs::remove_file(entry.path());
                                 }
                             }
@@ -351,6 +351,48 @@ pub fn get_current_log_file_name(level: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// 手动清理旧日志文件：保留最近 `keep_days` 天（含今天）的日志，删除更早的文件。
+/// 会跳过当前正在写入的日志轮次（Windows 下打开的文件无法删除）。返回删除的文件数量。
+pub fn clean_old_log_files(keep_days: u32) -> usize {
+    let Some(ref writer) = *FILE_LOG_WRITER else {
+        return 0;
+    };
+    let current_id = writer.current_log_id.lock().unwrap().clone();
+    // 今天算第 1 天：keep_days=7 时保留今天与最近 6 天
+    let keep_from = Local::now().date_naive() - chrono::Duration::days(i64::from(keep_days.saturating_sub(1)));
+    let mut removed = 0usize;
+    let Ok(entries) = fs::read_dir(&writer.log_dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        // 跳过当前正在写入的日志轮次
+        if file_name.contains(&current_id) {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(modified_since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
+            continue;
+        };
+        let modified_datetime = Local
+            .timestamp_opt(modified_since_epoch.as_secs() as i64, 0)
+            .single()
+            .unwrap_or_else(Local::now);
+        if modified_datetime.date_naive() < keep_from && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 // 在程序退出时调用，确保所有日志都被写入

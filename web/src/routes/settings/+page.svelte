@@ -9,6 +9,7 @@
 	import { CustomSelect } from '$lib/components/ui/select';
 	import { SheetFooter } from '$lib/components/ui/sheet';
 	import * as Tabs from '$lib/components/ui/tabs';
+	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import QrLogin from '$lib/components/qr-login.svelte';
 	import ResponsiveSheet from '$lib/components/responsive-sheet.svelte';
 	import SectionHeader from '$lib/components/section-header.svelte';
@@ -33,7 +34,10 @@
 		BellIcon,
 		SparklesIcon,
 		RefreshCwIcon,
-		EyeIcon
+	DatabaseIcon,
+		EyeIcon,
+		YoutubeIcon,
+		Music2Icon
 	} from 'lucide-svelte';
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -43,6 +47,9 @@
 	// import type { Theme } from '$lib/stores/theme'; // 未使用，已注释
 	import ThemeToggle from '$lib/components/theme-toggle.svelte';
 	import Loading from '$lib/components/ui/Loading.svelte';
+	import YouTubeLoginPanel from '$lib/components/youtube-login-panel.svelte';
+	import DouyinLoginPanel from '$lib/components/douyin-login-panel.svelte';
+	import TikTokLoginPanel from '$lib/components/tiktok-login-panel.svelte';
 
 	let config: ConfigResponse | null = null;
 	let loading = false;
@@ -91,6 +98,30 @@
 			icon: KeyIcon
 		},
 		{
+			id: 'youtube_login',
+			title: 'YouTube 登录状态',
+			description: '从电脑端助手或 cookies.txt 导入',
+			icon: YoutubeIcon
+		},
+		{
+			id: 'network_proxy',
+			title: '网络代理',
+			description: '外源网络代理（YouTube / TikTok）',
+			icon: SettingsIcon
+		},
+		{
+			id: 'douyin_login',
+			title: '抖音登录状态',
+			description: '从电脑端助手或 cookies.txt 导入',
+			icon: Music2Icon
+		},
+		{
+			id: 'tiktok_login',
+			title: 'TikTok 登录状态',
+			description: '从 cookies.txt 导入，公开内容无需登录',
+			icon: Music2Icon
+		},
+		{
 			id: 'risk',
 			title: '风控配置',
 			description: 'UP主投稿获取风控策略',
@@ -127,6 +158,12 @@
 			icon: SparklesIcon
 		},
 		{
+			id: 'database',
+			title: '数据库管理',
+			description: '查看数据库状态，清理缓存与孤立记录',
+			icon: DatabaseIcon
+		},
+		{
 			id: 'system',
 			title: '系统设置',
 			description: '扫描间隔等其他设置',
@@ -140,13 +177,18 @@
 		download: '控制下载并发、速率限制、任务执行方式和下载器行为。',
 		danmaku: '配置弹幕文件的显示样式、布局参数和同步策略。',
 		credential: '填写 B 站登录凭证，影响会员画质、互动内容和受限接口访问。',
+		youtube_login: '通过电脑端登录助手或 cookies.txt 管理 yt-dlp 使用的 YouTube 登录状态。',
+		network_proxy: '外源网络代理：YouTube 与 TikTok 的搜索、扫描、直链解析和下载共用；B站与抖音不受影响。',
+		douyin_login: '通过同一个电脑端登录助手或 cookies.txt 管理抖音作者作品扫描和下载所需的 Cookie。',
+		tiktok_login: '管理 TikTok 作者扫描所用的 cookies.txt；TikTok 公开作者主页无需登录即可同步，导入后 yt-dlp 可访问需要登录的私密/受限内容。',
 		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
 		captcha: '设置遇到验证码风控时的处理模式、超时和自动识别参数。',
 		aria2: '配置外部 Aria2 的健康检查、自动重启和监控策略。',
 		interface: '调整主题模式和前端界面显示偏好。',
 		notification: '配置扫描完成后的推送渠道、测试发送和通知内容。',
 		ai_rename: '配置 AI 自动重命名的启用范围、提示词和相关行为。',
-		system: '调整扫描间隔、监听端口、路径模板和基础系统行为。'
+		system: '调整扫描间隔、监听端口、路径模板和基础系统行为。',
+		database: '查看数据库文件信息与各表数据量；可清理图片代理缓存、AI 对话历史、任务队列历史与孤立记录，执行 VACUUM 压缩或备份数据库。'
 	} as const;
 
 	function getSettingTooltip(id: string) {
@@ -350,6 +392,14 @@
 	let enableAria2HealthCheck = false;
 	let enableAria2AutoRestart = false;
 	let aria2HealthCheckInterval = 300;
+	let networkProxy = '';
+	let proxyTesting = false;
+	let proxyTestResult: {
+		success: boolean;
+		latency_ms: number;
+		status?: number | null;
+		error?: string | null;
+	} | null = null;
 
 	// 多P视频目录结构配置
 	let multiPageUseSeasonStructure = false;
@@ -400,6 +450,33 @@
 	let aiRenameRenameParentDir = false;
 	let aiRenameSaving = false;
 	let aiRenameClearingCache = false;
+
+	// 数据库管理
+	let databaseStatus: {
+		path: string;
+		db_size_bytes: number;
+		wal_size_bytes: number;
+		reclaimable_bytes: number;
+		tables: { table: string; rows: number; label: string }[];
+		youtube_video_status: { status: string; count: number }[];
+	} | null = null;
+	let databaseLoading = false;
+	let databaseActionRunning = false;
+	let databaseAction: {
+		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup' | 'clean_logs';
+		label: string;
+		description: string;
+		danger: boolean;
+		keepDays: number;
+	} | null = null;
+
+	let databaseBackups: { name: string; path: string; size_bytes: number; created_at: string; is_import: boolean }[] = [];
+	let databaseBackupsLoading = false;
+	let restoreTarget: { name: string; size_bytes: number; created_at: string } | null = null;
+	let restoreRunning = false;
+	let importFileInput: HTMLInputElement | undefined;
+	let importRestoreTarget: { file: File; name: string; size_bytes: number } | null = null;
+	let importRestoreRunning = false;
 
 	const defaultWebhookCustomBody = `{
   "source": "{{source}}",
@@ -460,6 +537,13 @@
 			{ name: '{{ctime}}', desc: '视频创建时间' }
 		],
 		page: [
+			{ name: '{{title}}', desc: '视频标题（单P/多P模板可用）' },
+			{ name: '{{bvid}}', desc: 'BV号（视频编号，单P/多P模板可用）' },
+			{ name: '{{upper_name}}', desc: 'UP主名称（单P/多P模板可用）' },
+			{ name: '{{upper_mid}}', desc: 'UP主ID（单P/多P模板可用）' },
+			{ name: '{{pubtime}}', desc: '视频发布时间（单P/多P模板可用）' },
+			{ name: '{{fav_time}}', desc: '视频收藏时间（单P/多P模板可用）' },
+			{ name: '{{show_title}}', desc: '节目标题（与title相同）' },
 			{ name: '{{ptitle}}', desc: '分页标题（页面名称）' },
 			{ name: '{{long_title}}', desc: '分页长标题（非番剧可用）' },
 			{ name: '{{pid}}', desc: '分页页号' },
@@ -732,6 +816,7 @@
 		enableAria2HealthCheck = config.enable_aria2_health_check ?? false;
 		enableAria2AutoRestart = config.enable_aria2_auto_restart ?? false;
 		aria2HealthCheckInterval = config.aria2_health_check_interval ?? 300;
+		networkProxy = config.proxy ?? config.youtube_proxy ?? '';
 
 		// 多P视频目录结构配置
 		multiPageUseSeasonStructure = config.multi_page_use_season_structure ?? false;
@@ -1000,6 +1085,145 @@
 		multiPageNameHasPath = hasPathSeparator(multiPageName);
 	}
 
+	// ===== 数据库管理 =====
+	function formatBytes(bytes: number): string {
+		if (!bytes || bytes <= 0) return '0 B';
+		const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+		const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+		const value = bytes / Math.pow(1024, index);
+		return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[index]}`;
+	}
+
+	async function loadDatabaseStatus() {
+		databaseLoading = true;
+		try {
+			const response = await runRequest(() => api.getDatabaseStatus(), {
+				context: '获取数据库状态失败'
+			});
+			if (response) databaseStatus = response.data;
+		} finally {
+			databaseLoading = false;
+		}
+	}
+
+	async function loadDatabaseBackups() {
+		databaseBackupsLoading = true;
+		try {
+			const response = await runRequest(() => api.getDatabaseBackups(), {
+				context: '获取数据库备份列表失败'
+			});
+			if (response) databaseBackups = response.data.backups;
+		} finally {
+			databaseBackupsLoading = false;
+		}
+	}
+
+	async function confirmRestore(backup: { name: string; size_bytes: number; created_at: string }) {
+		restoreTarget = backup;
+	}
+
+	async function runRestore() {
+		if (!restoreTarget) return;
+		const name = restoreTarget.name;
+		restoreRunning = true;
+		try {
+			const response = await runRequest(() => api.restoreDatabase(name), {
+				context: '恢复数据库失败'
+			});
+			if (response?.data?.success) {
+				toast.success('恢复已安排', { description: response.data.message });
+			} else if (response?.data) {
+				toast.error('恢复失败', { description: response.data.message });
+			}
+		} finally {
+			restoreRunning = false;
+			restoreTarget = null;
+		}
+	}
+
+	function selectImportFile() {
+		importFileInput?.click();
+	}
+
+	function onImportFilePicked(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (!file) return;
+		importRestoreTarget = { file, name: file.name, size_bytes: file.size };
+	}
+
+	async function runImportRestore() {
+		if (!importRestoreTarget) return;
+		const target = importRestoreTarget;
+		importRestoreRunning = true;
+		try {
+			const response = await runRequest(() => api.uploadRestoreBackup(target.file, target.name), {
+				context: '导入备份包失败'
+			});
+			if (response?.data?.success) {
+				toast.success('备份包已导入', { description: response.data.message });
+				await loadDatabaseBackups();
+			} else if (response?.data) {
+				toast.error('导入备份包失败', { description: response.data.message });
+			}
+		} finally {
+			importRestoreRunning = false;
+			importRestoreTarget = null;
+		}
+	}
+
+	function requestDatabaseAction(
+		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup' | 'clean_logs',
+		label: string,
+		description: string,
+		danger = false,
+		keepDays = 7
+	) {
+		databaseAction = { action, label, description, danger, keepDays };
+	}
+
+	async function runDatabaseAction() {
+		if (!databaseAction) return;
+		const { action, label } = databaseAction;
+		const keepDays = action === 'clean_logs' ? databaseAction.keepDays : undefined;
+		databaseActionRunning = true;
+		try {
+			const response = await runRequest(() => api.runDatabaseMaintenance(action, keepDays), {
+				context: `${label}失败`
+			});
+			if (response?.data?.success) {
+				toast.success(`${label}成功`, { description: response.data.message });
+				await loadDatabaseStatus();
+			} else if (response?.data) {
+				toast.error(`${label}失败`, { description: response.data.message });
+			}
+		} finally {
+			databaseActionRunning = false;
+			databaseAction = null;
+		}
+	}
+
+	$: if (openSheet === 'database') {
+		loadDatabaseStatus();
+		loadDatabaseBackups();
+	}
+
+	async function handleTestProxy() {
+		proxyTesting = true;
+		proxyTestResult = null;
+		try {
+			const proxy = networkProxy.trim();
+			const response = await runRequest(() => api.testProxy(proxy || undefined), {
+				context: '测试代理失败'
+			});
+			if (!response) return;
+			proxyTestResult = response.data;
+		} finally {
+			proxyTesting = false;
+		}
+	}
+
 	async function saveConfig() {
 		// 保存前验证
 		if (!validatePageName(pageName)) {
@@ -1213,7 +1437,8 @@
 				DEFAULT_CONFIG_VALUES.largeSourcePlayurlDurationMs
 			),
 			audio_only_use_low_qn_for_playurl: audioOnlyUseLowQnForPlayurl,
-			// aria2监控配置
+			proxy: networkProxy.trim(),
+				// aria2监控配置
 			enable_aria2_health_check: enableAria2HealthCheck,
 			enable_aria2_auto_restart: enableAria2AutoRestart,
 			aria2_health_check_interval: normalizeNumberInput(
@@ -1601,7 +1826,7 @@
 </script>
 
 <svelte:head>
-	<title>设置 - Bili Sync</title>
+	<title>设置 - Bili Sync-up</title>
 </svelte:head>
 
 <div class="py-2">
@@ -3072,6 +3297,127 @@
 	</div>
 </ResponsiveSheet>
 
+<!-- YouTube 登录状态设置抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'youtube_login'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="YouTube 登录状态"
+	description="从电脑端登录助手或 cookies.txt 导入 yt-dlp 登录状态"
+	titleTooltip={getSettingTooltip('youtube_login')}
+	{isMobile}
+>
+	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+		<YouTubeLoginPanel />
+		<div
+			class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
+		>
+			登录成功后，订阅动态、喜欢的视频和稍后再看等账号来源会直接使用这里保存的登录状态。
+			添加视频源请前往“视频源管理 → YouTube 视频源 → 添加 YouTube 视频源”。
+		</div>
+	</div>
+	<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t px-6 pt-4'}>
+		<Button type="button" disabled={saving} class="w-full" onclick={saveConfig}>
+			{saving ? '保存中...' : '保存'}
+		</Button>
+	</SheetFooter>
+</ResponsiveSheet>
+
+<!-- 网络代理设置抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'network_proxy'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="网络代理"
+	description="YouTube / TikTok 等外源平台共用的代理通道"
+	titleTooltip={getSettingTooltip('network_proxy')}
+	{isMobile}
+>
+	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+		<div class="space-y-2 rounded-lg border p-4">
+			<Label for="network-proxy">网络代理地址</Label>
+			<Input
+				id="network-proxy"
+				bind:value={networkProxy}
+				placeholder="例如：http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
+				autocomplete="off"
+			/>
+			<p class="text-muted-foreground text-sm">
+				YouTube 与 TikTok 的搜索、订阅、扫描、直链解析、视频/音频/封面/头像/字幕和直播聊天共用此代理；B站与抖音不会使用。留空关闭。
+			</p>
+			<div class="flex flex-wrap items-center gap-2 pt-1">
+				<Button type="button" size="sm" variant="outline" disabled={proxyTesting} onclick={handleTestProxy}>
+					{proxyTesting ? '测试中...' : '测试连通性'}
+				</Button>
+				{#if proxyTestResult}
+					{#if proxyTestResult.success}
+						<span class="text-sm text-green-600 dark:text-green-400">
+							✓ 谷歌官网连通正常，耗时 {proxyTestResult.latency_ms} ms{proxyTestResult.status
+								? `（HTTP ${proxyTestResult.status}）`
+								: ''}
+						</span>
+					{:else}
+						<span class="text-sm text-red-600 dark:text-red-400">
+							✗ 谷歌官网连接失败{proxyTestResult.error ? `：${proxyTestResult.error}` : ''}
+						</span>
+					{/if}
+				{/if}
+			</div>
+		</div>
+		<div
+			class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
+		>
+			后续接入其他外源平台时可直接复用此代理通道。
+		</div>
+	</div>
+	<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t px-6 pt-4'}>
+		<Button type="button" disabled={saving} class="w-full" onclick={saveConfig}>
+			{saving ? '保存中...' : '保存网络代理'}
+		</Button>
+	</SheetFooter>
+</ResponsiveSheet>
+
+<!-- 抖音登录状态设置抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'douyin_login'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="抖音登录状态"
+	description="从电脑端登录助手或 cookies.txt 导入抖音 Cookie"
+	titleTooltip={getSettingTooltip('douyin_login')}
+	{isMobile}
+>
+	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+		<DouyinLoginPanel />
+		<div class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200">
+			导入后可搜索抖音作者、选择历史作品并持续扫描新作品。媒体仍使用项目现有统一下载器、画质设置、路径模板、封面与 NFO 链路。
+		</div>
+	</div>
+</ResponsiveSheet>
+
+<!-- TikTok 登录状态设置抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'tiktok_login'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="TikTok 登录状态"
+	description="从电脑浏览器导出的 cookies.txt 导入 TikTok 登录状态"
+	titleTooltip={getSettingTooltip('tiktok_login')}
+	{isMobile}
+>
+	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
+		<TikTokLoginPanel />
+		<div class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200">
+			TikTok 作者主页公开内容无需登录即可同步；导入登录状态后，作者扫描会携带该 Cookie，可访问需要登录才可见的私密/受限内容，且不会与 YouTube、抖音的 Cookie 混用。
+		</div>
+
+	</div>
+</ResponsiveSheet>
+
 <!-- 风控配置抽屉 -->
 <ResponsiveSheet
 	open={openSheet === 'risk'}
@@ -4486,7 +4832,7 @@
 			>
 				<h4 class="mb-3 font-medium text-purple-800 dark:text-purple-400">推送内容示例</h4>
 				<div class="space-y-2 font-mono text-sm text-purple-700 dark:text-purple-300">
-					<p><strong>标题：</strong>Bili Sync 扫描完成</p>
+					<p><strong>标题：</strong>Bili Sync-up 扫描完成</p>
 					<p><strong>内容：</strong></p>
 					<div class="ml-4 space-y-1">
 						<p>📊 扫描摘要</p>
@@ -4938,3 +5284,385 @@
 		</SheetFooter>
 	</form>
 </ResponsiveSheet>
+
+<!-- 数据库管理抽屉 -->
+<ResponsiveSheet
+	open={openSheet === 'database'}
+	onOpenChange={(open) => {
+		if (!open) openSheet = null;
+	}}
+	title="数据库管理"
+	description="查看数据库状态，清理缓存与孤立记录"
+	titleTooltip={getSettingTooltip('database')}
+	{isMobile}
+>
+	<div class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}">
+		<div
+			class="min-h-0 flex-1 space-y-6 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}"
+		>
+			{#if databaseLoading && !databaseStatus}
+				<div class="flex justify-center py-12">
+					<Loading />
+				</div>
+			{:else if databaseStatus}
+				<!-- 数据库信息 -->
+				<div class="space-y-3">
+					<h3 class="text-base font-semibold">数据库信息</h3>
+					<div class="rounded-lg border p-4">
+						<div class="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+							<div>
+								<span class="text-muted-foreground">主库大小：</span>
+								<span class="font-medium">{formatBytes(databaseStatus.db_size_bytes)}</span>
+							</div>
+							<div>
+								<span class="text-muted-foreground">WAL：</span>
+								<span class="font-medium">{formatBytes(databaseStatus.wal_size_bytes)}</span>
+							</div>
+							<div>
+								<span class="text-muted-foreground">可回收空间：</span>
+								<span class="font-medium">{formatBytes(databaseStatus.reclaimable_bytes)}</span>
+							</div>
+						</div>
+						<p class="text-muted-foreground mt-2 break-all text-xs">{databaseStatus.path}</p>
+						{#if databaseStatus.reclaimable_bytes > 1024 * 1024}
+							<div class="mt-2 rounded-md bg-amber-100 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+								可回收空间较大，建议执行「压缩数据库」释放磁盘空间。
+							</div>
+						{/if}
+					</div>
+				</div>
+
+				<!-- 数据量统计 -->
+				<div class="space-y-3">
+					<h3 class="text-base font-semibold">数据量统计</h3>
+					<div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+						{#each databaseStatus.tables as stat (stat.table)}
+							<div class="rounded-lg border p-3">
+								<p class="text-muted-foreground text-xs">{stat.label}</p>
+								<p class="mt-1 text-lg font-semibold">{stat.rows}</p>
+							</div>
+						{/each}
+					</div>
+					{#if databaseStatus.youtube_video_status.length > 0}
+						<div class="flex flex-wrap items-center gap-2">
+							<span class="text-muted-foreground text-xs">YouTube 视频状态：</span>
+							{#each databaseStatus.youtube_video_status as item (item.status)}
+								<Badge variant="secondary">{item.status}：{item.count}</Badge>
+							{/each}
+						</div>
+					{/if}
+				</div>
+
+				<!-- 维护操作 -->
+				<div class="space-y-3">
+					<h3 class="text-base font-semibold">维护操作</h3>
+					<div class="space-y-2">
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clear_image_cache', '清理图片代理缓存', '清空网页图片代理缓存，图片将按需重新拉取。')}
+						>
+							<div>
+								<p class="text-sm font-medium">清理图片代理缓存</p>
+								<p class="text-muted-foreground text-xs">清空 image_proxy_cache 表</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clear_ai_history', '清理 AI 对话历史', '清空 AI 重命名使用的历史对话记录，不影响已完成的命名。')}
+						>
+							<div>
+								<p class="text-sm font-medium">清理 AI 对话历史</p>
+								<p class="text-muted-foreground text-xs">清空 ai_conversation_history 表</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clear_queue_history', '清理任务队列历史', '删除已经完成或失败的任务队列记录（删除来源/添加来源等历史任务）。')}
+						>
+							<div>
+								<p class="text-sm font-medium">清理任务队列历史</p>
+								<p class="text-muted-foreground text-xs">删除已完成/失败的任务队列记录</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clean_orphans', '清理孤立记录', '删除来源已删除但仍保留在数据库里的 YouTube 视频记录，以及无主分P记录。', true)}
+						>
+							<div>
+								<p class="text-sm font-medium">清理孤立记录</p>
+								<p class="text-muted-foreground text-xs">来源已删除的 YouTube 视频 / 无主分P</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('vacuum', '压缩数据库', '执行 VACUUM 回收删除数据后留下的磁盘空间，可能需要几秒到几十秒。')}
+						>
+							<div>
+								<p class="text-sm font-medium">压缩数据库</p>
+								<p class="text-muted-foreground text-xs">回收可释放空间（当前约 {formatBytes(databaseStatus.reclaimable_bytes)}）</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('backup', '备份数据库', '生成一份完整数据库快照到配置目录（data-backup-时间戳.sqlite），不影响当前运行。')}
+						>
+							<div>
+								<p class="text-sm font-medium">备份数据库</p>
+								<p class="text-muted-foreground text-xs">VACUUM INTO 快照，不锁库</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+						<button
+							type="button"
+							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
+							onclick={() =>
+								requestDatabaseAction('clean_logs', '清理旧日志', '删除保留期以外的旧日志文件，释放磁盘空间；保留天数可在确认框中自由调整（1-365 天），当前正在写入的日志不受影响。', false, 7)}
+						>
+							<div>
+								<p class="text-sm font-medium">清理旧日志</p>
+								<p class="text-muted-foreground text-xs">保留最近 7 天的 logs/*.csv</p>
+							</div>
+							<span class="text-muted-foreground text-xs">→</span>
+						</button>
+					</div>
+				</div>
+
+				<!-- 数据库备份与恢复 -->
+				<div class="space-y-3">
+					<div class="rounded-lg border p-3">
+						<div class="flex items-center justify-between gap-3">
+							<div class="min-w-0">
+								<p class="text-sm font-medium">导入备份包</p>
+								<p class="text-muted-foreground text-xs">选择其他电脑导出的 .sqlite 备份文件，导入后即可恢复；外部备份也会保留在本机备份列表中。</p>
+							</div>
+							<input
+								bind:this={importFileInput}
+								type="file"
+								accept=".sqlite,.db"
+								class="hidden"
+								onchange={onImportFilePicked}
+							/>
+							<button
+								type="button"
+								class="hover:bg-accent flex-shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors"
+								onclick={selectImportFile}
+							>
+								选择文件
+							</button>
+						</div>
+					</div>
+					<div class="flex items-center justify-between">
+						<h3 class="text-base font-semibold">数据库备份</h3>
+						<button
+							type="button"
+							class="text-muted-foreground hover:text-foreground text-xs transition-colors"
+							onclick={loadDatabaseBackups}
+							disabled={databaseBackupsLoading}
+						>
+							{databaseBackupsLoading ? '刷新中...' : '刷新列表'}
+						</button>
+					</div>
+					{#if databaseBackups.length === 0}
+						<div class="text-muted-foreground rounded-lg border border-dashed p-4 text-center text-sm">
+							暂无备份。点击上方「备份数据库」生成一份快照。
+						</div>
+					{:else}
+						<div class="space-y-2">
+							{#each databaseBackups as backup (backup.name)}
+								<div class="hover:bg-accent flex items-center justify-between rounded-lg border p-3 transition-colors">
+									<div class="min-w-0">
+										<p class="truncate font-mono text-sm">
+											{backup.name}
+											{#if backup.is_import}
+												<span class="ml-2 rounded bg-blue-500/15 px-1.5 py-0.5 text-xs font-normal text-blue-600 dark:text-blue-400">外部导入</span>
+											{/if}
+										</p>
+										<p class="text-muted-foreground text-xs">
+											{formatBytes(backup.size_bytes)} · {backup.created_at}
+										</p>
+									</div>
+									<button
+										type="button"
+										class="text-destructive hover:text-destructive/80 flex-shrink-0 rounded-md border border-destructive/40 px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+										onclick={() => confirmRestore(backup)}
+									>
+										恢复
+									</button>
+								</div>
+							{/each}
+						</div>
+						<p class="text-muted-foreground text-xs">
+							恢复会替换当前数据库，重启后生效；恢复前会自动保留一份当前库的快照（data.sqlite.pre-restore-*）。
+						</p>
+					{/if}
+				</div>
+			{/if}
+		</div>
+		<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t pt-4'}>
+			<Button
+				type="button"
+				variant="outline"
+				onclick={loadDatabaseStatus}
+				disabled={databaseLoading}
+				class="w-full"
+			>
+				{databaseLoading ? '刷新中...' : '刷新统计'}
+			</Button>
+		</SheetFooter>
+	</div>
+</ResponsiveSheet>
+
+<!-- 数据库维护确认对话框 -->
+<AlertDialog.Root
+	open={!!databaseAction}
+	onOpenChange={(open) => {
+		if (!open) databaseAction = null;
+	}}
+>
+	<AlertDialog.Content class="max-w-md">
+		<AlertDialog.Header>
+			<AlertDialog.Title class={databaseAction?.danger ? 'text-destructive dark:text-red-400' : ''}>
+				{databaseAction?.label}
+			</AlertDialog.Title>
+			<AlertDialog.Description>{databaseAction?.description}</AlertDialog.Description>
+			{#if databaseAction?.action === 'clean_logs'}
+				<div class="mt-3 flex items-center gap-2">
+					<label for="keep-log-days" class="text-muted-foreground whitespace-nowrap text-sm">保留天数</label>
+					<input
+						id="keep-log-days"
+						type="number"
+						min="1"
+						max="365"
+						value={databaseAction.keepDays}
+						oninput={(e) => {
+							const value = Number((e.currentTarget as HTMLInputElement).value);
+							if (databaseAction) databaseAction.keepDays = value >= 1 ? Math.min(value, 365) : 1;
+						}}
+						class="border-input bg-background w-28 rounded-md border px-3 py-1.5 text-sm"
+					/>
+					<span class="text-muted-foreground text-xs">删除更早的日志文件</span>
+				</div>
+			{/if}
+		</AlertDialog.Header>
+		<AlertDialog.Footer class="flex justify-end gap-3 pt-4">
+			<button
+				type="button"
+				class="hover:bg-accent rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+				disabled={databaseActionRunning}
+				onclick={() => (databaseAction = null)}
+			>
+				取消
+			</button>
+			<button
+				type="button"
+				class="disabled:cursor-not-allowed rounded-md border border-transparent bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+				disabled={databaseActionRunning}
+				onclick={runDatabaseAction}
+			>
+				{databaseActionRunning ? '执行中...' : '确认执行'}
+			</button>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>
+
+<!-- 数据库恢复确认对话框 -->
+<AlertDialog.Root
+	open={!!restoreTarget}
+	onOpenChange={(open) => {
+		if (!open) restoreTarget = null;
+	}}
+>
+	<AlertDialog.Content class="max-w-md">
+		<AlertDialog.Header>
+			<AlertDialog.Title class="text-destructive dark:text-red-400">恢复数据库</AlertDialog.Title>
+			<AlertDialog.Description>
+				<p class="mb-2">确定要用以下备份替换当前数据库吗？</p>
+				<div class="rounded-md border bg-muted/50 p-3 font-mono text-xs">
+					<p class="break-all">{restoreTarget?.name}</p>
+					<p class="text-muted-foreground mt-1">
+						{formatBytes(restoreTarget?.size_bytes ?? 0)} · {restoreTarget?.created_at}
+					</p>
+				</div>
+				<div class="mt-3 rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+					<strong>注意：</strong>恢复将在重启后生效。当前数据库会先自动保留一份快照，但请确认无需保留其它数据。
+				</div>
+			</AlertDialog.Description>
+		</AlertDialog.Header>
+		<AlertDialog.Footer class="flex justify-end gap-3 pt-4">
+			<button
+				type="button"
+				class="hover:bg-accent rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+				disabled={restoreRunning}
+				onclick={() => (restoreTarget = null)}
+			>
+				取消
+			</button>
+			<button
+				type="button"
+				class="disabled:cursor-not-allowed rounded-md border border-transparent bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+				disabled={restoreRunning}
+				onclick={runRestore}
+			>
+				{restoreRunning ? '安排中...' : '确认恢复'}
+			</button>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>
+<!-- 数据库导入备份确认对话框 -->
+<AlertDialog.Root
+	open={!!importRestoreTarget}
+	onOpenChange={(open) => {
+		if (!open) importRestoreTarget = null;
+	}}
+>
+	<AlertDialog.Content class="max-w-md">
+		<AlertDialog.Header>
+			<AlertDialog.Title class="text-destructive dark:text-red-400">导入备份包并恢复</AlertDialog.Title>
+			<AlertDialog.Description>
+				<p class="mb-2">确定要导入以下备份包并替换当前数据库吗？</p>
+				<div class="rounded-md border bg-muted/50 p-3 font-mono text-xs">
+					<p class="break-all">{importRestoreTarget?.name}</p>
+					<p class="text-muted-foreground mt-1">{formatBytes(importRestoreTarget?.size_bytes ?? 0)}</p>
+				</div>
+				<div class="mt-3 rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+					<strong>注意：</strong>导入后会校验备份包有效性，恢复将在重启后生效。当前数据库会先自动保留一份快照，但请确认无需保留其它数据。
+				</div>
+			</AlertDialog.Description>
+		</AlertDialog.Header>
+		<AlertDialog.Footer class="flex justify-end gap-3 pt-4">
+			<button
+				type="button"
+				class="hover:bg-accent rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+				disabled={importRestoreRunning}
+				onclick={() => (importRestoreTarget = null)}
+			>
+				取消
+			</button>
+			<button
+				type="button"
+				class="disabled:cursor-not-allowed rounded-md border border-transparent bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+				disabled={importRestoreRunning}
+				onclick={runImportRestore}
+			>
+				{importRestoreRunning ? '导入中...' : '确认导入并恢复'}
+			</button>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>

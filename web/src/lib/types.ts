@@ -5,6 +5,191 @@ export interface ApiResponse<T> {
 	data: T;
 }
 
+export type YouTubeSourceType =
+	| 'subscriptions'
+	| 'channel'
+	| 'tiktok'
+	| 'tiktok_favorite'
+	| 'tiktok_collection'
+	| 'playlist'
+	| 'liked'
+	| 'watch_later'
+	| 'douyin'
+	| 'douyin_liked'
+	| 'douyin_collection'
+	| 'douyin_watch_later'
+	| 'douyin_theater'
+	| 'douyin_series';
+
+export interface YouTubeSource {
+	id: number;
+	source_type: YouTubeSourceType;
+	name: string;
+	url: string;
+	path: string;
+	enabled: boolean;
+	scan_deleted_videos: boolean;
+	scan_deleted_videos_once: boolean;
+	audio_only: boolean;
+	audio_only_m4a_only: boolean;
+	flat_folder: boolean;
+	download_danmaku: boolean;
+	download_subtitle: boolean;
+	ai_subtitle_language: string;
+	ai_rename: boolean;
+	ai_rename_video_prompt: string;
+	ai_rename_audio_prompt: string;
+	ai_rename_enable_multi_page: boolean;
+	ai_rename_enable_collection: boolean;
+	ai_rename_enable_bangumi: boolean;
+	ai_rename_rename_parent_dir: boolean;
+	filter_option?: FilterOption | null;
+	blacklist_keywords: string[];
+	whitelist_keywords: string[];
+	case_sensitive: boolean;
+	min_duration_seconds?: number | null;
+	max_duration_seconds?: number | null;
+	published_after?: string | null;
+	published_before?: string | null;
+	selected_videos: string[];
+	selected_channels: string[];
+	last_scan_at?: string | null;
+	pending_count: number;
+	completed_count: number;
+	failed_count: number;
+	skipped_count: number;
+}
+
+export interface CreateYouTubeSourceRequest {
+	source_type: YouTubeSourceType;
+	name: string;
+	url?: string;
+	path: string;
+	audio_only: boolean;
+	audio_only_m4a_only?: boolean;
+	flat_folder?: boolean;
+	download_danmaku?: boolean;
+	download_subtitle: boolean;
+	ai_subtitle_language?: string;
+	ai_rename?: boolean;
+	ai_rename_video_prompt?: string;
+	ai_rename_audio_prompt?: string;
+	ai_rename_enable_multi_page?: boolean;
+	ai_rename_enable_collection?: boolean;
+	ai_rename_enable_bangumi?: boolean;
+	ai_rename_rename_parent_dir?: boolean;
+	filter_option?: FilterOption;
+	blacklist_keywords?: string[];
+	whitelist_keywords?: string[];
+	case_sensitive?: boolean;
+	min_duration_seconds?: number | null;
+	max_duration_seconds?: number | null;
+	published_after?: string;
+	published_before?: string;
+	selected_videos?: string[];
+	selected_channels?: string[];
+}
+
+export interface YouTubeVideo {
+	id: number;
+	source_id: number;
+	youtube_id: string;
+	url: string;
+	title: string;
+	uploader: string;
+	thumbnail?: string | null;
+	published_at?: string | null;
+	duration_seconds?: number | null;
+	download_status: 'pending' | 'downloading' | 'completed' | 'failed' | 'skipped';
+	retry_count: number;
+	output_path?: string | null;
+	error_message?: string | null;
+}
+
+export interface YouTubeStatusResponse {
+	ytdlp_available: boolean;
+	ytdlp_version?: string | null;
+	logged_in: boolean;
+	default_output_path: string;
+	container_runtime: boolean;
+	cookie_path: string;
+}
+
+export interface DouyinStatusResponse {
+	logged_in: boolean;
+	cookie_path: string;
+}
+
+export interface TikTokStatusResponse {
+	logged_in: boolean;
+	cookie_path: string;
+}
+
+export interface TikTokSecUidStatusResponse {
+	/** 手动设置并保存的账号 secUid；未设置时为 null */
+	manual_sec_uid: string | null;
+}
+
+export interface YouTubeSearchRequest {
+	keyword: string;
+	source_type: 'channel' | 'playlist';
+}
+
+export interface YouTubeSearchResponse {
+	success: boolean;
+	results: SearchResultItem[];
+	total: number;
+}
+
+export interface YouTubeSourceVideosRequest {
+	url?: string;
+	source_type: 'subscriptions' | 'channel' | 'playlist' | 'liked';
+	page?: number;
+	page_size?: number;
+	keyword?: string;
+}
+
+export interface YouTubeLoginResponse {
+	logged_in: boolean;
+	message: string;
+}
+
+export interface UpdateYouTubeSourceRequest {
+	name?: string;
+	path?: string;
+	audio_only?: boolean;
+	audio_only_m4a_only?: boolean;
+	flat_folder?: boolean;
+	download_danmaku?: boolean;
+	download_subtitle?: boolean;
+	ai_subtitle_language?: string;
+	ai_rename?: boolean;
+	ai_rename_video_prompt?: string;
+	ai_rename_audio_prompt?: string;
+	ai_rename_enable_multi_page?: boolean;
+	ai_rename_enable_collection?: boolean;
+	ai_rename_enable_bangumi?: boolean;
+	ai_rename_rename_parent_dir?: boolean;
+	filter_option?: FilterOption | null;
+	inherit_filter_option?: boolean;
+	blacklist_keywords?: string[];
+	whitelist_keywords?: string[];
+	case_sensitive?: boolean;
+	min_duration_seconds?: number | null;
+	max_duration_seconds?: number | null;
+	published_after?: string | null;
+	published_before?: string | null;
+}
+
+export interface YouTubeQueueStatusResponse {
+	pending: number;
+	downloading: number;
+	completed: number;
+	failed: number;
+	skipped: number;
+	tasks: YouTubeVideo[];
+}
+
 // 排序字段枚举
 export type SortBy =
 	'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime' | 'is_charge_video' | 'file_size';
@@ -14,6 +199,8 @@ export type SortOrder = 'asc' | 'desc';
 
 // 请求参数类型
 export interface VideosRequest {
+	platform?: 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
+	youtube?: number;
 	collection?: number;
 	favorite?: number;
 	submission?: number;
@@ -73,6 +260,12 @@ export interface VideoSource {
 	name: string;
 	enabled: boolean;
 	path: string;
+	url?: string;
+	source_type?: YouTubeSourceType;
+	last_scan_at?: string | null;
+	pending_count?: number;
+	completed_count?: number;
+	failed_count?: number;
 	latest_row_at?: string | null; // 最近一条视频的发布时间（北京时间）
 	scan_deleted_videos: boolean;
 	scan_deleted_videos_once: boolean;
@@ -127,6 +320,9 @@ export interface VideoSourcesResponse {
 	submission: VideoSource[];
 	watch_later: VideoSource[];
 	bangumi: VideoSource[];
+	youtube: VideoSource[];
+	douyin: VideoSource[];
+	tiktok: VideoSource[];
 }
 
 // 视频信息类型
@@ -141,7 +337,12 @@ export interface VideoInfo {
 	cover: string;
 	valid: boolean;
 	is_charge_video: boolean;
+	is_image_post?: boolean;
+	is_story?: boolean; // 抖音日常 story 作品
+	image_urls?: string[];
 	bangumi_title?: string; // 番剧真实标题，用于番剧类型视频的显示
+	url?: string; // 平台原始视频地址（外部平台使用）
+	skip_reason?: string; // 主动跳过下载的原因（如未达到最低分辨率）；无此字段表示正常
 }
 
 // 视频列表响应类型
@@ -338,6 +539,8 @@ export interface ConfigResponse {
 	parallel_download_threads: number;
 	parallel_download_use_aria2: boolean;
 	split_chapters_after_download?: boolean;
+	proxy?: string;
+	youtube_proxy?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;
@@ -521,6 +724,8 @@ export interface UpdateConfigRequest {
 	parallel_download_threads?: number;
 	parallel_download_use_aria2?: boolean;
 	split_chapters_after_download?: boolean;
+	proxy?: string;
+	youtube_proxy?: string;
 	// 新增视频质量设置
 	video_max_quality?: string;
 	video_min_quality?: string;
@@ -675,6 +880,8 @@ export interface SearchResultItem {
 	play?: number;
 	danmaku?: number;
 	follower?: number; // 粉丝数（UP主搜索结果）
+	youtube_url?: string;
+	channel_id?: string;
 }
 
 // 搜索响应类型
@@ -1086,6 +1293,7 @@ export interface ValidateFavoriteResponse {
 export interface SubmissionVideoInfo {
 	title: string;
 	bvid: string;
+	author?: string;
 	description: string;
 	cover: string;
 	pubtime: string;
@@ -1122,7 +1330,44 @@ export interface DashBoardResponse {
 	total_submissions: number;
 	total_bangumi: number;
 	total_watch_later: number;
+	enabled_youtube_sources: number;
+	total_youtube_sources: number;
+	enabled_douyin_sources: number;
+	total_douyin_sources: number;
+	enabled_douyin_authors: number;
+	total_douyin_authors: number;
+	enabled_douyin_liked: number;
+	total_douyin_liked: number;
+	enabled_douyin_collections: number;
+	total_douyin_collections: number;
+	enabled_douyin_watch_later: number;
+	total_douyin_watch_later: number;
+	enabled_douyin_theaters: number;
+	total_douyin_theaters: number;
+	enabled_douyin_series: number;
+	total_douyin_series: number;
+	enabled_tiktok_sources: number;
+	total_tiktok_sources: number;
+	enabled_tiktok_authors: number;
+	total_tiktok_authors: number;
+	enabled_tiktok_liked: number;
+	total_tiktok_liked: number;
+	enabled_tiktok_collections: number;
+	total_tiktok_collections: number;
+	enabled_youtube_subscriptions: number;
+	total_youtube_subscriptions: number;
+	enabled_youtube_channels: number;
+	total_youtube_channels: number;
+	enabled_youtube_playlists: number;
+	total_youtube_playlists: number;
+	enabled_youtube_liked: number;
+	total_youtube_liked: number;
+	enabled_youtube_watch_later: number;
+	total_youtube_watch_later: number;
 	videos_by_day: DayCountPair[];
+	youtube_videos_by_day: DayCountPair[];
+	douyin_videos_by_day: DayCountPair[];
+	tiktok_videos_by_day: DayCountPair[];
 	monitoring_status: MonitoringStatus;
 }
 
@@ -1161,6 +1406,20 @@ export interface TaskStatus {
 	next_run?: string;
 }
 
+// 首页「正在下载」实时进度
+export interface DownloadProgressItem {
+	key: string;
+	platform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
+	title: string;
+	phase: string;
+	file_name: string;
+	downloaded_bytes: number;
+	total_bytes: number;
+	speed_bps: number;
+	eta_seconds: number | null;
+	started_at: string;
+}
+
 // 首页最新入库
 export interface LatestIngestItem {
 	video_id: number;
@@ -1171,6 +1430,7 @@ export interface LatestIngestItem {
 	download_speed_bps: number | null;
 	status: 'success' | 'failed' | 'deleted' | 'pending';
 	series_name: string | null; // 番剧系列名称（从share_copy的《》中提取）
+	platform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok'; // 视频平台
 }
 
 export interface LatestIngestResponse {
@@ -1186,4 +1446,75 @@ export interface BetaImageUpdateStatusResponse {
 	remote_pushed_at?: string;
 	checked_at?: string;
 	error?: string;
+}
+
+
+// 网络代理连通性测试结果
+export interface TestProxyResponse {
+	success: boolean;
+	latency_ms: number;
+	status?: number | null;
+	error?: string | null;
+}
+
+
+// ===== 数据库管理 =====
+
+export interface DatabaseTableStat {
+	table: string;
+	rows: number;
+	label: string;
+}
+
+export interface DatabaseStatusCount {
+	status: string;
+	count: number;
+}
+
+export interface DatabaseStatusResponse {
+	path: string;
+	db_size_bytes: number;
+	wal_size_bytes: number;
+	reclaimable_bytes: number;
+	tables: DatabaseTableStat[];
+	youtube_video_status: DatabaseStatusCount[];
+}
+
+export type DatabaseMaintenanceAction =
+	| 'clear_image_cache'
+	| 'clear_ai_history'
+	| 'clear_queue_history'
+	| 'clean_orphans'
+	| 'vacuum'
+	| 'backup'
+	| 'clean_logs';
+
+export interface DatabaseMaintenanceResponse {
+	success: boolean;
+	message: string;
+	removed_rows?: number | null;
+	backup_path?: string | null;
+	backup_size_bytes?: number | null;
+	size_before_bytes?: number | null;
+	size_after_bytes?: number | null;
+}
+
+
+export interface DatabaseBackupInfo {
+	name: string;
+	path: string;
+	size_bytes: number;
+	created_at: string;
+	is_import: boolean;
+}
+
+export interface DatabaseBackupListResponse {
+	backups: DatabaseBackupInfo[];
+}
+
+export interface DatabaseRestoreResponse {
+	success: boolean;
+	message: string;
+	backup_name?: string | null;
+	restart_required: boolean;
 }

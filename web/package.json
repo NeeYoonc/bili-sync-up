@@ -19,6 +19,7 @@
 		"format": "prettier --write .",
 		"lint": "prettier --check . && eslint .",
 		"validate:changed": "node scripts/validate-changed.mjs",
+		"test:youtube-helper": "node scripts/test-youtube-login-helper.mjs",
 		"validate:node20": "npx -y -p node@20 -c \"node --version && npm run check && npm run build && npm run validate:changed\""
 	},
 	"devDependencies": {

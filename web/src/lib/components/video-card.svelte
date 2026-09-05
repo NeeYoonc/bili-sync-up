@@ -34,6 +34,12 @@
 	export let selectionMode: boolean = false; // 是否为选择模式
 	export let selected: boolean = false; // 是否被选中
 	export let onSelectionChange: ((videoId: number, selected: boolean) => void) | null = null; // 选择状态变化回调
+	export let resourceId: string | number | null = null; // 统一 API 资源 ID（外部平台使用 platform-{id}）
+
+	// 抖音短剧付费与 B 站充电视频是两套文案
+	$: isDouyin = /^douyin-/.test(String(resourceId ?? ''));
+	$: isTikTok = /^tiktok-/.test(String(resourceId ?? ''));
+	export let detailHref: string = ''; // 详情页地址；不传时沿用 B 站地址
 	let coverFailed = false;
 	let lastVideoId: number | null = null;
 
@@ -115,6 +121,9 @@
 		if (taskNames.length > 0) {
 			return taskNames[index] || `任务${index + 1}`;
 		}
+		if (/^(youtube|douyin|tiktok)-/.test(String(resourceId ?? ''))) {
+			return ['视频封面', '视频信息', 'UP主头像', 'UP主信息', '视频下载'][index] || `任务${index + 1}`;
+		}
 
 		// 根据视频类型返回不同的任务名称
 		const isBangumi = video.bangumi_title !== undefined;
@@ -139,7 +148,7 @@
 			if (onReset) {
 				await onReset(force);
 			} else {
-				const response = await api.resetVideo(video.id, force);
+				const response = await api.resetVideo(resourceId ?? video.id, force);
 				// 根据返回结果显示不同的提示
 				if (response.data.resetted) {
 					toast.success('重置成功', {
@@ -173,7 +182,7 @@
 	}
 
 	function handleViewDetail() {
-		goto(`/video/${video.id}`);
+		goto(detailHref || `/video/${video.id}`);
 	}
 
 	function handleSelectionChange(event: Event) {
@@ -264,10 +273,13 @@
 	}
 
 	function getLocalCoverUrl(videoId: number): string {
-		return `/api/videos/${videoId}/cover`;
+		return `/api/videos/${resourceId ?? videoId}/cover`;
 	}
 
 	function getInitialCoverUrl(video: VideoInfo): string {
+		if (/^(youtube|douyin|tiktok)-/.test(String(resourceId ?? ''))) {
+			return getLocalCoverUrl(video.id);
+		}
 		if (video.valid === false) {
 			return getLocalCoverUrl(video.id);
 		}
@@ -276,7 +288,15 @@
 
 	function handleCoverImageError(event: Event) {
 		const target = event.currentTarget as HTMLImageElement;
-		if (video.valid !== false && video.cover && target.dataset.coverFallback !== 'local') {
+		const isExternalVideo = /^(youtube|douyin|tiktok)-/.test(String(resourceId ?? ''));
+		// 外部平台先试本地封面，本地不存在时只回源一次。旧逻辑会在
+		// local -> remote -> local 之间无限循环，导致未下载卡片闪烁并刷爆代理日志。
+		if (isExternalVideo && video.cover && !target.dataset.coverFallback) {
+			target.dataset.coverFallback = 'remote';
+			target.src = getProxiedImageUrl(video.cover);
+			return;
+		}
+		if (!isExternalVideo && video.valid !== false && video.cover && target.dataset.coverFallback !== 'local') {
 			target.dataset.coverFallback = 'local';
 			target.src = getLocalCoverUrl(video.id);
 			return;
@@ -313,9 +333,10 @@
 				loading="lazy"
 				on:error={handleCoverImageError}
 			/>
-			<!-- 选择模式复选框覆盖在封面左上角 -->
-			{#if selectionMode}
-				<div class="absolute top-2 left-2 z-20">
+			<!-- 类型标识和选择框统一排列在封面左上角 -->
+			{#if selectionMode || video.is_image_post || video.is_story || video.is_charge_video || video.skip_reason}
+				<div class="absolute top-2 left-2 z-20 flex max-w-[calc(100%-88px)] flex-wrap items-center gap-1.5">
+					{#if selectionMode}
 					<input
 						type="checkbox"
 						checked={selected}
@@ -323,17 +344,33 @@
 						on:click|stopPropagation
 						class="h-5 w-5 rounded border-2 border-white bg-white/80 text-blue-600 shadow-lg backdrop-blur-sm focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
 					/>
-				</div>
-			{/if}
-
-			{#if video.is_charge_video}
-				<div class="absolute top-2 {selectionMode ? 'left-10' : 'left-2'} z-20">
-					<Badge
-						class="bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500"
-						title="充电专属视频，播放前需先为 UP 主充电"
-					>
-						充电视频
-					</Badge>
+					{/if}
+					{#if video.is_image_post}
+						<Badge class="bg-fuchsia-600 text-xs text-white shadow-md hover:bg-fuchsia-600" title="抖音图文作品">
+							图文
+						</Badge>
+					{/if}
+					{#if video.is_story}
+						<Badge class="bg-cyan-600 text-xs text-white shadow-md hover:bg-cyan-600" title="抖音日常作品">
+							日常
+						</Badge>
+					{/if}
+					{#if video.is_charge_video}
+						<Badge
+							class="{isTikTok ? 'bg-yellow-500 text-xs text-white shadow-md hover:bg-yellow-500' : 'bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500'}"
+							title={isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
+						>
+							{isTikTok ? '无法下载视频' : isDouyin ? '付费' : '充电视频'}
+						</Badge>
+					{/if}
+					{#if video.skip_reason}
+						<Badge
+							class="border border-yellow-500/60 bg-yellow-200 text-xs text-yellow-950 shadow-md hover:bg-yellow-200"
+							title={video.skip_reason}
+						>
+							未达到最低下载标准
+						</Badge>
+					{/if}
 				</div>
 			{/if}
 
@@ -369,12 +406,30 @@
 					class="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
 				/>
 			{/if}
+			{#if (coverFailed || mode !== 'default') && (video.is_image_post || video.is_story)}
+				<Badge class="mt-0.5 shrink-0 bg-fuchsia-600 text-xs text-white hover:bg-fuchsia-600" title="抖音图文作品">
+					图文
+				</Badge>
+			{/if}
+			{#if (coverFailed || mode !== 'default') && video.is_story}
+				<Badge class="mt-0.5 shrink-0 bg-cyan-600 text-xs text-white hover:bg-cyan-600" title="抖音日常作品">
+					日常
+				</Badge>
+			{/if}
 			{#if (coverFailed || mode !== 'default') && video.is_charge_video}
 				<Badge
-					class="mt-0.5 shrink-0 bg-amber-500 text-xs text-white hover:bg-amber-500"
-					title="充电专属视频，播放前需先为 UP 主充电"
+					class="mt-0.5 shrink-0 {isTikTok ? 'bg-yellow-500 text-xs text-white hover:bg-yellow-500' : 'bg-amber-500 text-xs text-white hover:bg-amber-500'}"
+					title={isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
 				>
-					充电视频
+					{isTikTok ? '无法下载视频' : isDouyin ? '付费' : '充电视频'}
+				</Badge>
+			{/if}
+			{#if (coverFailed || mode !== 'default') && video.skip_reason}
+				<Badge
+					class="mt-0.5 shrink-0 border border-yellow-500/60 bg-yellow-200 text-xs text-yellow-950 hover:bg-yellow-200"
+					title={video.skip_reason}
+				>
+					未达到最低下载标准
 				</Badge>
 			{/if}
 			<CardTitle

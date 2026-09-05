@@ -78,7 +78,10 @@ struct SearchData {
 
 // 一个对 reqwest::Client 的简单封装，用于 Bilibili 请求
 #[derive(Clone)]
-pub struct Client(reqwest::Client);
+pub struct Client {
+    api: reqwest::Client,
+    media: reqwest::Client,
+}
 
 impl Client {
     pub fn new() -> Self {
@@ -94,16 +97,26 @@ impl Client {
             header::REFERER,
             header::HeaderValue::from_static("https://www.bilibili.com"),
         );
-        Self(
-            reqwest::Client::builder()
-                .default_headers(headers)
-                .gzip(true)
-                .referer(false)  // 禁用自动Referer策略，使用我们自己设置的Referer头
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .read_timeout(std::time::Duration::from_secs(10))
-                .build()
-                .expect("failed to build reqwest client"),
-        )
+        let api = reqwest::Client::builder()
+            .default_headers(headers.clone())
+            .gzip(true)
+            .referer(false) // 禁用自动Referer策略，使用我们自己设置的Referer头
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build reqwest API client");
+        // 媒体分片可能在 CDN 限速时超过 API 请求使用的 10 秒无数据超时。
+        // 仍由同一个 Client / UnifiedDownloader 链路发起，只为媒体传输使用更长的
+        // 单次读取超时，避免把正常的慢速 GoogleVideo/B站 CDN 分片误判为失败。
+        let media = reqwest::Client::builder()
+            .default_headers(headers)
+            .gzip(true)
+            .referer(false)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .read_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .expect("failed to build reqwest media client");
+        Self { api, media }
     }
 
     // a wrapper of reqwest::Client::request to add credential to the request
@@ -119,7 +132,7 @@ impl Client {
         credential: Option<&Credential>,
         gaia_vtoken: Option<&str>,
     ) -> reqwest::RequestBuilder {
-        let mut req = self.0.request(method, url);
+        let mut req = self.api.request(method, url);
         // 如果有 credential，会将其转换成 cookie 添加到请求的 header 中
         if let Some(credential) = credential {
             let mut cookie_parts = vec![
@@ -163,6 +176,43 @@ impl Client {
         }
 
         req
+    }
+
+    /// 下载媒体文件时使用。它和 API 请求共享默认请求头与代理环境，但允许 CDN
+    /// 在限速或分片调度时出现更长的无数据间隔。
+    pub fn media_request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
+        self.media.request(method, url)
+    }
+
+    /// 克隆 API 客户端，并为媒体请求单独创建指定代理的客户端。
+    /// 该代理不会影响 B 站 API、抖音请求或其他共享下载任务。
+    pub fn with_media_proxy(&self, proxy: &str) -> Result<Self> {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            header::HeaderValue::from_static(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            ),
+        );
+        headers.insert(
+            header::REFERER,
+            header::HeaderValue::from_static("https://www.youtube.com/"),
+        );
+        let configured_proxy = reqwest::Proxy::all(proxy).context("无效的 YouTube 代理地址")?;
+        let media = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(configured_proxy)
+            .default_headers(headers)
+            .gzip(true)
+            .referer(false)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .read_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .context("创建 YouTube 代理媒体客户端失败")?;
+        Ok(Self {
+            api: self.api.clone(),
+            media,
+        })
     }
 }
 
@@ -1383,6 +1433,7 @@ impl BiliClient {
             let video_info = crate::api::response::SubmissionVideoInfo {
                 bvid: video_item["bvid"].as_str().unwrap_or("").to_string(),
                 title: video_item["title"].as_str().unwrap_or("").to_string(),
+                author: None,
                 cover: video_item["pic"].as_str().unwrap_or("").to_string(),
                 pubtime,
                 duration: video_item["length"]

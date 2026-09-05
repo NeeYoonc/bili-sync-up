@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, Request};
-use axum::http::{header, Uri};
+use axum::http::{header, HeaderValue, Method, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{middleware, Extension, Router, ServiceExt};
@@ -14,6 +14,57 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
 use crate::api::auth;
+
+
+/// 浏览器扩展「外部平台登录助手」（chrome-extension:// 源）跨域调用本服务时的 CORS 处理。
+///
+/// 扩展在未授予 localhost host 权限时会先发 OPTIONS 预检（携带 Authorization 头），
+/// 若服务端不返回 CORS 头，浏览器会以 "Failed to fetch" 直接中断请求。这里统一：
+///  - 放行 OPTIONS 预检（204 + CORS 头，不经过认证中间件）；
+///  - 给所有响应附加 Access-Control-Allow-Origin 等头，保证扩展可直接跨域传输登录状态。
+pub(crate) async fn cors_middleware(
+    request: Request,
+    next: middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let is_preflight = request.method() == Method::OPTIONS
+        && request
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    if is_preflight {
+        let mut response = axum::response::Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(axum::body::Body::empty())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let headers = response.headers_mut();
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Authorization, Content-Type"),
+        );
+        headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
+        return Ok(response);
+    }
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Authorization, Content-Type"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("Content-Disposition"),
+    );
+    Ok(response)
+}
 use crate::api::handler::{
     add_video_source,
     ai_rename_history,
@@ -37,6 +88,7 @@ use crate::api::handler::{
     get_config_migration_status,
     get_current_user,
     get_dashboard_data,
+    get_downloads_progress,
     get_hot_reload_status,
     get_latest_ingests,
     get_log_files,
@@ -55,6 +107,7 @@ use crate::api::handler::{
     get_video,
     get_video_bvid,
     get_video_local_cover,
+    get_video_local_image,
     get_video_play_info,
     get_video_source_keyword_filters,
     get_video_sources,
@@ -84,6 +137,12 @@ use crate::api::handler::{
     stream_videos,
     test_credential_refresh,
     test_notification_handler,
+    test_proxy_handler,
+    get_database_status,
+    get_database_backups,
+    restore_database,
+    restore_database_upload,
+    run_database_maintenance,
     test_risk_control_handler,
     update_config,
     update_config_item_internal,
@@ -106,7 +165,26 @@ use crate::api::video_stream::stream_video;
 use crate::api::wrapper::ApiResponse;
 use crate::api::ws;
 use crate::bilibili::{get_captcha_info, serve_captcha_page, submit_captcha_result};
+use crate::douyin::{
+    douyin_status, get_douyin_catalog, get_douyin_followings, get_douyin_source_videos, import_douyin_cookie_file,
+    search_douyin,
+};
 use crate::utils::model::queue_missing_video_file_size_backfill;
+use crate::tiktok::{
+    create_tiktok_source, delete_tiktok_source, get_tiktok_followings, get_tiktok_playlists,
+    get_tiktok_source_videos,
+    get_tiktok_sources, import_tiktok_cookie_file, search_tiktok,
+    tiktok_secuid_status, tiktok_status, update_tiktok_secuid, update_tiktok_source,
+    update_tiktok_source_enabled,
+};
+use crate::youtube::{
+    create_douyin_source, create_youtube_source_checked, delete_douyin_source, delete_youtube_source_checked,
+    get_douyin_queue_status, get_douyin_sources, get_douyin_videos, get_youtube_queue_status,
+    get_youtube_channel_playlists, get_youtube_source_videos, get_youtube_sources, get_youtube_videos,
+    import_youtube_cookie_file, retry_douyin_video,
+    retry_youtube_video_checked, search_youtube, update_douyin_source, update_douyin_source_enabled,
+    update_youtube_source_checked, update_youtube_source_enabled_checked, youtube_status,
+};
 // CONFIG导入已移除 - 现在使用动态配置
 
 #[derive(Embed)]
@@ -264,6 +342,53 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/auth/qr/poll", get(poll_qr_status))
         .route("/api/auth/current-user", get(get_current_user))
         .route("/api/auth/clear-credential", post(clear_credential))
+        // YouTube 登录状态导入与来源适配（yt-dlp 只解析来源/直链，媒体走项目统一下载器）
+        .route("/api/youtube/status", get(youtube_status))
+        .route("/api/youtube/cookies", post(import_youtube_cookie_file))
+        .route("/api/youtube/search", get(search_youtube))
+        .route("/api/youtube/channel-playlists", get(get_youtube_channel_playlists))
+        .route("/api/youtube/source-videos", get(get_youtube_source_videos))
+        .route("/api/youtube/sources", get(get_youtube_sources).post(create_youtube_source_checked))
+        .route(
+            "/api/youtube/sources/{id}",
+            put(update_youtube_source_checked).delete(delete_youtube_source_checked),
+        )
+        .route(
+            "/api/youtube/sources/{id}/enabled",
+            put(update_youtube_source_enabled_checked),
+        )
+        .route("/api/youtube/videos", get(get_youtube_videos))
+        .route("/api/youtube/videos/{id}/retry", post(retry_youtube_video_checked))
+        .route("/api/youtube/queue-status", get(get_youtube_queue_status))
+        // 抖音作者发现/登录；来源 CRUD、下载和视频状态复用上面的外部媒体链路。
+        .route("/api/douyin/status", get(douyin_status))
+        .route("/api/douyin/cookies", post(import_douyin_cookie_file))
+        .route("/api/douyin/search", get(search_douyin))
+        .route("/api/douyin/followings", get(get_douyin_followings))
+        .route("/api/douyin/catalog", get(get_douyin_catalog))
+        .route("/api/douyin/source-videos", get(get_douyin_source_videos))
+        .route("/api/douyin/sources", get(get_douyin_sources).post(create_douyin_source))
+        .route(
+            "/api/douyin/sources/{id}",
+            put(update_douyin_source).delete(delete_douyin_source),
+        )
+        .route("/api/douyin/sources/{id}/enabled", put(update_douyin_source_enabled))
+        .route("/api/tiktok/status", get(tiktok_status))
+        .route("/api/tiktok/source-videos", get(get_tiktok_source_videos))
+        .route("/api/tiktok/playlists", get(get_tiktok_playlists))
+        .route("/api/tiktok/followings", get(get_tiktok_followings))
+        .route("/api/tiktok/cookies", post(import_tiktok_cookie_file))
+        .route("/api/tiktok/secuid", get(tiktok_secuid_status).put(update_tiktok_secuid))
+        .route("/api/tiktok/search", get(search_tiktok))
+        .route("/api/tiktok/sources", get(get_tiktok_sources).post(create_tiktok_source))
+        .route(
+            "/api/tiktok/sources/{id}",
+            put(update_tiktok_source).delete(delete_tiktok_source),
+        )
+        .route("/api/tiktok/sources/{id}/enabled", put(update_tiktok_source_enabled))
+        .route("/api/douyin/videos", get(get_douyin_videos))
+        .route("/api/douyin/videos/{id}/retry", post(retry_douyin_video))
+        .route("/api/douyin/queue-status", get(get_douyin_queue_status))
         .route("/api/bangumi/seasons/{season_id}", get(get_bangumi_seasons))
         .route("/api/search", get(search_bilibili))
         .route("/api/user/favorites", get(get_user_favorites))
@@ -278,6 +403,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/logs/files", get(get_log_files))
         .route("/api/logs/download", get(download_log_file))
         .route("/api/queue-status", get(get_queue_status))
+        .route("/api/downloads/progress", get(get_downloads_progress))
         .route("/api/queue/tasks/{task_id}", delete(cancel_queue_task))
         .route("/api/proxy/image", get(proxy_image))
         .route("/api/task-control/status", get(get_task_control_status))
@@ -288,15 +414,27 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/ingest/recent", get(get_recent_ingests))
         // 推送通知API
         .route("/api/notification/test", post(test_notification_handler))
+        .route("/api/proxy/test", post(test_proxy_handler))
         .route("/api/config/notification", get(get_notification_config))
         .route("/api/config/notification", post(update_notification_config))
         .route("/api/notification/status", get(get_notification_status))
         // 测试API
         .route("/api/test/risk-control", post(test_risk_control_handler))
+        // 数据库管理
+        .route("/api/database/status", get(get_database_status))
+        .route("/api/database/maintenance", post(run_database_maintenance))
+        .route("/api/database/backups", get(get_database_backups))
+        .route("/api/database/restore", post(restore_database))
+        // 外部备份包上传可达数百 MB，单路由放宽 body 上限
+        .route(
+            "/api/database/restore-upload",
+            post(restore_database_upload).layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)),
+        )
         // 视频流API
         .route("/api/videos/stream/{video_id}", get(stream_video))
         // 新增在线播放API
         .route("/api/videos/{video_id}/cover", get(get_video_local_cover))
+        .route("/api/videos/{video_id}/images/{image_index}", get(get_video_local_image))
         .route("/api/videos/{video_id}/play-info", get(get_video_play_info))
         .route("/api/videos/{video_id}/bvid", get(get_video_bvid))
         .route("/api/videos/proxy-stream", get(proxy_video_stream))
@@ -306,9 +444,13 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/captcha", get(serve_captcha_page))
         .route("/api/captcha/info", get(get_captcha_info))
         .route("/api/captcha/submit", post(submit_captcha_result))
-        // 先应用认证中间件
+        // 先应用认证中间件；CORS 在认证外层，保证扩展的 OPTIONS 预检可直达
         .layer(Extension(optimized_connection.clone()))
         .layer(middleware::from_fn(auth::auth))
+        // 扩展同步 TikTok localStorage（webmssdk 数据可达数 MB），放宽 body 上限
+        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+        // 浏览器扩展跨域调用所需的 CORS 头
+        .layer(middleware::from_fn(cors_middleware))
         // WebSocket API需要在认证中间件之后
         .merge(ws::router())
         .merge(

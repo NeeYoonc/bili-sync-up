@@ -24,7 +24,7 @@ assert_matches = "1.5.0"
 async-std = { version = "1.13.1", features = ["attributes", "tokio1"] } # 仅在 migration 中使用
 async-stream = "0.3.6"
 async-trait = "0.1.88"
-axum = { version = "0.8.4", features = ["macros", "ws"] }
+axum = { version = "0.8.4", features = ["macros", "ws", "multipart"] }
 base64 = "0.22.1"
 built = { version = "0.7.7", features = ["chrono"] }
 chrono = { version = "0.4.41", features = ["serde"] }
@@ -57,6 +57,7 @@ reqwest = { version = "0.12.15", features = [
     "http2",
     "json",
     "rustls-tls",
+    "socks",
     "stream",
 ], default-features = false }
 rsa = { version = "0.9.8", features = ["sha2"] }
@@ -69,6 +70,7 @@ sea-orm = { version = "1.1.11", features = [
 sea-orm-migration = { version = "1.1.11", features = ["runtime-tokio", "sqlx-sqlite"] }
 sha2 = "0.10.8"
 sha3 = "0.10.8"
+sm3 = "0.4.2"
 wasmtime = { version = "28.0", default-features = false, features = ["cranelift", "runtime", "std"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
@@ -77,9 +79,9 @@ strum = { version = "0.27.1", features = ["derive"] }
 sysinfo = "0.36.0"
 thiserror = "2.0.12"
 tokio = { version = "1.45.0", features = ["full"] }
+tokio-tungstenite = "0.24.0"
 tokio-stream = { version = "0.1.16", features = ["sync"] }
 tokio-util = { version = "0.7.15", features = ["io", "rt"] }
-tokio-tungstenite = "0.24.0"
 # toml = "0.8.22" # 已移除：配置已迁移到数据库
 # toml_edit = "0.22.22" # 已移除：配置已迁移到数据库
 tower = "0.5.2"
@@ -91,6 +93,8 @@ utoipa-swagger-ui = { version = "9.0.0", features = ["axum", "vendored"] }
 uuid = { version = "1.0", features = ["v4"] }
 webbrowser = "1.0.2"
 zip = "3.0.0"
+tar = "0.4.45"
+flate2 = "1.1.9"
 
 [workspace.metadata.release]
 release = false

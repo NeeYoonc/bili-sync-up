@@ -12,3 +12,5 @@ pub mod task_queue;
 pub mod video;
 pub mod video_source;
 pub mod watch_later;
+pub mod youtube_source;
+pub mod youtube_video;

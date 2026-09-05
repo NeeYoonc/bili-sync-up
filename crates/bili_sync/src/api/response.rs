@@ -111,6 +111,8 @@ pub struct SubmissionVideosResponse {
 pub struct SubmissionVideoInfo {
     pub bvid: String,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     pub cover: String,
     pub pubtime: String,
     pub duration: i32,
@@ -376,8 +378,17 @@ pub struct VideoInfo {
     pub cover: String,
     pub valid: bool,
     pub is_charge_video: bool,
+    pub is_image_post: bool,
+    #[serde(default)]
+    pub is_story: bool, // 抖音「日常」（story）作品标记
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bangumi_title: Option<String>, // 番剧真实标题，用于番剧类型视频的显示
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>, // 平台原始视频地址（YouTube/抖音/TikTok 外部平台使用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>, // 主动跳过下载的原因（如未达到最低分辨率）；None 表示正常
 }
 
 impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> for VideoInfo {
@@ -406,7 +417,12 @@ impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> f
             cover,
             valid,
             is_charge_video,
+            is_image_post: false,
+            is_story: false,
+            image_urls: Vec::new(),
             bangumi_title: None, // 默认为None，将在API层根据视频类型填充
+            url: None,
+            skip_reason: None,
         }
     }
 }
@@ -581,6 +597,10 @@ pub struct ConfigResponse {
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: String,
     pub split_chapters_after_download: bool,
+    // 外源网络代理（YouTube/TikTok 等平台共用）
+    pub proxy: String,
+    // 兼容旧配置：旧版仅 YouTube 使用的代理字段
+    pub youtube_proxy: String,
     // B站凭证信息
     pub credential: Option<CredentialInfo>,
     // 推送通知配置
@@ -1000,7 +1020,48 @@ pub struct DashBoardResponse {
     pub total_submissions: u64,
     pub total_bangumi: u64,
     pub total_watch_later: u64,
+    pub enabled_youtube_sources: u64,
+    pub total_youtube_sources: u64,
+    pub enabled_douyin_sources: u64,
+    pub total_douyin_sources: u64,
+    pub enabled_douyin_authors: u64,
+    pub total_douyin_authors: u64,
+    pub enabled_douyin_liked: u64,
+    pub total_douyin_liked: u64,
+    pub enabled_douyin_collections: u64,
+    pub total_douyin_collections: u64,
+    pub enabled_douyin_watch_later: u64,
+    pub total_douyin_watch_later: u64,
+    pub enabled_douyin_theaters: u64,
+    pub total_douyin_theaters: u64,
+    pub enabled_douyin_series: u64,
+    pub total_douyin_series: u64,
+    pub enabled_tiktok_sources: u64,
+    pub total_tiktok_sources: u64,
+    pub enabled_tiktok_authors: u64,
+    pub total_tiktok_authors: u64,
+    pub enabled_tiktok_liked: u64,
+    pub total_tiktok_liked: u64,
+    pub enabled_tiktok_collections: u64,
+    pub total_tiktok_collections: u64,
+    pub enabled_youtube_subscriptions: u64,
+    pub total_youtube_subscriptions: u64,
+    pub enabled_youtube_channels: u64,
+    pub total_youtube_channels: u64,
+    pub enabled_youtube_playlists: u64,
+    pub total_youtube_playlists: u64,
+    pub enabled_youtube_liked: u64,
+    pub total_youtube_liked: u64,
+    pub enabled_youtube_watch_later: u64,
+    pub total_youtube_watch_later: u64,
+    /// B 站近七日新增视频
     pub videos_by_day: Vec<DayCountPair>,
+    /// YouTube 近七日新增视频
+    pub youtube_videos_by_day: Vec<DayCountPair>,
+    /// 抖音近七日新增视频
+    pub douyin_videos_by_day: Vec<DayCountPair>,
+    /// TikTok 近七日新增视频
+    pub tiktok_videos_by_day: Vec<DayCountPair>,
     /// 当前监听状态
     pub monitoring_status: MonitoringStatus,
 }
@@ -1175,6 +1236,8 @@ pub struct LatestIngestItemResponse {
     pub status: String,
     /// 番剧系列名称（从share_copy的《》中提取）
     pub series_name: Option<String>,
+    /// 视频平台：bilibili / youtube / douyin / tiktok
+    pub platform: String,
 }
 
 // 最新入库列表响应
@@ -1235,4 +1298,102 @@ pub struct ConfigMigrationReportResponse {
     pub mapped_keys: Vec<String>,
     pub unmapped_keys: Vec<String>,
     pub notes: Vec<String>,
+}
+
+
+/// 网络代理连通性测试结果。
+#[derive(Serialize, ToSchema)]
+pub struct TestProxyResponse {
+    /// 是否成功连通谷歌官网
+    pub success: bool,
+    /// 测试耗时（毫秒）
+    pub latency_ms: u64,
+    /// 目标站点返回的 HTTP 状态码（成功时）
+    pub status: Option<u16>,
+    /// 失败原因
+    pub error: Option<String>,
+}
+
+/// 数据库管理：单个表的记录数统计。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseTableStat {
+    /// 表名
+    pub table: String,
+    /// 记录数
+    pub rows: i64,
+    /// 用户可读的中文表名说明
+    pub label: String,
+}
+
+/// 数据库管理：按状态统计。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseStatusCount {
+    pub status: String,
+    pub count: i64,
+}
+
+/// 数据库管理：数据库状态概览。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseStatusResponse {
+    /// 数据库文件路径
+    pub path: String,
+    /// 主库文件大小（字节）
+    pub db_size_bytes: u64,
+    /// WAL 文件大小（字节，0 表示不存在）
+    pub wal_size_bytes: u64,
+    /// 可回收空间（字节，VACUUM 可释放）
+    pub reclaimable_bytes: u64,
+    /// 各表记录数
+    pub tables: Vec<DatabaseTableStat>,
+    /// YouTube 视频下载状态统计
+    pub youtube_video_status: Vec<DatabaseStatusCount>,
+}
+
+/// 数据库管理：维护操作结果。
+#[derive(Debug, Serialize, ToSchema, Default)]
+pub struct DatabaseMaintenanceResponse {
+    pub success: bool,
+    pub message: String,
+    /// 本次删除的行数（清理类操作）
+    pub removed_rows: Option<u64>,
+    /// 备份文件路径（backup 操作）
+    pub backup_path: Option<String>,
+    /// 备份文件大小（字节，backup 操作）
+    pub backup_size_bytes: Option<u64>,
+    /// 操作前数据库大小（字节，vacuum/backup 操作）
+    pub size_before_bytes: Option<u64>,
+    /// 操作后数据库大小（字节，vacuum 操作）
+    pub size_after_bytes: Option<u64>,
+}
+
+/// 数据库备份文件信息。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseBackupInfo {
+    /// 备份文件名（data-backup-YYYYMMDD-HHMMSS.sqlite）
+    pub name: String,
+    /// 备份文件完整路径
+    pub path: String,
+    /// 文件大小（字节）
+    pub size_bytes: u64,
+    /// 创建时间（YYYY-MM-DD HH:MM:SS）
+    pub created_at: String,
+    /// 是否为外部导入的备份包（data-import-*.sqlite）
+    pub is_import: bool,
+}
+
+/// 数据库备份列表。
+#[derive(Debug, Serialize, ToSchema, Default)]
+pub struct DatabaseBackupListResponse {
+    pub backups: Vec<DatabaseBackupInfo>,
+}
+
+/// 数据库恢复结果。
+#[derive(Debug, Serialize, ToSchema, Default)]
+pub struct DatabaseRestoreResponse {
+    pub success: bool,
+    pub message: String,
+    /// 被恢复的备份文件名
+    pub backup_name: Option<String>,
+    /// 是否需要在重启后生效
+    pub restart_required: bool,
 }

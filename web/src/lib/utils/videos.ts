@@ -11,7 +11,8 @@ export function buildVideosRequest({
 	minHeight,
 	maxHeight,
 	sortBy = 'id',
-	sortOrder = 'desc'
+	sortOrder = 'desc',
+	platform = 'bilibili'
 }: {
 	page: number;
 	pageSize: number;
@@ -22,12 +23,14 @@ export function buildVideosRequest({
 	maxHeight?: number | null;
 	sortBy?: SortBy;
 	sortOrder?: SortOrder;
+	platform?: 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
 }): VideosRequest {
 	const params: VideosRequest = {
 		page,
 		page_size: pageSize,
 		sort_by: sortBy,
-		sort_order: sortOrder
+		sort_order: sortOrder,
+		platform
 	};
 
 	if (query?.trim()) {
@@ -49,6 +52,11 @@ export function buildVideosRequest({
 		const sourceId = Number.parseInt(videoSource.id, 10);
 		if (Number.isFinite(sourceId)) {
 			switch (videoSource.type) {
+				case 'youtube':
+				case 'douyin':
+				case 'tiktok':
+					params.youtube = sourceId;
+					break;
 				case 'collection':
 					params.collection = sourceId;
 					break;

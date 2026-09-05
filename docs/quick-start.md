@@ -8,7 +8,7 @@
 docker run -d \
   --name bili-sync \
   -p 12345:12345 \
-  -v /path/to/data:/app/data \
+  -v /path/to/data:/app/.config/bili-sync \
   -v /path/to/videos:/app/videos \
   qq1582185982/bili-sync:latest
 ```
@@ -44,6 +44,9 @@ cargo build --release
 - **DedeUserID**：用户ID
 
 > 💡 获取方法：登录 B站后，F12 打开开发者工具，在 Application > Cookies 中查找
+
+YouTube 登录状态在 **设置 → YouTube 登录状态** 中通过电脑端登录助手或
+Netscape `cookies.txt` 导入。Docker 不需要内嵌浏览器或额外登录端口。
 
 ### 3. 添加视频源
 

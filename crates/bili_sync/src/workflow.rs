@@ -305,13 +305,15 @@ use crate::error::{DownloadAbortError, DownloadAbortReason, ExecutionStatus, Pro
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
-    create_pages, create_videos, filter_unfilled_videos, filter_unhandled_video_pages,
-    get_failed_videos_in_current_cycle, update_pages_model, update_videos_model,
+    check_favorite_multipage_videos_for_new_parts, check_favorite_videos_for_new_parts,
+    collect_favorite_page_counts, create_pages, create_videos, filter_unfilled_videos,
+    filter_unhandled_video_pages, get_failed_videos_in_current_cycle, update_pages_model,
+    update_videos_model,
 };
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
 use crate::utils::scan_collector::create_new_video_info;
-use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX};
+use crate::utils::status::{PageStatus, VideoStatus, STATUS_COMPLETED, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX};
 
 const DB_LOCK_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
 const DOWNLOAD_RISK_CONTROL_RESUME_KEY: &str = "download_risk_control_resume_sources";
@@ -1241,6 +1243,11 @@ pub async fn process_video_source(
             }
         };
 
+    // 清理旧版本"未达最低下载标准"视频遗留的附属文件（封面/NFO/弹幕/字幕）
+    if let Err(err) = cleanup_completed_skipped_video_sidecars(&video_source, connection).await {
+        debug!("清理已完成跳过视频的历史附属文件失败: {:#}", err);
+    }
+
     let resume_download_without_refresh =
         !ARGS.scan_only && should_skip_refresh_for_download_risk_control_resume(&video_source, connection).await?;
 
@@ -1620,7 +1627,16 @@ pub async fn refresh_video_source<'a>(
             })
             .collect();
 
+        // 收藏夹源：先收集 B站 当前分P数（仅当这批数据包含收藏夹条目时非空）
+        let favorite_page_map = collect_favorite_page_counts(&videos_info);
+
         create_videos(videos_info, video_source, connection).await?;
+
+        // 收藏夹源：对比 B站 当前分P数与本地记录，检测已收藏多P视频是否新增分P；
+        // 若检测到新增，重置 single_page/download_status 以重新拉取详情并下载新分P。
+        if !favorite_page_map.is_empty() {
+            check_favorite_videos_for_new_parts(favorite_page_map, video_source, connection).await?;
+        }
 
         // 获取插入后的视频数量，计算实际新增数量
         let after_count = get_video_count_for_source(video_source, connection).await?;
@@ -1748,6 +1764,22 @@ pub async fn refresh_video_source<'a>(
             .update_latest_row_at(beijing_datetime_string)
             .save(connection)
             .await?;
+    }
+
+    // 收藏夹源：巡检已入库的多P视频是否新增了分P。
+    // 增量扫描只能发现「新收藏」的视频，而多P视频新增分P不会改变收藏时间，
+    // 因此这里每轮对存量内容做限量巡检，发现新增分P即重置并重新拉取详情下载。
+    if let VideoSourceEnum::Favorite(_) = video_source {
+        if !(token.is_cancelled() || crate::task::TASK_CONTROLLER.is_paused()) {
+            match check_favorite_multipage_videos_for_new_parts(bili_client, video_source, connection).await {
+                Ok(checked_count) => {
+                    if checked_count > 0 {
+                        debug!("收藏夹多P视频分P巡检：本轮重置 {} 个视频以拉取新分P", checked_count);
+                    }
+                }
+                Err(err) => warn!("收藏夹多P视频分P巡检失败（不影响本轮扫描）: {:#}", err),
+            }
+        }
     }
 
     // 番剧源：更新缓存
@@ -2193,7 +2225,14 @@ pub async fn fetch_video_details(
                                 ..
                             } = &mut view_info
                             else {
-                                unreachable!()
+                                // B站详情接口对部分特殊状态视频（如数据异常/下架中）返回的 data 缺少 pages，
+                                // 会被 serde untagged 解析为其他 VideoInfo 变体（如 Collection）。
+                                // 这里不再 panic，而是记录并跳过该视频，避免整个下载流程崩溃。
+                                warn!(
+                                    "视频「{}」({}) 详情接口返回了非预期信息结构（可能为数据异常/下架中视频），本轮跳过处理",
+                                    &video_model.name, &video_model.bvid
+                                );
+                                return Ok(());
                             };
 
                             // 充电视频不再自动删除。
@@ -2573,6 +2612,127 @@ pub async fn fetch_video_details(
     }
     video_source.log_fetch_video_end();
     Ok(())
+}
+
+/// 删除残留的空目录链（用于未达到最低下载标准的跳过视频）
+///
+/// 从 `start_dir`（视频文件夹）开始，若目录为空则删除，并逐级向上清理空的父目录
+/// （如 UP 目录），直到遇到非空目录或到达 `stop_at`（视频源根目录）为止。
+/// 视频源根目录本身不会被删除。返回删除的目录数量。
+async fn cleanup_empty_dir_chain(start_dir: &Path, stop_at: &Path, label: &str) -> Result<usize> {
+    let mut removed = 0usize;
+    let mut current = start_dir.to_path_buf();
+    loop {
+        // 越界保护：不删除视频源根目录本身，也不删除根目录之外的路径
+        if current == stop_at || !current.starts_with(stop_at) {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            break;
+        };
+        if entries.flatten().next().is_some() {
+            // 目录非空，停止向上清理
+            break;
+        }
+        match std::fs::remove_dir(&current) {
+            Ok(()) => {
+                info!("已删除空文件夹: {}（{}）", current.display(), label);
+                removed += 1;
+            }
+            Err(e) => {
+                debug!("删除空文件夹失败: {} - {}", current.display(), e);
+                break;
+            }
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent.to_path_buf();
+    }
+    Ok(removed)
+}
+
+/// 清理旧版本遗留的"已完成但未达最低下载标准"视频附属文件。
+/// 旧版本在视频因未达到最低分辨率被跳过时仍会生成封面/NFO/弹幕/字幕等文件，
+/// 新版不再生成；此处对已完成跳过的单P视频目录做一次性磁盘清理，避免历史残留。
+async fn cleanup_completed_skipped_video_sidecars(
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<usize> {
+    let videos = video::Entity::find()
+        .filter(video::Column::Valid.eq(true))
+        .filter(video::Column::Deleted.eq(0))
+        .filter(video::Column::DownloadStatus.gte(STATUS_COMPLETED))
+        .filter(video::Column::SkipReason.is_not_null())
+        .filter(video::Column::SkipReason.ne(""))
+        .filter(video_source.filter_expr())
+        .all(connection)
+        .await?;
+
+    debug!(
+        "清理已完成跳过视频附属文件: 源「{}」查询到 {} 个候选视频",
+        video_source.source_name_display(),
+        videos.len()
+    );
+    let mut removed = 0usize;
+    for video_model in videos {
+        let dir = Path::new(&video_model.path);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        // 仅清理"没有媒体文件"的目录（真正未下载媒体文件的跳过视频）；
+        // 若目录内存在媒体文件则视为正常下载，不清除任何附属文件。
+        let mut has_media = false;
+        let mut sidecar_candidates = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let lower = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(ext, "mp4" | "m4a" | "flv" | "mkv" | "mov" | "ts" | "webm" | "mp3" | "aac" | "wav" | "flac" | "m4s") {
+                has_media = true;
+                break;
+            }
+            if lower.ends_with(".nfo")
+                || lower.ends_with(".ass")
+                || lower.ends_with(".srt")
+                || lower.contains("-thumb.")
+                || lower.contains("-fanart.")
+                || lower.contains("-poster.")
+            {
+                sidecar_candidates.push(path);
+            }
+        }
+        if has_media {
+            continue;
+        }
+        let sidecar_count = sidecar_candidates.len();
+        for path in &sidecar_candidates {
+            if remove_file_if_exists(path).await? {
+                removed += 1;
+            }
+        }
+        if sidecar_count > 0 {
+            info!(
+                "已清理已完成跳过视频「{}」的 {} 个历史附属文件（未达到最低下载标准不保留封面/NFO/弹幕/字幕）",
+                video_model.name,
+                sidecar_count
+            );
+        }
+        // 删除残留的空视频文件夹及空父目录（如 UP 目录），直到视频源根目录为止。
+        // 仅删除空目录：目录内仍存在其他文件/子文件夹时自动停止，不会误删共享目录。
+        let removed_dirs = cleanup_empty_dir_chain(dir, video_source.path(), "未达最低下载标准视频残留").await?;
+        removed += removed_dirs;
+    }
+    Ok(removed)
 }
 
 /// 下载所有未处理成功的视频
@@ -3011,6 +3171,25 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
 
             let is_audio = matches!(file_ext.as_str(), "m4a" | "mp3" | "flac" | "aac" | "ogg");
 
+            // 计算该视频的目录结构描述（帮助 AI 按结构生成与文件一一对应的文件名）
+            let structure = if is_bangumi {
+                if cfg.bangumi_use_season_structure {
+                    "番剧Season结构".to_string()
+                } else {
+                    "番剧季文件夹".to_string()
+                }
+            } else if is_collection {
+                match cfg.collection_folder_mode.as_ref() {
+                    "unified" => "合集统一模式（SxxExx）".to_string(),
+                    "up_seasonal" => "UP分季结构（SxxExx）".to_string(),
+                    _ => String::new(),
+                }
+            } else if is_multi_page && cfg.multi_page_use_season_structure {
+                "Season 结构".to_string()
+            } else {
+                String::new()
+            };
+
             // 构建 AI 重命名上下文
             let ctx = AiRenameContext {
                 title: video_model.name.clone(),
@@ -3033,6 +3212,9 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
                 is_audio,
                 sort_index: None,
                 bvid: video_model.bvid.clone(),
+                is_multi_page,
+                is_bangumi,
+                structure,
             };
 
             let file_info = FileToRename {
@@ -3061,6 +3243,24 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
         video_files.len(),
         audio_files.len()
     );
+
+    // 收集多P视频独占文件夹（整个视频文件夹的 AI 重命名）。
+    // 仅在多P视频已启用 AI 重命名时收集，且要求「重命名上级目录」已开启。
+    let folder_renames: Vec<crate::utils::ai_rename::FolderToRename> = if video_source.ai_rename_enable_multi_page()
+        && cfg.ai_rename.rename_parent_dir
+        && video_source.ai_rename_rename_parent_dir()
+    {
+        ai_rename::collect_multi_page_folders(connection, &videos_with_pages, video_source.flat_folder(), true).await
+    } else {
+        Vec::new()
+    };
+    if !folder_renames.is_empty() {
+        info!(
+            "[{}] 收集到 {} 个多P视频文件夹待重命名",
+            source_key,
+            folder_renames.len()
+        );
+    }
 
     // 第二阶段：按批次处理视频文件（每批 10 个）
     let batch_size = 10;
@@ -3135,6 +3335,57 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
         }
     }
 
+    // 处理多P视频文件夹重命名（在文件重命名之后执行，避免路径中途失效）
+    if !folder_renames.is_empty() {
+        info!(
+            "[{}] 开始处理 {} 个多P视频文件夹的重命名",
+            source_key,
+            folder_renames.len()
+        );
+        for (batch_idx, batch) in folder_renames.chunks(batch_size).enumerate() {
+            info!(
+                "[{}] 处理文件夹批次 {}/{}: {} 个文件夹",
+                source_key,
+                batch_idx + 1,
+                (folder_renames.len() + batch_size - 1) / batch_size,
+                batch.len()
+            );
+            match ai_rename::ai_generate_folder_names_batch(
+                &cfg.ai_rename,
+                &source_key,
+                batch,
+                video_prompt_hint,
+            )
+            .await
+            {
+                Ok(new_names) => {
+                    for (folder, new_name) in batch.iter().zip(new_names.iter()) {
+                        match ai_rename::apply_ai_rename_folder(connection, &source_key, folder, new_name).await {
+                            Ok(true) => renamed_count += 1,
+                            Ok(false) => skipped_count += 1,
+                            Err(e) => {
+                                warn!(
+                                    "[{}] 文件夹重命名失败 {}: {}",
+                                    source_key, folder.current_name, e
+                                );
+                                failed_count += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "[{}] 文件夹批次 {} AI 调用失败: {}",
+                        source_key,
+                        batch_idx + 1,
+                        e
+                    );
+                    failed_count += batch.len();
+                }
+            }
+        }
+    }
+
     info!(
         "[{}] 批量 AI 重命名完成: 重命名 {} 个, 跳过 {} 个, 失败 {} 个",
         source_key, renamed_count, skipped_count, failed_count
@@ -3199,11 +3450,25 @@ async fn apply_ai_rename(
         return Ok(false);
     }
 
+    // 视频文件按命名模板补全 AI 名字中缺失的变量内容（如 {{bvid}}/{{pubtime}}），
+    // 单P用 page_name、多P用 multi_page_name、番剧用 bangumi_name；音频不附加
+    let page_template = if file.ctx.is_bangumi {
+        cfg.bangumi_name.as_ref()
+    } else if !file.single_page {
+        cfg.multi_page_name.as_ref()
+    } else {
+        cfg.page_name.as_ref()
+    };
+    let mut final_stem = if file.ctx.is_audio {
+        new_stem.to_string()
+    } else {
+        ai_rename::append_missing_template_variables(new_stem, page_template, &file.ctx)
+    };
+    let base_stem = final_stem.clone();
     // 检查目标文件是否已存在，若冲突则追加 bvid
-    let mut final_stem = new_stem.to_string();
     let mut new_path = page_path.with_file_name(format!("{}.{}", final_stem, file.ext));
     if new_path.exists() && new_path != page_path {
-        final_stem = format!("{}-{}", new_stem, file.bvid);
+        final_stem = format!("{}-{}", base_stem, file.bvid);
         new_path = page_path.with_file_name(format!("{}.{}", final_stem, file.ext));
         info!(
             "[{}] AI 重命名检测到文件冲突，追加BV号: {} -> {}",
@@ -3221,9 +3486,9 @@ async fn apply_ai_rename(
         warn!("[{}] AI 重命名侧车文件失败: {}", source_key, e);
     }
 
-    // 更新 NFO 文件内容
+    // 更新 NFO 文件内容（标题用 AI 名，不含补全/去重后缀）
     let new_nfo_path = new_path.with_extension("nfo");
-    if let Err(e) = ai_rename::update_nfo_content(&new_nfo_path, &final_stem) {
+    if let Err(e) = ai_rename::update_nfo_content(&new_nfo_path, new_stem) {
         warn!("[{}] AI 更新NFO内容失败: {}", source_key, e);
     }
 
@@ -3237,9 +3502,20 @@ async fn apply_ai_rename(
     let final_path = if should_rename_folder {
         if let Some(old_dir) = new_path.parent() {
             if let Some(parent_dir) = old_dir.parent() {
-                let mut target_dir = parent_dir.join(&final_stem);
+                // 单P文件夹补全缺失的模板变量（如 {{bvid}}/{{pubtime}}），避免 AI 重命名把变量内容清除掉。
+                // 依次按「视频文件夹命名模板」与「单P文件名模板」补全：视频模板未配置这些变量时，
+                // 单P文件名模板（默认 {{pubtime}}-{{bvid}}）中的变量仍会附加到文件夹名上。
+                let folder_stem = if file.ctx.is_audio {
+                    final_stem.clone()
+                } else if file.ctx.is_bangumi {
+                    ai_rename::append_missing_template_variables(&final_stem, cfg.bangumi_folder_name.as_ref(), &file.ctx)
+                } else {
+                    let with_folder = ai_rename::append_missing_template_variables(&final_stem, cfg.video_name.as_ref(), &file.ctx);
+                    ai_rename::append_missing_template_variables(&with_folder, cfg.page_name.as_ref(), &file.ctx)
+                };
+                let mut target_dir = parent_dir.join(&folder_stem);
                 if target_dir.exists() && target_dir != old_dir {
-                    target_dir = parent_dir.join(format!("{}-{}", &final_stem, file.bvid));
+                    target_dir = parent_dir.join(format!("{}-{}", &folder_stem, file.bvid));
                 }
 
                 if target_dir != old_dir {
@@ -3589,6 +3865,8 @@ struct DownloadPageArgs<'a> {
     filter_option: &'a FilterOption,
     inline_total_file_size_bytes: Arc<TokioMutex<Option<i64>>>,
     inline_chapters_split: Arc<TokioMutex<bool>>,
+    inline_skip_reason: Arc<TokioMutex<Option<String>>>,
+    inline_skip_reason_touched: Arc<TokioMutex<bool>>,
 }
 
 fn video_status_should_run_nfo(separate_status: &[bool; 5]) -> bool {
@@ -5573,6 +5851,8 @@ async fn download_video_pages(
     );
     let inline_total_file_size_bytes = Arc::new(TokioMutex::new(None));
     let inline_chapters_split = Arc::new(TokioMutex::new(false));
+    let inline_skip_reason = Arc::new(TokioMutex::new(None));
+    let inline_skip_reason_touched = Arc::new(TokioMutex::new(false));
     let res_5_fut = Box::pin(
         // 分发并执行分 P 下载的任务
         dispatch_download_page(
@@ -5590,6 +5870,8 @@ async fn download_video_pages(
                 filter_option,
                 inline_total_file_size_bytes: inline_total_file_size_bytes.clone(),
                 inline_chapters_split: inline_chapters_split.clone(),
+                inline_skip_reason: inline_skip_reason.clone(),
+                inline_skip_reason_touched: inline_skip_reason_touched.clone(),
             },
             token.clone(),
         ),
@@ -5599,6 +5881,8 @@ async fn download_video_pages(
         tokio::join!(res_1_fut, res_2_fut, res_folder_fut, res_3_fut, res_4_fut, res_5_fut);
     let inline_total_file_size_bytes = inline_total_file_size_bytes.lock().await.take();
     let inline_chapters_split = *inline_chapters_split.lock().await;
+    let inline_skip_reason = inline_skip_reason.lock().await.take();
+    let inline_skip_reason_touched = *inline_skip_reason_touched.lock().await;
 
     // 兼容命名：根目录补充“根目录名-thumb/fanart”，例如：
     // - 投稿源同UP合集分季：浅影阿_合集-thumb.jpg / 浅影阿_合集-fanart.jpg（使用 UP 头像）
@@ -6134,6 +6418,11 @@ async fn download_video_pages(
     if inline_chapters_split {
         video_active_model.single_page = Set(Some(false));
     }
+    // 未达最低分辨率/质量等主动跳过：仅在本轮实际执行过分P下载时写入视频级跳过原因
+    // （成功下载会清除旧标记；未执行分P下载时保留原有标记，避免重试封面/头像时误清）
+    if inline_skip_reason_touched {
+        video_active_model.skip_reason = Set(inline_skip_reason);
+    }
     video_active_model.total_file_size_bytes = Set(inline_total_file_size_bytes.or_else(|| {
         latest_video_snapshot
             .as_ref()
@@ -6154,6 +6443,7 @@ struct PageDownloadOutcome {
     persistence: PagePersistenceDecision,
     video_total_file_size_bytes_override: Option<i64>,
     split_chapters: bool,
+    skip_reason: Option<String>,
 }
 
 fn active_value_matches<T>(value: &sea_orm::ActiveValue<T>, original: &T) -> bool
@@ -6285,6 +6575,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                 if download_abort_reason.is_some() {
                     continue;
                 }
+                *args.inline_skip_reason_touched.lock().await = true;
                 let model = outcome.model;
                 // 该视频的所有分页的下载状态都会在此返回，需要根据这些状态确认视频层"分 P 下载"子任务的状态
                 // 在过去的实现中，此处仅仅根据 page_download_status 的最高标志位来判断，如果最高标志位是 true 则认为完成
@@ -6309,6 +6600,12 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                     );
                 }
                 split_chapters |= outcome.split_chapters;
+                if let Some(reason) = outcome.skip_reason {
+                    let mut skip_reason_guard = args.inline_skip_reason.lock().await;
+                    if skip_reason_guard.is_none() {
+                        *skip_reason_guard = Some(reason);
+                    }
+                }
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -7016,11 +7313,12 @@ async fn download_page(
     let nfo_path_for_chapters = nfo_path.clone();
     let danmaku_path_for_chapters = danmaku_path.clone();
     let subtitle_path_for_chapters = subtitle_path.clone();
+    let page_model_for_sidecars = page_model.clone();
     let skip_charge_video_media_download = video_model.is_charge_video && !video_source.download_charge_videos();
     let res_1_fut = Box::pin(fetch_page_poster(
         separate_status[0],
         video_model,
-        &page_model,
+        &page_model_for_sidecars,
         downloader,
         poster_path,
         fanart_path,
@@ -7043,7 +7341,7 @@ async fn download_page(
     let res_3_fut = Box::pin(generate_page_nfo(
         separate_status[2],
         video_model,
-        &page_model,
+        &page_model_for_sidecars,
         nfo_path,
         connection,
         if matches!(video_source, VideoSourceEnum::Collection(_))
@@ -7061,7 +7359,7 @@ async fn download_page(
         separate_status[3],
         bili_client,
         video_model,
-        &page_model,
+        &page_model_for_sidecars,
         connection,
         &danmaku_config,
         &page_info,
@@ -7079,18 +7377,79 @@ async fn download_page(
         token.clone(),
     ));
 
-    let (res_1, res_2, res_3, res_4, res_5) = tokio::join!(res_1_fut, res_2_fut, res_3_fut, res_4_fut, res_5_fut);
+    // 先执行视频下载任务：若视频因未达到最低下载标准被主动跳过，
+    // 则封面/NFO/弹幕/字幕等附属文件本轮不下载，避免为跳过视频生成多余文件。
+    let res_2 = res_2_fut.await;
+    let (
+        res_2,
+        mut page_file_size_bytes,
+        mut page_video_stream_size_bytes,
+        mut page_audio_stream_size_bytes,
+        media_skip_reason,
+    ) = match res_2 {
+        Ok(video_result) => (
+            Ok(video_result.status),
+            video_result.file_size_bytes,
+            video_result.video_stream_size_bytes,
+            video_result.audio_stream_size_bytes,
+            video_result.skip_reason,
+        ),
+        Err(err) => (Err(err), None, None, None, None),
+    };
 
-    let (res_2, mut page_file_size_bytes, mut page_video_stream_size_bytes, mut page_audio_stream_size_bytes) =
-        match res_2 {
-            Ok(video_result) => (
-                Ok(video_result.status),
-                video_result.file_size_bytes,
-                video_result.video_stream_size_bytes,
-                video_result.audio_stream_size_bytes,
-            ),
-            Err(err) => (Err(err), None, None, None),
-        };
+    // 视频未达到最低下载标准（本轮产生 skip_reason，或数据库已持久化 skip_reason
+    // 且该分页没有实际媒体文件）时，跳过并清理附属文件（封面/NFO/弹幕/字幕）。
+    let media_file_exists = fs::metadata(&video_path)
+        .await
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    let skip_reason_persisted = video_model
+        .skip_reason
+        .as_deref()
+        .is_some_and(|reason| !reason.trim().is_empty());
+    let skip_sidecars = media_skip_reason.is_some()
+        || (skip_reason_persisted
+            && !media_file_exists
+            && matches!(res_2, Ok(ExecutionStatus::Skipped)));
+
+    let (res_1, res_3, res_4, res_5) = if skip_sidecars {
+        if let Err(err) = remove_original_page_artifacts(
+            &video_path,
+            &nfo_path_for_chapters,
+            &poster_path_for_chapters,
+            fanart_path_for_chapters.as_deref(),
+            &danmaku_path_for_chapters,
+            &subtitle_path_for_chapters,
+        )
+        .await
+        {
+            debug!("清理未达最低下载标准视频的附属文件失败: {:#}", err);
+        }
+        info!(
+            "视频「{}」第 {} 页未达到最低下载标准，已跳过封面/NFO/弹幕/字幕等附属文件",
+            &video_model.name, page_model.pid
+        );
+        // 删除本页跳过产生的空视频文件夹及空父目录（直到视频源根目录），
+        // 避免未达到最低下载标准的视频残留空文件夹。
+        if let Some(video_dir) = video_path.parent() {
+            if let Err(err) =
+                cleanup_empty_dir_chain(video_dir, video_source.path(), "未达最低下载标准视频残留").await
+            {
+                debug!("清理未达最低下载标准视频的空文件夹失败: {:#}", err);
+            }
+        }
+        (
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+            Ok(PageDanmakuFetchResult {
+                status: ExecutionStatus::Skipped,
+                sync_update: None,
+            }),
+            Ok(ExecutionStatus::Skipped),
+        )
+    } else {
+        tokio::join!(res_1_fut, res_3_fut, res_4_fut, res_5_fut)
+    };
     let mut chapter_total_file_size_bytes: Option<i64> = None;
     let mut split_chapters = false;
 
@@ -7565,7 +7924,9 @@ async fn download_page(
     let final_video_path = chapter_primary_path.unwrap_or_else(|| video_path.clone());
 
     let final_video_path_str = final_video_path.to_string_lossy().to_string();
-    let final_page_path = if skip_charge_video_media_download {
+    let final_page_path = if skip_charge_video_media_download
+        || matches!(results.get(1), Some(ExecutionStatus::Skipped))
+    {
         original_page_model.path.clone()
     } else if inaccessible_reason.is_some() {
         original_page_model
@@ -7603,6 +7964,7 @@ async fn download_page(
         persistence,
         video_total_file_size_bytes_override: chapter_total_file_size_bytes,
         split_chapters,
+        skip_reason: media_skip_reason,
     })
 }
 
@@ -7652,10 +8014,61 @@ pub async fn fetch_page_poster(
     Ok(ExecutionStatus::Succeeded)
 }
 
+/// 下载进度 RAII 清理器：作用域结束（无论成败）后异步移除首页「正在下载」进度条目。
+pub(crate) struct DownloadProgressGuard {
+    key: String,
+}
+
+impl DownloadProgressGuard {
+    pub(crate) fn new(key: String) -> Self {
+        Self { key }
+    }
+}
+
+impl Drop for DownloadProgressGuard {
+    fn drop(&mut self) {
+        let key = self.key.clone();
+        tokio::spawn(async move {
+            crate::download_progress::DOWNLOAD_PROGRESS.finish_task(&key).await;
+        });
+    }
+}
+
 /// 下载单个流文件并返回文件大小（使用UnifiedDownloader智能选择下载方式）
 ///
-/// 同时会把本次下载的 bytes 与耗时写入内存「入库事件」统计，用于首页展示平均下载速度。
-async fn download_stream(downloader: &UnifiedDownloader, video_id: i32, urls: &[&str], path: &Path) -> Result<u64> {
+/// 同时会把本次下载的 bytes 与耗时写入内存「入库事件」统计，用于首页展示平均下载速度；
+/// 并在首页「正在下载」进度区注册实时进度（分片下载器会持续上报字节）。
+async fn download_stream(
+    downloader: &UnifiedDownloader,
+    progress_key: &str,
+    progress_platform: &str,
+    progress_title: &str,
+    progress_phase: &str,
+    progress_file_name: &str,
+    urls: &[&str],
+    path: &Path,
+) -> Result<u64> {
+    // 注册首页下载进度：幂等，每个流下载前刷新任务阶段
+    let path_str = path.display().to_string();
+    crate::download_progress::DOWNLOAD_PROGRESS
+        .begin_task(
+            progress_key,
+            progress_platform,
+            progress_title,
+            progress_phase,
+            progress_file_name,
+        )
+        .await;
+    crate::download_progress::DOWNLOAD_PROGRESS
+        .attach_stream(progress_key, &path_str, 0)
+        .await;
+    // 从进度任务键解析 video_id（格式：bilibili:{video_id}:{page_id}），
+    // 供下载完成后的「入库事件」平均速度统计使用。
+    let video_id = progress_key
+        .strip_prefix("bilibili:")
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(0);
     // 直接使用UnifiedDownloader，它会智能选择aria2或原生下载器
     // aria2本身就支持多线程，原生下载器作为备选方案使用单线程
     let start = std::time::Instant::now();
@@ -8000,6 +8413,7 @@ struct PageVideoFetchResult {
     file_size_bytes: Option<i64>,
     video_stream_size_bytes: Option<i64>,
     audio_stream_size_bytes: Option<i64>,
+    skip_reason: Option<String>,
 }
 
 fn to_db_file_size(size: u64) -> i64 {
@@ -8299,6 +8713,18 @@ async fn download_page_video_from_streams(
     audio_only: bool,
     filter_option: &FilterOption,
 ) -> Result<PageVideoFetchResult> {
+    // 首页「正在下载」进度：任务键 = 视频ID:分页ID，标题/文件名用于展示
+    let progress_key = format!("bilibili:{}:{}", video_model.id, page_id);
+    let progress_title = video_model.name.clone();
+    let progress_file_name = page_path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| page_path.display().to_string());
+    // 函数返回（无论成败）后自动清理进度条目
+    let _progress_guard = DownloadProgressGuard::new(progress_key.clone());
+    crate::download_progress::DOWNLOAD_PROGRESS
+        .begin_task(&progress_key, "bilibili", &progress_title, "准备下载", &progress_file_name)
+        .await;
     // 按需创建保存目录（只在实际下载时创建）
     ensure_parent_dir_for_file(page_path).await?;
 
@@ -8359,7 +8785,69 @@ async fn download_page_video_from_streams(
     let start_time = std::time::Instant::now();
 
     // 根据流类型进行不同处理
-    let best_stream_result = streams.best_stream(filter_option)?;
+    let best_stream_result = match streams.best_stream(filter_option) {
+        Ok(result) => result,
+        Err(err) => {
+            // 视频源存在，但最高可用画质仍低于设定的最低分辨率时，按“跳过/警告”处理，
+            // 不进入失败重试。
+            if !audio_only {
+                if let Some(max_quality) = streams.max_available_video_quality() {
+                    if max_quality < filter_option.video_min_quality {
+                        warn!(
+                            "视频「{}」第{}页未达到设定的最低分辨率/质量（最低 {:?}，实际最高 {:?}），跳过下载",
+                            video_model.name,
+                            page_info_for_download.page,
+                            filter_option.video_min_quality,
+                            max_quality
+                        );
+                        return Ok(PageVideoFetchResult {
+                            status: ExecutionStatus::Skipped,
+                            file_size_bytes: None,
+                            video_stream_size_bytes: None,
+                            audio_stream_size_bytes: None,
+                            skip_reason: Some(format!(
+                                "未达到设定的最低分辨率（最低 {:?}，实际最高 {:?}），已跳过下载",
+                                filter_option.video_min_quality, max_quality
+                            )),
+                        });
+                    }
+                }
+            }
+            return Err(err);
+        }
+    };
+    // 即使 best_stream 成功，也可能选中低于最低质量的混合流/旧格式流；
+    // 这里按实际选中的视频流质量判断，避免下载低清文件。
+    if !audio_only {
+        let actual_quality = match &best_stream_result {
+            BestStream::VideoAudio { video, .. } => match video {
+                VideoStream::DashVideo { quality, .. } => Some(*quality),
+                _ => None,
+            },
+            BestStream::Mixed(_) => streams.max_available_video_quality(),
+        };
+        if let Some(actual_quality) = actual_quality {
+            if actual_quality < filter_option.video_min_quality {
+                warn!(
+                    "视频「{}」第{}页未达到设定的最低分辨率/质量（最低 {:?}，实际 {:?}），跳过下载",
+                    video_model.name,
+                    page_info_for_download.page,
+                    filter_option.video_min_quality,
+                    actual_quality
+                );
+                return Ok(PageVideoFetchResult {
+                    status: ExecutionStatus::Skipped,
+                    file_size_bytes: None,
+                    video_stream_size_bytes: None,
+                    audio_stream_size_bytes: None,
+                    skip_reason: Some(format!(
+                        "未达到设定的最低分辨率（最低 {:?}，实际 {:?}），已跳过下载",
+                        filter_option.video_min_quality, actual_quality
+                    )),
+                });
+            }
+        }
+    }
     if let Err(e) = save_download_play_stream_cache(connection, page_id, &best_stream_result).await {
         debug!("写入下载播放缓存失败（不影响下载）: page_id={}, error={}", page_id, e);
     }
@@ -8417,7 +8905,10 @@ async fn download_page_video_from_streams(
                 // 混合流无法提取纯音频，警告并使用混合流
                 warn!("混合流不支持纯音频提取，将下载完整内容");
                 let urls = mix_stream.urls();
-                let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                let downloaded_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                )
+                .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
             BestStream::VideoAudio {
@@ -8426,7 +8917,10 @@ async fn download_page_video_from_streams(
             } => {
                 // 直接下载音频流
                 let audio_urls = audio_stream.urls();
-                let downloaded_size = download_stream(downloader, video_model.id, &audio_urls, page_path).await?;
+                let downloaded_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载音频流", &progress_file_name, &audio_urls, page_path,
+                )
+                .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
             BestStream::VideoAudio {
@@ -8436,7 +8930,12 @@ async fn download_page_video_from_streams(
                 // 没有独立音频流，警告并使用视频流（可能包含音频）
                 warn!("未找到独立音频流，将下载视频流");
                 let urls = video_stream.urls();
-                let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                let downloaded_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                )
+                .await?;
+                // 单流下载完成即最终文件，清理可能遗留的断点续传状态
+                let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(page_path)).await;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
             }
         }
@@ -8449,7 +8948,13 @@ async fn download_page_video_from_streams(
                     crate::bilibili::Stream::Flv(_) => {
                         let tmp_mix_path = page_path.with_extension("tmp_flv");
                         let urls = mix_stream.urls();
-                        let downloaded_size = download_stream(downloader, video_model.id, &urls, &tmp_mix_path).await?;
+                        let downloaded_size = download_stream(
+                            downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, &tmp_mix_path,
+                        )
+                        .await?;
+                        crate::download_progress::DOWNLOAD_PROGRESS
+                            .set_phase(&progress_key, "转封装中")
+                            .await;
                         let final_size = match crate::downloader::remux_with_ffmpeg(&tmp_mix_path, page_path).await {
                             Ok(()) => {
                                 let _ = fs::remove_file(&tmp_mix_path).await;
@@ -8473,7 +8978,10 @@ async fn download_page_video_from_streams(
                     }
                     _ => {
                         let urls = mix_stream.urls();
-                        let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                        let downloaded_size = download_stream(
+                            downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                        )
+                        .await?;
                         (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
                     }
                 }
@@ -8483,7 +8991,10 @@ async fn download_page_video_from_streams(
                 audio: None,
             } => {
                 let urls = video_stream.urls();
-                let downloaded_size = download_stream(downloader, video_model.id, &urls, page_path).await?;
+                let downloaded_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                )
+                .await?;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
             }
             BestStream::VideoAudio {
@@ -8496,8 +9007,10 @@ async fn download_page_video_from_streams(
                 );
 
                 let video_urls = video_stream.urls();
-                let video_size = download_stream(downloader, video_model.id, &video_urls, &tmp_video_path)
-                    .await
+                let video_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载视频流", &progress_file_name, &video_urls, &tmp_video_path,
+                )
+                .await
                     .map_err(|e| {
                         // 使用错误分类器进行统一处理
                         let classified_error = crate::error::ErrorClassifier::classify_error(&e);
@@ -8516,8 +9029,10 @@ async fn download_page_video_from_streams(
                     })?;
 
                 let audio_urls = audio_stream.urls();
-                let audio_size = download_stream(downloader, video_model.id, &audio_urls, &tmp_audio_path)
-                    .await
+                let audio_size = download_stream(
+                    downloader, &progress_key, "bilibili", &progress_title, "下载音频流", &progress_file_name, &audio_urls, &tmp_audio_path,
+                )
+                .await
                     .map_err(|e| {
                         // 使用错误分类器进行统一处理
                         let classified_error = crate::error::ErrorClassifier::classify_error(&e);
@@ -8532,15 +9047,15 @@ async fn download_page_video_from_streams(
                                 error!("音频流下载失败: {:#}", e);
                             }
                         }
-                        // 异步删除临时视频文件
-                        let video_path_clone = tmp_video_path.clone();
-                        tokio::spawn(async move {
-                            let _ = fs::remove_file(&video_path_clone).await;
-                        });
+                        // 保留已下载完成的视频临时文件：重试时走断点续传复用。
+                        // 之前用 tokio::spawn 异步删除会与重试下载产生竞态，误删新文件。
                         e
                     })?;
 
                 // 增强的音视频合并，带损坏文件检测和重试机制
+                crate::download_progress::DOWNLOAD_PROGRESS
+                    .set_phase(&progress_key, "合并中")
+                    .await;
                 let res = downloader.merge(&tmp_video_path, &tmp_audio_path, page_path).await;
 
                 // 合并失败时的智能处理
@@ -8555,9 +9070,11 @@ async fn download_page_video_from_streams(
                     {
                         warn!("检测到文件损坏，清理临时文件并标记为重试: {}", error_msg);
 
-                        // 立即清理损坏的临时文件
+                        // 立即清理损坏的临时文件与断点续传状态
                         let _ = fs::remove_file(&tmp_video_path).await;
                         let _ = fs::remove_file(&tmp_audio_path).await;
+                        let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_video_path)).await;
+                        let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_audio_path)).await;
 
                         // 返回特殊错误，让上层重试下载
                         return Err(anyhow::anyhow!(
@@ -8565,16 +9082,20 @@ async fn download_page_video_from_streams(
                             error_msg
                         ));
                     } else {
-                        // 其他类型的合并错误，清理临时文件后直接返回
+                        // 其他类型的合并错误，清理临时文件与断点续传状态后直接返回
                         let _ = fs::remove_file(&tmp_video_path).await;
                         let _ = fs::remove_file(&tmp_audio_path).await;
+                        let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_video_path)).await;
+                        let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_audio_path)).await;
                         return Err(e);
                     }
                 }
 
-                // 合并成功，清理临时文件
-                let _ = fs::remove_file(tmp_video_path).await;
-                let _ = fs::remove_file(tmp_audio_path).await;
+                // 合并成功，清理临时文件与断点续传状态
+                let _ = fs::remove_file(&tmp_video_path).await;
+                let _ = fs::remove_file(&tmp_audio_path).await;
+                let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_video_path)).await;
+                let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_audio_path)).await;
 
                 // 获取合并后文件大小，如果失败则使用视频和音频大小之和
                 let final_size = tokio::fs::metadata(page_path)
@@ -8621,6 +9142,7 @@ async fn download_page_video_from_streams(
         file_size_bytes: Some(to_db_file_size(total_bytes)),
         video_stream_size_bytes,
         audio_stream_size_bytes,
+        skip_reason: None,
     })
 }
 
@@ -8644,6 +9166,7 @@ async fn fetch_page_video(
             file_size_bytes: None,
             video_stream_size_bytes: None,
             audio_stream_size_bytes: None,
+            skip_reason: None,
         });
     }
 
@@ -8660,6 +9183,7 @@ async fn fetch_page_video(
             file_size_bytes: None,
             video_stream_size_bytes: None,
             audio_stream_size_bytes: None,
+            skip_reason: None,
         });
     }
 
@@ -8674,6 +9198,7 @@ async fn fetch_page_video(
             file_size_bytes: placeholder_size,
             video_stream_size_bytes: None,
             audio_stream_size_bytes: placeholder_size,
+            skip_reason: None,
         });
     }
 
@@ -8760,6 +9285,7 @@ async fn fetch_page_video(
                             file_size_bytes: placeholder_size,
                             video_stream_size_bytes: None,
                             audio_stream_size_bytes: placeholder_size,
+                            skip_reason: None,
                         });
                     }
                     return Err(e);
@@ -14808,6 +15334,7 @@ mod tests {
             is_charge_video: Set(false),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
         }
         .insert(db)
         .await
@@ -15237,6 +15764,253 @@ mod tests {
         assert!(matches!(result.status, ExecutionStatus::Succeeded));
         assert_eq!(result.file_size_bytes, None);
         assert!(!page_path.exists(), "关闭充电视频下载不应创建媒体或占位文件");
+    }
+
+    #[tokio::test]
+    async fn apply_ai_rename_folder_updates_filesystem_and_db_paths() {
+        use crate::utils::ai_rename::{apply_ai_rename_folder, AiRenameContext, FolderToRename};
+        use bili_sync_entity::page;
+        use bili_sync_entity::video;
+        use sea_orm::QueryFilter;
+
+        let db = create_test_db("ai-rename-folder").await;
+        let root = unique_temp_dir("ai-rename-folder-root");
+        let folder = root.join("旧文件夹");
+        let p1 = folder.join("P01.mp4");
+        let p2 = folder.join("P02.mp4");
+        std::fs::create_dir_all(&folder).expect("应能创建临时文件夹");
+        std::fs::write(&p1, b"x").expect("应能创建测试文件");
+        std::fs::write(&p2, b"x").expect("应能创建测试文件");
+
+        // 插入多P视频（single_page=false）与两个分页
+        insert_test_video_with_status(&db, 1, 1, 0).await;
+        {
+            let db_video = video::Entity::find_by_id(1)
+                .one(&db)
+                .await
+                .expect("应能查询测试视频")
+                .expect("测试视频应存在");
+            let mut active_video: video::ActiveModel = db_video.into();
+            active_video.path = Set(folder.to_string_lossy().to_string());
+            active_video.single_page = Set(Some(false));
+            active_video.update(&db).await.expect("应能更新测试视频");
+        }
+        insert_test_page_with_status(&db, 1, 1, 0).await;
+        insert_test_page_with_status(&db, 2, 1, 0).await;
+        for (page_id, path) in [(1, &p1), (2, &p2)] {
+            let db_page = page::Entity::find_by_id(page_id)
+                .one(&db)
+                .await
+                .expect("应能查询测试分页")
+                .expect("测试分页应存在");
+            let mut active_page: page::ActiveModel = db_page.into();
+            active_page.path = Set(Some(path.to_string_lossy().to_string()));
+            active_page.update(&db).await.expect("应能更新分页路径");
+        }
+
+        let folder_info = FolderToRename {
+            path: folder.clone(),
+            current_name: "旧文件夹".to_string(),
+            ctx: AiRenameContext {
+                title: "测试视频".to_string(),
+                owner: "测试UP".to_string(),
+                bvid: "BVTEST0000000001".to_string(),
+                ..Default::default()
+            },
+            video_id: 1,
+            bvid: "BVTEST0000000001".to_string(),
+        };
+
+        let renamed = apply_ai_rename_folder(&db, "test", &folder_info, "新文件夹名")
+            .await
+            .expect("应能重命名文件夹");
+        assert!(renamed, "应执行文件夹重命名");
+
+        // 文件系统：文件夹已改名，分页文件仍在
+        let new_folder = root.join("新文件夹名");
+        assert!(new_folder.is_dir(), "新文件夹应存在");
+        assert!(!folder.exists(), "旧文件夹应不存在");
+        assert!(new_folder.join("P01.mp4").is_file(), "P01 应跟随移动到新文件夹");
+        assert!(new_folder.join("P02.mp4").is_file(), "P02 应跟随移动到新文件夹");
+
+        // 数据库：video.path 与所有 page.path 都已同步更新
+        let db_video = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询测试视频")
+            .expect("测试视频应存在");
+        assert_eq!(db_video.path, new_folder.to_string_lossy().to_string());
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.eq(1))
+            .all(&db)
+            .await
+            .expect("应能查询分页");
+        assert_eq!(pages.len(), 2, "应有 2 个分页");
+        for db_page in pages {
+            let path = db_page.path.expect("分页路径应存在");
+            assert!(
+                path.starts_with(&new_folder.to_string_lossy().to_string()),
+                "分页路径应更新到新文件夹: {path}"
+            );
+            assert!(std::path::Path::new(&path).is_file(), "分页文件应存在于新路径: {path}");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn cleanup_empty_dir_chain_removes_empty_dirs_but_keeps_source_root() {
+        let root = unique_temp_dir("cleanup-empty-chain");
+        let up_dir = root.join("UP名");
+        let video_dir = up_dir.join("视频文件夹");
+        std::fs::create_dir_all(&video_dir).expect("应能创建测试目录");
+
+        // 空目录链：视频文件夹 + UP 目录都应删除，源根保留
+        let removed = cleanup_empty_dir_chain(&video_dir, &root, "测试")
+            .await
+            .expect("应能清理空目录链");
+        assert_eq!(removed, 2, "视频文件夹与 UP 目录都应删除");
+        assert!(!video_dir.exists(), "空视频文件夹应被删除");
+        assert!(!up_dir.exists(), "空 UP 目录应被删除");
+        assert!(root.exists(), "视频源根目录应保留");
+
+        // 含文件的目录不删除
+        let up_dir2 = root.join("UP名2");
+        let video_dir2 = up_dir2.join("视频文件夹2");
+        std::fs::create_dir_all(&video_dir2).expect("应能创建测试目录");
+        std::fs::write(video_dir2.join("P01.mp4"), b"x").expect("应能写入测试文件");
+        let removed = cleanup_empty_dir_chain(&video_dir2, &root, "测试")
+            .await
+            .expect("应能清理空目录链");
+        assert_eq!(removed, 0, "含文件的视频文件夹不应被删除");
+        assert!(video_dir2.is_dir(), "含文件的视频文件夹应保留");
+        assert!(up_dir2.is_dir(), "含子内容的 UP 目录应保留");
+
+        // start == stop：不删除源根
+        let removed = cleanup_empty_dir_chain(&root, &root, "测试")
+            .await
+            .expect("应能清理空目录链");
+        assert_eq!(removed, 0, "源根目录不应被删除");
+        assert!(root.exists(), "源根目录应保留");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn cleanup_skipped_video_sidecars_removes_empty_up_dir() {
+        use bili_sync_entity::{favorite, video};
+        use crate::adapter::VideoSourceEnum;
+
+        let db = create_test_db("cleanup-skipped-dirs").await;
+        let root = unique_temp_dir("cleanup-skipped-dirs-root");
+        let up_dir = root.join("软糯小面包");
+        std::fs::create_dir_all(&up_dir).expect("应能创建测试空目录");
+
+        // 收藏夹源（路径即源根目录）
+        let fav = favorite::ActiveModel {
+            id: Set(1),
+            f_id: Set(100),
+            name: Set("测试 老剧".to_string()),
+            path: Set(root.to_string_lossy().to_string()),
+            created_at: Set("2026-01-01 00:00:00".to_string()),
+            latest_row_at: Set("2026-01-01 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
+            filter_option: Set(None),
+            keyword_filters: Set(None),
+            keyword_filter_mode: Set(None),
+            blacklist_keywords: Set(None),
+            whitelist_keywords: Set(None),
+            keyword_case_sensitive: Set(false),
+            min_duration_seconds: Set(None),
+            max_duration_seconds: Set(None),
+            published_after: Set(None),
+            published_before: Set(None),
+            audio_only: Set(false),
+            audio_only_m4a_only: Set(false),
+            flat_folder: Set(false),
+            split_chapters_after_download: Set(false),
+            download_charge_videos: Set(true),
+            download_danmaku: Set(false),
+            download_subtitle: Set(false),
+            download_ai_subtitle: Set(false),
+            ai_subtitle_language: Set("zh-CN".to_string()),
+            ai_rename: Set(false),
+            ai_rename_video_prompt: Set(String::new()),
+            ai_rename_audio_prompt: Set(String::new()),
+            ai_rename_enable_multi_page: Set(false),
+            ai_rename_enable_collection: Set(false),
+            ai_rename_enable_bangumi: Set(false),
+            ai_rename_rename_parent_dir: Set(false),
+        }
+        .insert(&db)
+        .await
+        .expect("应能插入测试收藏夹源");
+
+        // 未达最低下载标准（已跳过）的单P视频：状态全 7，skip_reason 非空，path 指向空目录
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let skipped_status: u32 = VideoStatus::from([STATUS_OK; 5]).into();
+        video::ActiveModel {
+            id: Set(1),
+            collection_id: Set(None),
+            favorite_id: Set(Some(1)),
+            watch_later_id: Set(None),
+            submission_id: Set(None),
+            source_id: Set(None),
+            source_type: Set(None),
+            upper_id: Set(1000),
+            upper_name: Set("软糯小面包".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set("测试视频".to_string()),
+            path: Set(up_dir.to_string_lossy().to_string()),
+            category: Set(1),
+            bvid: Set("BV1PK411W7bE".to_string()),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(now),
+            pubtime: Set(now),
+            favtime: Set(now),
+            download_status: Set(skipped_status),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-01-01 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(true),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+            skip_reason: Set(Some("未达到设定的最低分辨率（最低 Quality720p，实际最高 Quality480p），已跳过下载".to_string())),
+        }
+        .insert(&db)
+        .await
+        .expect("应能插入测试视频");
+
+        let source = VideoSourceEnum::Favorite(fav.clone());
+        let removed = cleanup_completed_skipped_video_sidecars(&source, &db)
+            .await
+            .expect("应能清理跳过视频残留");
+        assert!(removed >= 1, "应至少删除残留的空目录，实际删除 {} 个", removed);
+        assert!(!up_dir.exists(), "未达最低下载标准视频的空 UP 目录应被删除");
+        assert!(root.exists(), "视频源根目录应保留");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     async fn insert_test_submission(
@@ -15697,6 +16471,7 @@ mod tests {
             is_charge_video: false,
             charge_can_play: false,
             total_file_size_bytes: None,
+            skip_reason: None,
         };
 
         let resolved = resolve_final_video_path("/videos/new-path", "/videos/old-path", Some(&latest_video));

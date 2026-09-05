@@ -6,6 +6,10 @@ use crate::bilibili::FilterOption;
 
 #[derive(Clone, Deserialize, IntoParams, Default)]
 pub struct VideosRequest {
+    /// 视频平台：bilibili（默认）或 youtube
+    pub platform: Option<String>,
+    /// YouTube 视频源 ID
+    pub youtube: Option<i32>,
     pub collection: Option<i32>,
     pub favorite: Option<i32>,
     pub submission: Option<i32>,
@@ -319,6 +323,10 @@ pub struct UpdateConfigRequest {
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: Option<String>,
     pub split_chapters_after_download: Option<bool>,
+    // 外源网络代理（YouTube/TikTok 等平台共用）
+    pub proxy: Option<String>,
+    // 兼容旧配置：旧版仅 YouTube 使用的代理字段
+    pub youtube_proxy: Option<String>,
     // 风控验证配置
     pub risk_control_enabled: Option<bool>,
     pub risk_control_mode: Option<String>,
@@ -474,6 +482,8 @@ pub struct ResetSpecificTasksRequest {
     pub submission: Option<i32>,
     pub watch_later: Option<i32>,
     pub bangumi: Option<i32>,
+    pub platform: Option<String>,
+    pub youtube: Option<i32>,
     // 与 /api/videos 的过滤参数保持一致，便于“按当前筛选批量重置”
     pub query: Option<String>,
     pub show_failed_only: Option<bool>,
@@ -585,4 +595,50 @@ pub struct ValidateRegexRequest {
 #[derive(Deserialize, IntoParams, ToSchema)]
 pub struct ConfigMigrationRequest {
     pub dry_run: Option<bool>,
+}
+
+
+/// 网络代理连通性测试请求：不传 proxy 时使用当前配置的外源代理。
+#[derive(Deserialize, ToSchema)]
+pub struct TestProxyRequest {
+    /// 待测试的代理地址（http/socks5）；为空时使用当前已保存配置。
+    pub proxy: Option<String>,
+}
+
+
+/// 数据库维护操作类型。
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseMaintenanceAction {
+    /// 清空图片代理缓存（image_proxy_cache）
+    ClearImageCache,
+    /// 清空 AI 对话历史（ai_conversation_history）
+    ClearAiHistory,
+    /// 清理已完成/失败的任务队列记录
+    ClearQueueHistory,
+    /// 清理孤立记录（来源已删除的 YouTube 视频、无主分P）
+    CleanOrphans,
+    /// VACUUM 压缩数据库
+    Vacuum,
+    /// 备份数据库（VACUUM INTO 快照）
+    Backup,
+    /// 清理旧日志文件（保留最近 7 天）
+    CleanLogs,
+}
+
+/// 数据库维护请求。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DatabaseMaintenanceRequest {
+    pub action: DatabaseMaintenanceAction,
+    /// 仅清理日志（CleanLogs）使用：保留最近 N 天（含今天），默认 7 天
+    #[serde(default)]
+    pub keep_days: Option<u32>,
+}
+
+
+/// 数据库恢复请求：指定要恢复的备份文件名。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RestoreDatabaseRequest {
+    /// 备份文件名（data-backup-YYYYMMDD-HHMMSS.sqlite）
+    pub backup_file: String,
 }

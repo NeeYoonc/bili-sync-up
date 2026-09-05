@@ -55,6 +55,12 @@ pub struct AiRenameContext {
     pub sort_index: Option<i32>,
     /// B站视频ID（BV号）
     pub bvid: String,
+    /// 是否为多P视频（多个分页）
+    pub is_multi_page: bool,
+    /// 是否为番剧
+    pub is_bangumi: bool,
+    /// 目录结构描述（如 "Season 结构" / "合集统一模式" / "UP分季结构"；空表示无特殊结构）
+    pub structure: String,
 }
 
 impl AiRenameContext {
@@ -126,6 +132,17 @@ impl AiRenameContext {
         }
         if self.is_audio {
             info["模式"] = serde_json::json!("仅音频");
+        }
+        // 类型标记：帮助 AI 识别单P/多P/番剧，从而生成与文件一一对应的文件名
+        if self.is_bangumi {
+            info["类型"] = serde_json::json!("番剧");
+        } else if self.is_multi_page {
+            info["类型"] = serde_json::json!("多P视频");
+        } else {
+            info["类型"] = serde_json::json!("单P视频");
+        }
+        if !self.structure.is_empty() {
+            info["目录结构"] = serde_json::json!(self.structure);
         }
 
         let json_str = serde_json::to_string_pretty(&info).unwrap_or_default();
@@ -647,6 +664,21 @@ pub struct FileToRename {
     pub flat_folder: bool,
 }
 
+/// 待重命名的视频文件夹（多P视频独占文件夹）
+#[derive(Clone)]
+pub struct FolderToRename {
+    /// 视频文件夹路径
+    pub path: std::path::PathBuf,
+    /// 当前文件夹名
+    pub current_name: String,
+    /// AI 上下文（视频级信息）
+    pub ctx: AiRenameContext,
+    /// video.id（用于更新数据库）
+    pub video_id: i32,
+    /// bvid（冲突时追加）
+    pub bvid: String,
+}
+
 /// 批量生成文件名（一次请求处理多个文件）
 ///
 /// # 参数
@@ -657,17 +689,11 @@ pub struct FileToRename {
 ///
 /// # 返回
 /// - 新文件名列表（与输入顺序对应）
-pub async fn ai_generate_filenames_batch(
-    cfg: &AiRenameConfig,
-    source_key: &str,
-    files: &[FileToRename],
-    prompt_hint: &str,
-) -> Result<Vec<String>> {
-    if files.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // 构建批量 prompt
+/// 构建批量文件名的 AI prompt（纯函数，便于测试）
+///
+/// 每个文件条目包含序号、当前文件名和带类型/结构标记的视频信息，
+/// 并明确要求 AI 返回与文件一一对应的文件名。
+fn build_batch_filenames_prompt(files: &[FileToRename], prompt_hint: &str) -> String {
     let mut file_list = String::new();
     for (i, file) in files.iter().enumerate() {
         let video_info = file.ctx.to_json_string();
@@ -679,23 +705,88 @@ pub async fn ai_generate_filenames_batch(
         ));
     }
 
-    let full_prompt = format!(
+    format!(
         "请为以下 {} 个视频文件生成新的文件名。\n\
+        【重要】返回的文件名数量必须与文件数量完全一致（{} 个），第 N 个文件名必须与第 N 个文件一一对应，不得打乱顺序、不得合并、不得遗漏任何一个文件！\n\
+        【重要】多P/番剧等带序号结构的文件，生成的名字必须保留原有序号信息（如 P1/P2 或 S01E01），用于区分同一视频的不同分页/剧集；不同类型（单P/多P/番剧）按各自类型生成对应格式的文件名。\n\
         【重要】严格按照用户指定的命名格式生成，不要添加格式中未要求的任何信息！\n\
         严格按照 JSON 数组格式返回，只输出文件名（不含扩展名），不要解释：\n\
         [\"文件名1\", \"文件名2\", ...]\n\n\
         用户指定的命名格式：{}\n\n\
         文件列表（仅供参考，只提取格式中需要的字段；如信息缺失可访问API参考链接获取）：\n{}",
         files.len(),
+        files.len(),
         prompt_hint,
         file_list
-    );
+    )
+}
+
+pub async fn ai_generate_filenames_batch(
+    cfg: &AiRenameConfig,
+    source_key: &str,
+    files: &[FileToRename],
+    prompt_hint: &str,
+) -> Result<Vec<String>> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let full_prompt = build_batch_filenames_prompt(files, prompt_hint);
 
     // 根据 provider 选择实现
     if cfg.provider == "deepseek-web" {
         ai_generate_filenames_batch_deepseek_web(cfg, source_key, &full_prompt, files.len()).await
     } else {
         ai_generate_filenames_batch_openai(cfg, source_key, &full_prompt, files.len()).await
+    }
+}
+
+/// 批量生成视频文件夹名（一次请求处理多个文件夹）
+///
+/// 用于多P视频独占文件夹的 AI 重命名：输入为视频级信息，
+/// 输出为新的文件夹名（不含扩展名、不含路径分隔符）。
+pub async fn ai_generate_folder_names_batch(
+    cfg: &AiRenameConfig,
+    source_key: &str,
+    folders: &[FolderToRename],
+    prompt_hint: &str,
+) -> Result<Vec<String>> {
+    if folders.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut folder_list = String::new();
+    for (i, folder) in folders.iter().enumerate() {
+        let video_info = folder.ctx.to_json_string();
+        folder_list.push_str(&format!(
+            "{}. 当前文件夹名: {}\n   视频信息: {}\n\n",
+            i + 1,
+            folder.current_name,
+            video_info.replace('\n', " ")
+        ));
+    }
+
+    let full_prompt = format!(
+        "请为以下 {} 个视频的文件夹生成新的文件夹名（是整个视频的文件夹，不是单个文件）。\n\
+        【重要】返回的文件夹名数量必须与文件夹数量完全一致（{} 个），第 N 个文件夹名必须与第 N 个文件夹一一对应，不得打乱顺序、不得遗漏任何一个文件夹！\n\
+        【重要】多P/番剧等视频文件夹的命名，需要与内部分页/剧集文件配套，保留必要的序号语义。\n\
+        【重要】严格按照用户指定的命名格式生成，不要添加格式中未要求的任何信息！\n\
+        【重要】只输出文件夹名本身，不要包含路径分隔符（/ 或 \\\\），不要包含扩展名！\n\
+        严格按照 JSON 数组格式返回，只输出文件夹名，不要解释：\n\
+        [\"文件夹名1\", \"文件夹名2\", ...]\n\n\
+        用户指定的命名格式：{}\n\n\
+        文件夹列表（仅供参考，只提取格式中需要的字段；如信息缺失可访问API参考链接获取）：\n{}",
+        folders.len(),
+        folders.len(),
+        prompt_hint,
+        folder_list
+    );
+
+    // 根据 provider 选择实现（复用文件名的生成逻辑，prompt 已按文件夹名构造）
+    if cfg.provider == "deepseek-web" {
+        ai_generate_filenames_batch_deepseek_web(cfg, source_key, &full_prompt, folders.len()).await
+    } else {
+        ai_generate_filenames_batch_openai(cfg, source_key, &full_prompt, folders.len()).await
     }
 }
 
@@ -1076,8 +1167,100 @@ fn parse_batch_response(response: &str, expected_count: usize) -> Result<Vec<Str
 mod tests {
     use super::parse_batch_response;
     use super::{
-        deepseek_thinking_override, extract_chat_content, AiRenameConfig, ChatMessageResponse, ChatResponse, Choice,
+        deepseek_thinking_override, extract_chat_content, AiRenameConfig, AiRenameContext, ChatMessageResponse,
+        ChatResponse, Choice, FileToRename,
     };
+
+    #[test]
+    fn ai_context_json_marks_multi_page_and_bangumi() {
+        let ctx = AiRenameContext {
+            title: "测试视频".to_string(),
+            owner: "测试UP".to_string(),
+            source_type: "投稿".to_string(),
+            is_multi_page: true,
+            is_bangumi: false,
+            structure: "Season 结构".to_string(),
+            pid: 2,
+            part_name: "P2 内容".to_string(),
+            ..Default::default()
+        };
+        let json = ctx.to_json_string();
+        assert!(json.contains("多P视频"), "应标记多P类型: {json}");
+        assert!(json.contains("Season 结构"), "应标记目录结构: {json}");
+        assert!(json.contains("P2"), "应包含分P信息: {json}");
+
+        let bangumi = AiRenameContext {
+            title: "番剧视频".to_string(),
+            owner: "番剧".to_string(),
+            source_type: "番剧".to_string(),
+            is_bangumi: true,
+            structure: "番剧Season结构".to_string(),
+            ..Default::default()
+        };
+        let json = bangumi.to_json_string();
+        assert!(json.contains("番剧"), "应标记番剧类型: {json}");
+        assert!(json.contains("番剧Season结构"), "应标记番剧结构: {json}");
+
+        let single = AiRenameContext {
+            title: "单P".to_string(),
+            owner: "UP".to_string(),
+            source_type: "投稿".to_string(),
+            ..Default::default()
+        };
+        let json = single.to_json_string();
+        assert!(json.contains("单P视频"), "应标记单P类型: {json}");
+    }
+
+    #[test]
+    fn batch_filenames_prompt_enforces_one_to_one_and_marks_types() {
+        let file1 = FileToRename {
+            path: std::path::PathBuf::from("P01.mp4"),
+            current_stem: "P01".to_string(),
+            ext: "mp4".to_string(),
+            ctx: AiRenameContext {
+                title: "多P测试".to_string(),
+                owner: "UP".to_string(),
+                source_type: "投稿".to_string(),
+                is_multi_page: true,
+                structure: "Season 结构".to_string(),
+                pid: 1,
+                part_name: "P1 开场".to_string(),
+                ..Default::default()
+            },
+            page_id: 1,
+            video_id: 1,
+            bvid: "BV1".to_string(),
+            single_page: false,
+            flat_folder: false,
+        };
+        let file2 = FileToRename {
+            path: std::path::PathBuf::from("P02.mp4"),
+            current_stem: "P02".to_string(),
+            ext: "mp4".to_string(),
+            ctx: AiRenameContext {
+                title: "多P测试".to_string(),
+                owner: "UP".to_string(),
+                source_type: "投稿".to_string(),
+                is_multi_page: true,
+                structure: "Season 结构".to_string(),
+                pid: 2,
+                part_name: "P2 内容".to_string(),
+                ..Default::default()
+            },
+            page_id: 2,
+            video_id: 1,
+            bvid: "BV1".to_string(),
+            single_page: false,
+            flat_folder: false,
+        };
+        let prompt = super::build_batch_filenames_prompt(&[file1, file2], "作者-标题-序号");
+        assert!(prompt.contains("一一对应"), "应包含一一对应约束");
+        assert!(prompt.contains("数量必须与文件数量完全一致"), "应包含数量一致约束");
+        assert!(prompt.contains("多P视频"), "条目应标记多P类型");
+        assert!(prompt.contains("Season 结构"), "条目应标记结构");
+        assert!(prompt.contains("1. 当前文件名: P01"), "应包含文件1条目");
+        assert!(prompt.contains("2. 当前文件名: P02"), "应包含文件2条目");
+    }
 
     #[test]
     fn parse_batch_response_accepts_json_array() {
@@ -1109,6 +1292,341 @@ mod tests {
                 "[电影解说]开局即巅峰-这部片太重磅了"
             ]
         );
+    }
+    #[test]
+    fn append_missing_template_variables_appends_missing_bvid_and_pubtime_with_template_separators() {
+        use std::collections::HashMap;
+        let ctx = AiRenameContext {
+            title: "多P联调测试视频".to_string(),
+            owner: "联调UP".to_string(),
+            bvid: "BV1xx0000000000".to_string(),
+            pubdate: "20260801000000".to_string(),
+            pid: 2,
+            part_name: "第二P高潮".to_string(),
+            ..Default::default()
+        };
+        // 模板使用 ] 分隔符：标题已包含在 AI 名中，BV号/发布时间缺失应附加
+        let out = super::append_missing_template_variables(
+            "联调UP-多P联调测试视频-来源-1080p",
+            "{{title}}]{{bvid}}]{{pubtime}}",
+            &ctx,
+        );
+        assert_eq!(out, "联调UP-多P联调测试视频-来源-1080p]BV1xx0000000000]20260801000000");
+        assert!(!out.contains("{{"), "不应残留模板占位符: {out}");
+
+        // 已包含全部变量时不重复附加
+        let out2 = super::append_missing_template_variables(
+            "联调UP-多P联调测试视频]BV1xx0000000000]20260801000000",
+            "{{title}}]{{bvid}}]{{pubtime}}",
+            &ctx,
+        );
+        assert_eq!(out2, "联调UP-多P联调测试视频]BV1xx0000000000]20260801000000");
+    }
+
+    #[test]
+    fn append_missing_template_variables_uses_default_page_name_style() {
+        let ctx = AiRenameContext {
+            title: "测试标题".to_string(),
+            owner: "测试UP".to_string(),
+            bvid: "BV116421f7rM".to_string(),
+            pubdate: "20240609200216".to_string(),
+            ..Default::default()
+        };
+        // 默认单P文件名模板 {{pubtime}}-{{bvid}}
+        let out = super::append_missing_template_variables("测试UP-测试标题-来源-1080p", "{{pubtime}}-{{bvid}}", &ctx);
+        assert_eq!(out, "测试UP-测试标题-来源-1080p-20240609200216-BV116421f7rM");
+
+        // 空模板 / 空名字：原样返回
+        assert_eq!(super::append_missing_template_variables("名字", "", &ctx), "名字");
+        assert_eq!(super::append_missing_template_variables("", "{{bvid}}", &ctx), "");
+    }
+
+    #[test]
+    fn single_page_folder_name_appends_page_name_vars_when_video_template_lacks_them() {
+        let ctx = AiRenameContext {
+            title: "测试标题".to_string(),
+            owner: "测试UP".to_string(),
+            bvid: "BV116421f7rM".to_string(),
+            pubdate: "20240609200216".to_string(),
+            ..Default::default()
+        };
+        let base = "测试UP-测试标题-来源-1080p";
+        // 用户当前 video_name = "{{upper_name}}"：不含 bvid/pubtime，按视频模板补全无变化
+        let with_video = super::append_missing_template_variables(base, "{{upper_name}}", &ctx);
+        assert_eq!(with_video, base);
+        // 再按单P文件名模板（默认 {{pubtime}}-{{bvid}}）补全 → 附加 -pubtime-bvid
+        let folder = super::append_missing_template_variables(&with_video, "{{pubtime}}-{{bvid}}", &ctx);
+        assert_eq!(folder, "测试UP-测试标题-来源-1080p-20240609200216-BV116421f7rM");
+    }
+
+    #[test]
+    fn append_missing_template_variables_ignores_structure_vars_for_multi_page_default() {
+        let ctx = AiRenameContext {
+            title: "测试标题".to_string(),
+            bvid: "BV116421f7rM".to_string(),
+            pubdate: "20240609200216".to_string(),
+            pid: 3,
+            part_name: "第三P".to_string(),
+            ..Default::default()
+        };
+        // 多P默认模板 P{{pid_pad}}.{{ptitle}} 只含结构变量，不应附加任何内容
+        let out = super::append_missing_template_variables("测试UP-测试标题-P3-1080p", "P{{pid_pad}}.{{ptitle}}", &ctx);
+        assert_eq!(out, "测试UP-测试标题-P3-1080p");
+    }
+
+    #[test]
+    #[ignore = "需要真实 AI API 凭证与网络，用于人工联调（设置 BILI_SYNC_CONFIG_DIR 指向含 ai_rename 配置的临时库）"]
+    fn live_ai_api_multi_page_and_bangumi_one_to_one() {
+        use std::path::PathBuf;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let db = crate::database::setup_database().await;
+            crate::config::init_config_with_database(db).await.expect("初始化配置失败");
+            let cfg = crate::config::with_config(|bundle| bundle.config.ai_rename.clone());
+            if !cfg.enabled || cfg.api_key.is_none() {
+                panic!("AI 重命名未启用或缺少 API key，无法进行真实联调");
+            }
+            println!(
+                "真实 AI 联调: provider={} model={} base_url={}",
+                cfg.provider, cfg.model, cfg.base_url
+            );
+            let (page_template, multi_page_template, video_template, bangumi_template, bangumi_folder_template) =
+                crate::config::with_config(|bundle| {
+                    (
+                        bundle.config.page_name.to_string(),
+                        bundle.config.multi_page_name.to_string(),
+                        bundle.config.video_name.to_string(),
+                        bundle.config.bangumi_name.to_string(),
+                        bundle.config.bangumi_folder_name.to_string(),
+                    )
+                });
+            println!(
+                "模板: page_name='{}' multi_page_name='{}' video_name='{}' bangumi_name='{}'",
+                page_template, multi_page_template, video_template, bangumi_template
+            );
+
+            let prompt_hint = "作者-标题-P序号-清晰度；用 - 连接";
+
+            // 场景1：多P视频（同一视频 2 个分P）——应返回 2 个一一对应的文件名并保留 P1/P2 序号
+            let files_multi = vec![
+                FileToRename {
+                    path: PathBuf::from("P1.mp4"),
+                    current_stem: "P1".to_string(),
+                    ext: "mp4".to_string(),
+                    ctx: AiRenameContext {
+                        title: "多P联调测试视频".to_string(),
+                        owner: "联调UP".to_string(),
+                        source_type: "投稿".to_string(),
+                        dimension: "1920x1080".to_string(),
+                        pid: 1,
+                        part_name: "第一P开场".to_string(),
+                        is_multi_page: true,
+                        is_bangumi: false,
+                        structure: "Season 结构".to_string(),
+                        bvid: "BV_TESTM01".to_string(),
+                        ..Default::default()
+                    },
+                    page_id: 1,
+                    video_id: 1,
+                    bvid: "BV_TESTM01".to_string(),
+                    single_page: false,
+                    flat_folder: false,
+                },
+                FileToRename {
+                    path: PathBuf::from("P2.mp4"),
+                    current_stem: "P2".to_string(),
+                    ext: "mp4".to_string(),
+                    ctx: AiRenameContext {
+                        title: "多P联调测试视频".to_string(),
+                        owner: "联调UP".to_string(),
+                        source_type: "投稿".to_string(),
+                        dimension: "1920x1080".to_string(),
+                        pid: 2,
+                        part_name: "第二P高潮".to_string(),
+                        is_multi_page: true,
+                        is_bangumi: false,
+                        structure: "Season 结构".to_string(),
+                        bvid: "BV_TESTM01".to_string(),
+                        ..Default::default()
+                    },
+                    page_id: 2,
+                    video_id: 1,
+                    bvid: "BV_TESTM01".to_string(),
+                    single_page: false,
+                    flat_folder: false,
+                },
+            ];
+            let full_prompt = super::build_batch_filenames_prompt(&files_multi, prompt_hint);
+            println!("=== 多P 发送给 AI 的完整 prompt ===\n{}", full_prompt);
+            let names = super::ai_generate_filenames_batch(&cfg, "live-test-multip", &files_multi, prompt_hint)
+                .await
+                .expect("多P 真实 AI 调用失败");
+            println!("=== 多P 真实返回（{} 个） ===", names.len());
+            for (i, n) in names.iter().enumerate() {
+                println!("  {} -> {}", i + 1, n);
+            }
+            assert_eq!(names.len(), 2, "多P 返回数量必须与文件数一致");
+            assert_ne!(names[0], names[1], "两个分P 的文件名不能相同");
+            let mp_folder = super::append_missing_template_variables(&names[0], &multi_page_template, &files_multi[0].ctx);
+            println!("多P 文件夹补全后（multi_page_name）: {}", mp_folder);
+
+            // 场景1.5：单P（1 个分页，无多P序号）——按 page_name 补全 bvid/pubtime
+            let single_ctx = AiRenameContext {
+                title: "单P联调测试视频".to_string(),
+                owner: "联调UP".to_string(),
+                source_type: "投稿".to_string(),
+                dimension: "1920x1080".to_string(),
+                pid: 1,
+                part_name: "单P内容".to_string(),
+                is_multi_page: false,
+                is_bangumi: false,
+                bvid: "BV1SINGLE00001".to_string(),
+                pubdate: "20260801000000".to_string(),
+                ..Default::default()
+            };
+            let single_file = FileToRename {
+                path: PathBuf::from("single.mp4"),
+                current_stem: "single".to_string(),
+                ext: "mp4".to_string(),
+                ctx: single_ctx.clone(),
+                page_id: 21,
+                video_id: 21,
+                bvid: "BV1SINGLE00001".to_string(),
+                single_page: true,
+                flat_folder: false,
+            };
+            let single_names = super::ai_generate_filenames_batch(&cfg, "live-test-single", &[single_file], prompt_hint)
+                .await
+                .expect("单P 真实 AI 调用失败");
+            println!("=== 单P 真实返回（{} 个） ===", single_names.len());
+            for (i, n) in single_names.iter().enumerate() {
+                println!("  {} -> {}", i + 1, n);
+            }
+            let single_file_name = super::append_missing_template_variables(&single_names[0], &page_template, &single_ctx);
+            println!("单P 文件补全后（page_name）: {}", single_file_name);
+            let single_folder_name = super::append_missing_template_variables(
+                &super::append_missing_template_variables(&single_names[0], &video_template, &single_ctx),
+                &page_template,
+                &single_ctx,
+            );
+            println!("单P 文件夹补全后（video_name+page_name）: {}", single_folder_name);
+
+            // 场景2：番剧（2 集）——应返回 2 个一一对应的文件名并保留 S01E01 序号语义
+            let files_bangumi = vec![
+                FileToRename {
+                    path: PathBuf::from("S01E01.mp4"),
+                    current_stem: "S01E01".to_string(),
+                    ext: "mp4".to_string(),
+                    ctx: AiRenameContext {
+                        title: "联调番剧第一季".to_string(),
+                        owner: "番剧官方".to_string(),
+                        source_type: "番剧".to_string(),
+                        dimension: "1920x1080".to_string(),
+                        episode_number: Some(1),
+                        is_multi_page: false,
+                        is_bangumi: true,
+                        structure: "番剧Season结构".to_string(),
+                        bvid: "BV_TESTB01".to_string(),
+                        ..Default::default()
+                    },
+                    page_id: 11,
+                    video_id: 11,
+                    bvid: "BV_TESTB01".to_string(),
+                    single_page: false,
+                    flat_folder: false,
+                },
+                FileToRename {
+                    path: PathBuf::from("S01E02.mp4"),
+                    current_stem: "S01E02".to_string(),
+                    ext: "mp4".to_string(),
+                    ctx: AiRenameContext {
+                        title: "联调番剧第一季".to_string(),
+                        owner: "番剧官方".to_string(),
+                        source_type: "番剧".to_string(),
+                        dimension: "1920x1080".to_string(),
+                        episode_number: Some(2),
+                        is_multi_page: false,
+                        is_bangumi: true,
+                        structure: "番剧Season结构".to_string(),
+                        bvid: "BV_TESTB01".to_string(),
+                        ..Default::default()
+                    },
+                    page_id: 12,
+                    video_id: 11,
+                    bvid: "BV_TESTB01".to_string(),
+                    single_page: false,
+                    flat_folder: false,
+                },
+            ];
+            let full_prompt = super::build_batch_filenames_prompt(&files_bangumi, prompt_hint);
+            println!("=== 番剧 发送给 AI 的完整 prompt ===\n{}", full_prompt);
+            let names = super::ai_generate_filenames_batch(&cfg, "live-test-bangumi", &files_bangumi, prompt_hint)
+                .await
+                .expect("番剧 真实 AI 调用失败");
+            println!("=== 番剧 真实返回（{} 个） ===", names.len());
+            for (i, n) in names.iter().enumerate() {
+                println!("  {} -> {}", i + 1, n);
+            }
+            assert_eq!(names.len(), 2, "番剧 返回数量必须与集数一致");
+            assert_ne!(names[0], names[1], "两集的文件名不能相同");
+            let bg_file = super::append_missing_template_variables(&names[0], &bangumi_template, &files_bangumi[0].ctx);
+            println!("番剧 文件补全后（bangumi_name）: {}", bg_file);
+            let bg_folder = super::append_missing_template_variables(&names[0], &bangumi_folder_template, &files_bangumi[0].ctx);
+            println!("番剧 文件夹补全后（bangumi_folder_name）: {}", bg_folder);
+        });
+    }
+
+
+    #[test]
+    fn resolves_multi_page_video_folder() {
+        use std::path::PathBuf;
+
+        // 无 Season 结构：所有分页文件在同一目录
+        let p1 = PathBuf::from("F:/下载/视频A/P01.mp4");
+        let p2 = PathBuf::from("F:/下载/视频A/P02.mp4");
+        let parents = vec![
+            p1.parent().unwrap().to_path_buf(),
+            p2.parent().unwrap().to_path_buf(),
+        ];
+        assert_eq!(
+            super::resolve_multi_page_video_folder(&parents),
+            Some(PathBuf::from("F:/下载/视频A"))
+        );
+
+        // Season 结构：分页文件位于「视频文件夹/Season XX」下
+        let p3 = PathBuf::from("F:/下载/视频B/Season 01/P01.mp4");
+        let p4 = PathBuf::from("F:/下载/视频B/Season 01/P02.mp4");
+        let parents = vec![
+            p3.parent().unwrap().to_path_buf(),
+            p4.parent().unwrap().to_path_buf(),
+        ];
+        assert_eq!(
+            super::resolve_multi_page_video_folder(&parents),
+            Some(PathBuf::from("F:/下载/视频B"))
+        );
+
+        // 同一视频跨季（结构异常但仍在同一视频文件夹下）：仍能反推出视频文件夹
+        let p5 = PathBuf::from("F:/下载/视频B/Season 02/P01.mp4");
+        let parents = vec![
+            p3.parent().unwrap().to_path_buf(),
+            p5.parent().unwrap().to_path_buf(),
+        ];
+        assert_eq!(
+            super::resolve_multi_page_video_folder(&parents),
+            Some(PathBuf::from("F:/下载/视频B"))
+        );
+
+        // 分页散落在不同视频文件夹下：无法确定单一文件夹
+        let p6 = PathBuf::from("F:/下载/视频C/Season 01/P01.mp4");
+        let parents = vec![
+            p3.parent().unwrap().to_path_buf(),
+            p6.parent().unwrap().to_path_buf(),
+        ];
+        assert_eq!(super::resolve_multi_page_video_folder(&parents), None);
+
+        // 空输入
+        assert_eq!(super::resolve_multi_page_video_folder(&[]), None);
     }
 
     #[test]
@@ -1164,6 +1682,320 @@ mod tests {
     }
 }
 
+/// 收集多P视频的独占文件夹（用于 AI 重命名整个视频文件夹）
+///
+/// 判定规则：
+/// - 视频必须是多P（分页数 > 1），且不在平铺目录模式下；
+/// - 所有分页文件位于同一个视频文件夹下（无 Season 结构），或位于
+///   「视频文件夹/Season XX」结构下（有 Season 结构）；
+/// - 该文件夹没有被其他视频共享（其他 video 的 path 也指向同一目录时跳过，
+///   例如 UP 分组目录 / 合集统一目录 / 收藏夹按 UP 分组目录）。
+///
+/// `skip_if_all_pages_renamed` 为 true 时，若该视频的所有分页都已被 AI
+/// 重命名过（page.ai_renamed = 1），则不再收集文件夹，避免重复调用 AI。
+pub async fn collect_multi_page_folders(
+    connection: &DatabaseConnection,
+    videos: &[(bili_sync_entity::video::Model, Vec<bili_sync_entity::page::Model>)],
+    flat_folder: bool,
+    skip_if_all_pages_renamed: bool,
+) -> Vec<FolderToRename> {
+    use bili_sync_entity::video;
+
+    if flat_folder {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (video_model, pages) in videos {
+        if pages.len() <= 1 {
+            continue;
+        }
+        if skip_if_all_pages_renamed && pages.iter().all(|p| p.ai_renamed.unwrap_or(0) == 1) {
+            debug!("[{}] 跳过多P文件夹重命名（所有分页均已 AI 重命名）: {}", video_model.id, video_model.name);
+            continue;
+        }
+        // 收集有真实路径的分页
+        let paths: Vec<std::path::PathBuf> = pages
+            .iter()
+            .filter_map(|p| {
+                p.path
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(std::path::PathBuf::from)
+            })
+            .collect();
+        if paths.len() < 2 {
+            continue;
+        }
+        // 找到分页文件所在目录
+        let parents: Vec<std::path::PathBuf> = paths
+            .iter()
+            .filter_map(|p| p.parent().map(|d| d.to_path_buf()))
+            .collect();
+        if parents.is_empty() {
+            continue;
+        }
+        // 推导视频文件夹：所有分页同目录（无 Season 结构），
+        // 或位于「视频文件夹/Season XX」结构下
+        let Some(video_folder) = resolve_multi_page_video_folder(&parents) else {
+            debug!(
+                "[{}] 跳过多P文件夹重命名（分页目录结构不规整）: {}",
+                video_model.id, video_model.name
+            );
+            continue;
+        };
+        // 文件夹必须存在且是目录
+        if !video_folder.is_dir() {
+            continue;
+        }
+        // 独占判定：没有其他 video 共享该目录
+        let folder_str = video_folder.to_string_lossy().to_string();
+        let folder_str_alt = folder_str.replace('/', "\\");
+        let shared_count = match video::Entity::find()
+            .filter(video::Column::Id.ne(video_model.id))
+            .filter(video::Column::Path.eq(&folder_str).or(video::Column::Path.eq(&folder_str_alt)))
+            .count(connection)
+            .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("查询共享文件夹失败 video_id={}: {}", video_model.id, e);
+                0
+            }
+        };
+        if shared_count > 0 {
+            debug!(
+                "[{}] 跳过多P文件夹重命名（其他视频也使用该目录）: {}",
+                video_model.id, folder_str
+            );
+            continue;
+        }
+        let current_name = video_folder
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if current_name.is_empty() {
+            continue;
+        }
+        let ctx = AiRenameContext {
+            title: video_model.name.clone(),
+            desc: video_model.intro.clone(),
+            owner: video_model.upper_name.clone(),
+            tname: String::new(),
+            duration: 0,
+            pubdate: video_model.pubtime.format("%Y%m%d%H%M%S").to_string(),
+            dimension: String::new(),
+            part_name: String::new(),
+            ugc_season: None,
+            copyright: String::new(),
+            view: 0,
+            pid: pages.len() as i32,
+            episode_number: None,
+            source_type: String::new(),
+            is_audio: false,
+            sort_index: None,
+            bvid: video_model.bvid.clone(),
+            is_multi_page: true,
+            is_bangumi: false,
+            structure: "多P视频文件夹".to_string(),
+        };
+        out.push(FolderToRename {
+            path: video_folder,
+            current_name,
+            ctx,
+            video_id: video_model.id,
+            bvid: video_model.bvid.clone(),
+        });
+    }
+    out
+}
+
+/// 从分页文件目录列表推导多P视频的文件夹路径。
+///
+/// - 所有分页文件位于同一目录（无 Season 结构）→ 直接返回该目录；
+/// - 分页文件位于「视频文件夹/Season XX」结构下 → 返回 Season 的上一级；
+/// - 其它不规整结构 → None。
+fn resolve_multi_page_video_folder(parents: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    if parents.is_empty() {
+        return None;
+    }
+    // 所有分页文件位于同一目录
+    if parents.iter().all(|d| d == &parents[0]) {
+        let is_season_dir = parents[0]
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.to_lowercase().starts_with("season "));
+        // 目录本身是「Season XX」时说明处于 Season 结构，视频文件夹是上一级；
+        // 否则该目录就是视频文件夹（无 Season 结构）。
+        if is_season_dir {
+            return parents[0].parent().map(|g| g.to_path_buf());
+        }
+        return Some(parents[0].clone());
+    }
+    resolve_season_parent(parents)
+}
+
+/// 多P视频处于「视频文件夹/Season XX」结构时，从分页文件目录反推视频文件夹。
+fn resolve_season_parent(parents: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let grandparents: Vec<Option<std::path::PathBuf>> = parents
+        .iter()
+        .map(|d| d.parent().map(|g| g.to_path_buf()))
+        .collect();
+    let first = grandparents.first()?.as_ref()?;
+    if !grandparents.iter().all(|g| g.as_ref() == Some(first)) {
+        return None;
+    }
+    if !parents.iter().all(|d| {
+        d.file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.to_lowercase().starts_with("season "))
+    }) {
+        return None;
+    }
+    Some(first.clone())
+}
+
+/// 应用单个视频文件夹的 AI 重命名（多P视频独占文件夹）
+///
+/// 重命名文件夹后同步更新数据库中的 video.path 与该视频所有分页的 page.path，
+/// 保证后续扫描/播放/重设路径等逻辑仍然能找到文件。
+///
+/// 返回 Ok(true) 表示成功重命名，Ok(false) 表示跳过。
+pub async fn apply_ai_rename_folder(
+    connection: &DatabaseConnection,
+    source_key: &str,
+    folder: &FolderToRename,
+    new_name: &str,
+) -> Result<bool> {
+    use bili_sync_entity::{page, video};
+
+    let new_name = new_name.trim();
+    if new_name.is_empty() || new_name == folder.current_name {
+        debug!(
+            "[{}] 跳过文件夹重命名(相同或为空): {}",
+            source_key, folder.current_name
+        );
+        return Ok(false);
+    }
+    // 多P/番剧文件夹按对应命名模板补全 AI 名字中缺失的模板变量（如 {{bvid}}/{{pubtime}}），
+    // 保持多P视频模板规则命名，避免重命名把变量内容清除掉
+    let global_config = crate::config::reload_config();
+    let folder_template = if source_key.starts_with("bangumi") {
+        global_config.bangumi_folder_name.as_ref()
+    } else {
+        global_config.multi_page_name.as_ref()
+    };
+    let enriched_name = append_missing_template_variables(new_name, folder_template, &folder.ctx);
+    // 清理非法字符，防止 AI 生成路径分隔符或非法文件名
+    let safe_name = crate::utils::filenamify::filenamify(&enriched_name);
+    let safe_name = safe_name.trim().to_string();
+    if safe_name.is_empty() || safe_name == folder.current_name {
+        debug!(
+            "[{}] 跳过文件夹重命名(清理后相同或为空): {}",
+            source_key, folder.current_name
+        );
+        return Ok(false);
+    }
+    let old_dir = &folder.path;
+    // 重新确认文件夹仍存在
+    if !old_dir.is_dir() {
+        debug!(
+            "[{}] 跳过文件夹重命名(目录不存在): {}",
+            source_key,
+            old_dir.display()
+        );
+        return Ok(false);
+    }
+    let parent_dir = match old_dir.parent() {
+        Some(d) => d,
+        None => return Ok(false),
+    };
+    let mut target_dir = parent_dir.join(&safe_name);
+    if target_dir.exists() && target_dir != *old_dir {
+        let bvid = folder.bvid.trim();
+        target_dir = parent_dir.join(if bvid.is_empty() {
+            safe_name.clone()
+        } else {
+            format!("{}-{}", safe_name, bvid)
+        });
+        info!(
+            "[{}] 检测到文件夹名冲突，追加BV号: {} -> {}",
+            source_key,
+            safe_name,
+            target_dir.file_name().and_then(|s| s.to_str()).unwrap_or("")
+        );
+    }
+    if target_dir == *old_dir {
+        return Ok(false);
+    }
+    if target_dir.exists() {
+        info!(
+            "[{}] 跳过文件夹重命名(目标目录已存在): {}",
+            source_key,
+            target_dir.display()
+        );
+        return Ok(false);
+    }
+    if let Err(e) = fs::rename(old_dir, &target_dir) {
+        warn!(
+            "[{}] 重命名文件夹失败: {} -> {}: {}",
+            source_key,
+            old_dir.display(),
+            target_dir.display(),
+            e
+        );
+        return Ok(false);
+    }
+    info!(
+        "[{}] AI 重命名文件夹成功: {} -> {}",
+        source_key,
+        old_dir.display(),
+        target_dir.display()
+    );
+
+    let old_dir_str = old_dir.to_string_lossy().to_string();
+    let old_dir_str_alt = old_dir_str.replace('/', "\\");
+    let new_dir_str = target_dir.to_string_lossy().to_string();
+
+    // 更新 video.path
+    if let Ok(Some(current_video)) = video::Entity::find_by_id(folder.video_id).one(connection).await {
+        let mut active_video: video::ActiveModel = current_video.into();
+        active_video.path = Set(new_dir_str.clone());
+        if let Err(e) = active_video.update(connection).await {
+            warn!("[{}] 更新 video.path 失败: {}", source_key, e);
+        }
+    }
+    // 更新该视频所有分页的 page.path
+    if let Ok(pages) = page::Entity::find()
+        .filter(page::Column::VideoId.eq(folder.video_id))
+        .all(connection)
+        .await
+    {
+        for page_model in pages {
+            if let Some(page_path_str) = page_model.path.clone() {
+                if page_path_str.starts_with(&old_dir_str) || page_path_str.starts_with(&old_dir_str_alt) {
+                    let new_page_path = if page_path_str.starts_with(&old_dir_str) {
+                        page_path_str.replacen(&old_dir_str, &new_dir_str, 1)
+                    } else {
+                        page_path_str.replacen(&old_dir_str_alt, &new_dir_str, 1)
+                    };
+                    let mut active_page: page::ActiveModel = page_model.into();
+                    active_page.path = Set(Some(new_page_path.clone()));
+                    if let Err(e) = active_page.update(connection).await {
+                        warn!("[{}] 更新 page.path 失败: {}", source_key, e);
+                    } else {
+                        info!(
+                            "[{}] 同步更新分页路径: {} -> {}",
+                            source_key, page_path_str, new_page_path
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// 批量重命名视频源下的历史文件
 ///
 /// # 参数
@@ -1185,6 +2017,7 @@ pub async fn batch_rename_history_files(
     video_prompt: &str,
     audio_prompt: &str,
     flat_folder: bool,
+    structure_hint: &str,
 ) -> Result<BatchRenameResult> {
     let mut result = BatchRenameResult::default();
 
@@ -1270,6 +2103,9 @@ pub async fn batch_rename_history_files(
                 is_audio,
                 sort_index: Some(current_sort_index),
                 bvid: video.bvid.clone(),
+                is_multi_page: !is_single_page_video,
+                is_bangumi: source_key.starts_with("bangumi"),
+                structure: structure_hint.to_string(),
             };
 
             let file_info = FileToRename {
@@ -1298,6 +2134,16 @@ pub async fn batch_rename_history_files(
         video_files.len(),
         audio_files.len()
     );
+
+    // 收集多P视频独占文件夹（整个视频文件夹的 AI 重命名）
+    let folder_renames = collect_multi_page_folders(connection, &videos, flat_folder, false).await;
+    if !folder_renames.is_empty() {
+        info!(
+            "[{}] 收集到 {} 个多P视频文件夹待重命名",
+            source_key,
+            folder_renames.len()
+        );
+    }
 
     // 第二步：按批次处理视频文件（每批 10 个）
     let batch_size = 10;
@@ -1358,12 +2204,140 @@ pub async fn batch_rename_history_files(
         }
     }
 
+    // 处理多P视频文件夹重命名（需开启「重命名上级目录」，与单P保持一致）
+    if config.rename_parent_dir && !folder_renames.is_empty() {
+        info!(
+            "[{}] 开始处理 {} 个多P视频文件夹的重命名",
+            source_key,
+            folder_renames.len()
+        );
+        for (batch_idx, batch) in folder_renames.chunks(batch_size).enumerate() {
+            info!(
+                "[{}] 处理文件夹批次 {}/{}: {} 个文件夹",
+                source_key,
+                batch_idx + 1,
+                (folder_renames.len() + batch_size - 1) / batch_size,
+                batch.len()
+            );
+            match ai_generate_folder_names_batch(config, source_key, batch, video_prompt_hint).await {
+                Ok(new_names) => {
+                    for (folder, new_name) in batch.iter().zip(new_names.iter()) {
+                        match apply_ai_rename_folder(connection, source_key, folder, new_name).await {
+                            Ok(true) => result.renamed_count += 1,
+                            Ok(false) => result.skipped_count += 1,
+                            Err(e) => {
+                                warn!(
+                                    "[{}] 文件夹重命名失败 {}: {}",
+                                    source_key, folder.current_name, e
+                                );
+                                result.failed_count += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "[{}] 文件夹批次 {} AI 调用失败: {}",
+                        source_key,
+                        batch_idx + 1,
+                        e
+                    );
+                    result.failed_count += batch.len();
+                }
+            }
+        }
+    }
+
     info!(
         "[{}] 批量重命名完成: 重命名 {} 个, 跳过 {} 个, 失败 {} 个",
         source_key, result.renamed_count, result.skipped_count, result.failed_count
     );
 
     Ok(result)
+}
+
+/// 可参与「缺失变量补全」的模板变量（信息类变量）。
+/// 结构类变量（{{pid_pad}}/{{ptitle}}/{{season_pad}}/{{episode_pad}} 等）由 AI 通过提示词
+/// 保留序号语义，不在此处重复附加，避免破坏 P/S 序号结构。
+const APPENDABLE_TEMPLATE_VARS: &[&str] = &[
+    "bvid",
+    "pubtime",
+    "fav_time",
+    "ctime",
+    "year",
+    "upper_mid",
+    "show_title",
+    "dimension",
+    "duration",
+    "sort_index",
+    "episode_number",
+];
+
+/// 从 AI 重命名上下文构建可补全的模板变量值表
+fn ctx_to_appendable_vars(ctx: &AiRenameContext) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    if !ctx.bvid.is_empty() {
+        vars.insert("bvid".to_string(), ctx.bvid.clone());
+    }
+    if !ctx.pubdate.is_empty() {
+        vars.insert("pubtime".to_string(), ctx.pubdate.clone());
+    }
+    if !ctx.dimension.is_empty() {
+        vars.insert("dimension".to_string(), ctx.dimension.clone());
+    }
+    if ctx.duration > 0 {
+        vars.insert("duration".to_string(), ctx.duration.to_string());
+    }
+    if let Some(idx) = ctx.sort_index {
+        vars.insert("sort_index".to_string(), idx.to_string());
+    }
+    if let Some(ep) = ctx.episode_number {
+        vars.insert("episode_number".to_string(), ep.to_string());
+    }
+    vars
+}
+
+/// 按命名模板把 AI 生成的名字中缺失的模板变量内容附加到末尾，保留模板的字面分隔符。
+///
+/// 例如模板 `{{title}}]{{bvid}}]{{pubtime}}`、AI 名 `作者-标题-1080p` 缺 BV 号与发布时间时，
+/// 结果为 `作者-标题-1080p]BV1xxxx]20260801`；已包含的变量值不会重复附加。
+/// 结构类变量（{{pid_pad}}/{{ptitle}} 等）不在补全范围，避免破坏 P/S 序号结构。
+pub fn append_missing_template_variables(ai_name: &str, template: &str, ctx: &AiRenameContext) -> String {
+    let mut out = ai_name.trim().to_string();
+    if out.is_empty() || template.trim().is_empty() {
+        return out;
+    }
+    let vars = ctx_to_appendable_vars(ctx);
+    let mut rest = template;
+    let mut literal = String::new();
+    while let Some(start) = rest.find("{{") {
+        literal.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                let var = after[..end].trim();
+                if APPENDABLE_TEMPLATE_VARS.contains(&var) {
+                    if let Some(raw) = vars.get(var) {
+                        let value = raw.trim();
+                        if !value.is_empty() && !out.contains(value) {
+                            let mut sep = literal.replace(['/', '\\'], "").trim().to_string();
+                            if sep.is_empty() {
+                                sep.push('-');
+                            }
+                            if !out.ends_with(&sep) {
+                                out.push_str(&sep);
+                            }
+                            out.push_str(value);
+                        }
+                    }
+                }
+                literal.clear();
+                rest = &after[end + 2..];
+            }
+            None => break,
+        }
+    }
+    out
 }
 
 /// 应用单个文件的重命名
@@ -1376,6 +2350,16 @@ async fn apply_rename(
     result: &mut BatchRenameResult,
 ) {
     use bili_sync_entity::{page, video};
+
+    // 读取全局命名模板：按视频类型选择补全规则（单P用 page_name，多P用 multi_page_name，番剧用 bangumi_name）
+    let global_config = crate::config::reload_config();
+    let page_template = if file.ctx.is_bangumi {
+        global_config.bangumi_name.as_ref()
+    } else if !file.single_page {
+        global_config.multi_page_name.as_ref()
+    } else {
+        global_config.page_name.as_ref()
+    };
 
     // 文件名相同则跳过
     if new_stem == file.current_stem {
@@ -1393,14 +2377,20 @@ async fn apply_rename(
 
     // 构建新路径（处理重复文件名）
     let parent = file.path.parent().unwrap_or(Path::new("."));
-    let mut final_stem = new_stem.to_string();
+    // 视频文件：按命名模板补全 AI 名字中缺失的变量内容（如 {{bvid}}/{{pubtime}}），音频不附加
+    let mut final_stem = if file.ctx.is_audio {
+        new_stem.to_string()
+    } else {
+        append_missing_template_variables(new_stem, page_template, &file.ctx)
+    };
+    let base_stem = final_stem.clone();
     let mut new_filename = format!("{}.{}", final_stem, file.ext);
     let mut new_path = parent.join(&new_filename);
 
     // 如果目标文件已存在，添加后缀使其唯一
     let mut suffix = 1;
     while new_path.exists() {
-        final_stem = format!("{}-{}", new_stem, suffix);
+        final_stem = format!("{}-{}", base_stem, suffix);
         new_filename = format!("{}.{}", final_stem, file.ext);
         new_path = parent.join(&new_filename);
         suffix += 1;
@@ -1445,7 +2435,7 @@ async fn apply_rename(
 
     // 更新NFO文件内容（标题标签）
     let nfo_path = parent.join(format!("{}.nfo", final_stem));
-    if let Err(e) = update_nfo_content(&nfo_path, &final_stem) {
+    if let Err(e) = update_nfo_content(&nfo_path, new_stem) {
         warn!("[{}] 更新NFO内容失败: {}", source_key, e);
     }
 
@@ -1457,10 +2447,21 @@ async fn apply_rename(
     let final_path = if should_rename_folder {
         if let Some(old_dir) = new_path.parent() {
             if let Some(parent_dir) = old_dir.parent() {
-                let mut target_dir = parent_dir.join(&final_stem);
+                // 单P文件夹补全缺失的模板变量（如 {{bvid}}/{{pubtime}}），避免 AI 重命名把变量内容清除掉。
+                // 依次按「视频文件夹命名模板」与「单P文件名模板」补全：视频模板未配置这些变量时，
+                // 单P文件名模板（默认 {{pubtime}}-{{bvid}}）中的变量仍会附加到文件夹名上。
+                let folder_stem = if file.ctx.is_audio {
+                    final_stem.clone()
+                } else if file.ctx.is_bangumi {
+                    append_missing_template_variables(&final_stem, global_config.bangumi_folder_name.as_ref(), &file.ctx)
+                } else {
+                    let with_folder = append_missing_template_variables(&final_stem, global_config.video_name.as_ref(), &file.ctx);
+                    append_missing_template_variables(&with_folder, global_config.page_name.as_ref(), &file.ctx)
+                };
+                let mut target_dir = parent_dir.join(&folder_stem);
                 // 如果目标目录已存在且不是当前目录，追加 bvid 避免冲突
                 if target_dir.exists() && target_dir != old_dir {
-                    target_dir = parent_dir.join(format!("{}-{}", &final_stem, file.bvid));
+                    target_dir = parent_dir.join(format!("{}-{}", &folder_stem, file.bvid));
                 }
 
                 if target_dir != old_dir {

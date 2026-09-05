@@ -69,6 +69,22 @@ mod m20260415_000001_add_split_chapters_to_sources;
 mod m20260704_000001_add_ai_subtitle_settings;
 mod m20260718_000001_add_source_filter_option;
 mod m20260719_000001_add_source_download_charge_videos;
+mod m20260729_000001_create_youtube_sources;
+mod m20260729_000002_align_youtube_download_lifecycle;
+mod m20260729_000003_integrate_youtube_source_options;
+mod m20260730_000001_add_youtube_selected_videos;
+mod m20260730_000002_add_youtube_source_selection_state;
+mod m20260802_000001_add_youtube_video_image_post;
+mod m20260802_000002_add_youtube_source_ai_rename;
+mod m20260802_000003_enable_douyin_danmaku;
+mod m20260802_000004_add_youtube_scan_deleted;
+mod m20260804_000001_add_external_episode_number;
+mod m20260807_000001_add_youtube_video_charge_flags;
+mod m20260821_000001_add_video_skip_reason;
+mod m20260826_000001_add_youtube_video_story;
+mod m20260903_000001_add_youtube_video_task_status;
+mod m20260904_000001_backfill_external_task_status_by_files;
+mod m20260905_000001_backfill_external_moved_media_as_completed;
 
 pub struct Migrator;
 
@@ -145,6 +161,22 @@ impl MigratorTrait for Migrator {
             Box::new(m20260704_000001_add_ai_subtitle_settings::Migration),
             Box::new(m20260718_000001_add_source_filter_option::Migration),
             Box::new(m20260719_000001_add_source_download_charge_videos::Migration),
+            Box::new(m20260729_000001_create_youtube_sources::Migration),
+            Box::new(m20260729_000002_align_youtube_download_lifecycle::Migration),
+            Box::new(m20260729_000003_integrate_youtube_source_options::Migration),
+            Box::new(m20260730_000001_add_youtube_selected_videos::Migration),
+            Box::new(m20260730_000002_add_youtube_source_selection_state::Migration),
+            Box::new(m20260802_000001_add_youtube_video_image_post::Migration),
+            Box::new(m20260802_000002_add_youtube_source_ai_rename::Migration),
+            Box::new(m20260802_000003_enable_douyin_danmaku::Migration),
+            Box::new(m20260802_000004_add_youtube_scan_deleted::Migration),
+            Box::new(m20260804_000001_add_external_episode_number::Migration),
+            Box::new(m20260807_000001_add_youtube_video_charge_flags::Migration),
+            Box::new(m20260821_000001_add_video_skip_reason::Migration),
+            Box::new(m20260826_000001_add_youtube_video_story::Migration),
+            Box::new(m20260903_000001_add_youtube_video_task_status::Migration),
+            Box::new(m20260904_000001_backfill_external_task_status_by_files::Migration),
+            Box::new(m20260905_000001_backfill_external_moved_media_as_completed::Migration),
         ]
     }
 }

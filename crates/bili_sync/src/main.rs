@@ -7,25 +7,37 @@ mod aria2_downloader;
 mod auth;
 mod bilibili;
 mod config;
+mod credential_store;
 mod database;
+mod db_maintenance;
+mod douyin;
+mod douyin_sign;
+mod download_progress;
 mod downloader;
 mod error;
+mod external_media;
 mod hardware;
 mod http;
 mod ingest_log;
 mod initialization;
 mod task;
+mod tiktok;
+mod tiktok_impersonate;
+mod tiktok_sign;
 mod unified_downloader;
 mod utils;
 mod workflow;
 mod workflow_danmaku;
+mod youtube;
 
 use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 // 移除未使用的Lazy导入
 use task::{credential_refresh_scheduler, http_server, video_downloader};
+use youtube::external_login_guard_scheduler;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -66,6 +78,9 @@ async fn async_main() -> Result<()> {
     if let Err(e) = init_config_with_database(connection.as_ref().clone()).await {
         warn!("数据库配置系统初始化失败: {}, 继续使用TOML配置", e);
     }
+
+    // 迁移旧版外部平台凭证文件到数据库（YouTube/抖音/TikTok）
+    crate::credential_store::migrate_legacy_credentials_on_startup().await;
 
     // 启动时自动统一 upper_face 分桶目录大小写（A-Z -> a-z），避免媒体库头像匹配异常
     if let Err(e) = crate::workflow::migrate_upper_face_buckets_on_startup().await {
@@ -167,10 +182,32 @@ async fn async_main() -> Result<()> {
         token.clone(),
     );
     spawn_task("定时下载", video_downloader(connection), &tracker, token.clone());
+    spawn_task("日志落盘", flush_logs_periodically(), &tracker, token.clone());
+    spawn_task(
+        "外源登录状态守护",
+        external_login_guard_scheduler(),
+        &tracker,
+        token.clone(),
+    );
+    spawn_task(
+        "TikTok SDK 自动更新",
+        tiktok::tiktok_sdk_scheduler(),
+        &tracker,
+        token.clone(),
+    );
 
     tracker.close();
     handle_shutdown(tracker, token).await;
     Ok(())
+}
+
+/// 日志周期落盘：文件日志先写内存缓冲，避免服务繁忙时日志文件长时间不更新、
+/// 让用户误以为任务“卡住”；每 5 秒把缓冲内容刷到磁盘一次。
+async fn flush_logs_periodically() {
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        file_logger::flush_file_logger();
+    }
 }
 
 fn spawn_task(
