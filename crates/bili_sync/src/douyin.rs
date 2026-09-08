@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -382,7 +382,7 @@ pub async fn import_douyin_cookie_file(
     let secsdk_suffix = if secsdk_imported {
         "；我的喜欢/收藏夹签名会话已同步 ✓".to_string()
     } else {
-        "；⚠ 未同步我的喜欢/收藏夹签名会话（如需使用我的喜欢/收藏夹，请用电脑端登录助手重新传输登录状态）".to_string()
+        "；⚠ 未同步抖音 secsdk 签名会话（我的喜欢/收藏夹不可用；作者作品扫描也可能被平台风控拒绝，建议用电脑端登录助手完整传输一次登录状态）".to_string()
     };
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
@@ -2507,6 +2507,8 @@ fn endpoint_display_name(base_url: &str) -> &'static str {
         "收藏夹列表"
     } else if base_url.starts_with(DOUYIN_COLLECTION_VIDEOS_API) {
         "收藏夹作品"
+    } else if base_url.starts_with(DOUYIN_POST_API) {
+        "抖音作者作品接口"
     } else {
         "抖音 Web API"
     }
@@ -2515,13 +2517,29 @@ fn endpoint_display_name(base_url: &str) -> &'static str {
 /// 需要 Node 现场签名（secsdk x-secsdk-web-signature）的受保护抖音接口。
 /// 收藏夹列表/收藏夹作品/我的喜欢三个接口实测只需 secsdk 签名 + 完整登录 Cookie：
 /// 附加 a_bogus 必须字节级有效，项目无法生成有效值，无效的 a_bogus 反而会被 Turing
-/// 静默丢弃（HTTP 200 空响应），因此这三个接口不再生成 a_bogus；其余接口
-/// （搜索/作者作品/稍后再看等）仍接受旧算法，继续走纯 Rust 快速路径。
+/// 静默丢弃（HTTP 200 空响应），因此这三个接口不再生成 a_bogus。
+/// 作者作品接口（aweme/post，添加源历史选择/作者扫描走这里）自 2026-09 起也被
+/// 抖音 Argus 逐步纳入同类风控校验：同一会话下旧 f2 移植的 a_bogus 已有约半数
+/// 请求被拒绝（HTTP 403 Signature Not Found），改用官方 secsdk 现场签名后连续
+/// 请求全部通过。因此作者作品接口在已同步 secsdk 会话时同样优先走 SDK 签名，
+/// 仅在未同步 secsdk 会话时回退旧算法（见 endpoint_allows_legacy_abogus_fallback）。
 fn endpoint_needs_sdk_signature(base_url: &str) -> bool {
     base_url.starts_with(DOUYIN_FAVORITE_API)
         || base_url.starts_with(DOUYIN_COLLECTIONS_API)
         || base_url.starts_with(DOUYIN_COLLECTION_VIDEOS_API)
+        || base_url.starts_with(DOUYIN_POST_API)
 }
+
+/// 是否允许在未同步 secsdk 会话时回退旧版纯 Rust a_bogus 签名。
+/// 我的喜欢/收藏夹接口附加无效 a_bogus 会被 Turing 静默丢弃（HTTP 200 空响应），
+/// 没有 secsdk 时必须直接给出明确报错；作者作品接口历史上接受旧签名，仅把它作为
+/// 「只导入了 cookies.txt」用户的尽力而为回退保留，仍可能被风控拒绝。
+fn endpoint_allows_legacy_abogus_fallback(base_url: &str) -> bool {
+    base_url.starts_with(DOUYIN_POST_API)
+}
+
+/// 无 secsdk 会话时的旧签名回退只提示一次，避免长扫描中每页重复刷屏。
+static LEGACY_ABOGUS_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 // ---------- 抖音 secsdk 现场签名（Node 子进程） ----------
 // 我的喜欢/收藏夹等接口由抖音 Turing 安全网关校验 secsdk（x-secsdk-web-signature）。
@@ -2702,12 +2720,24 @@ async fn signed_get_impl(
     }
     let params = serde_urlencoded::to_string(&pairs)?;
     // 收藏夹/我的喜欢等受保护接口走官方 SDK 现场签名；其余接口继续用
-    // 旧的 f2 移植快速路径（仍被服务端接受）。
-    let url = if endpoint_needs_sdk_signature(base_url) {
+    // 旧的 f2 移植快速路径。作者作品接口已并入 SDK 签名列表：自 2026-09 起
+    // 抖音对作者作品接口的风控校验已收紧，旧 a_bogus 约有半数请求被 Argus
+    // 以 HTTP 403 拒绝，官方 secsdk 签名则连续通过；仅当用户只导入了
+    // cookies.txt（无 secsdk 会话）时才回退旧算法尽力而为。
+    let needs_sdk = endpoint_needs_sdk_signature(base_url);
+    let legacy_fallback = endpoint_allows_legacy_abogus_fallback(base_url) && douyin_secsdk_text().is_none();
+    let used_sdk_signature = needs_sdk && !legacy_fallback;
+    let url = if used_sdk_signature {
         let unsigned = reqwest::Url::parse_with_params(base_url, &pairs)?;
         let signed = sign_douyin_url(unsigned.as_str()).await?;
         reqwest::Url::parse(&signed)?
     } else {
+        if legacy_fallback && !LEGACY_ABOGUS_FALLBACK_WARNED.swap(true, AtomicOrdering::Relaxed) {
+            warn!(
+                target: "bili_sync_rs::douyin",
+                "未同步抖音 secsdk 签名会话，作者作品接口回退旧版 a_bogus 签名（可能被平台风控拒绝；建议在设置页用电脑端登录助手完整传输一次登录状态）"
+            );
+        }
         let signature = douyin_sign::generate(&params);
         let mut url = reqwest::Url::parse_with_params(base_url, &pairs)?;
         url.query_pairs_mut().append_pair("a_bogus", &signature);
@@ -2730,7 +2760,7 @@ async fn signed_get_impl(
         let bytes = response.bytes().await?;
         if status.is_success() {
             if bytes.is_empty() {
-                if endpoint_needs_sdk_signature(base_url) {
+                if used_sdk_signature {
                     // 签名已通过但返回空 body：通常是当前出口 IP 被抖音风控
                     // （响应头 bd-ticket-guard-result=1101 + bdturing 滑块验证）。
                     // 更换外源代理节点或刷新 cookies 后通常可恢复。
