@@ -382,7 +382,7 @@ impl ConfigManager {
         match self.load_from_database().await {
             Ok(config) => {
                 debug!("从数据库加载配置成功");
-                ConfigBundle::from_config(config)
+                ConfigBundle::from_config_lenient(config)
             }
             Err(e) => {
                 warn!("从数据库加载配置失败: {}, 尝试从TOML加载", e);
@@ -767,6 +767,25 @@ impl ConfigManager {
         if key.starts_with("notification.") {
             warn!("拒绝写入嵌套的notification字段: {}，请使用完整的notification对象", key);
             return Ok(()); // 静默忽略，不返回错误
+        }
+
+        // 命名模板必须能通过 Handlebars 编译，否则坏模板会让下次启动的配置系统整体回退。
+        // 这里只校验语法；设置页保存路径另有更友好的中文报错。
+        if matches!(
+            key,
+            "video_name"
+                | "page_name"
+                | "multi_page_name"
+                | "bangumi_name"
+                | "folder_structure"
+                | "bangumi_folder_name"
+                | "collection_unified_name"
+        ) {
+            let template_text = value.as_str().unwrap_or_default();
+            if !template_text.trim().is_empty() {
+                super::validate_naming_template_syntax(template_text)
+                    .map_err(|error| anyhow!("{key} 模板语法错误，拒绝保存：{error}"))?;
+            }
         }
 
         let value_json = serde_json::to_string(&value)?;

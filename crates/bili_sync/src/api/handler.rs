@@ -10891,6 +10891,20 @@ fn apply_preview_template(value: Option<String>, target: &mut Cow<'static, str>)
     }
 }
 
+/// 校验命名模板语法（保存前拦截，避免坏模板污染数据库后导致下次启动整体回退）。
+/// 例如 `{{pubtime|%Y-%m-%d}}` 是 Python/Jinja 风格管道写法，本程序不支持；
+/// `{{pubtime}}`/`{{fav_time}}` 的输出格式统一由设置页「时间格式」控制。
+fn ensure_valid_naming_template(label: &str, template: &str) -> Result<(), ApiError> {
+    if template.trim().is_empty() {
+        return Ok(());
+    }
+    crate::config::validate_naming_template_syntax(template).map_err(|error| {
+        ApiError::bad_request(format!(
+            "{label}语法错误，未保存：{error}。提示：{{{{pubtime}}}}/{{{{fav_time}}}} 的日期格式由设置页「时间格式」统一控制，不要在模板中使用 {{{{字段|%Y-%m-%d}}}} 管道写法"
+        ))
+    })
+}
+
 fn config_for_filename_preview(params: FilenamePreviewRequest) -> crate::config::Config {
     let mut config = crate::config::with_config(|bundle| bundle.config.clone());
 
@@ -11716,6 +11730,7 @@ pub async fn update_config_internal(
 
     // 更新配置字段
     if let Some(video_name) = params.video_name {
+        ensure_valid_naming_template("视频文件名模板", &video_name)?;
         let normalized_video_name = if video_name.trim().is_empty() {
             default_config.video_name.clone()
         } else {
@@ -11728,6 +11743,7 @@ pub async fn update_config_internal(
     }
 
     if let Some(page_name) = params.page_name {
+        ensure_valid_naming_template("单P文件名模板", &page_name)?;
         let normalized_page_name = if page_name.trim().is_empty() {
             default_config.page_name.clone()
         } else {
@@ -11740,6 +11756,7 @@ pub async fn update_config_internal(
     }
 
     if let Some(multi_page_name) = params.multi_page_name {
+        ensure_valid_naming_template("多P文件名模板", &multi_page_name)?;
         let normalized_multi_page_name = if multi_page_name.trim().is_empty() {
             default_config.multi_page_name.clone()
         } else {
@@ -11752,6 +11769,7 @@ pub async fn update_config_internal(
     }
 
     if let Some(folder_structure) = params.folder_structure {
+        ensure_valid_naming_template("文件夹结构模板", &folder_structure)?;
         let normalized_folder_structure = if folder_structure.trim().is_empty() {
             default_config.folder_structure.clone()
         } else {
@@ -11800,6 +11818,7 @@ pub async fn update_config_internal(
         if has_path_separator_outside_handlebars(trimmed) {
             return Err(anyhow!("合集统一模式命名模板不应包含路径分隔符 / 或 \\").into());
         }
+        ensure_valid_naming_template("合集统一模式命名模板", trimmed)?;
         let normalized_collection_unified_name = if trimmed.is_empty() {
             default_config.collection_unified_name.clone()
         } else {
@@ -11904,6 +11923,7 @@ pub async fn update_config_internal(
     }
 
     if let Some(bangumi_name) = params.bangumi_name {
+        ensure_valid_naming_template("番剧文件名模板", &bangumi_name)?;
         let normalized_bangumi_name = if bangumi_name.trim().is_empty() {
             default_config.bangumi_name.clone()
         } else {
@@ -11916,6 +11936,7 @@ pub async fn update_config_internal(
     }
 
     if let Some(bangumi_folder_name) = params.bangumi_folder_name {
+        ensure_valid_naming_template("番剧文件夹模板", &bangumi_folder_name)?;
         let normalized_bangumi_folder_name = if bangumi_folder_name.trim().is_empty() {
             default_config.bangumi_folder_name.clone()
         } else {

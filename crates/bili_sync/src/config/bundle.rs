@@ -1,10 +1,129 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use handlebars::Handlebars;
 use leaky_bucket::RateLimiter;
 
 use crate::config::Config;
+
+/// 仅替换“模板文本”中的路径分隔符，避免破坏 Handlebars 语法（例如 {{/if}}）。
+/// 规则：
+/// - Handlebars 标签内（{{ ... }} / {{{ ... }}} / {{{{ ... }}}}）不做替换
+/// - 标签外：
+///   - // => __UNIX_SEP__
+///   - \\\\ => __WIN_SEP__
+///   - /  => __UNIX_SEP__
+///   - \\ => __WIN_SEP__
+fn escape_template_separators(template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0usize;
+    let mut in_tag = false;
+    let mut tag_end_len = 0usize;
+
+    while i < template.len() {
+        let bytes = template.as_bytes();
+
+        if !in_tag {
+            if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                let mut start_len = 2usize;
+                while i + start_len < bytes.len() && bytes[i + start_len] == b'{' && start_len < 4 {
+                    start_len += 1;
+                }
+                out.push_str(&template[i..i + start_len]);
+                i += start_len;
+                in_tag = true;
+                tag_end_len = start_len;
+                continue;
+            }
+
+            if bytes[i] == b'/' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    out.push_str("__UNIX_SEP__");
+                    i += 2;
+                } else {
+                    out.push_str("__UNIX_SEP__");
+                    i += 1;
+                }
+                continue;
+            }
+            if bytes[i] == b'\\' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                    out.push_str("__WIN_SEP__");
+                    i += 2;
+                } else {
+                    out.push_str("__WIN_SEP__");
+                    i += 1;
+                }
+                continue;
+            }
+
+            let ch = template[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+
+        if bytes[i] == b'}' && tag_end_len > 0 {
+            let mut ok = true;
+            for k in 0..tag_end_len {
+                if i + k >= bytes.len() || bytes[i + k] != b'}' {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                out.push_str(&template[i..i + tag_end_len]);
+                i += tag_end_len;
+                in_tag = false;
+                tag_end_len = 0;
+                continue;
+            }
+        }
+
+        let ch = template[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    out
+}
+
+/// 校验命名模板是否可以被 Handlebars 编译（转义逻辑与运行时注册完全一致）。
+pub(crate) fn validate_naming_template_syntax(template: &str) -> Result<()> {
+    let mut handlebars = Handlebars::new();
+    handlebars.register_escape_fn(|s| s.to_string());
+    let safe = escape_template_separators(template);
+    handlebars.register_template_string("_naming_validate", &safe)?;
+    Ok(())
+}
+
+/// 读取某条命名模板当前值（video/page/multi_page/bangumi/...）。
+fn naming_template_value<'a>(name: &str, config: &'a Config) -> &'a str {
+    match name {
+        "video" => config.video_name.as_ref(),
+        "page" => config.page_name.as_ref(),
+        "multi_page" => config.multi_page_name.as_ref(),
+        "bangumi" => config.bangumi_name.as_ref(),
+        "collection_unified" => config.collection_unified_name.as_ref(),
+        "folder_structure" => config.folder_structure.as_ref(),
+        "bangumi_folder" => config.bangumi_folder_name.as_ref(),
+        _ => "",
+    }
+}
+
+/// 宽容模式下把某一条坏模板就地重置为默认模板，保证内存配置与注册模板一致。
+fn reset_template_to_default(name: &str, config: &mut Config, defaults: &Config) {
+    match name {
+        "video" => config.video_name = defaults.video_name.clone(),
+        "page" => config.page_name = defaults.page_name.clone(),
+        "multi_page" => config.multi_page_name = defaults.multi_page_name.clone(),
+        "bangumi" => config.bangumi_name = defaults.bangumi_name.clone(),
+        "collection_unified" => config.collection_unified_name = defaults.collection_unified_name.clone(),
+        "folder_structure" => config.folder_structure = defaults.folder_structure.clone(),
+        "bangumi_folder" => config.bangumi_folder_name = defaults.bangumi_folder_name.clone(),
+        _ => {}
+    }
+}
 
 /// 配置包，包含所有需要热重载的组件
 /// 使用 ArcSwap<ConfigBundle> 确保原子性更新
@@ -20,9 +139,25 @@ pub struct ConfigBundle {
 }
 
 impl ConfigBundle {
-    /// 从配置构建完整的配置包
+    /// 从配置构建完整的配置包（严格模式）。
+    ///
+    /// 任一命名模板无法被 Handlebars 编译都会直接返回错误，用于设置页
+    /// 「文件名预览」和保存前的语法校验，避免把坏模板写进数据库。
     pub fn from_config(config: Config) -> Result<Self> {
-        let handlebars = Self::build_handlebars(&config)?;
+        Self::from_config_with_mode(config, false)
+    }
+
+    /// 从配置构建完整的配置包（宽容模式）。
+    ///
+    /// 启动加载数据库配置 / 热重载时使用：某一条命名模板语法错误（例如误填了
+    /// `{{pubtime|%Y-%m-%d}}` 这类管道写法）只会让这一条回退为默认模板并告警，
+    /// 不再让整个数据库配置系统初始化失败，其余配置项照常生效。
+    pub fn from_config_lenient(config: Config) -> Result<Self> {
+        Self::from_config_with_mode(config, true)
+    }
+
+    fn from_config_with_mode(mut config: Config, lenient: bool) -> Result<Self> {
+        let handlebars = Self::build_handlebars(&mut config, lenient)?;
         let rate_limiter = Self::build_rate_limiter(&config);
 
         Ok(Self {
@@ -33,103 +168,14 @@ impl ConfigBundle {
     }
 
     /// 构建 Handlebars 模板引擎
-    fn build_handlebars(config: &Config) -> Result<Handlebars<'static>> {
+    fn build_handlebars(config: &mut Config, lenient: bool) -> Result<Handlebars<'static>> {
         use handlebars::handlebars_helper;
-        use tracing::debug;
-
-        fn escape_template_separators(template: &str) -> String {
-            // 仅替换“模板文本”中的路径分隔符，避免破坏 Handlebars 语法（例如 {{/if}}）。
-            // 规则：
-            // - Handlebars 标签内（{{ ... }} / {{{ ... }}} / {{{{ ... }}}}）不做替换
-            // - 标签外：
-            //   - // => __UNIX_SEP__
-            //   - \\\\ => __WIN_SEP__
-            //   - /  => __UNIX_SEP__
-            //   - \\ => __WIN_SEP__
-            let mut out = String::with_capacity(template.len());
-            let mut i = 0usize;
-            let mut in_tag = false;
-            let mut tag_end_len = 0usize;
-
-            while i < template.len() {
-                let bytes = template.as_bytes();
-
-                if !in_tag {
-                    // 进入 Handlebars 标签
-                    if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-                        // 支持 {{ / {{{ / {{{{ 三种
-                        let mut start_len = 2usize;
-                        while i + start_len < bytes.len() && bytes[i + start_len] == b'{' && start_len < 4 {
-                            start_len += 1;
-                        }
-                        out.push_str(&template[i..i + start_len]);
-                        i += start_len;
-                        in_tag = true;
-                        tag_end_len = start_len;
-                        continue;
-                    }
-
-                    // 标签外：处理路径分隔符
-                    if bytes[i] == b'/' {
-                        if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                            out.push_str("__UNIX_SEP__");
-                            i += 2;
-                        } else {
-                            out.push_str("__UNIX_SEP__");
-                            i += 1;
-                        }
-                        continue;
-                    }
-                    if bytes[i] == b'\\' {
-                        if i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                            out.push_str("__WIN_SEP__");
-                            i += 2;
-                        } else {
-                            out.push_str("__WIN_SEP__");
-                            i += 1;
-                        }
-                        continue;
-                    }
-
-                    // 其它字符：按 UTF-8 字符复制
-                    let ch = template[i..].chars().next().unwrap();
-                    out.push(ch);
-                    i += ch.len_utf8();
-                    continue;
-                }
-
-                // Handlebars 标签内：寻找结束符
-                if bytes[i] == b'}' && tag_end_len > 0 {
-                    let mut ok = true;
-                    for k in 0..tag_end_len {
-                        if i + k >= bytes.len() || bytes[i + k] != b'}' {
-                            ok = false;
-                            break;
-                        }
-                    }
-                    if ok {
-                        out.push_str(&template[i..i + tag_end_len]);
-                        i += tag_end_len;
-                        in_tag = false;
-                        tag_end_len = 0;
-                        continue;
-                    }
-                }
-
-                // 标签内其它字符
-                let ch = template[i..].chars().next().unwrap();
-                out.push(ch);
-                i += ch.len_utf8();
-            }
-
-            out
-        }
+        use tracing::{debug, warn};
 
         debug!("开始构建Handlebars模板引擎...");
         let mut handlebars = Handlebars::new();
 
         // 禁用HTML转义，避免文件名中的特殊字符被转义为HTML实体
-        // 例如：避免 "=" 被转义为 "&#x3D;"
         handlebars.register_escape_fn(|s| s.to_string());
         debug!("已禁用Handlebars HTML转义");
 
@@ -144,58 +190,45 @@ impl ConfigBundle {
         handlebars.register_helper("truncate", Box::new(truncate));
         debug!("Handlebars helper 'truncate' 已注册");
 
-        // 注册所有必需的模板
-        // 使用 to_string() 转换 Cow<'static, str> 为 &'static str
-        let video_name = Box::leak(config.video_name.to_string().into_boxed_str());
-        let page_name = Box::leak(config.page_name.to_string().into_boxed_str());
-        let multi_page_name = Box::leak(config.multi_page_name.to_string().into_boxed_str());
-        let bangumi_name = Box::leak(config.bangumi_name.to_string().into_boxed_str());
-        let collection_unified_name = Box::leak(config.collection_unified_name.to_string().into_boxed_str());
-        let folder_structure = Box::leak(config.folder_structure.to_string().into_boxed_str());
-        let bangumi_folder_name = Box::leak(config.bangumi_folder_name.to_string().into_boxed_str());
-
-        // 区分Unix风格和Windows风格的路径分隔符（仅替换标签外文本，避免破坏 {{/if}} 等语法）
-        let safe_video_name = escape_template_separators(video_name);
-        let safe_page_name = escape_template_separators(page_name);
-        let safe_multi_page_name = escape_template_separators(multi_page_name);
-        let safe_bangumi_name = escape_template_separators(bangumi_name);
-        let safe_collection_unified_name = escape_template_separators(collection_unified_name);
-        let safe_folder_structure = escape_template_separators(folder_structure);
-        let safe_bangumi_folder_name = escape_template_separators(bangumi_folder_name);
-
-        // 注册模板并记录日志
-        handlebars.register_template_string("video", &safe_video_name)?;
-        debug!("模板 'video' 已注册: '{}' -> '{}'", video_name, safe_video_name);
-
-        handlebars.register_template_string("page", &safe_page_name)?;
-        debug!("模板 'page' 已注册: '{}' -> '{}'", page_name, safe_page_name);
-
-        handlebars.register_template_string("multi_page", &safe_multi_page_name)?;
-        debug!(
-            "模板 'multi_page' 已注册: '{}' -> '{}'",
-            multi_page_name, safe_multi_page_name
-        );
-
-        handlebars.register_template_string("bangumi", &safe_bangumi_name)?;
-        debug!("模板 'bangumi' 已注册: '{}' -> '{}'", bangumi_name, safe_bangumi_name);
-
-        handlebars.register_template_string("collection_unified", &safe_collection_unified_name)?;
-        debug!(
-            "模板 'collection_unified' 已注册: '{}' -> '{}'",
-            collection_unified_name, safe_collection_unified_name
-        );
-
-        handlebars.register_template_string("folder_structure", &safe_folder_structure)?;
-        debug!(
-            "模板 'folder_structure' 已注册: '{}' -> '{}'",
-            folder_structure, safe_folder_structure
-        );
-
-        handlebars.register_template_string("bangumi_folder", &safe_bangumi_folder_name)?;
-        debug!(
-            "模板 'bangumi_folder' 已注册: '{}' -> '{}'",
-            bangumi_folder_name, safe_bangumi_folder_name
-        );
+        // 注册所有必需的模板（路径分隔符仅替换标签外文本，避免破坏 {{/if}} 等语法）。
+        // 坏模板只回退自身一条：严格模式（预览/保存校验）直接报错，宽容模式
+        // （启动加载数据库配置）回退默认模板并告警，不让整份配置失效。
+        let defaults = Config::default();
+        let template_entries: [(&str, &str); 7] = [
+            ("video", "视频文件名模板"),
+            ("page", "单P文件名模板"),
+            ("multi_page", "多P文件名模板"),
+            ("bangumi", "番剧文件名模板"),
+            ("collection_unified", "合集统一模式命名模板"),
+            ("folder_structure", "文件夹结构模板"),
+            ("bangumi_folder", "番剧文件夹模板"),
+        ];
+        for (name, label) in template_entries {
+            let template = naming_template_value(name, config).to_string();
+            let fallback = naming_template_value(name, &defaults).to_string();
+            let safe_template = escape_template_separators(&template);
+            match handlebars.register_template_string(name, &safe_template) {
+                Ok(()) => {
+                    debug!("模板 '{}' 已注册: '{}' -> '{}'", name, template, safe_template);
+                }
+                Err(error) if lenient => {
+                    warn!(
+                        target: "bili_sync_rs::config",
+                        template = name,
+                        error = %error,
+                        "{label}「{template}」语法无效，已回退为默认模板。日期类字段 {{{{pubtime}}}}/{{{{fav_time}}}} 的格式由设置页「时间格式」统一控制，不要在模板中使用 {{{{字段|%Y-%m-%d}}}} 管道写法；请到设置页修正该模板后再保存"
+                    );
+                    reset_template_to_default(name, config, &defaults);
+                    let safe_fallback = escape_template_separators(&fallback);
+                    handlebars.register_template_string(name, &safe_fallback)?;
+                }
+                Err(error) => {
+                    return Err(anyhow!(
+                        "{label}「{template}」语法错误：{error}。日期类字段 {{{{pubtime}}}}/{{{{fav_time}}}} 的格式由设置页「时间格式」统一控制，不要在模板中使用 {{{{字段|%Y-%m-%d}}}} 管道写法"
+                    ));
+                }
+            }
+        }
 
         debug!("Handlebars模板引擎构建完成，共注册 {} 个模板", 7);
         Ok(handlebars)
@@ -547,5 +580,35 @@ mod tests {
 
         // 验证原始等号保持不变
         assert_eq!(result, "=咬人猫=", "等号应该保持原样，实际结果: {}", result);
+    }
+
+    #[test]
+    fn strict_config_rejects_invalid_naming_template() {
+        // {{pubtime|%Y-%m-%d}} 是 Jinja/Python 管道写法，本程序用 handlebars，
+        // 严格模式（预览/保存校验）必须直接报错，不能写进数据库。
+        let config = Config {
+            page_name: Cow::Borrowed("{{pubtime|%Y-%m-%d}} - {{upper_name}} - {{bvid}}"),
+            ..Default::default()
+        };
+        assert!(ConfigBundle::from_config(config).is_err());
+    }
+
+    #[test]
+    fn lenient_config_falls_back_invalid_template_only() {
+        // 宽容模式（启动加载数据库配置）下，坏模板只回退为默认模板，
+        // 其余正常模板（video）照常可用，不能让整份配置初始化失败。
+        let config = Config {
+            video_name: Cow::Borrowed("{{upper_name}}/{{title}}"),
+            page_name: Cow::Borrowed("{{pubtime|%Y-%m-%d}} - {{upper_name}} - {{bvid}}"),
+            ..Default::default()
+        };
+        let bundle = ConfigBundle::from_config_lenient(config).expect("宽容模式应能加载配置");
+        assert_eq!(bundle.config.page_name, "{{pubtime}}-{{bvid}}");
+        assert_eq!(bundle.config.video_name, "{{upper_name}}/{{title}}");
+
+        let data = json!({"pubtime": "20260909", "bvid": "BV1x", "upper_name": "UP主"});
+        assert_eq!(bundle.render_page_template(&data).unwrap(), "20260909-BV1x");
+        let video_data = json!({"upper_name": "UP主", "title": "标题"});
+        assert!(bundle.render_video_template(&video_data).is_ok());
     }
 }
