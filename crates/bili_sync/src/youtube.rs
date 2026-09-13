@@ -1859,7 +1859,10 @@ async fn unified_youtube_parts(
     let (video_status, page_status) = youtube_artifact_status(video, source).await;
     let output_path = video.output_path.clone();
     let image_paths = youtube_image_post_paths(video);
-    let is_image_post = is_douyin_source(source) && (video.is_image_post || !image_paths.is_empty());
+    // 抖音与 TikTok 都可能有图文作品（TikTok 侧为 photo post / 幻灯片），
+    // 两者的图片目录约定一致，这里一起标记，供视频管理页与详情页显示图片。
+    let is_image_post = (is_douyin_source(source) || crate::tiktok::is_tiktok_source(source))
+        && (video.is_image_post || !image_paths.is_empty());
     let image_urls = image_paths
         .iter()
         .enumerate()
@@ -4044,7 +4047,7 @@ async fn download_youtube_media(
     if media_exists {
         // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
     } else if !metadata.images.is_empty() {
-        crate::douyin::download_image_post(downloader, &metadata, &output_path, &filter_option).await?;
+        crate::douyin::download_image_post(downloader, &metadata, &output_path, &filter_option, source).await?;
     } else if source.audio_only {
         let selected = selected.as_ref().context("图文作品不应进入音频流选择")?;
         if let Some(audio) = selected.audio.as_ref() {
@@ -4359,6 +4362,24 @@ async fn is_reusable_media_file(path: &Path) -> bool {
         .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
+/// 判断解析结果里是否存在真正可下载的视频流。
+///
+/// TikTok 图片贴（photo post，也就是幻灯片）经 yt-dlp 解析后只剩一条
+/// `vcodec=none` 的配乐音轨，拿它去走视频选流必然失败；调用方据此把这类作品
+/// 分流到图文链路（下载原图与配乐并合成幻灯片 MP4）。
+fn external_metadata_has_video_stream(metadata: &ExternalMediaMetadata) -> bool {
+    metadata.formats.iter().any(|format| {
+        format
+            .vcodec
+            .as_deref()
+            .is_some_and(|codec| {
+                let codec = codec.trim();
+                !codec.is_empty() && !codec.eq_ignore_ascii_case("none")
+            })
+            && format.url.as_deref().is_some_and(|url| !url.is_empty())
+    })
+}
+
 async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Model>) -> Result<ExternalMediaMetadata> {
     if source.is_some_and(is_douyin_source) || url.contains("douyin.com") {
         let aweme_id = crate::douyin::aweme_id(url).context("抖音作品链接缺少有效作品 ID")?;
@@ -4366,19 +4387,37 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
     }
     if url.contains("tiktok.com") {
         match extract_ytdlp_metadata(url, "TikTok").await {
-            Ok(metadata) => return Ok(metadata),
-            Err(ytdlp_error) => {
-                debug!(error = %ytdlp_error, url = %url, "yt-dlp 解析 TikTok 媒体直链失败，尝试 API 兜底（item/detail）");
-                return match crate::tiktok::extract_tiktok_media_detail(url).await {
-                    Ok(metadata) => Ok(metadata),
-                    Err(api_error) if crate::tiktok::is_tiktok_unavailable_error(&api_error) => {
-                        // 明确不可下载（地区/内容不可用）：直接透传，不再追加风控提示。
-                        Err(api_error)
+            // 正常视频：yt-dlp 给出可下载的视频格式，直接使用。
+            Ok(metadata) if external_metadata_has_video_stream(&metadata) => return Ok(metadata),
+            ytdlp_result => {
+                // 落到这里的两种情况：yt-dlp 只解析出配乐音轨（图片贴 / 幻灯片），
+                // 或 yt-dlp 直接失败（rehydration 报错等）。先试官方详情接口，
+                // 再用 TikWM 取原图，任一路径拿到原图即按图文作品处理。
+                let api_error = match crate::tiktok::extract_tiktok_media_detail(url).await {
+                    Ok(metadata) => return Ok(metadata),
+                    Err(error) => error,
+                };
+                match crate::tiktok::fetch_tiktok_photo_via_tikwm(url).await {
+                    Ok(Some(photo)) => return Ok(photo),
+                    Ok(None) => {}
+                    Err(error) => {
+                        debug!(error = %error, url = %url, "TikWM 图片贴解析失败，继续按视频解析结果处理")
                     }
-                    Err(api_error) => bail!(
+                }
+                if crate::tiktok::is_tiktok_unavailable_error(&api_error) {
+                    // 明确不可下载（地区/内容不可用）：直接透传，不再追加风控提示。
+                    return Err(api_error);
+                }
+                match ytdlp_result {
+                    // 只有配乐、又没有取到原图：给出明确原因，不再让它落到
+                    // “没有可用的视频流”这种含糊报错上。
+                    Ok(_) => bail!(
+                        "TikTok 作品没有可下载的视频流（图片贴/幻灯片未取到原图；yt-dlp 只返回配乐音轨，官方详情与 TikWM 均未取到原图）：{api_error}"
+                    ),
+                    Err(ytdlp_error) => bail!(
                         "yt-dlp 解析 TikTok 媒体直链失败：{ytdlp_error}；API 兜底也失败：{api_error}（通常是当前出口 IP 被 TikTok 风控，请更换外源代理节点后重试）"
                     ),
-                };
+                }
             }
         }
     }
@@ -5173,10 +5212,10 @@ async fn download_youtube_upper_face(
             .with_context(|| format!("创建{platform} UP头像目录失败: {}", upper_dir.display()))?;
 
         if !face_exists {
-            let sec_uid = profile_url.and_then(crate::tiktok::tiktok_handle_from_url).ok_or_else(|| {
+            let author_handle = profile_url.and_then(crate::tiktok::tiktok_handle_from_url).ok_or_else(|| {
                 anyhow!("TikTok 元数据没有频道主页地址，无法获取 UP 头像")
             })?;
-            let avatar_url = crate::tiktok::fetch_tiktok_author_avatar_url(&sec_uid)
+            let avatar_url = crate::tiktok::fetch_tiktok_author_avatar_url(&author_handle)
                 .await?
                 .ok_or_else(|| anyhow!("TikTok 作者作品接口没有返回头像地址"))?;
             let temporary = upper_dir.join("folder.download");
@@ -7195,6 +7234,29 @@ mod tests {
             last_scan_at: None,
             created_at: "2026-01-01 00:00:00".to_string(),
         }
+    }
+
+    /// 真实网络测试（默认 ignore，需要 yt-dlp 与 TikTok 会话可用）：
+    /// TikTok 图片贴经统一下载入口解析后应带原图、不带视频流；普通视频相反。
+    /// 验证「图片贴 → 图文链路」的分流不会误伤普通视频。
+    #[tokio::test]
+    #[ignore]
+    async fn tiktok_photo_and_video_split_by_media_kind() {
+        let photo_url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
+        let photo = super::extract_youtube_metadata(&photo_url, None)
+            .await
+            .expect("解析 TikTok 图片贴失败");
+        assert!(!photo.images.is_empty(), "图片贴应带原图");
+        assert!(photo.formats.is_empty(), "图片贴不应带视频流");
+
+        let video_url = std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
+        let video = super::extract_youtube_metadata(&video_url, None)
+            .await
+            .expect("解析 TikTok 普通视频失败");
+        assert!(video.images.is_empty(), "普通视频不应带原图");
+        assert!(!video.formats.is_empty(), "普通视频应带视频流");
     }
 
     #[tokio::test]

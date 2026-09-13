@@ -3856,12 +3856,23 @@ pub(crate) async fn download_image_post(
     metadata: &ExternalMediaMetadata,
     output_path: &Path,
     filter: &FilterOption,
+    source: &youtube_source::Model,
 ) -> Result<()> {
-    let parent = output_path.parent().context("抖音图文输出路径没有父目录")?;
+    // 抖音与 TikTok 的图文作品结构一致（TikTok 侧叫 photo post / 幻灯片）：
+    // 一组原图 + 一首配乐，这里合成同一种幻灯片 MP4，只在取媒体时的 Cookie、
+    // Referer 与传输客户端上按平台分派。
+    let platform = if crate::tiktok::is_tiktok_source(source) {
+        "TikTok"
+    } else {
+        "抖音"
+    };
+    let parent = output_path
+        .parent()
+        .with_context(|| format!("{platform}图文输出路径没有父目录"))?;
     let stem = output_path
         .file_stem()
         .and_then(|value| value.to_str())
-        .context("抖音图文输出文件名无效")?;
+        .with_context(|| format!("{platform}图文输出文件名无效"))?;
     let image_dir = parent.join(format!("{stem}-images"));
     tokio::fs::create_dir_all(&image_dir).await?;
     let mut image_paths = Vec::with_capacity(metadata.images.len());
@@ -3873,9 +3884,11 @@ pub(crate) async fn download_image_post(
         {
             let temporary = image_dir.join(format!("{:02}.download", index + 1));
             let url_refs = urls.iter().map(String::as_str).collect::<Vec<_>>();
-            if let Err(error) = fetch_media(downloader, &url_refs, &temporary)
+            if let Err(error) = fetch_media(downloader, source, &url_refs, &temporary)
                 .await
-                .with_context(|| format!("使用项目统一下载器下载抖音第 {} 张原图失败", index + 1))
+                .with_context(|| {
+                    format!("使用项目统一下载器下载{platform}第 {} 张原图失败", index + 1)
+                })
             {
                 let _ = remove_file_if_exists(&temporary).await;
                 return Err(error);
@@ -3885,7 +3898,7 @@ pub(crate) async fn download_image_post(
         image_paths.push(path);
     }
     if image_paths.is_empty() {
-        bail!("抖音图文作品没有可下载的原图");
+        bail!("{platform}图文作品没有可下载的原图");
     }
 
     let music_path = parent.join(format!("{stem}-music.mp3"));
@@ -3898,9 +3911,9 @@ pub(crate) async fn download_image_post(
         {
             let temporary = parent.join(format!("{stem}-music.download"));
             let urls = metadata.music_urls.iter().map(String::as_str).collect::<Vec<_>>();
-            if let Err(error) = fetch_media(downloader, &urls, &temporary)
+            if let Err(error) = fetch_media(downloader, source, &urls, &temporary)
                 .await
-                .context("使用项目统一下载器下载抖音图文配乐失败")
+                .with_context(|| format!("使用项目统一下载器下载{platform}图文配乐失败"))
             {
                 let _ = remove_file_if_exists(&temporary).await;
                 return Err(error);
@@ -3957,14 +3970,14 @@ pub(crate) async fn download_image_post(
         .arg(&temporary)
         .output()
         .await
-        .context("启动 ffmpeg 生成抖音图文幻灯片失败")?;
+        .with_context(|| format!("启动 ffmpeg 生成{platform}图文幻灯片失败"))?;
     let _ = remove_file_if_exists(&concat_path).await;
     if !result.status.success() {
         let _ = remove_file_if_exists(&temporary).await;
-        bail!("ffmpeg 生成抖音图文 MP4 失败：{}", process_error(&result));
+        bail!("ffmpeg 生成{platform}图文 MP4 失败：{}", process_error(&result));
     }
     replace_file(&temporary, output_path).await?;
-    info!(aweme_id = %metadata.id, images = image_paths.len(), path = %output_path.display(), "抖音图文原图、配乐和 MP4 幻灯片生成完成");
+    info!(aweme_id = %metadata.id, images = image_paths.len(), path = %output_path.display(), "{platform}图文原图、配乐和 MP4 幻灯片生成完成");
     Ok(())
 }
 
@@ -4240,7 +4253,18 @@ pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_pa
     Ok(())
 }
 
-async fn fetch_media(downloader: &UnifiedDownloader, urls: &[&str], path: &Path) -> Result<()> {
+/// 拉取图文作品的原图/配乐：抖音走自身 Cookie + Referer；TikTok 走
+/// curl-impersonate（其图片与音频 CDN 同样按 TLS/JA3 指纹拒绝普通客户端，
+/// 实测 reqwest 直连直接失败，curl-impersonate 返回 200）。
+async fn fetch_media(
+    downloader: &UnifiedDownloader,
+    source: &youtube_source::Model,
+    urls: &[&str],
+    path: &Path,
+) -> Result<()> {
+    if crate::tiktok::is_tiktok_source(source) {
+        return crate::tiktok::fetch_tiktok_media_with_impersonation(urls, path).await;
+    }
     let cookie = cookie_header()?;
     downloader
         .fetch_with_fallback_with_referer_and_cookie(urls, path, "https://www.douyin.com/", &cookie)

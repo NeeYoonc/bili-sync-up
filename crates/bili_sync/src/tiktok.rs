@@ -1209,6 +1209,55 @@ fn tiktok_cover_url(value: &serde_json::Value) -> Option<&str> {
     })
 }
 
+/// TikTok item 的 `imagePost` 是否为非空对象（图片贴 / 幻灯片）。
+///
+/// 图片贴没有视频流：`video.playAddr` 为 null、`video.duration` 为 0，
+/// 作品内容全部在 `imagePost.images[].imageURL.urlList` 里。
+pub(crate) fn tiktok_item_is_image_post(item: &serde_json::Map<String, serde_json::Value>) -> bool {
+    item.get("imagePost")
+        .is_some_and(|value| value.as_object().is_some_and(|object| !object.is_empty()))
+}
+
+/// 提取图片贴的全部原图备选直链（每张图一组 CDN 地址）。
+///
+/// 不同接口版本的图片直链字段名略有差异（`imageURL` / `displayImage` /
+/// `imageUrl`），这里全部兼容，只保留 http(s) 地址。
+pub(crate) fn tiktok_image_post_urls(
+    item: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<Vec<String>> {
+    item.get("imagePost")
+        .and_then(|value| value.get("images"))
+        .and_then(serde_json::Value::as_array)
+        .map(|images| {
+            images
+                .iter()
+                .filter_map(|image| {
+                    image
+                        .get("imageURL")
+                        .or_else(|| image.get("displayImage"))
+                        .or_else(|| image.get("imageUrl"))
+                        .and_then(|value| value.get("urlList"))
+                        .and_then(serde_json::Value::as_array)
+                        .map(|urls| {
+                            urls.iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .filter(|url| url.starts_with("http"))
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|urls: &Vec<String>| !urls.is_empty())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// 图片贴的展示时长：TikTok 不给幻灯片时长（`video.duration` 为 0），
+/// 按每张图 3 秒估算，与抖音图文幻灯片保持一致。
+pub(crate) fn tiktok_image_post_duration(images: &[Vec<String>]) -> f64 {
+    (images.len().max(1) * 3) as f64
+}
+
 pub(crate) fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> {
     let id = item.get("id").and_then(serde_json::Value::as_str)?.trim().to_string();
     if id.is_empty() {
@@ -1248,9 +1297,8 @@ pub(crate) fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> 
             .unwrap_or_default()
     });
     let is_image_post = item
-        .get("imagePost")
-        .map(|value| value.is_object() && !value.as_object().is_none_or(|object| object.is_empty()))
-        .unwrap_or(false);
+        .as_object()
+        .is_some_and(|object| tiktok_item_is_image_post(object));
     Some(TikTokPost {
         id: id.clone(),
         url: format!("https://www.tiktok.com/@{}/video/{id}", unique_id.trim().trim_start_matches('@')),
@@ -2713,13 +2761,57 @@ fn tiktok_web_device_id() -> u64 {
     })
 }
 
+/// TikTok secUid 形如 `MS4wLjABAAAA...`（固定前缀 + base64），作者主页句柄
+/// （uniqueId，如 `nkuu666`）不是 secUid，两者不能混用。
+pub(crate) fn looks_like_tiktok_sec_uid(value: &str) -> bool {
+    let value = value.trim();
+    value.len() > 32 && value.starts_with("MS4wLjAB")
+}
+
+/// 把「作者主页句柄或 secUid」统一解析成 secUid；解析失败返回 None。
+async fn resolve_tiktok_author_sec_uid(sec_uid_or_handle: &str) -> Option<String> {
+    let value = sec_uid_or_handle.trim();
+    if looks_like_tiktok_sec_uid(value) {
+        return Some(value.to_string());
+    }
+    let unique_id = value.trim_start_matches('@');
+    if unique_id.is_empty() {
+        return None;
+    }
+    let profile_url = format!("https://www.tiktok.com/@{unique_id}");
+    match resolve_tiktok_sec_uid_public(&profile_url).await {
+        Ok(sec_uid) if looks_like_tiktok_sec_uid(&sec_uid) => Some(sec_uid),
+        Ok(sec_uid) => {
+            debug!(
+                unique_id = %unique_id,
+                resolved = %sec_uid,
+                "TikTok 作者 secUid 解析结果格式异常，无法获取 UP 头像"
+            );
+            None
+        }
+        Err(error) => {
+            debug!(error = %error, unique_id = %unique_id, "解析 TikTok 作者 secUid 失败，无法获取 UP 头像");
+            None
+        }
+    }
+}
+
 /// 通过 `api/creator/item_list/` 获取指定作者的公开头像地址。
 ///
 /// 该接口是 yt-dlp 扫描 TikTok 用户作品所用的 Web API：带登录 Cookie + 随机
 /// verifyFp + 进程稳定 device_id 即可在服务端直接访问（不要求浏览器签名）。
 /// 头像为可选资源，任何失败都返回 `Ok(None)`，不影响主下载流程。
-pub(crate) async fn fetch_tiktok_author_avatar_url(sec_uid: &str) -> anyhow::Result<Option<String>> {
-    let cookie = tiktok_cookie_header()?;
+pub(crate) async fn fetch_tiktok_author_avatar_url(
+    sec_uid_or_handle: &str,
+) -> anyhow::Result<Option<String>> {
+    // `creator/item_list` 只接受 secUid：调用方常只拿得到作者主页句柄
+    // （uniqueId，如 nkuu666），把句柄当 secUid 传进去接口会返回空 itemList
+    // —— 这正是旧版“TikTok 作者作品接口没有返回头像地址”的根因。这里统一解析。
+    let Some(sec_uid) = resolve_tiktok_author_sec_uid(sec_uid_or_handle).await else {
+        return Ok(None);
+    };
+    // 与 `fetch_tiktok_creator_posts` 一致：公开作者无需登录，Cookie 可选。
+    let cookie = tiktok_cookie_header().unwrap_or_default();
     let device_id = tiktok_web_device_id();
     let verify_fp = format!(
         "verify_{}",
@@ -2753,7 +2845,7 @@ pub(crate) async fn fetch_tiktok_author_avatar_url(sec_uid: &str) -> anyhow::Res
         ("region", "US".to_string()),
         ("screen_height", "1080".to_string()),
         ("screen_width", "1920".to_string()),
-        ("secUid", sec_uid.to_string()),
+        ("secUid", sec_uid),
         ("type", "1".to_string()),
         ("tz_name", "UTC".to_string()),
         ("verifyFp", verify_fp),
@@ -3412,6 +3504,12 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
                 anyhow!("TikTok 视频详情响应缺少 item 信息")
             }
         })?;
+    // 图片贴（photo post / 幻灯片）没有视频流：直接返回原图与配乐，
+    // 由统一下载链路复用图文分支合成幻灯片 MP4。
+    let image_urls = tiktok_image_post_urls(item);
+    if !image_urls.is_empty() {
+        return Ok(tiktok_photo_metadata(item, &item_id, image_urls, &handle));
+    }
     let video = item.get("video").and_then(serde_json::Value::as_object);
 
     // 新版详情接口结构：playAddr 直接是带签名参数的完整直链字符串，
@@ -3585,6 +3683,79 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
     })
 }
 
+/// 用官方接口返回的 item 构造图片贴元数据（原图 + 配乐）。
+///
+/// `images` 非空即表示图片贴；`formats` 保持为空，统一下载链路会因此走
+/// 图文分支（下载原图与配乐并合成幻灯片 MP4），而不是尝试挑选视频流。
+fn tiktok_photo_metadata(
+    item: &serde_json::Map<String, serde_json::Value>,
+    fallback_id: &str,
+    images: Vec<Vec<String>>,
+    handle: &str,
+) -> ExternalMediaMetadata {
+    let id = item
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback_id)
+        .to_string();
+    let author = item.get("author").and_then(serde_json::Value::as_object);
+    let unique_id = author
+        .and_then(|author| author.get("uniqueId"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            author
+                .and_then(|author| author.get("nickname"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            let handle = handle.trim().trim_start_matches('@');
+            (!handle.is_empty()).then(|| handle.to_string())
+        })
+        .unwrap_or_default();
+    let mut music_urls = Vec::new();
+    if let Some(url) = item
+        .get("music")
+        .and_then(|music| music.get("playUrl"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|url| url.starts_with("http"))
+    {
+        music_urls.push(url.to_string());
+    }
+    ExternalMediaMetadata {
+        id,
+        title: item
+            .get("desc")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        uploader: (!unique_id.is_empty()).then(|| unique_id.clone()),
+        uploader_url: (!unique_id.is_empty())
+            .then(|| format!("https://www.tiktok.com/@{unique_id}")),
+        channel: None,
+        channel_id: None,
+        channel_url: None,
+        thumbnail: item
+            .get("video")
+            .and_then(|video| video.get("cover"))
+            .or_else(|| item.get("imagePost").and_then(|image_post| image_post.get("cover")))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        description: None,
+        language: None,
+        upload_date: None,
+        duration: Some(tiktok_image_post_duration(&images)),
+        formats: Vec::new(),
+        subtitles: HashMap::new(),
+        automatic_captions: HashMap::new(),
+        images,
+        music_urls,
+        creators: None,
+    }
+}
+
 /// TikTok 媒体直链下载：Akamai CDN 按 TLS/JA3 与 HTTP/2 指纹拒绝
 /// reqwest/OpenSSL 客户端（对 playAddr 返回 HTTP 403 Access Denied），
 /// 必须用 curl-impersonate（Chrome 指纹）拉取。按备用直链顺序逐个尝试。
@@ -3641,11 +3812,12 @@ pub(crate) async fn refresh_tiktok_cover_url(
     Ok(Some(fresh))
 }
 
-/// 通过第三方 TikTok 解析服务（TikWM）获取视频最新封面直链。
+/// 请求第三方 TikTok 解析服务（TikWM）并返回其响应载荷。
 ///
 /// 官方 item/detail 接口需要浏览器 BotGuard 验证，服务端直连常返回空响应；
-/// TikWM 由服务端代拉视频信息，返回未过期的 CDN 封面地址，作为封面刷新兜底。
-async fn fetch_tiktok_cover_via_tikwm(video_url: &str) -> Result<Option<String>> {
+/// TikWM 由服务端代拉作品信息，返回未过期的 CDN 直链，作为封面刷新与图片贴
+/// 解析的兜底。`code != 0` 或请求失败时返回 `Ok(None)`，由调用方决定降级策略。
+async fn request_tiktok_tikwm(video_url: &str) -> Result<Option<serde_json::Value>> {
     let client = reqwest::Client::builder()
         .user_agent(TIKTOK_WEB_UA)
         .timeout(Duration::from_secs(30))
@@ -3659,15 +3831,26 @@ async fn fetch_tiktok_cover_via_tikwm(video_url: &str) -> Result<Option<String>>
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
         .send()
         .await
-        .context("请求 TikWM 获取 TikTok 视频信息失败（用于刷新封面直链）")?;
+        .context("请求 TikWM 获取 TikTok 作品信息失败")?;
     if !response.status().is_success() {
         return Ok(None);
     }
     let payload: serde_json::Value = serde_json::from_str(&response.text().await?)
-        .context("解析 TikWM 视频信息响应失败（用于刷新封面直链）")?;
+        .context("解析 TikWM 作品信息响应失败")?;
     if payload.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
         return Ok(None);
     }
+    Ok(Some(payload))
+}
+
+/// 通过第三方 TikTok 解析服务（TikWM）获取视频最新封面直链。
+///
+/// 官方 item/detail 接口需要浏览器 BotGuard 验证，服务端直连常返回空响应；
+/// TikWM 返回未过期的 CDN 封面地址，作为封面刷新兜底。
+async fn fetch_tiktok_cover_via_tikwm(video_url: &str) -> Result<Option<String>> {
+    let Some(payload) = request_tiktok_tikwm(video_url).await? else {
+        return Ok(None);
+    };
     let cover = payload
         .pointer("/data/cover")
         .or_else(|| payload.pointer("/data/origin_cover"))
@@ -3678,15 +3861,107 @@ async fn fetch_tiktok_cover_via_tikwm(video_url: &str) -> Result<Option<String>>
     Ok(cover)
 }
 
+/// 通过 TikWM 解析 TikTok 图片贴（photo post / 幻灯片）的原图与配乐直链。
+///
+/// yt-dlp 对图片贴只能解析出配乐音轨（没有任何视频格式），官方 item/detail
+/// 接口服务端直连常返回空响应；TikWM 能返回未过期的原图直链与配乐地址。
+/// 非图片贴（普通视频）返回 `Ok(None)`，由调用方继续走视频解析流程。
+pub(crate) async fn fetch_tiktok_photo_via_tikwm(
+    video_url: &str,
+) -> Result<Option<ExternalMediaMetadata>> {
+    let Some(payload) = request_tiktok_tikwm(video_url).await? else {
+        return Ok(None);
+    };
+    let images = payload
+        .pointer("/data/images")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .map(|url| {
+                    url.split_whitespace()
+                        .filter(|candidate| candidate.starts_with("http"))
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|urls: &Vec<String>| !urls.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if images.is_empty() {
+        return Ok(None);
+    }
+    let id = tiktok_video_id(video_url).unwrap_or_default();
+    let music_urls = payload
+        .pointer("/data/music_info/play")
+        .or_else(|| payload.pointer("/data/music"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|url| url.starts_with("http"))
+        .map(|url| vec![url.to_string()])
+        .unwrap_or_default();
+    let author = payload
+        .pointer("/data/author")
+        .and_then(serde_json::Value::as_object);
+    let unique_id = author
+        .and_then(|author| author.get("unique_id"))
+        .or_else(|| author.and_then(|author| author.get("uniqueId")))
+        .or_else(|| author.and_then(|author| author.get("nickname")))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+    let title = payload
+        .pointer("/data/title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+    let thumbnail = payload
+        .pointer("/data/origin_cover")
+        .or_else(|| payload.pointer("/data/cover"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+    Ok(Some(ExternalMediaMetadata {
+        id,
+        title,
+        uploader: unique_id.clone(),
+        uploader_url: unique_id
+            .as_deref()
+            .map(|value| format!("https://www.tiktok.com/@{value}")),
+        channel: None,
+        channel_id: None,
+        channel_url: None,
+        thumbnail,
+        description: None,
+        language: None,
+        upload_date: None,
+        duration: Some(tiktok_image_post_duration(&images)),
+        formats: Vec::new(),
+        subtitles: HashMap::new(),
+        automatic_captions: HashMap::new(),
+        images,
+        music_urls,
+        creators: None,
+    }))
+}
+
 pub(crate) async fn fetch_tiktok_media_with_impersonation(urls: &[&str], path: &Path) -> Result<()> {
-    let cookie = tiktok_cookie_header()?;
-    let headers: Vec<(&str, &str)> = vec![
+    // Cookie 可选：图文作品（图片贴/幻灯片）的原图与配乐 CDN 直链本身带签名，
+    // 未导入 TikTok 登录凭证也能下载（实测 curl-impersonate 直连 HTTP 200）；
+    // 视频直链依赖登录态，缺失时由 CDN 返回的 403 交给上层重试与提示，不再在
+    // 入口直接判定为“未导入凭证”而让仅订阅公开作者的图文作品失败。
+    let cookie = tiktok_cookie_header().unwrap_or_default();
+    let mut headers: Vec<(&str, &str)> = vec![
         ("user-agent", TIKTOK_WEB_UA),
         ("accept", "*/*"),
         ("accept-language", "zh-CN,zh;q=0.9,en;q=0.8"),
         ("referer", "https://www.tiktok.com/"),
-        ("cookie", cookie.as_str()),
     ];
+    if !cookie.is_empty() {
+        headers.push(("cookie", cookie.as_str()));
+    }
     let mut last_error: Option<anyhow::Error> = None;
     for url in urls {
         match crate::tiktok_impersonate::tiktok_impersonated_download(
@@ -3740,4 +4015,205 @@ pub(crate) async fn migrate_legacy_tiktok_credentials() -> Result<()> {
         }
     }
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 图片贴的原图直链来自 `imagePost.images[].imageURL.urlList`，部分接口
+    /// 版本用 `displayImage`；只保留 http(s) 地址，取不到地址的图片项直接丢弃。
+    #[test]
+    fn extracts_image_post_urls_from_official_item() {
+        let item = serde_json::json!({
+            "id": "7163642772132482306",
+            "imagePost": {
+                "images": [
+                    { "imageURL": { "urlList": [
+                        "https://p16-common-sign.example/a.jpeg?x=1",
+                        "https://p19-common-sign.example/a.jpeg?x=1"
+                    ] } },
+                    { "displayImage": { "urlList": ["https://p16-common-sign.example/b.jpeg?x=1"] } },
+                    { "imageURL": { "urlList": ["not-a-url"] } }
+                ]
+            }
+        });
+        let object = item.as_object().expect("item 是对象");
+        assert!(tiktok_item_is_image_post(object));
+        let urls = tiktok_image_post_urls(object);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0].len(), 2);
+        assert_eq!(
+            urls[1],
+            vec!["https://p16-common-sign.example/b.jpeg?x=1".to_string()]
+        );
+    }
+
+    /// 普通视频没有 `imagePost`，空对象也不算图片贴，不能被误判。
+    #[test]
+    fn video_item_is_not_image_post() {
+        let item = serde_json::json!({
+            "id": "1",
+            "video": { "playAddr": "https://example.invalid/v.mp4" }
+        });
+        let object = item.as_object().expect("item 是对象");
+        assert!(!tiktok_item_is_image_post(object));
+        assert!(tiktok_image_post_urls(object).is_empty());
+        let empty = serde_json::json!({ "id": "2", "imagePost": {} });
+        assert!(!tiktok_item_is_image_post(empty.as_object().expect("item 是对象")));
+    }
+
+    /// 幻灯片时长：TikTok 不给图片贴时长，按每张图 3 秒估算（与抖音图文一致）。
+    #[test]
+    fn image_post_duration_scales_with_image_count() {
+        let images = vec![vec!["https://example.invalid/1.jpg".to_string()]; 4];
+        assert_eq!(tiktok_image_post_duration(&images), 12.0);
+        assert_eq!(tiktok_image_post_duration(&[]), 3.0);
+    }
+
+    /// secUid 与作者主页句柄格式不同：把句柄当 secUid 传给 creator/item_list
+    /// 会返回空 itemList，这正是旧版 UP 头像拿不到的根因。
+    #[test]
+    fn distinguishes_tiktok_sec_uid_from_handle() {
+        assert!(looks_like_tiktok_sec_uid(
+            "MS4wLjABAAAAhxulOo0hdnN7T1mBgNPVp0hNuxiU2EC9Og_hbKqsE5Ygqa7Gc-MUU9xGJmNauLpc"
+        ));
+        assert!(!looks_like_tiktok_sec_uid("nkuu666"));
+        assert!(!looks_like_tiktok_sec_uid("@nkuu666"));
+        assert!(!looks_like_tiktok_sec_uid(""));
+        assert!(!looks_like_tiktok_sec_uid("MS4wLjAB"));
+    }
+
+    /// 真实网络测试（默认 ignore）：作者主页句柄能解析成 secUid，
+    /// 并据官方 creator/item_list 拿回可下载的头像直链。
+    #[tokio::test]
+    #[ignore]
+    async fn fetches_author_avatar_from_handle() {
+        let handle = std::env::var("BILI_SYNC_TEST_TIKTOK_AUTHOR_HANDLE")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_AUTHOR_HANDLE");
+        let sec_uid = resolve_tiktok_author_sec_uid(&handle)
+            .await
+            .expect("作者句柄应能解析出 secUid");
+        assert!(looks_like_tiktok_sec_uid(&sec_uid), "解析结果应是 secUid：{sec_uid}");
+        let avatar = fetch_tiktok_author_avatar_url(&handle)
+            .await
+            .expect("请求 TikTok 作者头像失败");
+        let avatar = avatar.expect("应从 creator/item_list 取到头像直链");
+        assert!(avatar.starts_with("http"), "头像直链无效：{avatar}");
+    }
+
+    fn sample_tiktok_source() -> youtube_source::Model {
+        youtube_source::Model {
+            id: 1,
+            source_type: "tiktok".to_string(),
+            name: "测试TikTok源".to_string(),
+            url: "https://www.tiktok.com/@nkuu666".to_string(),
+            path: std::env::temp_dir()
+                .join("bili-sync-tiktok-photo-e2e")
+                .display()
+                .to_string(),
+            enabled: true,
+            audio_only: false,
+            audio_only_m4a_only: false,
+            flat_folder: false,
+            download_danmaku: false,
+            download_subtitle: false,
+            ai_subtitle_language: String::new(),
+            ai_rename: false,
+            ai_rename_video_prompt: String::new(),
+            ai_rename_audio_prompt: String::new(),
+            ai_rename_enable_multi_page: false,
+            ai_rename_enable_collection: false,
+            ai_rename_enable_bangumi: false,
+            ai_rename_rename_parent_dir: false,
+            filter_option: None,
+            blacklist_keywords: None,
+            whitelist_keywords: None,
+            keyword_case_sensitive: false,
+            min_duration_seconds: None,
+            max_duration_seconds: None,
+            published_after: None,
+            published_before: None,
+            selected_videos: None,
+            selected_channels: None,
+            known_video_ids: None,
+            scan_deleted_videos: false,
+            scan_deleted_videos_once: false,
+            deleted_video_ids: None,
+            last_scan_at: None,
+            created_at: "2026-01-01 00:00:00".to_string(),
+        }
+    }
+
+    /// 真实网络测试（默认 ignore）：TikWM 能返回图片贴的原图与配乐，
+    /// 并且不给出任何视频流（`formats` 为空），确保下游走图文分支。
+    #[tokio::test]
+    #[ignore]
+    async fn tikwm_returns_images_for_photo_post() {
+        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
+        let metadata = fetch_tiktok_photo_via_tikwm(&url)
+            .await
+            .expect("TikWM 请求失败")
+            .expect("应识别为图片贴");
+        assert!(!metadata.images.is_empty(), "应返回原图");
+        assert!(metadata.images.iter().all(|urls| !urls.is_empty()));
+        assert!(!metadata.music_urls.is_empty(), "应返回配乐");
+        assert!(metadata.formats.is_empty(), "图片贴不应带视频流");
+        assert_eq!(
+            metadata.duration,
+            Some(tiktok_image_post_duration(&metadata.images))
+        );
+    }
+
+    /// 真实网络测试（默认 ignore）：普通视频不会被误判成图片贴。
+    #[tokio::test]
+    #[ignore]
+    async fn tikwm_skips_normal_video() {
+        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
+        assert!(
+            fetch_tiktok_photo_via_tikwm(&url)
+                .await
+                .expect("TikWM 请求失败")
+                .is_none(),
+            "普通视频不应被当作图片贴"
+        );
+    }
+
+    /// 端到端（默认 ignore）：图片贴 → 下载原图与配乐 → 合成幻灯片 MP4。
+    #[tokio::test]
+    #[ignore]
+    async fn downloads_photo_post_as_slideshow_mp4() {
+        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
+        let metadata = fetch_tiktok_photo_via_tikwm(&url)
+            .await
+            .expect("TikWM 请求失败")
+            .expect("应识别为图片贴");
+        let output_dir = std::env::temp_dir().join("bili-sync-tiktok-photo-e2e");
+        let _ = std::fs::remove_dir_all(&output_dir);
+        std::fs::create_dir_all(&output_dir).expect("创建输出目录失败");
+        let stem = format!("20260101000000-{}", metadata.id);
+        let output_path = output_dir.join(format!("{stem}.mp4"));
+        let downloader = crate::unified_downloader::UnifiedDownloader::new_native(
+            crate::bilibili::Client::new(),
+        );
+        crate::douyin::download_image_post(
+            &downloader,
+            &metadata,
+            &output_path,
+            &crate::bilibili::FilterOption::default(),
+            &sample_tiktok_source(),
+        )
+        .await
+        .expect("图片贴下载失败");
+        let size = std::fs::metadata(&output_path)
+            .expect("幻灯片 MP4 未生成")
+            .len();
+        assert!(size > 10_000, "幻灯片 MP4 过小：{size} 字节");
+        let image_count = std::fs::read_dir(output_dir.join(format!("{stem}-images")))
+            .expect("图片目录未生成")
+            .count();
+        assert_eq!(image_count, metadata.images.len(), "落盘原图数量应与解析结果一致");
+    }
 }
