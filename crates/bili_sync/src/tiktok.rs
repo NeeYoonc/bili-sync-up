@@ -3767,6 +3767,14 @@ pub(crate) fn is_tiktok_unavailable_error(error: &anyhow::Error) -> bool {
         .chain()
         .any(|cause| cause.to_string().contains("TikTok视频无法下载"))
 }
+/// 判断是否为「官方只回作品元数据、媒体字段全空」的错误（视频/封面/原图/配乐都取不到）。
+/// 与 statusCode 非 0 的明确不可下载不同：这类作品的返回会随出口地区变化
+/// （换节点后可能又能取到），因此不能立刻判死；由调用方连续重试到阈值后再落占位。
+pub(crate) fn is_tiktok_media_missing_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("TikTok 作品的媒体内容取不到"))
+}
 
 /// TikTok 封面直链签名过期（CDN 返回 403）时，通过 item/detail 刷新最新封面直链。
 /// 命中数据库记录后重新解析元数据，更新 thumbnail 字段并返回新地址。
@@ -3818,10 +3826,33 @@ pub(crate) async fn refresh_tiktok_cover_url(
 /// TikWM 由服务端代拉作品信息，返回未过期的 CDN 直链，作为封面刷新与图片贴
 /// 解析的兜底。`code != 0` 或请求失败时返回 `Ok(None)`，由调用方决定降级策略。
 async fn request_tiktok_tikwm(video_url: &str) -> Result<Option<serde_json::Value>> {
-    let client = reqwest::Client::builder()
+    // 走外源代理：TikWM 与 TikTok 同属"需要外网出口"的服务。此前这里直连，
+    // 国内网络下常常超时/被拒，而失败原因又被折叠成"没取到原图"，导致图片作品
+    // 明明存在却报出含糊的失败（与其它 TikTok 请求走代理的行为也不一致）。
+    let proxy = crate::youtube::configured_external_proxy();
+    let proxy = proxy.trim().to_string();
+    let mut last_error: Option<anyhow::Error> = None;
+    // 偶发超时/5xx 重试一次，避免把临时抖动记成"作品不可用"。
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        match request_tiktok_tikwm_once(video_url, &proxy).await {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("请求 TikWM 解析服务失败")))
+}
+
+async fn request_tiktok_tikwm_once(video_url: &str, proxy: &str) -> Result<Option<serde_json::Value>> {
+    let mut builder = reqwest::Client::builder()
         .user_agent(TIKTOK_WEB_UA)
-        .timeout(Duration::from_secs(30))
-        .build()?;
+        .timeout(Duration::from_secs(30));
+    if !proxy.is_empty() {
+        builder = builder.proxy(reqwest::Proxy::all(proxy).context("外源代理地址无效（TikWM 请求）")?);
+    }
+    let client = builder.build()?;
     let api_url = reqwest::Url::parse_with_params(
         "https://www.tikwm.com/api/",
         &[("url", video_url)],
@@ -3831,13 +3862,27 @@ async fn request_tiktok_tikwm(video_url: &str) -> Result<Option<serde_json::Valu
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
         .send()
         .await
-        .context("请求 TikWM 获取 TikTok 作品信息失败")?;
-    if !response.status().is_success() {
-        return Ok(None);
+        .context("请求 TikWM 解析服务失败（请检查外源代理与网络是否可用）")?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        bail!("TikWM 解析服务返回 HTTP {status}");
     }
-    let payload: serde_json::Value = serde_json::from_str(&response.text().await?)
-        .context("解析 TikWM 作品信息响应失败")?;
-    if payload.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
+    let payload: serde_json::Value = serde_json::from_str(&body)
+        .context("解析 TikWM 响应失败（服务返回了非 JSON 内容，可能被网关拦截）")?;
+    let code = payload
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(-1);
+    if code != 0 {
+        // 服务明确表示解析不了该作品（已删除/私密/地区限制/不支持的类型）。
+        let message = payload
+            .get("msg")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        debug!(code, msg = %message, url = %video_url, "TikWM 未能解析该 TikTok 作品");
         return Ok(None);
     }
     Ok(Some(payload))
@@ -3848,8 +3893,14 @@ async fn request_tiktok_tikwm(video_url: &str) -> Result<Option<serde_json::Valu
 /// 官方 item/detail 接口需要浏览器 BotGuard 验证，服务端直连常返回空响应；
 /// TikWM 返回未过期的 CDN 封面地址，作为封面刷新兜底。
 async fn fetch_tiktok_cover_via_tikwm(video_url: &str) -> Result<Option<String>> {
-    let Some(payload) = request_tiktok_tikwm(video_url).await? else {
-        return Ok(None);
+    let payload = match request_tiktok_tikwm(video_url).await {
+        Ok(Some(payload)) => payload,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            // 封面刷新是可选子任务，解析服务不可用时保持静默降级。
+            debug!(error = %error, url = %video_url, "TikWM 封面刷新请求失败");
+            return Ok(None);
+        }
     };
     let cover = payload
         .pointer("/data/cover")
@@ -3945,6 +3996,275 @@ pub(crate) async fn fetch_tiktok_photo_via_tikwm(
         music_urls,
         creators: None,
     }))
+}
+
+// ---------- TikTok 官方 embed 接口（图片作品解析 / 内容可用性判定） ----------
+
+/// TikTok 官方 embed 接口（`/embed/v2/{id}`）反映的作品媒体情况。
+///
+/// 该接口是 TikTok 提供给第三方网站嵌入用的公开接口：**不需要登录、不需要
+/// 签名**，服务端用 curl-impersonate 直连即可拿到，页面内嵌的 `videoData`
+/// 同时包含视频直链、封面、图片作品的原图列表与配乐。相比需要浏览器 BotGuard
+/// 的 item/detail 和第三方 TikWM，它是更可靠的官方数据源。
+pub(crate) enum TikTokEmbedMedia {
+    /// 图片作品（photo post / 幻灯片）：已取出原图与配乐。
+    Photo(Box<ExternalMediaMetadata>),
+    /// 作品内容仍存在：embed 给出了视频直链或封面。
+    Video(Box<ExternalMediaMetadata>),
+    /// 作品只有元数据、没有可下载的媒体：视频直链、封面、原图全为空。
+    ///
+    /// 实测这类作品的共同点是"标题/作者/播放量能看到，但任何途径都取不到
+    /// 视频或图片"（TikTok 自己的播放器同样拉不到流）。服务端无法区分它是
+    /// 被作者删除/设为私密、被平台下架，还是媒体对当前出口地区屏蔽；也观察到
+    /// 同一作品只换出口地区，返回的字段与播放量统计就会变化。
+    ///
+    /// 因此这里只作为提示线索，**不能立即判死**：调用方会继续按普通失败重试
+    /// （用户换出口节点后可能恢复），只有连续重试到阈值仍未取到媒体时，才落成
+    /// 「无法下载视频」占位并停止自动重试（视频管理页手动重置可重新探测）。
+    MediaUnavailable,
+}
+
+static TIKTOK_EMBED_SCRIPT_RE: OnceLock<Regex> = OnceLock::new();
+
+/// 通过 TikTok 官方 embed 接口探测作品媒体。
+pub(crate) async fn probe_tiktok_embed_media(video_url: &str) -> Result<TikTokEmbedMedia> {
+    let aweme_id = tiktok_video_id(video_url)
+        .ok_or_else(|| anyhow!("无法从 TikTok 链接识别视频 ID：{video_url}"))?;
+    let embed_url = format!("https://www.tiktok.com/embed/v2/{aweme_id}");
+    // 嵌入接口本身不需要登录，带上 Cookie 只是为了与其它 TikTok 请求保持一致的
+    // 会话信息；未导入登录状态时用空 Cookie 同样可以取到数据。
+    let cookie = tiktok_cookie_header().unwrap_or_default();
+    let (status, body, _) = tiktok_impersonated_get(&embed_url, &cookie).await?;
+    if status != 200 {
+        bail!("TikTok 官方 embed 接口返回 HTTP {status}");
+    }
+    let Some(video_data) = extract_tiktok_embed_video_data(&body)? else {
+        bail!("TikTok 官方 embed 页面里没有找到作品数据（页面结构可能已变化）");
+    };
+    let images = tiktok_embed_image_urls(&video_data);
+    if !images.is_empty() {
+        return Ok(TikTokEmbedMedia::Photo(Box::new(tiktok_embed_photo_metadata(
+            &video_data,
+            &aweme_id,
+            images,
+        ))));
+    }
+    let has_video = video_data
+        .pointer("/itemInfos/video/urls")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|urls| urls.iter().any(|value| value.as_str().is_some_and(|url| url.starts_with("http"))));
+    let has_cover = video_data
+        .pointer("/itemInfos/covers")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|covers| !covers.is_empty());
+    if has_video || has_cover {
+        return Ok(TikTokEmbedMedia::Video(Box::new(tiktok_embed_video_metadata(
+            &video_data,
+            &aweme_id,
+        ))));
+    }
+    Ok(TikTokEmbedMedia::MediaUnavailable)
+}
+
+/// 从 embed 页面 HTML 中取出内嵌的 `videoData`。
+///
+/// 页面里有多个 `application/json` 脚本块，逐个尝试解析、找含 `videoData`
+/// 的那一个（TikTok 前端数据结构变化时这里直接返回 None，由调用方降级）。
+fn extract_tiktok_embed_video_data(html: &str) -> Result<Option<serde_json::Value>> {
+    let regex = TIKTOK_EMBED_SCRIPT_RE.get_or_init(|| {
+        Regex::new(r#"(?s)<script[^>]*type="application/json"[^>]*>(.*?)</script>"#)
+            .expect("embed 脚本提取正则应当合法")
+    });
+    for capture in regex.captures_iter(html) {
+        let Some(raw) = capture.get(1) else { continue };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(raw.as_str()) else {
+            continue;
+        };
+        let Some(data) = payload
+            .pointer("/source/data")
+            .and_then(serde_json::Value::as_object)
+        else {
+            continue;
+        };
+        for value in data.values() {
+            if let Some(video_data) = value.get("videoData") {
+                return Ok(Some(video_data.clone()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// 取图片作品的全部原图备选直链（`imagePostInfo.displayImages[].urlList`）。
+fn tiktok_embed_image_urls(video_data: &serde_json::Value) -> Vec<Vec<String>> {
+    video_data
+        .pointer("/imagePostInfo/displayImages")
+        .and_then(serde_json::Value::as_array)
+        .map(|images| {
+            images
+                .iter()
+                .filter_map(|image| {
+                    image
+                        .get("urlList")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|urls| {
+                            urls.iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .filter(|url| url.starts_with("http"))
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|urls: &Vec<String>| !urls.is_empty())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn tiktok_embed_music_urls(video_data: &serde_json::Value) -> Vec<String> {
+    video_data
+        .pointer("/musicInfos/playUrl")
+        .and_then(serde_json::Value::as_array)
+        .map(|urls| {
+            urls.iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|url| url.starts_with("http"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn tiktok_embed_uploader(video_data: &serde_json::Value) -> Option<String> {
+    video_data
+        .pointer("/authorInfos/uniqueId")
+        .or_else(|| video_data.pointer("/authorInfos/nickName"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+}
+
+fn tiktok_embed_thumbnail(video_data: &serde_json::Value) -> Option<String> {
+    video_data
+        .pointer("/itemInfos/covers")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|covers| covers.first())
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn tiktok_embed_title(video_data: &serde_json::Value) -> Option<String> {
+    video_data
+        .pointer("/itemInfos/text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+}
+
+/// 用 embed 数据构造图片作品元数据（原图 + 配乐）。
+fn tiktok_embed_photo_metadata(
+    video_data: &serde_json::Value,
+    fallback_id: &str,
+    images: Vec<Vec<String>>,
+) -> ExternalMediaMetadata {
+    let uploader = tiktok_embed_uploader(video_data);
+    ExternalMediaMetadata {
+        id: video_data
+            .pointer("/itemInfos/id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(fallback_id)
+            .to_string(),
+        title: tiktok_embed_title(video_data),
+        uploader: uploader.clone(),
+        uploader_url: uploader.map(|value| format!("https://www.tiktok.com/@{value}")),
+        channel: None,
+        channel_id: None,
+        channel_url: None,
+        thumbnail: tiktok_embed_thumbnail(video_data),
+        description: None,
+        language: None,
+        upload_date: None,
+        duration: Some(tiktok_image_post_duration(&images)),
+        formats: Vec::new(),
+        subtitles: HashMap::new(),
+        automatic_captions: HashMap::new(),
+        images,
+        music_urls: tiktok_embed_music_urls(video_data),
+        creators: None,
+    }
+}
+
+/// 用 embed 数据构造普通视频元数据（作为 yt-dlp 解析失败时的最后兜底）。
+fn tiktok_embed_video_metadata(video_data: &serde_json::Value, fallback_id: &str) -> ExternalMediaMetadata {
+    let uploader = tiktok_embed_uploader(video_data);
+    let meta = video_data.pointer("/itemInfos/video/videoMeta");
+    let duration = meta
+        .and_then(|value| value.get("duration"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| *value > 0.0);
+    let urls = video_data
+        .pointer("/itemInfos/video/urls")
+        .and_then(serde_json::Value::as_array)
+        .map(|urls| {
+            urls.iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|url| url.starts_with("http"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut url_iter = urls.iter();
+    let primary = url_iter.next().cloned();
+    let format = ExternalMediaFormat {
+        format_id: Some("embed-http".to_string()),
+        url: primary,
+        protocol: Some("https".to_string()),
+        ext: Some("mp4".to_string()),
+        // embed 直链是 TikTok 的播放版本（含 AAC 音轨），按 H.264 单流处理。
+        vcodec: Some("h264".to_string()),
+        acodec: Some("aac".to_string()),
+        width: meta
+            .and_then(|value| value.get("width"))
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value > 0),
+        height: meta
+            .and_then(|value| value.get("height"))
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value > 0),
+        fps: None,
+        tbr: None,
+        vbr: None,
+        abr: None,
+        dynamic_range: None,
+        decryption_key: None,
+        fallback_urls: url_iter.cloned().collect(),
+    };
+    ExternalMediaMetadata {
+        id: video_data
+            .pointer("/itemInfos/id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(fallback_id)
+            .to_string(),
+        title: tiktok_embed_title(video_data),
+        uploader: uploader.clone(),
+        uploader_url: uploader.map(|value| format!("https://www.tiktok.com/@{value}")),
+        channel: None,
+        channel_id: None,
+        channel_url: None,
+        thumbnail: tiktok_embed_thumbnail(video_data),
+        description: None,
+        language: None,
+        upload_date: None,
+        duration,
+        formats: vec![format],
+        subtitles: HashMap::new(),
+        automatic_captions: HashMap::new(),
+        images: Vec::new(),
+        music_urls: Vec::new(),
+        creators: None,
+    }
 }
 
 pub(crate) async fn fetch_tiktok_media_with_impersonation(urls: &[&str], path: &Path) -> Result<()> {
@@ -4099,6 +4419,48 @@ mod tests {
             .expect("请求 TikTok 作者头像失败");
         let avatar = avatar.expect("应从 creator/item_list 取到头像直链");
         assert!(avatar.starts_with("http"), "头像直链无效：{avatar}");
+    }
+
+    /// 真实网络测试（默认 ignore）：官方 embed 接口能区分
+    /// 「图片作品 / 普通视频 / 内容已不存在」三种情况。
+    #[tokio::test]
+    #[ignore]
+    async fn embed_probe_classifies_photo_video_and_missing() {
+        let photo_url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
+        match probe_tiktok_embed_media(&photo_url).await.expect("embed 探测失败") {
+            TikTokEmbedMedia::Photo(metadata) => {
+                assert!(!metadata.images.is_empty(), "图片作品应带原图");
+                assert!(metadata.formats.is_empty(), "图片作品不应带视频流");
+            }
+            _ => panic!("图片作品未被 embed 识别为 Photo"),
+        }
+
+        let video_url = std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
+        match probe_tiktok_embed_media(&video_url).await.expect("embed 探测失败") {
+            TikTokEmbedMedia::Video(metadata) => {
+                assert!(!metadata.formats.is_empty(), "普通视频应带可下载直链");
+            }
+            _ => panic!("普通视频未被 embed 识别为 Video"),
+        }
+
+        // 只有元数据、取不到媒体的作品：embed 会给出 MediaUnavailable。
+        // 它不是"内容已删除"的判定依据（实测换出口地区返回的数据会变化），
+        // 因此只能作为提示线索，必须保持可重试。
+        let blocked_url = std::env::var("BILI_SYNC_TEST_TIKTOK_REGION_URL")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_REGION_URL");
+        match probe_tiktok_embed_media(&blocked_url).await.expect("embed 探测失败") {
+            TikTokEmbedMedia::MediaUnavailable => {}
+            other => panic!(
+                "只有元数据、取不到媒体的作品应识别为 MediaUnavailable，实际是 {}",
+                match other {
+                    TikTokEmbedMedia::Photo(_) => "Photo",
+                    TikTokEmbedMedia::Video(_) => "Video",
+                    TikTokEmbedMedia::MediaUnavailable => "MediaUnavailable",
+                }
+            ),
+        }
     }
 
     fn sample_tiktok_source() -> youtube_source::Model {

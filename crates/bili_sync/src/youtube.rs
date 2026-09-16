@@ -52,6 +52,9 @@ const YTDLP_RELEASE_BASE_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(90);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const MAX_DOWNLOAD_RETRIES: i32 = 4;
+/// TikTok「只回元数据、媒体字段全空」这类失败连续重试到此轮数后，才落「无法下载视频」
+/// 占位并停止自动重试。保留前几轮正常重试，是为了给用户换出口节点留出恢复机会。
+const TIKTOK_MEDIA_MISSING_PLACEHOLDER_RETRY: i32 = 2;
 const SUBSCRIPTIONS_URL: &str = "https://www.youtube.com/feed/subscriptions";
 const SUBSCRIPTION_CHANNELS_URL: &str = "https://www.youtube.com/feed/channels";
 const LIKED_URL: &str = "https://www.youtube.com/playlist?list=LL";
@@ -3880,6 +3883,18 @@ pub async fn ai_rename_external_history(
     Ok(result)
 }
 
+/// 是否应把本轮 TikTok 失败直接落成「无法下载视频」占位（而不是继续普通重试）。
+///
+/// 分两类：
+///  · 官方详情返回 statusCode≠0（地区/内容不可用）：服务端已确认拿不到，立刻落占位；
+///  · 官方 embed 只回作品元数据、媒体字段全空：返回随出口地区变化，换节点可能又能
+///    取到，所以前几轮仍按普通失败重试，连续失败到阈值才落占位，避免刚换节点就被判死。
+fn should_placeholder_unavailable_tiktok(error: &anyhow::Error, retry_count: i32) -> bool {
+    crate::tiktok::is_tiktok_unavailable_error(error)
+        || (crate::tiktok::is_tiktok_media_missing_error(error)
+            && retry_count >= TIKTOK_MEDIA_MISSING_PLACEHOLDER_RETRY)
+}
+
 async fn download_youtube_media(
     downloader: &UnifiedDownloader,
     source: &youtube_source::Model,
@@ -3888,17 +3903,23 @@ async fn download_youtube_media(
     let platform = source_platform_label(source);
     let metadata = match extract_youtube_metadata(&video.url, Some(source)).await {
         Ok(metadata) => metadata,
-        Err(error) if crate::tiktok::is_tiktok_unavailable_error(&error) => {
-            // TikTok 明确不可下载（地区/内容不可用，statusCode≠0）：与付费/加密占位
-            // 方案一致，生成占位文件并标记为不可下载，避免反复重试。
+        Err(error) if should_placeholder_unavailable_tiktok(&error, video.retry_count) => {
+            // TikTok「明确不可下载」分两类（判定见 should_placeholder_unavailable_tiktok）：
+            //  · 官方详情返回 statusCode≠0（地区/内容不可用）；
+            //  · 官方 embed 只回作品元数据、媒体字段全空（视频/封面/原图/配乐都取不到）。
+            //    后者的结果会随出口地区变化（换节点后可能又能取到），所以前几轮仍按普通
+            //    失败正常重试，连续失败到阈值才落占位，避免刚换节点就被判死。
+            // 两者都与付费/加密占位方案一致：生成占位文件并标记为不可下载，避免反复重试。
+            let media_missing = crate::tiktok::is_tiktok_media_missing_error(&error);
             warn!(
                 platform,
                 source_id = source.id,
                 youtube_id = %video.youtube_id,
                 %error,
-                "{}视频「{}」明确无法下载（地区/内容不可用），生成占位并停止重试",
+                "{}视频「{}」明确无法下载（{}），生成占位并停止重试",
                 platform,
-                video.title
+                video.title,
+                if media_missing { "媒体内容不可用" } else { "地区/内容不可用" }
             );
             let fallback_metadata = ExternalMediaMetadata {
                 id: video.youtube_id.clone(),
@@ -3950,7 +3971,11 @@ async fn download_youtube_media(
                 published_at: video.published_at.clone(),
                 duration_seconds: video.duration_seconds,
                 is_image_post: false,
-                warning_message: Some("无法下载视频：你所在国家或地区无法下载此视频".to_string()),
+                warning_message: Some(if media_missing {
+                    "无法下载视频：作品的媒体内容不可用（视频、封面、原图均取不到）".to_string()
+                } else {
+                    "无法下载视频：你所在国家或地区无法下载此视频".to_string()
+                }),
                 paid_content: true,
                 skipped: false,
             });
@@ -4391,28 +4416,70 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
             Ok(metadata) if external_metadata_has_video_stream(&metadata) => return Ok(metadata),
             ytdlp_result => {
                 // 落到这里的两种情况：yt-dlp 只解析出配乐音轨（图片贴 / 幻灯片），
-                // 或 yt-dlp 直接失败（rehydration 报错等）。先试官方详情接口，
-                // 再用 TikWM 取原图，任一路径拿到原图即按图文作品处理。
+                // 或 yt-dlp 直接失败（rehydration 报错等）。
+                //
+                // 先用 TikTok 官方 embed 接口（无需登录/签名）探测：
+                //  · 图片作品 → 直接拿原图与配乐；
+                //  · 媒体字段为空 → 通常是对当前出口地区不可见，换节点后可能可用，
+                //    因此只记下线索、继续走后面的兜底，绝不判定为永久不可下载；
+                //  · 仍有内容的普通视频 → 记下直链，作为最后兜底。
+                let mut embed_video_fallback: Option<Box<ExternalMediaMetadata>> = None;
+                let mut embed_media_invisible = false;
+                match crate::tiktok::probe_tiktok_embed_media(url).await {
+                    Ok(crate::tiktok::TikTokEmbedMedia::Photo(photo)) => return Ok(*photo),
+                    Ok(crate::tiktok::TikTokEmbedMedia::Video(metadata)) => {
+                        embed_video_fallback = Some(metadata);
+                    }
+                    Ok(crate::tiktok::TikTokEmbedMedia::MediaUnavailable) => {
+                        embed_media_invisible = true;
+                    }
+                    Err(error) => {
+                        debug!(error = %error, url = %url, "TikTok 官方 embed 接口探测失败，继续其它解析路径")
+                    }
+                }
                 let api_error = match crate::tiktok::extract_tiktok_media_detail(url).await {
                     Ok(metadata) => return Ok(metadata),
                     Err(error) => error,
                 };
-                match crate::tiktok::fetch_tiktok_photo_via_tikwm(url).await {
+                let tikwm_note = match crate::tiktok::fetch_tiktok_photo_via_tikwm(url).await {
                     Ok(Some(photo)) => return Ok(photo),
-                    Ok(None) => {}
+                    Ok(None) => "TikWM 没有返回原图（该作品可能不是图片作品，或已被删除/设为私密/受地区限制）"
+                        .to_string(),
                     Err(error) => {
-                        debug!(error = %error, url = %url, "TikWM 图片贴解析失败，继续按视频解析结果处理")
+                        debug!(error = %error, url = %url, "TikWM 图片贴解析失败，继续按视频解析结果处理");
+                        format!("TikWM 解析服务请求失败：{error:#}")
                     }
+                };
+                // 兜底：embed 接口给了可下载的视频直链（yt-dlp 与详情接口都没成功时使用）。
+                if let Some(metadata) = embed_video_fallback {
+                    warn!(
+                        url = %url,
+                        "yt-dlp 与官方详情接口都未解析出 TikTok 媒体直链，改用官方 embed 接口给出的直链下载"
+                    );
+                    return Ok(*metadata);
                 }
                 if crate::tiktok::is_tiktok_unavailable_error(&api_error) {
                     // 明确不可下载（地区/内容不可用）：直接透传，不再追加风控提示。
                     return Err(api_error);
                 }
+                // 官方 embed 已经明确“只有元数据、没有任何媒体”：无论 yt-dlp 这一轮
+                // 是直接报错还是只解析出配乐音轨，都统一给出可操作的原因。否则用户看到
+                // 的会是 yt-dlp 的底层报错（同一作品的返回会在“报错/只回音轨”之间浮动），
+                // 既看不出真正原因，也无法被「连续重试到阈值后落占位」的判定稳定识别。
+                if embed_media_invisible {
+                    let ytdlp_note = match &ytdlp_result {
+                        Ok(_) => "yt-dlp 只解析出配乐音轨，没有任何视频流".to_string(),
+                        Err(error) => format!("yt-dlp 报错：{error}"),
+                    };
+                    bail!(
+                        "TikTok 作品的媒体内容取不到：官方 embed 接口只返回了作品信息（标题/作者/播放量等），没有返回任何视频、封面或原图（{ytdlp_note}）。常见原因是作品已被作者删除/设为私密、被平台下架，或对当前出口地区不可见（这几种情况在服务端无法区分）。建议更换外源代理节点后重试，或在视频管理页对该视频手动重置后再试。"
+                    );
+                }
                 match ytdlp_result {
                     // 只有配乐、又没有取到原图：给出明确原因，不再让它落到
                     // “没有可用的视频流”这种含糊报错上。
                     Ok(_) => bail!(
-                        "TikTok 作品没有可下载的视频流（图片贴/幻灯片未取到原图；yt-dlp 只返回配乐音轨，官方详情与 TikWM 均未取到原图）：{api_error}"
+                        "这个 TikTok 作品没有可下载的媒体：它不是普通视频（yt-dlp 只解析出配乐音轨，没有任何视频流），按图片作品（幻灯片）取原图也没成功——{tikwm_note}。官方详情接口反馈：{api_error}"
                     ),
                     Err(ytdlp_error) => bail!(
                         "yt-dlp 解析 TikTok 媒体直链失败：{ytdlp_error}；API 兜底也失败：{api_error}（通常是当前出口 IP 被 TikTok 风控，请更换外源代理节点后重试）"
@@ -7257,6 +7324,57 @@ mod tests {
             .expect("解析 TikTok 普通视频失败");
         assert!(video.images.is_empty(), "普通视频不应带原图");
         assert!(!video.formats.is_empty(), "普通视频应带视频流");
+    }
+
+    /// 真实网络测试（默认 ignore）：只有元数据、媒体取不到的 TikTok 作品必须
+    /// 给出“换节点重试”的可操作提示，且**不能**被判为永久不可下载。
+    #[tokio::test]
+    #[ignore]
+    async fn media_unavailable_tiktok_post_stays_retryable() {
+        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_REGION_URL")
+            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_REGION_URL");
+        let error = super::extract_youtube_metadata(&url, None)
+            .await
+            .expect_err("媒体取不到的作品应返回错误");
+        let text = format!("{error:#}");
+        assert!(
+            !crate::tiktok::is_tiktok_unavailable_error(&error),
+            "媒体取不到不能被判定为永久不可下载（换节点或作品恢复后仍应能重试）：{text}"
+        );
+        assert!(
+            text.contains("媒体内容取不到") || text.contains("没有可下载的媒体"),
+            "应给出可操作的原因提示：{text}"
+        );
+        // 该错误必须能被「连续重试到阈值后落占位」的判定识别到，否则这条作品会
+        // 一直停在待重试状态空转（这正是本次要修的问题）。
+        assert!(
+            crate::tiktok::is_tiktok_media_missing_error(&error),
+            "媒体取不到的错误必须能被落占位判定识别：{text}"
+        );
+        assert!(!super::should_placeholder_unavailable_tiktok(&error, 0));
+        assert!(super::should_placeholder_unavailable_tiktok(&error, 2));
+    }
+    /// 媒体取不到的作品：前两轮仍按普通失败重试（给换节点留机会），
+    /// 连续到阈值才落「无法下载视频」占位；statusCode 非 0 的明确不可下载则立刻落。
+    #[test]
+    fn tiktok_media_missing_placeholder_waits_for_retry_threshold() {
+        let media_missing = anyhow::anyhow!(
+            "TikTok 作品的媒体内容取不到：官方接口只返回了作品信息（标题/作者等），没有返回任何视频、封面或原图"
+        );
+        assert!(!super::should_placeholder_unavailable_tiktok(&media_missing, 0));
+        assert!(!super::should_placeholder_unavailable_tiktok(&media_missing, 1));
+        assert!(super::should_placeholder_unavailable_tiktok(&media_missing, 2));
+        assert!(super::should_placeholder_unavailable_tiktok(&media_missing, 4));
+        // 0 次重试时绝不能落占位：换节点后可能又能取到。
+        assert!(!crate::tiktok::is_tiktok_unavailable_error(&media_missing));
+        let hard_unavailable = anyhow::anyhow!(
+            "TikTok视频无法下载：你所在国家或地区无法下载此视频（statusCode 10231）"
+        );
+        assert!(super::should_placeholder_unavailable_tiktok(&hard_unavailable, 0));
+        // 其它类型的失败（风控、解析报错等）继续走原有重试逻辑，不受影响。
+        let other = anyhow::anyhow!("yt-dlp 解析 TikTok 媒体直链失败：HTTP 403");
+        assert!(!super::should_placeholder_unavailable_tiktok(&other, 9));
+        assert!(!super::should_placeholder_unavailable_tiktok(&other, 0));
     }
 
     #[tokio::test]
