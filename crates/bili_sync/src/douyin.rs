@@ -2726,7 +2726,6 @@ async fn signed_get_impl(
     if let Some(ms_token) = cookies.get("msToken").cloned() {
         pairs.push(("msToken", ms_token));
     }
-    let params = serde_urlencoded::to_string(&pairs)?;
     // 收藏夹/我的喜欢等受保护接口走官方 SDK 现场签名；其余接口继续用
     // 旧的 f2 移植快速路径。作者作品接口已并入 SDK 签名列表：自 2026-09 起
     // 抖音对作者作品接口的风控校验已收紧，旧 a_bogus 约有半数请求被 Argus
@@ -2735,10 +2734,31 @@ async fn signed_get_impl(
     let needs_sdk = endpoint_needs_sdk_signature(base_url);
     let legacy_fallback = endpoint_allows_legacy_abogus_fallback(base_url) && douyin_secsdk_text().is_none();
     let used_sdk_signature = needs_sdk && !legacy_fallback;
+    // 旧版纯 Rust a_bogus 签名：既是「只导入了 cookies.txt」时的回退，
+    // 也是 SDK 现场签名失败时的兜底（作者作品 / 作品详情接口历史上接受旧签名）。
+    let legacy_signed_url = |pairs: &[(&str, String)]| -> Result<reqwest::Url> {
+        let params = serde_urlencoded::to_string(pairs)?;
+        let signature = douyin_sign::generate(&params);
+        let mut url = reqwest::Url::parse_with_params(base_url, pairs)?;
+        url.query_pairs_mut().append_pair("a_bogus", &signature);
+        Ok(url)
+    };
     let url = if used_sdk_signature {
         let unsigned = reqwest::Url::parse_with_params(base_url, &pairs)?;
-        let signed = sign_douyin_url(unsigned.as_str()).await?;
-        reqwest::Url::parse(&signed)?
+        match sign_douyin_url(unsigned.as_str()).await {
+            Ok(signed) => reqwest::Url::parse(&signed)?,
+            // 签名器现场失败（secsdk 会话过期、影子文件异常等）时不直接判死：
+            // 回退旧 a_bogus 尽力而为，是否被平台接受由随后的 HTTP 状态决定。
+            Err(error) if endpoint_allows_legacy_abogus_fallback(base_url) => {
+                warn!(
+                    target: "bili_sync_rs::douyin",
+                    error = %error,
+                    "抖音 SDK 现场签名失败，回退旧版 a_bogus 签名尽力而为（可能被平台风控拒绝）：{error}"
+                );
+                legacy_signed_url(&pairs)?
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         if legacy_fallback && !LEGACY_ABOGUS_FALLBACK_WARNED.swap(true, AtomicOrdering::Relaxed) {
             warn!(
@@ -2746,10 +2766,7 @@ async fn signed_get_impl(
                 "未同步抖音 secsdk 签名会话，作者作品接口回退旧版 a_bogus 签名（可能被平台风控拒绝；建议在设置页用电脑端登录助手完整传输一次登录状态）"
             );
         }
-        let signature = douyin_sign::generate(&params);
-        let mut url = reqwest::Url::parse_with_params(base_url, &pairs)?;
-        url.query_pairs_mut().append_pair("a_bogus", &signature);
-        url
+        legacy_signed_url(&pairs)?
     };
     let cookies = cookie_values();
     let uifid = cookies.get("UIFID").or_else(|| cookies.get("UIFID_TEMP"));
@@ -3154,16 +3171,39 @@ fn douyin_signer_shadow_dir() -> PathBuf {
     std::env::temp_dir().join("bili-sync-external").join("douyin-signer")
 }
 
+/// 签名器会话文件的写入锁。
+///
+/// 多个下载任务会并发请求签名，若不加锁，A 任务正在重写 douyin-secsdk.json、
+/// B 任务的 Node 子进程恰好读该文件，就会读到半截 JSON 并报出
+/// 「缺少抖音 secsdk 签名会话（含 s_sdk_crypt_sdk / s_sdk_server_cert_key）」——
+/// 明明凭证是好的，却偶发签名失败。这里串行化写入，并只在内容变化时重写。
+static DOUYIN_SIGNER_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 把数据库里的 cookies 与 secsdk 会话写入签名器影子目录，返回该目录。
 async fn sync_douyin_signer_env() -> Result<PathBuf> {
+    let _guard = DOUYIN_SIGNER_ENV_LOCK.lock().await;
     let dir = douyin_signer_shadow_dir();
     tokio::fs::create_dir_all(&dir).await?;
     let cookies = douyin_cookie_text().context("缺少抖音 cookies：请先在设置页导入 cookies.txt")?;
     let secsdk = douyin_secsdk_text()
         .context("缺少抖音 secsdk 签名会话：请用电脑端登录助手重新传输登录状态")?;
-    tokio::fs::write(dir.join("douyin-cookies.txt"), cookies.as_bytes()).await?;
-    tokio::fs::write(dir.join("douyin-secsdk.json"), secsdk.as_bytes()).await?;
+    write_signer_env_file(&dir.join("douyin-cookies.txt"), cookies.as_bytes()).await?;
+    write_signer_env_file(&dir.join("douyin-secsdk.json"), secsdk.as_bytes()).await?;
     Ok(dir)
+}
+
+/// 内容一致时跳过写入；需要写入时先落临时文件再原子替换，
+/// 保证并发启动的 Node 签名器进程永远读到完整文件。
+async fn write_signer_env_file(path: &Path, contents: &[u8]) -> Result<()> {
+    if let Ok(existing) = tokio::fs::read(path).await {
+        if existing == contents {
+            return Ok(());
+        }
+    }
+    let temporary = path.with_extension("writing");
+    tokio::fs::write(&temporary, contents).await?;
+    tokio::fs::rename(&temporary, path).await?;
+    Ok(())
 }
 
 /// webid / verify_fp / msToken 等单值凭证的数据库读取。
