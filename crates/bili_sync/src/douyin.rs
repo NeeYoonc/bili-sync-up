@@ -2509,6 +2509,8 @@ fn endpoint_display_name(base_url: &str) -> &'static str {
         "收藏夹作品"
     } else if base_url.starts_with(DOUYIN_POST_API) {
         "抖音作者作品接口"
+    } else if base_url.starts_with(DOUYIN_DETAIL_API) {
+        "抖音作品详情接口"
     } else {
         "抖音 Web API"
     }
@@ -2523,19 +2525,25 @@ fn endpoint_display_name(base_url: &str) -> &'static str {
 /// 请求被拒绝（HTTP 403 Signature Not Found），改用官方 secsdk 现场签名后连续
 /// 请求全部通过。因此作者作品接口在已同步 secsdk 会话时同样优先走 SDK 签名，
 /// 仅在未同步 secsdk 会话时回退旧算法（见 endpoint_allows_legacy_abogus_fallback）。
+///
+/// 作品详情接口（aweme/detail，下载视频时解析直链走这里）随后也出现同样症状：
+/// 同一个已同步 secsdk 的会话下，作者作品接口（SDK 签名）连续通过，详情接口
+/// （旧 a_bogus）频繁 HTTP 403，表现为「新加一个源、里面的视频成批下载失败、
+/// 重试满次数后停在失败」。因此详情接口也纳入 SDK 签名列表。
 fn endpoint_needs_sdk_signature(base_url: &str) -> bool {
     base_url.starts_with(DOUYIN_FAVORITE_API)
         || base_url.starts_with(DOUYIN_COLLECTIONS_API)
         || base_url.starts_with(DOUYIN_COLLECTION_VIDEOS_API)
         || base_url.starts_with(DOUYIN_POST_API)
+        || base_url.starts_with(DOUYIN_DETAIL_API)
 }
 
 /// 是否允许在未同步 secsdk 会话时回退旧版纯 Rust a_bogus 签名。
 /// 我的喜欢/收藏夹接口附加无效 a_bogus 会被 Turing 静默丢弃（HTTP 200 空响应），
-/// 没有 secsdk 时必须直接给出明确报错；作者作品接口历史上接受旧签名，仅把它作为
-/// 「只导入了 cookies.txt」用户的尽力而为回退保留，仍可能被风控拒绝。
+/// 没有 secsdk 时必须直接给出明确报错；作者作品接口与作品详情接口历史上接受旧签名，
+/// 仅把它们作为「只导入了 cookies.txt」用户的尽力而为回退保留，仍可能被风控拒绝。
 fn endpoint_allows_legacy_abogus_fallback(base_url: &str) -> bool {
-    base_url.starts_with(DOUYIN_POST_API)
+    base_url.starts_with(DOUYIN_POST_API) || base_url.starts_with(DOUYIN_DETAIL_API)
 }
 
 /// 无 secsdk 会话时的旧签名回退只提示一次，避免长扫描中每页重复刷屏。
