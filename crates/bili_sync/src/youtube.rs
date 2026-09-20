@@ -5178,7 +5178,8 @@ async fn ensure_youtube_series_sidecars(
                 .await
                 .with_context(|| format!("生成{platform}剧集封面失败: {}", target.display()))?;
         } else if let Some(url) = metadata.thumbnail.as_deref() {
-            let temporary = target.with_extension("download");
+            // 剧集封面同样按剧集共享，多个分集并发下载时会争用同一临时文件
+            let temporary = unique_download_path(&target);
             if let Err(error) = fetch_platform_asset(downloader, source, &[url], &temporary)
                 .await
                 .with_context(|| format!("使用项目统一下载器下载{platform}剧集封面失败"))
@@ -5201,7 +5202,7 @@ async fn ensure_youtube_series_sidecars(
         .is_ok_and(|metadata| metadata.len() > 0)
     {
         let xml = generate_youtube_tvshow_nfo(source, metadata);
-        let temporary = series_dir.join("tvshow.nfo.download");
+        let temporary = unique_download_path(&series_dir.join("tvshow.nfo"));
         tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
             format!("写入{platform}剧集 NFO 失败: {}", temporary.display())
         })?;
@@ -5215,7 +5216,7 @@ async fn ensure_youtube_series_sidecars(
         .is_ok_and(|metadata| metadata.len() > 0)
     {
         let xml = generate_youtube_season_nfo();
-        let temporary = season_dir.join("season.nfo.download");
+        let temporary = unique_download_path(&season_dir.join("season.nfo"));
         tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
             format!("写入{platform}季度 NFO 失败: {}", temporary.display())
         })?;
@@ -5301,7 +5302,7 @@ async fn download_youtube_upper_face(
             let avatar_url = crate::tiktok::fetch_tiktok_author_avatar_url(&author_handle)
                 .await?
                 .ok_or_else(|| anyhow!("TikTok 作者作品接口没有返回头像地址"))?;
-            let temporary = upper_dir.join("folder.download");
+            let temporary = unique_download_path(&upper_dir.join("folder.jpg"));
             if let Err(error) = fetch_platform_asset(downloader, source, &[avatar_url.as_str()], &temporary)
                 .await
                 .with_context(|| format!("使用项目统一下载器下载{platform} UP头像失败"))
@@ -5318,7 +5319,7 @@ async fn download_youtube_upper_face(
                 .and_then(crate::tiktok::tiktok_handle_from_url)
                 .unwrap_or_else(|| uploader.clone());
             let xml = generate_youtube_person_nfo(&uploader, &channel_id, "tiktok");
-            let temporary = upper_dir.join("person.nfo.download");
+            let temporary = unique_download_path(&upper_dir.join("person.nfo"));
             if let Err(error) = tokio::fs::write(&temporary, xml.as_bytes())
                 .await
                 .with_context(|| format!("写入{platform} UP主 NFO 临时文件失败: {}", temporary.display()))
@@ -5396,7 +5397,7 @@ async fn download_youtube_upper_face(
                 .map(|thumbnail| thumbnail.url.clone())
                 .context("YouTube 频道主页没有返回 UP 头像")?
         };
-        let temporary = upper_dir.join("folder.download");
+        let temporary = unique_download_path(&upper_dir.join("folder.jpg"));
         if let Err(error) = fetch_platform_asset(downloader, source, &[avatar_url.as_str()], &temporary)
             .await
             .with_context(|| format!("使用项目统一下载器下载{platform} UP头像失败"))
@@ -5427,7 +5428,7 @@ async fn download_youtube_upper_face(
                 .context("YouTube 频道主页没有返回频道 ID")?
         };
         let xml = generate_youtube_person_nfo(&uploader, &channel_id, source_platform(source));
-        let temporary = upper_dir.join("person.nfo.download");
+        let temporary = unique_download_path(&upper_dir.join("person.nfo"));
         if let Err(error) = tokio::fs::write(&temporary, xml.as_bytes())
             .await
             .with_context(|| format!("写入{platform} UP主 NFO 临时文件失败: {}", temporary.display()))
@@ -6074,6 +6075,21 @@ fn has_audio(format: &ExternalMediaFormat) -> bool {
     format.acodec.as_deref().is_some_and(|codec| codec != "none")
 }
 
+/// 生成目标文件同目录下的唯一临时文件名（`<目标名>.<随机>.download`）。
+///
+/// UP 头像 / person.nfo / 剧集级 NFO 都是「按 UP 主或剧集」共享的产物：多个视频
+/// 同时下载时会各自走同一条生成逻辑。如果都用固定的 `folder.download` /
+/// `person.nfo.download`，先完成的任务 rename 走临时文件后，另一个任务还在读写同一
+/// 路径，就会报「断点续传后文件大小不一致: 0 != N」之类的错，UP 头像子任务随之失败。
+/// 每次生成一个带随机后缀的临时文件即可彻底避开这种争用。
+fn unique_download_path(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    target.with_file_name(format!("{name}.{unique}.download"))
+}
 async fn replace_file(source: &Path, target: &Path) -> Result<()> {
     if tokio::fs::try_exists(target).await? {
         tokio::fs::remove_file(target).await?;
