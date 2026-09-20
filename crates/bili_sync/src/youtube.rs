@@ -3462,6 +3462,22 @@ async fn download_video(
                 let permanent_failure =
                     error_text.contains("CENC 加密 DASH") || error_text.contains("付费/加密内容");
                 let exhausted = permanent_failure || retry_count >= MAX_DOWNLOAD_RETRIES;
+                // 与 B 站一致：把失败次数写进「媒体」子任务的状态位（视频级 index 4、
+                // 分页级 index 1）。只改 download_status 字符串的话，卡片右上角读到的
+                // 状态位仍是 0，外源重试失败后会一直显示灰色的「进行中」，看不出已经失败。
+                // 状态位写满 MAX_DOWNLOAD_RETRIES 后 check_continue 自然为 false，重试节奏
+                // 仍由 retry_count / exhausted 决定，重置逻辑也能正确识别「失败」项。
+                let failure = if exhausted {
+                    MAX_DOWNLOAD_RETRIES as u32
+                } else {
+                    retry_count.clamp(1, MAX_DOWNLOAD_RETRIES) as u32
+                };
+                let mut video_status = VideoStatus::from(video.video_task_status);
+                let mut page_status = PageStatus::from(video.page_task_status);
+                video_status.set(4, failure);
+                page_status.set(1, failure);
+                active.video_task_status = Set(video_status.into());
+                active.page_task_status = Set(page_status.into());
                 active.retry_count = Set(retry_count);
                 active.download_status = Set(if exhausted { "failed" } else { "pending" }.to_string());
                 active.error_message = Set(Some(format!("{:#}", error)));
