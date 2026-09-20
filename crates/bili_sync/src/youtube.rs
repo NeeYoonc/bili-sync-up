@@ -5184,7 +5184,7 @@ async fn ensure_youtube_series_sidecars(
                 .await
                 .with_context(|| format!("使用项目统一下载器下载{platform}剧集封面失败"))
             {
-                let _ = remove_file_if_exists(&temporary).await;
+                remove_download_temp(&temporary).await;
                 return Err(error);
             }
             replace_file(&temporary, &target).await?;
@@ -5307,7 +5307,7 @@ async fn download_youtube_upper_face(
                 .await
                 .with_context(|| format!("使用项目统一下载器下载{platform} UP头像失败"))
             {
-                let _ = remove_file_if_exists(&temporary).await;
+                remove_download_temp(&temporary).await;
                 return Err(error);
             }
             replace_file(&temporary, &face_path).await?;
@@ -5324,7 +5324,7 @@ async fn download_youtube_upper_face(
                 .await
                 .with_context(|| format!("写入{platform} UP主 NFO 临时文件失败: {}", temporary.display()))
             {
-                let _ = remove_file_if_exists(&temporary).await;
+                remove_download_temp(&temporary).await;
                 return Err(error);
             }
             replace_file(&temporary, &person_nfo_path).await?;
@@ -5402,7 +5402,7 @@ async fn download_youtube_upper_face(
             .await
             .with_context(|| format!("使用项目统一下载器下载{platform} UP头像失败"))
         {
-            let _ = remove_file_if_exists(&temporary).await;
+            remove_download_temp(&temporary).await;
             return Err(error);
         }
         replace_file(&temporary, &face_path).await?;
@@ -5433,7 +5433,7 @@ async fn download_youtube_upper_face(
             .await
             .with_context(|| format!("写入{platform} UP主 NFO 临时文件失败: {}", temporary.display()))
         {
-            let _ = remove_file_if_exists(&temporary).await;
+            remove_download_temp(&temporary).await;
             return Err(error);
         }
         replace_file(&temporary, &person_nfo_path).await?;
@@ -6097,6 +6097,15 @@ async fn replace_file(source: &Path, target: &Path) -> Result<()> {
     tokio::fs::rename(source, target)
         .await
         .with_context(|| format!("保存下载文件失败: {}", target.display()))
+}
+
+/// 失败时清理临时文件及其断点续传状态文件。
+///
+/// UP 头像 / 剧集封面这类「按 UP 或剧集共享」的产物用带随机后缀的临时名，
+/// 失败后必须连同 `<临时名>.resume` 一起删掉，否则共享目录里会不断堆积残留。
+async fn remove_download_temp(temporary: &Path) {
+    let _ = remove_file_if_exists(temporary).await;
+    let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(temporary)).await;
 }
 
 async fn remove_file_if_exists(path: &Path) -> Result<()> {
@@ -7275,6 +7284,22 @@ mod tests {
     }
 
     #[test]
+    fn unique_download_path_isolates_concurrent_shared_assets() {
+        // UP 头像 / 剧集封面按 UP（或剧集）共享同一个目标路径，多个视频并发下载时
+        // 必须各自使用互不相同的临时文件：否则先完成的任务 rename 走临时文件后，
+        // 另一个任务会读到 0 字节，报「断点续传后文件大小不一致: 0 != N」。
+        let target = Path::new("people/白铭/folder.jpg");
+        let first = unique_download_path(target);
+        let second = unique_download_path(target);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), target.parent());
+        let name = first.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("folder.jpg."), "临时名应保留目标名: {name}");
+        assert!(name.ends_with(".download"), "临时名应以 .download 结尾: {name}");
+        assert_ne!(name, "folder.download", "不能退化成所有任务共用的固定临时名");
+    }
+
+    #[test]
     fn startup_skips_recently_scanned_sources() {
         let now = chrono::Local::now().naive_local();
         let recent = now.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -7288,7 +7313,7 @@ mod tests {
     use super::{
         canonical_channel_url, checksum_for_release_asset, collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
-        normalize_source_type, parse_youtube_live_chat, resolve_source_url, should_proxy_ytdlp_url, source_scanned_recently, youtube_cookie_jar,
+        normalize_source_type, parse_youtube_live_chat, resolve_source_url, should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
         youtube_page_is_logged_out, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
         ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
     };
