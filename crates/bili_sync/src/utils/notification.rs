@@ -170,6 +170,12 @@ impl NotificationClient {
         }
 
         if summary.total_new_videos < self.config.notification_min_videos {
+            // 阈值没达到时明确写一行 INFO：否则用户只会看到「没有推送」，
+            // 分不清是没内容可推还是推送坏了。
+            info!(
+                "本轮新增视频 {} 个，未达到推送阈值 {}，跳过扫描完成推送",
+                summary.total_new_videos, self.config.notification_min_videos
+            );
             debug!(
                 "新增视频数量({})未达到推送阈值({})",
                 summary.total_new_videos, self.config.notification_min_videos
