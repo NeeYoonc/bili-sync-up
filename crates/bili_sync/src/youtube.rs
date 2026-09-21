@@ -3168,7 +3168,17 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
     active.update(db).await?;
     notify_video_sources_changed();
     if added > 0 {
-        info!(source_id = source.id, added, "抖音视频源发现新作品");
+        // 与 YouTube/TikTok 口径保持一致：写清是哪个源、发现了几个作品，
+        // 否则日志里只有一句「发现新作品」，看不出归属与数量。
+        info!(
+            platform = source_platform_label(source),
+            source_id = source.id,
+            added,
+            "{}视频源「{}」发现 {} 个新视频",
+            source_platform_label(source),
+            source.name,
+            added
+        );
         notify_videos_changed();
         notify_queue_status_changed();
     }

@@ -15,6 +15,7 @@ use crate::task::TASK_CONTROLLER;
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::file_logger;
 use crate::utils::live_updates::notify_video_sources_changed;
+use crate::utils::notification::SourceScanResult;
 use crate::utils::scan_collector::ScanCollector;
 use crate::utils::scan_id_tracker::{
     get_last_scanned_ids, group_sources_by_new_old, update_last_scanned_ids, LastScannedIds, MaxIdRecorder, SourceType,
@@ -699,6 +700,94 @@ async fn init_all_sources(
     Ok(())
 }
 
+/// 单个平台的扫描汇总（日志里要写平台名，不能笼统写成「外源」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlatformScanTotals {
+    /// 平台名，与「扫描完成」推送里的标签一致（抖音 / YouTube / TikTok）。
+    label: String,
+    /// 该平台本轮扫描成功的源数量。
+    sources: usize,
+    /// 该平台本轮新增的作品（视频/图文）数量。
+    new_videos: usize,
+}
+
+/// YouTube/抖音/TikTok 本轮扫描结果的汇总，按平台分开记账。
+///
+/// 每轮的扫描日志与「扫描完成」推送共用这份口径：只统计扫描成功的源，
+/// 扫描失败的源另有单独告警，不混进这里的数字。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ExternalScanTotals {
+    /// 本轮扫描成功的外源数量。
+    sources: usize,
+    /// 本轮外源新增的作品（视频/图文）数量。
+    new_videos: usize,
+    /// 本轮扫到新作品的外源数量。
+    sources_with_new_content: usize,
+    /// 按平台拆分的结果，顺序与扫描顺序一致。
+    platforms: Vec<PlatformScanTotals>,
+}
+
+impl ExternalScanTotals {
+    fn from_results(results: &[SourceScanResult]) -> Self {
+        let mut platforms: Vec<PlatformScanTotals> = Vec::new();
+        for result in results {
+            let new_videos = result.new_videos.len();
+            match platforms.iter_mut().find(|platform| platform.label == result.source_type) {
+                Some(platform) => {
+                    platform.sources += 1;
+                    platform.new_videos += new_videos;
+                }
+                None => platforms.push(PlatformScanTotals {
+                    label: result.source_type.clone(),
+                    sources: 1,
+                    new_videos,
+                }),
+            }
+        }
+        Self {
+            sources: results.len(),
+            new_videos: results.iter().map(|result| result.new_videos.len()).sum(),
+            sources_with_new_content: results.iter().filter(|result| !result.new_videos.is_empty()).count(),
+            platforms,
+        }
+    }
+
+    /// 来源构成文本，例如 `B站 15 + 抖音 7 + YouTube 2`。
+    fn source_breakdown(&self, bilibili_sources: usize) -> String {
+        let mut parts = vec![format!("B站 {bilibili_sources}")];
+        parts.extend(
+            self.platforms
+                .iter()
+                .map(|platform| format!("{} {}", platform.label, platform.sources)),
+        );
+        parts.join(" + ")
+    }
+
+    /// 平台构成文本（不含 B 站），例如 `抖音 7、YouTube 2`。
+    fn platform_breakdown(&self) -> String {
+        self.platforms
+            .iter()
+            .map(|platform| format!("{} {}", platform.label, platform.sources))
+            .collect::<Vec<_>>()
+            .join("、")
+    }
+
+    /// 新增作品文本（按平台），例如 `抖音 2 个、YouTube 1 个`；没有新增时是 `无`。
+    fn new_video_breakdown(&self) -> String {
+        let parts: Vec<String> = self
+            .platforms
+            .iter()
+            .filter(|platform| platform.new_videos > 0)
+            .map(|platform| format!("{} {} 个", platform.label, platform.new_videos))
+            .collect();
+        if parts.is_empty() {
+            "无".to_string()
+        } else {
+            parts.join("、")
+        }
+    }
+}
+
 /// 启动周期下载视频的任务
 pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
     let bili_client = BiliClient::new(String::new());
@@ -787,6 +876,10 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                 Vec::new()
             }
         };
+
+        // 外源汇总口径：日志与「扫描完成」推送共用同一份计数，
+        // 避免每轮日志只报 B 站源、看不出外源扫到了什么。
+        let external_totals = ExternalScanTotals::from_results(&external_scan_results);
 
         // 重新初始化所有视频源（确保源初始化是幂等的）
         if let Err(e) = init_all_sources(&config, &optimized_connection).await {
@@ -1315,38 +1408,55 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
 
             // mmap自动处理数据持久化，不需要手动同步
 
-            info!("本轮扫描完成 - 视频源数量: {}", ordered_sources.len());
+            // B 站源与外源共用一份汇总：本轮日志里的源数量、有新内容的源数量
+            // 都与后面的「扫描完成」推送口径一致，不再出现「日志说均无新内容、
+            // 实际外源已经扫到并下载了新作品」的矛盾。
+            let scanned_source_total = processed_sources + external_totals.sources;
+            let sources_with_new_content_total = sources_with_new_content + external_totals.sources_with_new_content;
+
+            info!(
+                "本轮扫描完成 - 视频源数量: {}（{}），新增作品: {}",
+                ordered_sources.len() + external_totals.sources,
+                external_totals.source_breakdown(ordered_sources.len()),
+                external_totals.new_video_breakdown()
+            );
 
             // 标记任务状态为结束
             crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
 
             if processed_sources == ordered_sources.len() {
-                if sources_with_new_content > 0 {
+                if sources_with_new_content_total > 0 {
                     info!(
                         "本轮任务执行完毕，成功扫描 {} 个视频源，其中 {} 个源有新内容",
-                        processed_sources, sources_with_new_content
+                        scanned_source_total, sources_with_new_content_total
                     );
                 } else {
                     info!(
                         "本轮任务执行完毕，成功扫描 {} 个视频源（均无新内容）",
-                        processed_sources
+                        scanned_source_total
                     );
                 }
             } else if processed_sources > 0 {
-                if sources_with_new_content > 0 {
+                if sources_with_new_content_total > 0 {
                     info!(
                         "本轮任务执行完毕，成功扫描 {} 个视频源（其中 {} 个有新内容），{} 个源处理失败",
-                        processed_sources,
-                        sources_with_new_content,
+                        scanned_source_total,
+                        sources_with_new_content_total,
                         ordered_sources.len() - processed_sources
                     );
                 } else {
                     info!(
                         "本轮任务执行完毕，成功扫描 {} 个视频源（均无新内容），{} 个源处理失败",
-                        processed_sources,
+                        scanned_source_total,
                         ordered_sources.len() - processed_sources
                     );
                 }
+            } else if external_totals.sources > 0 {
+                warn!(
+                    "本轮任务执行完毕，B站 {} 个视频源均处理失败（{} 本轮扫描成功，详情见扫描推送）",
+                    ordered_sources.len(),
+                    external_totals.platform_breakdown()
+                );
             } else {
                 warn!("本轮任务执行完毕，所有 {} 个视频源均处理失败", ordered_sources.len());
             }
@@ -1355,11 +1465,8 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
         // 生成扫描摘要并发送推送通知：外源结果与 B 站源合并，
         // 推送门槛（最少新增视频数）也按合并后的总数判断。
         let mut scan_summary = scan_collector.generate_summary();
-        scan_summary.total_sources += external_scan_results.len();
-        scan_summary.total_new_videos += external_scan_results
-            .iter()
-            .map(|result| result.new_videos.len())
-            .sum::<usize>();
+        scan_summary.total_sources += external_totals.sources;
+        scan_summary.total_new_videos += external_totals.new_videos;
         scan_summary.source_results.extend(external_scan_results);
         if let Err(e) = crate::utils::notification::send_scan_notification(scan_summary).await {
             warn!("发送扫描完成推送失败: {}", e);
@@ -1465,6 +1572,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::notification::NewVideoInfo;
     use bili_sync_migration::MigratorTrait;
     use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
     use sea_orm::SqlxSqliteConnector;
@@ -1492,6 +1600,54 @@ mod tests {
             .await
             .expect("应能完成测试数据库迁移");
         db
+    }
+
+    /// 每轮扫描日志与「扫描完成」推送共用外源汇总：源数量、有新内容的源数量、
+    /// 新增作品数量都必须覆盖外源，否则日志会出现「均无新内容」的假象。
+    #[test]
+    fn external_scan_totals_cover_all_platforms_for_round_summary() {
+        let video = |title: &str, url: &str| NewVideoInfo {
+            title: title.to_string(),
+            bvid: "7687945613371288975".to_string(),
+            pubtime: Some("20260921".to_string()),
+            episode_number: None,
+            video_id: None,
+            url: Some(url.to_string()),
+        };
+        let results = vec![
+            SourceScanResult {
+                source_type: "抖音".to_string(),
+                source_name: "001".to_string(),
+                new_videos: vec![
+                    video("小肚小肚", "https://www.douyin.com/video/1"),
+                    video("你饿不饿", "https://www.douyin.com/video/2"),
+                ],
+            },
+            SourceScanResult {
+                source_type: "YouTube".to_string(),
+                source_name: "HDR VISION".to_string(),
+                new_videos: Vec::new(),
+            },
+            SourceScanResult {
+                source_type: "抖音".to_string(),
+                source_name: "开心蛙蛙".to_string(),
+                new_videos: vec![video("第三批", "https://www.douyin.com/video/3")],
+            },
+        ];
+
+        let totals = ExternalScanTotals::from_results(&results);
+        assert_eq!(totals.sources, 3, "外源数量应包含没有新作品的源");
+        assert_eq!(totals.new_videos, 3, "新增作品数量应覆盖所有外源");
+        assert_eq!(totals.sources_with_new_content, 2, "两个抖音源都有新作品");
+        // 日志里必须写平台名，不能写成笼统的「外源」。
+        assert_eq!(totals.source_breakdown(15), "B站 15 + 抖音 2 + YouTube 1");
+        assert_eq!(totals.platform_breakdown(), "抖音 2、YouTube 1");
+        assert_eq!(totals.new_video_breakdown(), "抖音 3 个");
+
+        let empty = ExternalScanTotals::from_results(&[]);
+        assert_eq!(empty.sources, 0, "没有外源时应为 0");
+        assert_eq!(empty.source_breakdown(15), "B站 15", "没有外源时只写 B 站");
+        assert_eq!(empty.new_video_breakdown(), "无", "没有新增作品时写「无」");
     }
 
     #[test]
