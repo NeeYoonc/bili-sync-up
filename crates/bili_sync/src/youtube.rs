@@ -43,6 +43,7 @@ use crate::external_media::{ExternalMediaFormat, ExternalMediaMetadata, External
 use crate::task::TASK_CONTROLLER;
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::live_updates::{notify_queue_status_changed, notify_video_sources_changed, notify_videos_changed};
+use crate::utils::notification::{NewVideoInfo, SourceScanResult};
 use crate::utils::status::{PageStatus, STATUS_OK, VideoStatus};
 use crate::utils::time_format::now_standard_string;
 
@@ -2584,21 +2585,26 @@ fn skip_douyin_source_scan_at_startup(source: &youtube_source::Model) -> bool {
         && source_scanned_recently(source.last_scan_at.as_deref(), crate::config::reload_config().interval)
 }
 
+/// 扫描并下载所有已启用的外源（YouTube / 抖音 / TikTok）。
+///
+/// 返回本轮每个外源的扫描结果，由调用方与 B 站源合并后一起发「扫描完成」推送，
+/// 保证外源与 B 站源的通知行为一致（只挂外源的部署也能收到推送）。
 pub async fn process_scheduled_sources(
     db: &DatabaseConnection,
     downloader: Arc<UnifiedDownloader>,
     concurrent_limit: usize,
-) -> Result<()> {
+) -> Result<Vec<SourceScanResult>> {
     let sources = youtube_source::Entity::find()
         .filter(youtube_source::Column::Enabled.eq(true))
         .all(db)
         .await?;
+    let mut results: Vec<SourceScanResult> = Vec::new();
     if sources.is_empty() {
-        return Ok(());
+        return Ok(results);
     }
     if let Err(error) = ensure_ytdlp_available().await {
         warn!(error = %error, "已配置 YouTube/抖音视频源，但 yt-dlp 自动安装失败；跳过本轮扫描");
-        return Ok(());
+        return Ok(results);
     }
     recover_interrupted_downloads(db).await?;
     let startup_round = EXTERNAL_STARTUP_SCAN_PENDING.swap(false, Ordering::SeqCst);
@@ -2610,12 +2616,12 @@ pub async fn process_scheduled_sources(
         );
         tokio::time::sleep(Duration::from_secs(STARTUP_EXTERNAL_SCAN_GRACE_SECONDS)).await;
         if TASK_CONTROLLER.is_paused() {
-            return Ok(());
+            return Ok(results);
         }
     }
     for source in &sources {
         if TASK_CONTROLLER.is_paused() {
-            return Ok(());
+            return Ok(results);
         }
         if startup_round && skip_douyin_source_scan_at_startup(source) {
             debug!(
@@ -2626,6 +2632,7 @@ pub async fn process_scheduled_sources(
             );
             continue;
         }
+        let scan_started_at = now_standard_string();
         let mut scan_result = scan_source(db, source).await;
         if let Err(error) = scan_result.as_ref() {
             if is_douyin_source(source) && crate::douyin::is_douyin_risk_error(error) {
@@ -2653,6 +2660,10 @@ pub async fn process_scheduled_sources(
                     scan_result = scan_source(db, source).await;
                 }
             }
+        }
+        // 外源新增视频并入「扫描完成」推送：与 B 站源共用同一份扫描摘要。
+        if let Ok(added) = scan_result.as_ref() {
+            results.push(collect_external_scan_result(db, source, &scan_started_at, *added).await);
         }
         if let Err(error) = scan_result {
             let now = Instant::now();
@@ -2708,10 +2719,60 @@ pub async fn process_scheduled_sources(
         }
     }
     if TASK_CONTROLLER.is_paused() {
-        return Ok(());
+        return Ok(results);
     }
     download_pending(db, downloader.clone(), concurrent_limit.max(1)).await?;
-    Ok(())
+    Ok(results)
+}
+
+/// 汇总单个外源本轮新增的作品，供「扫描完成」推送使用。
+///
+/// 外源扫描函数只返回新增数量，这里按 `created_at >= 本轮扫描开始时间` 取回本轮
+/// 真正新入库的行，标题/发布时间/链接与 B 站源保持一致的结构。
+async fn collect_external_scan_result(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+    scan_started_at: &str,
+    added: u64,
+) -> SourceScanResult {
+    let platform = source_platform_label(source);
+    let mut new_videos = Vec::new();
+    if added > 0 {
+        match youtube_video::Entity::find()
+            .filter(youtube_video::Column::SourceId.eq(source.id))
+            .filter(youtube_video::Column::CreatedAt.gte(scan_started_at))
+            .all(db)
+            .await
+        {
+            Ok(rows) => {
+                new_videos = rows
+                    .into_iter()
+                    .map(|row| NewVideoInfo {
+                        title: row.title,
+                        bvid: row.youtube_id,
+                        pubtime: row.published_at,
+                        episode_number: row.episode_number,
+                        video_id: None,
+                        url: Some(row.url),
+                    })
+                    .collect();
+            }
+            Err(error) => {
+                warn!(
+                    source_id = source.id,
+                    error = %error,
+                    "读取{}视频源「{}」本轮新增作品失败，推送中仅保留数量",
+                    platform,
+                    source.name
+                );
+            }
+        }
+    }
+    SourceScanResult {
+        source_type: platform.to_string(),
+        source_name: source.name.clone(),
+        new_videos,
+    }
 }
 
 /// 从 yt-dlp 平铺列表项提取封面地址：优先顶层 `thumbnail`，否则回退到
@@ -7311,7 +7372,8 @@ mod tests {
     }
 
     use super::{
-        canonical_channel_url, checksum_for_release_asset, collect_youtube_channel_renderers, current_ytdlp_package,
+        canonical_channel_url, checksum_for_release_asset, collect_external_scan_result,
+        collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
         normalize_source_type, parse_youtube_live_chat, resolve_source_url, should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
         youtube_page_is_logged_out, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
@@ -7319,6 +7381,90 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::Path;
+
+    use bili_sync_migration::MigratorTrait;
+    use sea_orm::ActiveModelTrait;
+
+    /// 建一个已完成迁移的临时测试库（单连接 WAL 文件库，避免 :memory: 多连接互不可见）。
+    async fn create_notification_test_db(prefix: &str) -> sea_orm::DatabaseConnection {
+        use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+        use sea_orm::SqlxSqliteConnector;
+
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-{}-{}", prefix, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("应能创建临时数据库目录");
+        let db_path = dir.join("data.sqlite");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("应能连接测试数据库");
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+
+        bili_sync_migration::Migrator::up(&db, None)
+            .await
+            .expect("应能完成测试数据库迁移");
+        db
+    }
+
+    async fn insert_external_video(
+        db: &sea_orm::DatabaseConnection,
+        source_id: i32,
+        youtube_id: &str,
+        title: &str,
+        created_at: &str,
+    ) {
+        super::youtube_video::ActiveModel {
+            source_id: super::Set(source_id),
+            youtube_id: super::Set(youtube_id.to_string()),
+            url: super::Set(format!("https://www.youtube.com/watch?v={youtube_id}")),
+            title: super::Set(title.to_string()),
+            created_at: super::Set(created_at.to_string()),
+            updated_at: super::Set(created_at.to_string()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试视频");
+    }
+
+    /// 「扫描完成」推送只应包含本轮扫描新入库的外源作品，历史作品不能混进来。
+    #[tokio::test]
+    async fn collect_external_scan_result_only_reads_videos_added_by_this_scan() {
+        let db = create_notification_test_db("external-scan-summary").await;
+        let source = sample_external_source("channel");
+        let source_id = source.id;
+        let source_row: super::youtube_source::ActiveModel = source.clone().into();
+        source_row.insert(&db).await.expect("应能插入测试视频源");
+
+        insert_external_video(&db, source_id, "oldOne", "上一轮就有的视频", "2026-09-21 09:00:00").await;
+        insert_external_video(&db, source_id, "newOne", "本轮新增视频 A", "2026-09-21 10:00:00").await;
+        insert_external_video(&db, source_id, "newTwo", "本轮新增视频 B", "2026-09-21 10:00:05").await;
+
+        let result = collect_external_scan_result(&db, &source, "2026-09-21 10:00:00", 2).await;
+
+        assert_eq!(result.source_type, "YouTube");
+        assert_eq!(result.source_name, source.name);
+        assert_eq!(result.new_videos.len(), 2, "只应统计本轮新增的作品");
+        let titles: Vec<&str> = result.new_videos.iter().map(|video| video.title.as_str()).collect();
+        assert!(titles.contains(&"本轮新增视频 A"), "titles: {titles:?}");
+        assert!(titles.contains(&"本轮新增视频 B"), "titles: {titles:?}");
+        assert!(!titles.contains(&"上一轮就有的视频"), "历史作品不应进推送: {titles:?}");
+        assert!(
+            result
+                .new_videos
+                .iter()
+                .all(|video| video.url.as_deref().is_some_and(|url| url.starts_with("https://"))),
+            "外源视频应带上自身链接: {:?}",
+            result.new_videos
+        );
+    }
 
     fn sample_external_source(source_type: &str) -> super::youtube_source::Model {
         super::youtube_source::Model {

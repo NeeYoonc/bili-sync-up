@@ -135,5 +135,6 @@ pub fn create_new_video_info(title: &str, bvid: &str) -> NewVideoInfo {
         pubtime: None,
         episode_number: None,
         video_id: None,
+        url: None,
     }
 }

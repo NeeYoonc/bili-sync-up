@@ -779,9 +779,14 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
         .await;
         TASK_CONTROLLER.set_scanning(false);
         crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
-        if let Err(error) = youtube_result {
-            warn!(error = %error, "执行 YouTube 视频源扫描/下载失败");
-        }
+        // 外源（YouTube/抖音/TikTok）本轮扫描结果：稍后与 B 站源合并进「扫描完成」推送。
+        let external_scan_results = match youtube_result {
+            Ok(results) => results,
+            Err(error) => {
+                warn!(error = %error, "执行 YouTube 视频源扫描/下载失败");
+                Vec::new()
+            }
+        };
 
         // 重新初始化所有视频源（确保源初始化是幂等的）
         if let Err(e) = init_all_sources(&config, &optimized_connection).await {
@@ -826,6 +831,10 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
         } else {
             info!("开始执行本轮视频下载任务，共 {} 个启用的视频源", due_sources_count);
         }
+
+        // 扫描收集器：收集 B 站源扫描结果，稍后与外源结果合并后统一推送，
+        // 保证「只挂外源」或「本轮没有启用 B 站源」的部署也能收到扫描完成通知。
+        let mut scan_collector = ScanCollector::new();
 
         'inner: {
             // 如果没有启用的视频源，跳过扫描
@@ -978,9 +987,6 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
 
             // 合并新旧源，新源在前
             let ordered_sources = [new_sources, old_sources].concat();
-
-            // 初始化扫描收集器来统计本轮扫描结果
-            let mut scan_collector = ScanCollector::new();
 
             // 初始化ID记录器
             let mut max_id_recorder = MaxIdRecorder::new();
@@ -1311,12 +1317,6 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
 
             info!("本轮扫描完成 - 视频源数量: {}", ordered_sources.len());
 
-            // 生成扫描摘要并发送推送通知
-            let scan_summary = scan_collector.generate_summary();
-            if let Err(e) = crate::utils::notification::send_scan_notification(scan_summary).await {
-                warn!("发送扫描完成推送失败: {}", e);
-            }
-
             // 标记任务状态为结束
             crate::utils::task_notifier::TASK_STATUS_NOTIFIER.set_finished();
 
@@ -1350,6 +1350,19 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             } else {
                 warn!("本轮任务执行完毕，所有 {} 个视频源均处理失败", ordered_sources.len());
             }
+        }
+
+        // 生成扫描摘要并发送推送通知：外源结果与 B 站源合并，
+        // 推送门槛（最少新增视频数）也按合并后的总数判断。
+        let mut scan_summary = scan_collector.generate_summary();
+        scan_summary.total_sources += external_scan_results.len();
+        scan_summary.total_new_videos += external_scan_results
+            .iter()
+            .map(|result| result.new_videos.len())
+            .sum::<usize>();
+        scan_summary.source_results.extend(external_scan_results);
+        if let Err(e) = crate::utils::notification::send_scan_notification(scan_summary).await {
+            warn!("发送扫描完成推送失败: {}", e);
         }
 
         // ========== 扫描后处理阶段 ==========

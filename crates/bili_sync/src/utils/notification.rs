@@ -106,6 +106,8 @@ pub struct NewVideoInfo {
     pub pubtime: Option<String>, // 使用字符串格式的北京时间
     pub episode_number: Option<i32>,
     pub video_id: Option<i32>, // 添加视频ID字段，用于过滤删除队列中的视频
+    /// 外源（YouTube/抖音/TikTok）视频链接；为空时按 B 站 BV 号拼链接。
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -907,6 +909,10 @@ impl NotificationClient {
                         "UP主投稿" => "🎯",
                         "稍后再看" => "⏰",
                         "番剧" => "📺",
+                        // 外源与 B 站源共用同一份扫描摘要，这里补平台图标。
+                        "YouTube" => "▶️",
+                        "抖音" => "🎵",
+                        "TikTok" => "🎶",
                         _ => "📄",
                     };
 
@@ -954,8 +960,13 @@ impl NotificationClient {
 
                         // 清理视频标题中的特殊字符
                         let clean_title = Self::sanitize_for_serverchan(&video.title);
-                        let mut video_line =
-                            format!("- [{}](https://www.bilibili.com/video/{})", clean_title, video.bvid);
+                        // 外源视频用自身链接（YouTube/抖音/TikTok），B 站视频按 BV 号拼链接。
+                        let video_url = video
+                            .url
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| format!("https://www.bilibili.com/video/{}", video.bvid));
+                        let mut video_line = format!("- [{}]({})", clean_title, video_url);
 
                         // 添加额外信息
                         if source_result.source_type == "番剧" && video.episode_number.is_some() {
@@ -1457,6 +1468,57 @@ mod tests {
     use std::sync::Arc;
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
+
+    /// 扫描完成推送：外源视频用自身链接与平台图标，B 站视频仍按 BV 号拼链接。
+    #[test]
+    fn scan_message_links_external_videos_to_their_platform() {
+        let client = NotificationClient::new(NotificationConfig::default());
+        let summary = ScanSummary {
+            total_sources: 2,
+            total_new_videos: 2,
+            scan_duration: Duration::from_secs(90),
+            source_results: vec![
+                SourceScanResult {
+                    source_type: "YouTube".to_string(),
+                    source_name: "HDR VISION".to_string(),
+                    new_videos: vec![NewVideoInfo {
+                        title: "4K 测试视频".to_string(),
+                        bvid: "7zJqrGyiBRs".to_string(),
+                        pubtime: Some("20260921120000".to_string()),
+                        episode_number: None,
+                        video_id: None,
+                        url: Some("https://www.youtube.com/watch?v=7zJqrGyiBRs".to_string()),
+                    }],
+                },
+                SourceScanResult {
+                    source_type: "UP主投稿".to_string(),
+                    source_name: "测试UP".to_string(),
+                    new_videos: vec![NewVideoInfo {
+                        title: "B站视频".to_string(),
+                        bvid: "BV1xx411c7mD".to_string(),
+                        pubtime: None,
+                        episode_number: None,
+                        video_id: None,
+                        url: None,
+                    }],
+                },
+            ],
+        };
+
+        let (title, content) = client.format_scan_message(&summary);
+        assert!(title.contains("扫描完成"), "title: {title}");
+        assert!(content.contains("扫描视频源: 2个"), "content: {content}");
+        assert!(content.contains("新增视频: 2个"), "content: {content}");
+        assert!(content.contains("▶️"), "外源应有平台图标: {content}");
+        assert!(
+            content.contains("(https://www.youtube.com/watch?v=7zJqrGyiBRs)"),
+            "外源视频应使用自身链接: {content}"
+        );
+        assert!(
+            content.contains("https://www.bilibili.com/video/BV1xx411c7mD"),
+            "B 站视频仍按 BV 号拼链接: {content}"
+        );
+    }
 
     #[test]
     fn test_wecom_response_success() {
