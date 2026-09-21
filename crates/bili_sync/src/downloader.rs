@@ -480,12 +480,14 @@ impl Downloader {
                 Ok(r) => match r.error_for_status() {
                     Ok(r) => r,
                     Err(e) => {
-                        error!("HTTP状态码错误: {:#}", e);
+                        // 单次尝试的失败由上层统一分类：能刷新直链重试的按 debug 记录，
+                        // 真正无法恢复时上层才会写 warn/error，避免自愈事件刷屏。
+                        debug!("HTTP状态码错误: {:#}", e);
                         return Err(e.into());
                     }
                 },
                 Err(e) => {
-                    error!("HTTP请求失败: {:#}", e);
+                    debug!("HTTP请求失败: {:#}", e);
                     return Err(e.into());
                 }
             },
@@ -528,7 +530,7 @@ impl Downloader {
                     break;
                 }
                 Err(error) => {
-                    error!("下载过程中出错: {:#}", error);
+                    debug!("下载过程中出错: {:#}", error);
                     return Err(error.into());
                 }
             }
@@ -924,8 +926,9 @@ impl Downloader {
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) => {
-                    // 保留部分下载数据与断点状态，下次重试可续传而不是从头下载
-                    warn!("下载资源「{}」失败: {error:#}", path.display());
+                    // 保留部分下载数据与断点状态，下次重试可续传而不是从头下载；
+                    // 调用方会按错误类型决定记录级别（可自愈的走 debug）。
+                    debug!("下载资源「{}」失败: {error:#}", path.display());
                     last_error = Some(error);
                 }
             }
@@ -970,7 +973,7 @@ impl Downloader {
                         if is_certificate_name_mismatch_error(&err) {
                             mark_bad_cdn_host(&candidate, &err);
                         }
-                        warn!("下载资源「{}」失败: {:#}", path.display(), err);
+                        debug!("下载资源「{}」失败: {:#}", path.display(), err);
                         last_error = Some(err);
                     }
                 }
