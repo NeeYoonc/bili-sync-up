@@ -772,14 +772,19 @@ impl ExternalScanTotals {
             .join("、")
     }
 
-    /// 新增作品文本（按平台），例如 `抖音 2 个、YouTube 1 个`；没有新增时是 `无`。
-    fn new_video_breakdown(&self) -> String {
-        let parts: Vec<String> = self
-            .platforms
-            .iter()
-            .filter(|platform| platform.new_videos > 0)
-            .map(|platform| format!("{} {} 个", platform.label, platform.new_videos))
-            .collect();
+    /// 新增作品文本（B 站与各平台分开列），例如 `B站 1 个、抖音 2 个`；
+    /// 整轮没有新增时是 `无`。B 站数量直接取本轮推送用的那份统计，保证两边一致。
+    fn new_video_breakdown(&self, bilibili_new_videos: usize) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if bilibili_new_videos > 0 {
+            parts.push(format!("B站 {bilibili_new_videos} 个"));
+        }
+        parts.extend(
+            self.platforms
+                .iter()
+                .filter(|platform| platform.new_videos > 0)
+                .map(|platform| format!("{} {} 个", platform.label, platform.new_videos)),
+        );
         if parts.is_empty() {
             "无".to_string()
         } else {
@@ -1418,7 +1423,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                 "本轮扫描完成 - 视频源数量: {}（{}），新增作品: {}",
                 ordered_sources.len() + external_totals.sources,
                 external_totals.source_breakdown(ordered_sources.len()),
-                external_totals.new_video_breakdown()
+                external_totals.new_video_breakdown(scan_collector.total_new_videos())
             );
 
             // 标记任务状态为结束
@@ -1642,12 +1647,17 @@ mod tests {
         // 日志里必须写平台名，不能写成笼统的「外源」。
         assert_eq!(totals.source_breakdown(15), "B站 15 + 抖音 2 + YouTube 1");
         assert_eq!(totals.platform_breakdown(), "抖音 2、YouTube 1");
-        assert_eq!(totals.new_video_breakdown(), "抖音 3 个");
+        // 只有外源有新增时，B 站不占位。
+        assert_eq!(totals.new_video_breakdown(0), "抖音 3 个");
+        // B 站有新增时要一起列出来，否则日志会出现「新增作品: 无」却真的新增了的假象。
+        assert_eq!(totals.new_video_breakdown(1), "B站 1 个、抖音 3 个");
+        assert_eq!(totals.new_video_breakdown(2), "B站 2 个、抖音 3 个");
 
         let empty = ExternalScanTotals::from_results(&[]);
         assert_eq!(empty.sources, 0, "没有外源时应为 0");
         assert_eq!(empty.source_breakdown(15), "B站 15", "没有外源时只写 B 站");
-        assert_eq!(empty.new_video_breakdown(), "无", "没有新增作品时写「无」");
+        assert_eq!(empty.new_video_breakdown(0), "无", "整轮没有新增时写「无」");
+        assert_eq!(empty.new_video_breakdown(1), "B站 1 个", "只有 B 站有新增时写 B 站");
     }
 
     #[test]
