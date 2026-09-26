@@ -379,6 +379,10 @@ pub struct VideoInfo {
     pub valid: bool,
     pub is_charge_video: bool,
     pub is_image_post: bool,
+    /// 图集作品是否只由视频段组成（抖音多段视频/动态）：这类作品没有可查看的原图，
+    /// 前端据此显示「动态」徽标，并区分「本来没有原图」与「原图还没下载完」。
+    #[serde(default)]
+    pub image_post_video_only: bool,
     #[serde(default)]
     pub is_story: bool, // 抖音「日常」（story）作品标记
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -418,6 +422,7 @@ impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> f
             valid,
             is_charge_video,
             is_image_post: false,
+            image_post_video_only: false,
             is_story: false,
             image_urls: Vec::new(),
             bangumi_title: None, // 默认为None，将在API层根据视频类型填充

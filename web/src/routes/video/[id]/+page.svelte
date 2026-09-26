@@ -46,6 +46,7 @@
 	let currentImageIndex = 0;
 	let imageUrls: string[] = [];
 	let isImagePost = false;
+	let imagePostVideoOnly = false;
 	let safeImageIndex = 0;
 	let deleteDialogOpen = false;
 	let deleting = false;
@@ -69,6 +70,8 @@
 		: 'aspect-ratio: 16/9; max-height: 70vh;';
 	$: imageUrls = videoData?.video.image_urls ?? [];
 	$: isImagePost = Boolean(videoData?.video.is_image_post);
+	// 只由视频段组成的图集（多段视频/动态）没有原图，不能再提示「图片尚未下载」
+	$: imagePostVideoOnly = Boolean(videoData?.video.image_post_video_only);
 	$: safeImageIndex = imageUrls.length > 0 ? Math.min(Math.max(currentImageIndex, 0), imageUrls.length - 1) : 0;
 
 	function videoDetailHref(videoId: number) {
@@ -1059,8 +1062,13 @@
 								{/if}
 
 								<!-- 播放按钮区域 -->
+								{#if imagePostVideoOnly}
+									<div class="text-muted-foreground mb-2 text-center text-xs">
+										本条作品由多段视频组成，没有可查看的原图；点「播放视频」查看合成后的完整视频。
+									</div>
+								{/if}
 								<div class="flex justify-center gap-2">
-									{#if isImagePost}
+									{#if isImagePost && !imagePostVideoOnly}
 										<Button
 											size="sm"
 											variant="default"

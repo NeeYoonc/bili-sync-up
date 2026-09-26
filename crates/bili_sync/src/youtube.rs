@@ -1862,11 +1862,15 @@ async fn unified_youtube_parts(
 ) -> (VideoInfo, PageInfo, VideoSourceTag) {
     let (video_status, page_status) = youtube_artifact_status(video, source).await;
     let output_path = video.output_path.clone();
-    let image_paths = youtube_image_post_paths(video);
+    let local_files = youtube_image_post_files(video);
+    let image_paths = local_files.images;
     // 抖音与 TikTok 都可能有图文作品（TikTok 侧为 photo post / 幻灯片），
     // 两者的图片目录约定一致，这里一起标记，供视频管理页与详情页显示图片。
     let is_image_post = (is_douyin_source(source) || crate::tiktok::is_tiktok_source(source))
-        && (video.is_image_post || !image_paths.is_empty());
+        && (video.is_image_post || !image_paths.is_empty() || local_files.has_video_segments);
+    // 只由视频段组成的图集（抖音多段视频 / 多段动态）没有可查看的原图：
+    // 卡片显示「动态」徽标，详情页不再提示「图片尚未下载」。
+    let image_post_video_only = is_image_post && local_files.has_video_segments && image_paths.is_empty();
     let image_urls = image_paths
         .iter()
         .enumerate()
@@ -1890,6 +1894,7 @@ async fn unified_youtube_parts(
             valid: true,
             is_charge_video: video.is_charge_video,
             is_image_post,
+            image_post_video_only,
             is_story: is_douyin_source(source) && video.is_story,
             image_urls,
             bangumi_title: None,
@@ -2508,31 +2513,53 @@ pub async fn unified_youtube_cover_path(db: &DatabaseConnection, id: i32) -> Res
         .filter(|path| path.is_file()))
 }
 
-fn youtube_image_post_paths(video: &youtube_video::Model) -> Vec<PathBuf> {
-    let Some(output_path) = video.output_path.as_deref().map(Path::new) else {
-        return Vec::new();
-    };
+/// 图集作品在磁盘上的落地情况：可查看的原图（不含视频段）与是否含视频段。
+#[derive(Default)]
+pub(crate) struct ImagePostLocalFiles {
+    pub(crate) images: Vec<PathBuf>,
+    /// 是否有视频段（抖音 live photo / 多段视频图集落成 `NN.mp4`）。
+    pub(crate) has_video_segments: bool,
+}
+
+/// 扫描图集作品的 `{stem}-images` 目录：图片段按序号排序，视频段只记标志位。
+/// 纯视频段图集（多段视频/动态）没有原图，卡片与详情页要靠这个标志位区分
+/// 「作品本来就没有原图」和「原图还没下载完」。
+pub(crate) fn image_post_local_files(output_path: &Path) -> ImagePostLocalFiles {
     let Ok(image_dir) = youtube_sidecar_path(output_path, "-images") else {
-        return Vec::new();
+        return ImagePostLocalFiles::default();
     };
     let Ok(entries) = std::fs::read_dir(image_dir) else {
-        return Vec::new();
+        return ImagePostLocalFiles::default();
     };
-    let mut paths = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|extension| {
-                        matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "webp")
-                    })
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths
+    let mut files = ImagePostLocalFiles::default();
+    for path in entries.filter_map(|entry| entry.ok()).map(|entry| entry.path()) {
+        if !path.is_file() {
+            continue;
+        }
+        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        match extension.to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" | "png" | "webp" => files.images.push(path),
+            // 合成中转片段（`NN.segment.mp4`）用完即清，不会被当成视频段；
+            // 万一残留也按视频段处理，最多只是标记为多段视频。
+            "mp4" | "mov" | "webm" => files.has_video_segments = true,
+            _ => {}
+        }
+    }
+    files.images.sort();
+    files
+}
+
+fn youtube_image_post_files(video: &youtube_video::Model) -> ImagePostLocalFiles {
+    match video.output_path.as_deref().map(Path::new) {
+        Some(output_path) => image_post_local_files(output_path),
+        None => ImagePostLocalFiles::default(),
+    }
+}
+
+fn youtube_image_post_paths(video: &youtube_video::Model) -> Vec<PathBuf> {
+    youtube_image_post_files(video).images
 }
 
 pub async fn unified_youtube_image_path(
@@ -2549,7 +2576,9 @@ pub async fn unified_youtube_image_path(
     let Some(source) = youtube_source::Entity::find_by_id(video.source_id).one(db).await? else {
         return Ok(None);
     };
-    if !is_douyin_source(&source) {
+    // 抖音与 TikTok 的图集原图都存在同一个 `-images` 目录里，两边都要放行，
+    // 否则 TikTok 图片贴在前端会显示「查看图片」但每张图都 404。
+    if !is_douyin_source(&source) && !crate::tiktok::is_tiktok_source(&source) {
         return Ok(None);
     }
     Ok(youtube_image_post_paths(&video).into_iter().nth(image_index - 1))
@@ -7355,6 +7384,49 @@ mod tests {
         let decoded = super::decode_command_bytes(gbk);
         assert!(decoded.contains("远程主机"), "decoded: {decoded}");
         assert!(decoded.contains("连接"), "decoded: {decoded}");
+    }
+
+    /// 图集落盘扫描：图片段进原图列表、视频段只记标志位，两者不能混淆——
+    /// 前端要靠「有视频段但没有原图」判断这是多段视频/动态作品。
+    #[test]
+    fn image_post_local_files_separates_images_from_video_segments() {
+        use std::fs;
+
+        let stamp = std::process::id();
+        let root = std::env::temp_dir().join(format!("bili-sync-image-post-scan-{stamp}"));
+        let _ = fs::remove_dir_all(&root);
+        let output = root.join("20260101000000-7678519182983467944.mp4");
+        let image_dir = root.join("20260101000000-7678519182983467944-images");
+        fs::create_dir_all(&image_dir).unwrap();
+        fs::write(image_dir.join("01.mp4"), b"video").unwrap();
+        fs::write(image_dir.join("02.jpg"), b"image").unwrap();
+        fs::write(image_dir.join("03.JPG"), b"image").unwrap();
+        fs::write(image_dir.join("04.segment.mp4"), b"clip").unwrap();
+        fs::write(image_dir.join("notes.txt"), b"text").unwrap();
+
+        let mixed = crate::youtube::image_post_local_files(&output);
+        assert!(mixed.has_video_segments, "有 mp4 段就要标记视频段");
+        let names = mixed
+            .images
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["02.jpg".to_string(), "03.JPG".to_string()], "只统计真正的原图");
+
+        // 纯视频段图集：没有原图，但必须被识别成图集（否则会显示成图片尚未下载）。
+        let video_only_dir = root.join("20260101000000-7689447727160205745-images");
+        fs::create_dir_all(&video_only_dir).unwrap();
+        fs::write(video_only_dir.join("01.mp4"), b"video").unwrap();
+        let video_only = crate::youtube::image_post_local_files(&root.join("20260101000000-7689447727160205745.mp4"));
+        assert!(video_only.has_video_segments);
+        assert!(video_only.images.is_empty());
+
+        // 还没下载（目录不存在）时两个标志都为空，前端继续显示「尚未下载」。
+        let missing = crate::youtube::image_post_local_files(&root.join("20260101000000-1.mp4"));
+        assert!(!missing.has_video_segments);
+        assert!(missing.images.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

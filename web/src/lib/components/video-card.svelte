@@ -39,6 +39,15 @@
 	// 抖音短剧付费与 B 站充电视频是两套文案
 	$: isDouyin = /^douyin-/.test(String(resourceId ?? ''));
 	$: isTikTok = /^tiktok-/.test(String(resourceId ?? ''));
+	// 图集作品分两种：带原图的「图文」和只由视频段组成的「动态」（多段视频），
+	// 后者没有可查看的原图，用另一个徽标区分，避免看着像原图下载失败。
+	$: imagePostVideoOnly = Boolean(video.image_post_video_only);
+	$: imagePostBadgeLabel = imagePostVideoOnly ? '动态' : '图文';
+	$: imagePostPlatformLabel = isDouyin ? '抖音' : isTikTok ? 'TikTok' : '平台';
+	$: imagePostBadgeTitle = imagePostVideoOnly
+		? `${imagePostPlatformLabel}多段视频作品，没有可查看的原图`
+		: `${imagePostPlatformLabel}图文作品`;
+	$: imagePostBadgeColor = imagePostVideoOnly ? 'bg-violet-600 hover:bg-violet-600' : 'bg-fuchsia-600 hover:bg-fuchsia-600';
 	export let detailHref: string = ''; // 详情页地址；不传时沿用 B 站地址
 	let coverFailed = false;
 	let lastVideoId: number | null = null;
@@ -346,8 +355,8 @@
 					/>
 					{/if}
 					{#if video.is_image_post}
-						<Badge class="bg-fuchsia-600 text-xs text-white shadow-md hover:bg-fuchsia-600" title="抖音图文作品">
-							图文
+						<Badge class="{imagePostBadgeColor} text-xs text-white shadow-md" title={imagePostBadgeTitle}>
+							{imagePostBadgeLabel}
 						</Badge>
 					{/if}
 					{#if video.is_story}
@@ -407,8 +416,8 @@
 				/>
 			{/if}
 			{#if (coverFailed || mode !== 'default') && (video.is_image_post || video.is_story)}
-				<Badge class="mt-0.5 shrink-0 bg-fuchsia-600 text-xs text-white hover:bg-fuchsia-600" title="抖音图文作品">
-					图文
+				<Badge class="mt-0.5 shrink-0 {imagePostBadgeColor} text-xs text-white" title={imagePostBadgeTitle}>
+					{imagePostBadgeLabel}
 				</Badge>
 			{/if}
 			{#if (coverFailed || mode !== 'default') && video.is_story}

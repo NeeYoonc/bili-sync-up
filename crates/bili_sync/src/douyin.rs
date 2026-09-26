@@ -5189,6 +5189,22 @@ mod tests {
             );
         }
 
+        // 前端显示依据：图片段落成 jpg、视频段落成同序号 mp4；
+        // 「有视频段但没有原图」就是多段视频/动态作品，卡片与详情页靠它区分显示。
+        let local = crate::youtube::image_post_local_files(&output_path);
+        let expected_images = segments.iter().filter(|segment| !segment.is_video()).count();
+        let expected_video_segments = segments.iter().any(|segment| segment.is_video());
+        assert_eq!(local.images.len(), expected_images, "原图列表应与图片段数量一致");
+        assert_eq!(
+            local.has_video_segments, expected_video_segments,
+            "视频段标志应与解析结果一致"
+        );
+        assert_eq!(
+            local.images.is_empty() && local.has_video_segments,
+            segments.iter().all(|segment| segment.is_video()),
+            "纯视频段图集应被识别为「有视频段但没有原图」"
+        );
+
         let size = std::fs::metadata(&output_path)
             .expect("合成 MP4 未生成")
             .len();

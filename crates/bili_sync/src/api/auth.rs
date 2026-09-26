@@ -12,6 +12,23 @@ use utoipa::Modify;
 
 use crate::api::wrapper::ApiResponse;
 
+/// 统一视频资源 ID：B 站为纯数字，外源为 `youtube-` / `douyin-` / `tiktok-{id}`。
+/// 三个平台的封面与原图都由 `<img>` 直接加载，浏览器不会附带 Authorization 头，
+/// 漏掉任何一个平台都会让图片静默 401（表现是图裂或反复回源重试）。
+fn is_public_video_resource_id(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if value.chars().all(|ch| ch.is_ascii_digit()) {
+        return true;
+    }
+    ["youtube-", "douyin-", "tiktok-"].iter().any(|prefix| {
+        value
+            .strip_prefix(prefix)
+            .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
+    })
+}
+
 fn is_public_video_cover_path(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("/api/videos/") else {
         return false;
@@ -19,22 +36,17 @@ fn is_public_video_cover_path(path: &str) -> bool {
     let Some(video_id) = rest.strip_suffix("/cover") else {
         return false;
     };
-    (!video_id.is_empty() && video_id.chars().all(|ch| ch.is_ascii_digit()))
-        || video_id
-            .strip_prefix("youtube-")
-            .or_else(|| video_id.strip_prefix("douyin-"))
-            .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
+    is_public_video_resource_id(video_id)
 }
 
 fn is_public_video_image_path(path: &str) -> bool {
-    let Some(rest) = path.strip_prefix("/api/videos/douyin-") else {
+    let Some(rest) = path.strip_prefix("/api/videos/") else {
         return false;
     };
     let Some((video_id, image_index)) = rest.split_once("/images/") else {
         return false;
     };
-    !video_id.is_empty()
-        && video_id.chars().all(|ch| ch.is_ascii_digit())
+    is_public_video_resource_id(video_id)
         && !image_index.is_empty()
         && image_index.chars().all(|ch| ch.is_ascii_digit())
 }
@@ -127,6 +139,59 @@ impl Modify for OpenAPIAuth {
                     "与配置文件中的 auth_token 相同",
                 ))),
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_public_video_cover_path, is_public_video_image_path};
+
+    #[test]
+    fn public_cover_path_accepts_all_platforms() {
+        for path in [
+            "/api/videos/123/cover",
+            "/api/videos/youtube-9/cover",
+            "/api/videos/douyin-16925/cover",
+            "/api/videos/tiktok-16928/cover",
+        ] {
+            assert!(is_public_video_cover_path(path), "{path} 应当免认证");
+        }
+
+        for path in [
+            "/api/videos",
+            "/api/videos/123",
+            "/api/videos//cover",
+            "/api/videos/douyin-/cover",
+            "/api/videos/douyin-abc/cover",
+            "/api/videos/tiktok-16928/cover/extra",
+        ] {
+            assert!(!is_public_video_cover_path(path), "{path} 不应免认证");
+        }
+    }
+
+    #[test]
+    fn public_image_path_accepts_all_platforms() {
+        for path in [
+            "/api/videos/123/images/1",
+            "/api/videos/youtube-9/images/1",
+            "/api/videos/douyin-16926/images/1",
+            "/api/videos/tiktok-16928/images/1",
+        ] {
+            assert!(is_public_video_image_path(path), "{path} 应当免认证");
+        }
+
+        for path in [
+            "/api/videos",
+            "/api/videos/123",
+            "/api/videos/douyin-/images/1",
+            "/api/videos/douyin-abc/images/1",
+            "/api/videos/tiktok-16928/images/",
+            "/api/videos/tiktok-16928/images/x",
+            "/api/videos/douyin-16928/files/1",
+            "/api/videos/tiktok-16928/images/1/2",
+        ] {
+            assert!(!is_public_video_image_path(path), "{path} 不应免认证");
         }
     }
 }
