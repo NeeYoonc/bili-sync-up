@@ -3680,6 +3680,7 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
         images: Vec::new(),
         music_urls: Vec::new(),
         creators: None,
+        slides: Vec::new(),
     })
 }
 
@@ -3753,6 +3754,7 @@ fn tiktok_photo_metadata(
         images,
         music_urls,
         creators: None,
+        slides: Vec::new(),
     }
 }
 
@@ -3995,6 +3997,7 @@ pub(crate) async fn fetch_tiktok_photo_via_tikwm(
         images,
         music_urls,
         creators: None,
+        slides: Vec::new(),
     }))
 }
 
@@ -4191,6 +4194,7 @@ fn tiktok_embed_photo_metadata(
         images,
         music_urls: tiktok_embed_music_urls(video_data),
         creators: None,
+        slides: Vec::new(),
     }
 }
 
@@ -4264,6 +4268,7 @@ fn tiktok_embed_video_metadata(video_data: &serde_json::Value, fallback_id: &str
         images: Vec::new(),
         music_urls: Vec::new(),
         creators: None,
+        slides: Vec::new(),
     }
 }
 

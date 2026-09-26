@@ -4027,6 +4027,7 @@ async fn download_youtube_media(
                 images: Vec::new(),
                 music_urls: Vec::new(),
                 creators: None,
+                slides: Vec::new(),
             };
             let placeholder_title = video.title.clone();
             let placeholder_uploader = if video.uploader.trim().is_empty() {
@@ -4101,7 +4102,7 @@ async fn download_youtube_media(
         .transpose()
         .with_context(|| format!("{platform}视频源级流过滤设置无效"))?
         .unwrap_or_else(|| crate::config::reload_config().filter_option);
-    let selected = if metadata.images.is_empty() {
+    let selected = if !metadata.is_slideshow() {
         let selected = select_youtube_streams(&metadata.formats, &filter_option, source.audio_only, platform)?;
         log_selected_youtube_streams(&selected, &filter_option, source, &title);
         Some(selected)
@@ -4110,7 +4111,7 @@ async fn download_youtube_media(
     };
 
     // 未达到设定的最低分辨率时主动跳过下载，不产生失败/错误任务。
-    if !media_exists && !metadata.images.is_empty() && !source.audio_only {
+    if !media_exists && metadata.is_slideshow() && !source.audio_only {
         if let Some(selected) = selected.as_ref() {
             let min_height = youtube_quality_height(filter_option.video_min_quality);
             if let Some(actual_height) = selected_effective_video_height(selected) {
@@ -4158,7 +4159,7 @@ async fn download_youtube_media(
 
     if media_exists {
         // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
-    } else if !metadata.images.is_empty() {
+    } else if metadata.is_slideshow() {
         crate::douyin::download_image_post(downloader, &metadata, &output_path, &filter_option, source).await?;
     } else if source.audio_only {
         let selected = selected.as_ref().context("图文作品不应进入音频流选择")?;
@@ -4354,7 +4355,7 @@ async fn download_youtube_media(
         }
     }
 
-    let warning_message = if source.audio_only && source.audio_only_m4a_only && metadata.images.is_empty() {
+    let warning_message = if source.audio_only && source.audio_only_m4a_only && !metadata.is_slideshow() {
         None
     } else {
         ensure_youtube_sidecars(
@@ -4369,6 +4370,8 @@ async fn download_youtube_media(
         .await
     };
 
+    // 图集判定要在 `metadata` 被部分移动前取好。
+    let is_image_post = metadata.is_slideshow();
     Ok(DownloadedYouTubeMedia {
         output_path,
         title,
@@ -4378,7 +4381,7 @@ async fn download_youtube_media(
         duration_seconds: metadata
             .duration
             .and_then(|value| i32::try_from(value.round() as i64).ok()),
-        is_image_post: !metadata.images.is_empty(),
+        is_image_post,
         warning_message,
         paid_content: false,
         skipped: false,
@@ -5119,7 +5122,7 @@ fn youtube_output_path(
 
     // 图文作品必须生成可在现有视频管理页播放的 MP4，
     // 同时原图和配乐仍保留在同目录。
-    let extension = if source.audio_only && metadata.images.is_empty() {
+    let extension = if source.audio_only && !metadata.is_slideshow() {
         "m4a"
     } else {
         "mp4"
@@ -8225,6 +8228,7 @@ mod tests {
             images: Vec::new(),
             music_urls: Vec::new(),
             creators: None,
+            slides: Vec::new(),
         };
         let path = super::youtube_output_path(&source, &video, &metadata, "第三集标题", "作者").unwrap();
         let expected = Path::new("F:/Downloads/测试")
