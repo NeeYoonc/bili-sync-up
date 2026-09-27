@@ -4032,19 +4032,86 @@ fn slideshow_video_filter(width: i32, height: i32) -> String {
     )
 }
 
-/// 下载抖音/TikTok 图集作品（图文、图片贴）的每一段与配乐，并生成可被现有
-/// 视频管理页播放的 MP4。
+/// 图集作品的视频段分页文件：整篇只有一段视频时沿用作品本身的名字
+/// （例如「1 段动态 + 3 张图」的作品就是一个普通视频），
+/// 多段时按 `<作品>-P01.mp4`、`-P02.mp4`…编号，逐段独立播放。
+fn image_post_page_file(parent: &Path, stem: &str, page: usize, page_count: usize) -> PathBuf {
+    if page_count <= 1 {
+        parent.join(format!("{stem}.mp4"))
+    } else {
+        parent.join(format!("{stem}-P{page:02}.mp4"))
+    }
+}
+
+/// 把分页文件名拆回作品名与分页号：`20260925-7689-P04` → `("20260925-7689", 4)`。
+pub(crate) fn split_image_post_page_stem(stem: &str) -> Option<(&str, u32)> {
+    let (base, suffix) = stem.rsplit_once("-P")?;
+    if base.is_empty() || suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let page = suffix.parse::<u32>().ok()?;
+    (page >= 1).then_some((base, page))
+}
+
+/// 外源图集作品的落地媒体文件：单页作品就是作品文件本身；视频段作品是
+/// `<作品>-P01.mp4`…`<作品>-Pnn.mp4`（按分页号升序，跳过缺失的分页）。
+pub(crate) fn image_post_page_paths(output_path: &Path) -> Vec<PathBuf> {
+    let single = || vec![output_path.to_path_buf()];
+    let (Some(parent), Some(stem), Some(ext)) = (
+        output_path.parent(),
+        output_path.file_stem().and_then(|value| value.to_str()),
+        output_path.extension().and_then(|value| value.to_str()),
+    ) else {
+        return single();
+    };
+    let Some((base, _)) = split_image_post_page_stem(stem) else {
+        return single();
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return single();
+    };
+    let mut pages: Vec<(u32, PathBuf)> = Vec::new();
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        if !path.is_file() {
+            continue;
+        }
+        let (Some(entry_stem), Some(entry_ext)) = (
+            path.file_stem().and_then(|value| value.to_str()),
+            path.extension().and_then(|value| value.to_str()),
+        ) else {
+            continue;
+        };
+        let Some((entry_base, page)) = split_image_post_page_stem(entry_stem) else {
+            continue;
+        };
+        if entry_base == base && entry_ext.eq_ignore_ascii_case(ext) {
+            pages.push((page, path));
+        }
+    }
+    if pages.is_empty() {
+        return single();
+    }
+    pages.sort_by(|left, right| left.0.cmp(&right.0));
+    pages.into_iter().map(|(_, path)| path).collect()
+}
+
+/// 落地图集作品（图文、图片贴、多段动态）。
 ///
-/// 抖音图集可以混排图片段与视频片段（live photo、视频混排）：图片段固定
-/// 3 秒、视频段按原速合成，视频段下载失败时回落该段封面静图，避免整篇作品
-/// 因为一个片段失败。纯图片作品仍走原来的单条 ffmpeg concat 流程。
+/// 规则：
+/// - 图片段 → `<作品>-images/NN.jpg` 原图，前端「查看图片」按顺序浏览；
+/// - 视频段 → 每一段都是一个独立视频文件：多段时按 `<作品>-P01.mp4`、`-P02.mp4`…
+///   编号，前端与媒体库都能逐段播放、互相切换，不再合并成一条长视频；
+/// - 整篇只有图片时才合成幻灯片 MP4，保证媒体库里有可播放的条目。
+///
+/// 返回作品的主媒体文件（纯图片作品是幻灯片，视频段作品是第一个分页），
+/// 调用方用它生成封面、NFO 等附属文件。
 pub(crate) async fn download_image_post(
     downloader: &UnifiedDownloader,
     metadata: &ExternalMediaMetadata,
     output_path: &Path,
     filter: &FilterOption,
     source: &youtube_source::Model,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let platform = if crate::tiktok::is_tiktok_source(source) {
         "TikTok"
     } else {
@@ -4064,8 +4131,13 @@ pub(crate) async fn download_image_post(
     if segments.is_empty() {
         bail!("{platform}图文作品没有可下载的图片或视频片段");
     }
-    let mut segment_paths = Vec::with_capacity(segments.len());
-    let mut video_segments = 0usize;
+    let video_segment_count = segments.iter().filter(|segment| segment.is_video()).count();
+    let max_short_edge = quality_height(filter.video_max_quality).clamp(360, 2160);
+    let width = max_short_edge - (max_short_edge % 2);
+    let height = ((i64::from(width) * 16 / 9) as i32).max(width) & !1;
+
+    let mut image_paths: Vec<PathBuf> = Vec::new();
+    let mut page_paths: Vec<PathBuf> = Vec::with_capacity(video_segment_count);
     for (index, segment) in segments.iter().enumerate() {
         // 序号按作品内的段顺序连续编号，视频段不会挤掉后面图片段的编号。
         let ordinal = index + 1;
@@ -4073,275 +4145,296 @@ pub(crate) async fn download_image_post(
             let path = image_dir.join(format!("{ordinal:02}.jpg"));
             download_image_segment(downloader, source, &segment.image_urls, &path, ordinal, platform)
                 .await?;
-            segment_paths.push(path);
+            image_paths.push(path);
             continue;
         }
-        let path = image_dir.join(format!("{ordinal:02}.mp4"));
-        if !media_file_ready(&path).await {
-            let temporary = path.with_extension("download");
-            let urls = segment.video_urls.iter().map(String::as_str).collect::<Vec<_>>();
-            if let Err(error) = fetch_media(downloader, source, &urls, &temporary)
-                .await
-                .with_context(|| {
-                    format!("使用项目统一下载器下载{platform}第 {ordinal} 段视频片段失败")
-                })
-            {
-                let _ = remove_file_if_exists(&temporary).await;
-                if segment.image_urls.is_empty() {
-                    return Err(error);
-                }
-                warn!(
-                    aweme_id = %metadata.id,
-                    index = ordinal,
-                    %error,
-                    "{platform}图集第 {} 段视频片段下载失败，改用该段封面静图合成",
-                    ordinal
-                );
-                let fallback = image_dir.join(format!("{ordinal:02}.jpg"));
-                download_image_segment(
+        let page = page_paths.len() + 1;
+        let target = image_post_page_file(parent, stem, page, video_segment_count);
+        if !media_file_ready(&target).await {
+            // 早前版本把视频段当临时片段下到 `-images/NN.mp4` 再合并成一条视频，
+            // 这里优先复用已经下好的片段，升级后不重复消耗用户流量。
+            let cached = image_dir.join(format!("{ordinal:02}.mp4"));
+            if media_file_ready(&cached).await {
+                replace_file(&cached, &target).await?;
+            } else {
+                download_image_post_segment(
                     downloader,
                     source,
-                    &segment.image_urls,
-                    &fallback,
+                    segment,
+                    &target,
+                    &image_dir.join(format!("{ordinal:02}.jpg")),
                     ordinal,
+                    width,
+                    height,
                     platform,
                 )
                 .await?;
-                segment_paths.push(fallback);
-                continue;
             }
-            replace_file(&temporary, &path).await?;
         }
-        video_segments += 1;
-        segment_paths.push(path);
+        page_paths.push(target);
     }
 
-    let music_path = parent.join(format!("{stem}-music.mp3"));
-    let has_music = if metadata.music_urls.is_empty() {
-        false
-    } else {
-        if !media_file_ready(&music_path).await {
-            let temporary = parent.join(format!("{stem}-music.download"));
-            let urls = metadata.music_urls.iter().map(String::as_str).collect::<Vec<_>>();
-            if let Err(error) = fetch_media(downloader, source, &urls, &temporary)
-                .await
-                .with_context(|| format!("使用项目统一下载器下载{platform}图文配乐失败"))
-            {
-                let _ = remove_file_if_exists(&temporary).await;
-                return Err(error);
-            }
-            replace_file(&temporary, &music_path).await?;
-        }
-        true
-    };
-
-    let max_short_edge = quality_height(filter.video_max_quality).clamp(360, 2160);
-    let width = max_short_edge - (max_short_edge % 2);
-    let height = ((i64::from(width) * 16 / 9) as i32).max(width) & !1;
-    let temporary = output_path.with_extension("slideshow.mp4");
-    if video_segments == 0 {
-        let concat_path = parent.join(format!("{stem}-images.concat"));
-        let quote_path = |path: &Path| path.to_string_lossy().replace('\\', "/").replace('\'', "'\\''");
-        let mut concat = String::new();
-        for path in &segment_paths {
-            concat.push_str(&format!(
-                "file '{}'\nduration {SLIDESHOW_SECONDS_PER_IMAGE}\n",
-                quote_path(path)
-            ));
-        }
-        concat.push_str(&format!("file '{}'\n", quote_path(segment_paths.last().unwrap())));
-        tokio::fs::write(&concat_path, concat.as_bytes()).await?;
-
-        let total_seconds = u64::try_from(segment_paths.len())
-            .unwrap_or(1)
-            .saturating_mul(SLIDESHOW_SECONDS_PER_IMAGE)
-            .max(3);
-        let mut command =
-            tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"));
-        command
-            .args(["-y", "-f", "concat", "-safe", "0", "-i"])
-            .arg(&concat_path);
-        if has_music {
-            command.args(["-stream_loop", "-1", "-i"]).arg(&music_path);
-        }
-        command
-            .args(["-vf", &slideshow_video_filter(width, height)])
-            .args([
-                "-t",
-                &total_seconds.to_string(),
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-            ]);
-        if has_music {
-            command.args([
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0?",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                "-shortest",
-            ]);
+    if video_segment_count == 0 {
+        let music_path = parent.join(format!("{stem}-music.mp3"));
+        let has_music = if metadata.music_urls.is_empty() {
+            false
         } else {
-            command.arg("-an");
-        }
-        let result = command
-            .arg(&temporary)
-            .output()
-            .await
-            .with_context(|| format!("启动 ffmpeg 生成{platform}图文幻灯片失败"))?;
-        let _ = remove_file_if_exists(&concat_path).await;
-        if !result.status.success() {
-            let _ = remove_file_if_exists(&temporary).await;
-            bail!("ffmpeg 生成{platform}图文 MP4 失败：{}", process_error(&result));
-        }
-    } else {
-        compose_mixed_slideshow(
+            if !media_file_ready(&music_path).await {
+                let temporary = parent.join(format!("{stem}-music.download"));
+                let urls = metadata.music_urls.iter().map(String::as_str).collect::<Vec<_>>();
+                if let Err(error) = fetch_media(downloader, source, &urls, &temporary)
+                    .await
+                    .with_context(|| format!("使用项目统一下载器下载{platform}图文配乐失败"))
+                {
+                    let _ = remove_file_if_exists(&temporary).await;
+                    return Err(error);
+                }
+                replace_file(&temporary, &music_path).await?;
+            }
+            true
+        };
+        compose_image_slideshow(
             platform,
-            &segment_paths,
+            &image_paths,
+            output_path,
             has_music.then_some(music_path.as_path()),
             width,
             height,
-            &temporary,
         )
         .await?;
+        info!(
+            aweme_id = %metadata.id,
+            segments = segments.len(),
+            path = %output_path.display(),
+            "{platform}图集原图、配乐和幻灯片 MP4 合成完成"
+        );
+        return Ok(output_path.to_path_buf());
     }
-    replace_file(&temporary, output_path).await?;
+
+    // 视频段各自成页后，作品目录里不能再留上一版合并出来的 `<作品>.mp4`，
+    // 否则媒体库里同一作品会同时出现「合并版」和「分页版」。
+    cleanup_stale_image_post_pages(output_path, parent, stem, &page_paths).await?;
+    let primary = page_paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| output_path.to_path_buf());
     info!(
         aweme_id = %metadata.id,
-        segments = segment_paths.len(),
-        video_segments,
-        path = %output_path.display(),
-        "{platform}图集各段、配乐和 MP4 合成完成"
+        image_segments = image_paths.len(),
+        video_segments = page_paths.len(),
+        path = %primary.display(),
+        "{platform}图集各段下载完成：{} 张原图、{} 个视频分页",
+        image_paths.len(),
+        page_paths.len()
     );
+    Ok(primary)
+}
+
+/// 下载图集里的一个视频段；失败时用该段封面静图生成 3 秒静止片段顶替，
+/// 保证分页编号不出现缺口（与图片段的时长规则一致）。
+#[allow(clippy::too_many_arguments)]
+async fn download_image_post_segment(
+    downloader: &UnifiedDownloader,
+    source: &youtube_source::Model,
+    segment: &ExternalImageSlide,
+    target: &Path,
+    fallback_image: &Path,
+    ordinal: usize,
+    width: i32,
+    height: i32,
+    platform: &str,
+) -> Result<()> {
+    let temporary = target.with_extension("download");
+    let urls = segment.video_urls.iter().map(String::as_str).collect::<Vec<_>>();
+    let result = if urls.is_empty() {
+        Err(anyhow!("{platform}图集第 {ordinal} 段没有可下载的视频地址"))
+    } else {
+        fetch_media(downloader, source, &urls, &temporary)
+            .await
+            .with_context(|| format!("使用项目统一下载器下载{platform}第 {ordinal} 段视频片段失败"))
+    };
+    match result {
+        Ok(()) => replace_file(&temporary, target).await,
+        Err(error) => {
+            let _ = remove_file_if_exists(&temporary).await;
+            if segment.image_urls.is_empty() {
+                return Err(error);
+            }
+            warn!(
+                index = ordinal,
+                %error,
+                "{platform}图集第 {} 段视频片段下载失败，改用该段封面静图生成静止片段",
+                ordinal
+            );
+            download_image_segment(downloader, source, &segment.image_urls, fallback_image, ordinal, platform)
+                .await?;
+            compose_still_page(fallback_image, target, width, height, platform).await
+        }
+    }
+}
+
+/// 用一张静态图生成固定时长的无声片段，编码规格与幻灯片保持一致。
+async fn compose_still_page(
+    image_path: &Path,
+    target: &Path,
+    width: i32,
+    height: i32,
+    platform: &str,
+) -> Result<()> {
+    let temporary = target.with_extension("still.mp4");
+    let result = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+        .args(["-y", "-loop", "1", "-framerate", "30", "-i"])
+        .arg(image_path)
+        .args(["-t", &SLIDESHOW_SECONDS_PER_IMAGE.to_string()])
+        .args(["-vf", &slideshow_video_filter(width, height)])
+        .args([
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(&temporary)
+        .output()
+        .await
+        .with_context(|| format!("启动 ffmpeg 生成{platform}图集静止片段失败"))?;
+    if !result.status.success() {
+        let _ = remove_file_if_exists(&temporary).await;
+        bail!("ffmpeg 生成{platform}图集静止片段失败：{}", process_error(&result));
+    }
+    replace_file(&temporary, target).await
+}
+
+/// 视频段各自成页后清理旧版残留：删掉上一版合并出来的 `<作品>.mp4`，
+/// 以及分页数变少后编号超出的旧分页（连同它们的缩略图、信息文件）。
+async fn cleanup_stale_image_post_pages(
+    output_path: &Path,
+    parent: &Path,
+    stem: &str,
+    page_paths: &[PathBuf],
+) -> Result<()> {
+    if !page_paths.iter().any(|path| path == output_path) && tokio::fs::try_exists(output_path).await? {
+        remove_file_if_exists(output_path).await?;
+        info!(
+            path = %output_path.display(),
+            "已删除旧版本合并出来的图集 MP4（视频段现在各自成页）"
+        );
+    }
+    let keep = page_paths.len();
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Ok(());
+    };
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(&format!("{stem}-P")) else {
+            continue;
+        };
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits == 0 {
+            continue;
+        }
+        let Ok(page) = rest[..digits].parse::<usize>() else {
+            continue;
+        };
+        let tail = &rest[digits..];
+        if page <= keep || (!tail.is_empty() && !tail.starts_with('.') && !tail.starts_with('-')) {
+            continue;
+        }
+        remove_file_if_exists(&path).await?;
+        debug!(path = %path.display(), "已清理多余图集分页文件");
+    }
     Ok(())
 }
 
-/// 含视频片段的图集合成。
-///
-/// 一条 `concat` 命令无法把图片段和视频段混在一起（实测图片段会被整段吞掉），
-/// 所以先把每段各自转成同规格的无声片段，再用 concat 拼接，最后混入配乐。
-async fn compose_mixed_slideshow(
+/// 纯图片作品的幻灯片合成：按顺序把每张原图铺成固定时长，再混入作品配乐。
+async fn compose_image_slideshow(
     platform: &str,
     segment_paths: &[PathBuf],
+    output_path: &Path,
     music_path: Option<&Path>,
     width: i32,
     height: i32,
-    output_path: &Path,
 ) -> Result<()> {
-    let ffmpeg = crate::downloader::resolve_media_tool_path("ffmpeg");
-    let filter = slideshow_video_filter(width, height);
-    let mut clip_paths = Vec::with_capacity(segment_paths.len());
-    for path in segment_paths {
-        let clip = path.with_extension("segment.mp4");
-        let is_video = path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"));
-        let mut command = tokio::process::Command::new(&ffmpeg);
-        command.arg("-y");
-        if is_video {
-            command.arg("-i").arg(path);
-        } else {
-            command
-                .args(["-loop", "1", "-framerate", "30", "-i"])
-                .arg(path)
-                .args(["-t", &SLIDESHOW_SECONDS_PER_IMAGE.to_string()]);
-        }
-        let result = command
-            .args(["-vf", &filter])
-            .args([
-                "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-pix_fmt",
-                "yuv420p",
-                "-r",
-                "30",
-            ])
-            .arg(&clip)
-            .output()
-            .await
-            .with_context(|| format!("启动 ffmpeg 生成{platform}图集片段失败"))?;
-        if !result.status.success() {
-            let _ = remove_file_if_exists(&clip).await;
-            cleanup_slideshow_clips(&clip_paths).await;
-            bail!("ffmpeg 生成{platform}图集片段失败：{}", process_error(&result));
-        }
-        clip_paths.push(clip);
+    if segment_paths.is_empty() {
+        bail!("{platform}图文作品没有可合成的原图");
     }
 
-    let concat_path = output_path.with_extension("concat");
+    let parent = output_path.parent().context("图文输出路径没有父目录")?;
+    let stem = output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .context("图文输出文件名无效")?;
+    let concat_path = parent.join(format!("{stem}-images.concat"));
     let quote_path = |path: &Path| path.to_string_lossy().replace('\\', "/").replace('\'', "'\\''");
     let mut concat = String::new();
-    for path in &clip_paths {
-        concat.push_str(&format!("file '{}'\n", quote_path(path)));
+    for path in segment_paths {
+        concat.push_str(&format!(
+            "file '{}'\nduration {SLIDESHOW_SECONDS_PER_IMAGE}\n",
+            quote_path(path)
+        ));
     }
+    concat.push_str(&format!("file '{}'\n", quote_path(segment_paths.last().unwrap())));
     tokio::fs::write(&concat_path, concat.as_bytes()).await?;
 
-    // 片段已统一编码规格，先按 `-c copy` 直接拼接；个别环境不接受时再回退重编码。
-    let mut failure = None;
-    for copy_video in [true, false] {
-        let mut command = tokio::process::Command::new(&ffmpeg);
-        command
-            .args(["-y", "-f", "concat", "-safe", "0", "-i"])
-            .arg(&concat_path);
-        if let Some(music_path) = music_path {
-            command.args(["-stream_loop", "-1", "-i"]).arg(music_path);
-        }
-        command.args(["-map", "0:v:0"]);
-        if copy_video {
-            command.args(["-c:v", "copy"]);
-        } else {
-            command.args([
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
-                "-pix_fmt",
-                "yuv420p",
-            ]);
-        }
-        command.args(["-movflags", "+faststart"]);
-        if music_path.is_some() {
-            command.args(["-map", "1:a:0?", "-c:a", "aac", "-b:a", "192k", "-shortest"]);
-        } else {
-            command.arg("-an");
-        }
-        let result = command
-            .arg(output_path)
-            .output()
-            .await
-            .with_context(|| format!("启动 ffmpeg 合成{platform}图集失败"))?;
-        if result.status.success() {
-            failure = None;
-            break;
-        }
-        let _ = remove_file_if_exists(output_path).await;
-        failure = Some(process_error(&result));
+    let total_seconds = u64::try_from(segment_paths.len())
+        .unwrap_or(1)
+        .saturating_mul(SLIDESHOW_SECONDS_PER_IMAGE)
+        .max(3);
+    let temporary = output_path.with_extension("slideshow.mp4");
+    let mut command = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"));
+    command
+        .args(["-y", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&concat_path);
+    if let Some(music_path) = music_path {
+        command.args(["-stream_loop", "-1", "-i"]).arg(music_path);
     }
+    command
+        .args(["-vf", &slideshow_video_filter(width, height)])
+        .args([
+            "-t",
+            &total_seconds.to_string(),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+        ]);
+    if music_path.is_some() {
+        command.args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0?",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+        ]);
+    } else {
+        command.arg("-an");
+    }
+    let result = command
+        .arg(&temporary)
+        .output()
+        .await
+        .with_context(|| format!("启动 ffmpeg 生成{platform}图文幻灯片失败"))?;
     let _ = remove_file_if_exists(&concat_path).await;
-    cleanup_slideshow_clips(&clip_paths).await;
-    if let Some(error) = failure {
-        bail!("ffmpeg 合成{platform}图集 MP4 失败：{error}");
+    if !result.status.success() {
+        let _ = remove_file_if_exists(&temporary).await;
+        bail!("ffmpeg 生成{platform}图文 MP4 失败：{}", process_error(&result));
     }
-    Ok(())
-}
-
-/// 中转片段只用于合成，成功或失败后都清掉，不给用户留垃圾文件。
-async fn cleanup_slideshow_clips(clips: &[PathBuf]) {
-    for path in clips {
-        let _ = remove_file_if_exists(path).await;
-    }
+    replace_file(&temporary, output_path).await
 }
 
 /// 使用 FFmpeg 的 mov CENC 解密能力处理放映厅独立音视频流，并保持项目原有
@@ -5045,6 +5138,46 @@ mod tests {
         assert_eq!(slideshow_duration(&slides), Some(12.967), "时长应等于各段之和");
     }
 
+    /// 分页落地规则：多段动态作品按 `-P01.mp4`… 编号，只有一个视频段时沿用作品名，
+    /// 纯图片作品的路径不参与分页推导。
+    #[test]
+    fn image_post_page_paths_lists_video_pages_in_order() {
+        let root = std::env::temp_dir().join(format!("bili-sync-image-post-pages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let stem = "20260101000000-7689447727160205745";
+        std::fs::write(root.join(format!("{stem}.mp4")), b"merged").unwrap();
+        std::fs::write(root.join(format!("{stem}-P01.mp4")), b"one").unwrap();
+        std::fs::write(root.join(format!("{stem}-P02.mp4")), b"two").unwrap();
+        std::fs::write(root.join(format!("{stem}-P10.mp4")), b"ten").unwrap();
+        // 侧车文件与别的作品不能被当成同一篇作品的分页。
+        std::fs::write(root.join(format!("{stem}-P03-thumb.jpg")), b"thumb").unwrap();
+        std::fs::write(root.join("20260101000000-999-P01.mp4"), b"other").unwrap();
+
+        let pages = image_post_page_paths(&root.join(format!("{stem}-P01.mp4")));
+        let names = pages
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                format!("{stem}-P01.mp4"),
+                format!("{stem}-P02.mp4"),
+                format!("{stem}-P10.mp4"),
+            ],
+            "分页应按编号升序、且只列同一篇作品的分页"
+        );
+
+        // 单页作品（普通视频、单段动态、纯图片幻灯片）原样返回。
+        let single = root.join(format!("{stem}.mp4"));
+        assert_eq!(image_post_page_paths(&single), vec![single.clone()]);
+        assert_eq!(split_image_post_page_stem(stem), None);
+        assert_eq!(split_image_post_page_stem("abc-P01"), Some(("abc", 1)));
+        assert_eq!(split_image_post_page_stem("abc-P1x"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 全是视频片段的图集（有些作者整篇都是 live photo）不能被当成普通视频丢掉。
     #[test]
     fn keeps_slideshow_without_any_image_segment() {
@@ -5127,8 +5260,11 @@ mod tests {
             .expect("解析 ffprobe 时长失败")
     }
 
-    /// 真实链路测试的公共流程：解析作品 → 逐段下载 → 合成 MP4，
-    /// 并校验每一段按顺序落盘、没有中转残留、合成时长等于各段之和。
+    /// 真实链路测试的公共流程：解析作品 → 逐段下载 → 校验落地结构。
+    ///
+    /// 期待的结构：图片段落成 `<作品>-images/NN.jpg`；视频段各自成页，
+    /// 多段时是 `<作品>-P01.mp4`…，只有一段时沿用作品名本身；纯图片作品
+    /// 才合成一张幻灯片 MP4。
     async fn run_douyin_image_post_e2e(aweme_id: &str) -> (PathBuf, Vec<ExternalImageSlide>) {
         let db = crate::database::setup_database().await;
         crate::config::init_config_with_database(db.clone())
@@ -5164,7 +5300,7 @@ mod tests {
         let output_path = output_dir.join(format!("{stem}.mp4"));
         let downloader =
             crate::unified_downloader::UnifiedDownloader::new_native(crate::bilibili::Client::new());
-        download_image_post(
+        let primary = download_image_post(
             &downloader,
             &metadata,
             &output_path,
@@ -5172,51 +5308,101 @@ mod tests {
             &sample_douyin_source(),
         )
         .await
-        .expect("图集下载与合成失败");
+        .expect("图集下载失败");
 
-        // 每一段都要按作品内顺序落盘：视频段是 mp4、图片段是 jpg，编号连续。
+        let image_segments = segments.iter().filter(|segment| !segment.is_video()).count();
+        let video_segments = segments.iter().filter(|segment| segment.is_video()).count();
+
+        // 图片段：编号跟着作品内的段顺序，视频段不会挤掉后面图片段的编号。
         let image_dir = output_dir.join(format!("{stem}-images"));
-        for (index, segment) in segments.iter().enumerate() {
-            let extension = if segment.is_video() { "mp4" } else { "jpg" };
-            let path = image_dir.join(format!("{:02}.{extension}", index + 1));
-            assert!(path.is_file(), "第 {} 段应落盘：{}", index + 1, path.display());
+        let expected_images = segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| !segment.is_video())
+            .map(|(index, _)| format!("{:02}.jpg", index + 1))
+            .collect::<Vec<_>>();
+        let mut actual_images = std::fs::read_dir(&image_dir)
+            .expect("读取原图目录失败")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        actual_images.sort();
+        assert_eq!(actual_images.len(), image_segments, "原图数量应与图片段一致");
+        assert_eq!(actual_images, expected_images, "原图应按段顺序编号");
+
+        // 视频段：每一段都是一个独立视频，多段时按 -P01… 编号，绝不合并成一条。
+        let expected_pages = (1..=video_segments)
+            .map(|page| {
+                if video_segments <= 1 {
+                    output_path.clone()
+                } else {
+                    output_dir.join(format!("{stem}-P{page:02}.mp4"))
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected_primary = expected_pages
+            .first()
+            .cloned()
+            .unwrap_or_else(|| output_path.clone());
+        assert_eq!(primary, expected_primary, "应返回第一个分页作为主文件");
+        assert_eq!(
+            crate::douyin::image_post_page_paths(&primary).len(),
+            video_segments.max(1),
+            "分页数量应等于视频段数量"
+        );
+        for page in &expected_pages {
+            let size = std::fs::metadata(page)
+                .unwrap_or_else(|error| panic!("分页文件缺失 {}: {error}", page.display()))
+                .len();
+            assert!(size > 10_000, "分页文件过小：{}（{size} 字节）", page.display());
+            let duration = probe_media_duration(page).await;
+            assert!(duration > 0.0, "分页应可播放：{}", page.display());
         }
-        for entry in std::fs::read_dir(&image_dir).expect("读取图片目录失败").flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
+        if video_segments >= 2 {
+            assert!(
+                !output_path.exists(),
+                "多段动态不应再留下合并视频：{}",
+                output_path.display()
+            );
+        }
+
+        // 纯图片作品仍然保留一张可播放的幻灯片，时长等于各张图的展示时长之和。
+        if video_segments == 0 {
+            let duration = probe_media_duration(&output_path).await;
+            let expected = slideshow_duration(&segments).expect("各段都应有时长");
+            println!("幻灯片时长 {duration:.2}s，按段计算 {expected:.2}s");
+            assert!(
+                (duration - expected).abs() < 1.0,
+                "幻灯片时长应等于各段之和：{duration:.2}s vs {expected:.2}s"
+            );
+        }
+
+        // 目录里不能留下中转文件。
+        for path in std::fs::read_dir(&output_dir).expect("读取输出目录失败").flatten() {
+            let name = path.file_name().to_string_lossy().to_string();
             assert!(
                 !name.ends_with(".download") && !name.ends_with(".segment.mp4"),
                 "不该残留中转文件：{name}"
             );
         }
+        for entry in std::fs::read_dir(&image_dir).expect("读取图片目录失败").flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                !name.ends_with(".download") && !name.ends_with(".mp4"),
+                "原图目录里不该再有视频片段或中转文件：{name}"
+            );
+        }
 
-        // 前端显示依据：图片段落成 jpg、视频段落成同序号 mp4；
-        // 「有视频段但没有原图」就是多段视频/动态作品，卡片与详情页靠它区分显示。
-        let local = crate::youtube::image_post_local_files(&output_path);
-        let expected_images = segments.iter().filter(|segment| !segment.is_video()).count();
-        let expected_video_segments = segments.iter().any(|segment| segment.is_video());
-        assert_eq!(local.images.len(), expected_images, "原图列表应与图片段数量一致");
+        // 前端显示依据：原图与分页分别用于「查看图片」和逐段播放。
+        let local = crate::youtube::image_post_local_files(&primary);
+        assert_eq!(local.images.len(), image_segments, "原图列表应与图片段数量一致");
         assert_eq!(
-            local.has_video_segments, expected_video_segments,
-            "视频段标志应与解析结果一致"
-        );
-        assert_eq!(
-            local.images.is_empty() && local.has_video_segments,
+            local.images.is_empty() && video_segments > 0,
             segments.iter().all(|segment| segment.is_video()),
-            "纯视频段图集应被识别为「有视频段但没有原图」"
+            "纯视频段图集应被识别为「视频段作品且没有原图」"
         );
 
-        let size = std::fs::metadata(&output_path)
-            .expect("合成 MP4 未生成")
-            .len();
-        assert!(size > 10_000, "合成 MP4 过小：{size} 字节");
-        let duration = probe_media_duration(&output_path).await;
-        let expected = slideshow_duration(&segments).expect("各段都应有时长");
-        println!("合成时长 {duration:.2}s，按段计算 {expected:.2}s");
-        assert!(
-            (duration - expected).abs() < 1.0,
-            "合成时长应等于各段之和：{duration:.2}s vs {expected:.2}s"
-        );
-        (output_path, segments)
+        (primary, segments)
     }
 
     /// 真实链路测试（默认 ignore）：图片段与视频片段混排的抖音图集，

@@ -656,9 +656,16 @@
 	// 获取视频播放源
 	function getVideoSource() {
 		const videoId = getPlayVideoId();
-		return videoId
-			? `/api/videos/stream/${isExternal ? `${externalPlatform}-${videoId}` : videoId}`
-			: undefined;
+		if (!videoId) return undefined;
+		const base = `/api/videos/stream/${isExternal ? `${externalPlatform}-${videoId}` : videoId}`;
+		// 外源图集作品里的视频段各自成页，播放时必须带上分页号，
+		// 否则切换分页后播放器仍然取第一段。
+		const pageCount = videoData?.pages?.length ?? 0;
+		const page = videoData?.pages?.[safePlayingPageIndex];
+		if (isExternal && pageCount > 1 && page) {
+			return `${base}?pid=${page.pid}`;
+		}
+		return base;
 	}
 
 	// 删除视频
@@ -961,7 +968,7 @@
 							? '280px'
 							: '320px'}, 1fr));"
 					>
-						{#each videoData.pages as pageInfo, index (pageInfo.id)}
+						{#each videoData.pages as pageInfo, index (`${pageInfo.id}-${pageInfo.pid}`)}
 							<div class="space-y-3">
 								<VideoCard
 									video={{
@@ -1064,7 +1071,8 @@
 								<!-- 播放按钮区域 -->
 								{#if imagePostVideoOnly}
 									<div class="text-muted-foreground mb-2 text-center text-xs">
-										本条作品由多段视频组成，没有可查看的原图；点「播放视频」查看合成后的完整视频。
+										本条作品由 {(videoData?.pages?.length ?? 1)} 段动态组成，没有可查看的原图；
+										每一段都是独立视频，点对应分段的「播放视频」即可逐段查看。
 									</div>
 								{/if}
 								<div class="flex justify-center gap-2">
@@ -1264,7 +1272,7 @@
 								<div class="mt-4 space-y-2">
 									<div class="text-sm font-medium text-gray-700">选择分页:</div>
 									<div class="grid max-h-60 grid-cols-2 gap-2 overflow-y-auto">
-										{#each videoData.pages as page, index (page.id)}
+										{#each videoData.pages as page, index (`${page.id}-${page.pid}`)}
 											{#if onlinePlayMode || page.download_status[1] === 7}
 												<Button
 													size="sm"

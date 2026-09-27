@@ -1859,18 +1859,30 @@ async fn youtube_artifact_status(video: &youtube_video::Model, source: &youtube_
 async fn unified_youtube_parts(
     video: &youtube_video::Model,
     source: &youtube_source::Model,
-) -> (VideoInfo, PageInfo, VideoSourceTag) {
+) -> (VideoInfo, Vec<PageInfo>, VideoSourceTag) {
     let (video_status, page_status) = youtube_artifact_status(video, source).await;
     let output_path = video.output_path.clone();
     let local_files = youtube_image_post_files(video);
     let image_paths = local_files.images;
+    // 图集作品的视频段各自成页；本地记录指向第一个分页，这里按分页编号还原整篇作品。
+    let page_paths = output_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(Path::new)
+        .map(crate::douyin::image_post_page_paths)
+        .unwrap_or_default();
     // 抖音与 TikTok 都可能有图文作品（TikTok 侧为 photo post / 幻灯片），
     // 两者的图片目录约定一致，这里一起标记，供视频管理页与详情页显示图片。
     let is_image_post = (is_douyin_source(source) || crate::tiktok::is_tiktok_source(source))
-        && (video.is_image_post || !image_paths.is_empty() || local_files.has_video_segments);
-    // 只由视频段组成的图集（抖音多段视频 / 多段动态）没有可查看的原图：
-    // 卡片显示「动态」徽标，详情页不再提示「图片尚未下载」。
-    let image_post_video_only = is_image_post && local_files.has_video_segments && image_paths.is_empty();
+        && (video.is_image_post
+            || !image_paths.is_empty()
+            || local_files.has_video_segments
+            || page_paths.len() > 1);
+    // 图集作品里的视频段是独立分页：有多个分页（或本地还留着早前版本的视频片段）
+    // 就按「多段动态」处理——卡片用紫色「动态」徽标区分，详情页不再提示「图片尚未下载」。
+    let image_post_video_only = is_image_post
+        && image_paths.is_empty()
+        && (page_paths.len() > 1 || local_files.has_video_segments);
     let image_urls = image_paths
         .iter()
         .enumerate()
@@ -1906,16 +1918,42 @@ async fn unified_youtube_parts(
                     .unwrap_or_else(|| "未达到最低下载标准".to_string())
             }),
         },
-        PageInfo {
-            id: video.id,
-            pid: 1,
-            name: video.title.clone(),
-            download_status: page_status,
-            path: output_path,
-            danmaku_last_synced_at: None,
-            danmaku_sync_generation: 0,
-            danmaku_cid_snapshot: None,
-            danmaku_last_write_count: 0,
+        {
+            let multi_page = page_paths.len() > 1;
+            if page_paths.is_empty() {
+                // 还没下载的作品：保留一个占位分页，前端继续显示「尚未下载」。
+                vec![PageInfo {
+                    id: video.id,
+                    pid: 1,
+                    name: video.title.clone(),
+                    download_status: page_status,
+                    path: output_path,
+                    danmaku_last_synced_at: None,
+                    danmaku_sync_generation: 0,
+                    danmaku_cid_snapshot: None,
+                    danmaku_last_write_count: 0,
+                }]
+            } else {
+                page_paths
+                    .iter()
+                    .enumerate()
+                    .map(|(index, path)| PageInfo {
+                        id: video.id,
+                        pid: (index + 1) as i32,
+                        name: if multi_page {
+                            format!("第{}段", index + 1)
+                        } else {
+                            video.title.clone()
+                        },
+                        download_status: page_status,
+                        path: Some(path.display().to_string()),
+                        danmaku_last_synced_at: None,
+                        danmaku_sync_generation: 0,
+                        danmaku_cid_snapshot: None,
+                        danmaku_last_write_count: 0,
+                    })
+                    .collect()
+            }
         },
         VideoSourceTag {
             source_id: source.id,
@@ -2020,10 +2058,10 @@ pub async fn get_unified_youtube_video(db: &DatabaseConnection, id: i32) -> Resu
         .one(db)
         .await?
         .ok_or_else(|| anyhow!("YouTube 视频源不存在: {}", video.source_id))?;
-    let (video, page, source) = unified_youtube_parts(&video, &source).await;
+    let (video, pages, source) = unified_youtube_parts(&video, &source).await;
     Ok(VideoResponse {
         video,
-        pages: vec![page],
+        pages,
         source: Some(source),
     })
 }
@@ -2096,7 +2134,10 @@ async fn remove_youtube_task_artifact(
             }
         }
         if media {
-            remove_file_if_exists(&output_path).await?;
+            // 图集作品的分页文件同属一篇作品，只删主文件会留下孤儿分页。
+            for page in crate::douyin::image_post_page_paths(&output_path) {
+                remove_file_if_exists(&page).await?;
+            }
         }
     }
     if upper_face || upper_info {
@@ -2525,7 +2566,15 @@ pub(crate) struct ImagePostLocalFiles {
 /// 纯视频段图集（多段视频/动态）没有原图，卡片与详情页要靠这个标志位区分
 /// 「作品本来就没有原图」和「原图还没下载完」。
 pub(crate) fn image_post_local_files(output_path: &Path) -> ImagePostLocalFiles {
-    let Ok(image_dir) = youtube_sidecar_path(output_path, "-images") else {
+    // 视频段各自成页时主文件是 `<作品>-P01.mp4`，原图目录挂在作品名上，
+    // 先剥掉分页号再找 `{作品}-images`，否则分页作品会读不到原图。
+    let base_path = output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .and_then(crate::douyin::split_image_post_page_stem)
+        .map(|(base, _)| output_path.with_file_name(base))
+        .unwrap_or_else(|| output_path.to_path_buf());
+    let Ok(image_dir) = youtube_sidecar_path(&base_path, "-images") else {
         return ImagePostLocalFiles::default();
     };
     let Ok(entries) = std::fs::read_dir(image_dir) else {
@@ -3730,6 +3779,104 @@ fn external_ai_file(
     })
 }
 
+/// 多段动态作品的 AI 重命名：整篇一起改名，分页编号与 `-images` 原图目录一起跟随。
+///
+/// 只改第一页会立刻把分页家族打散（其余分页、缩略图、NFO 全变孤儿，前端也再
+/// 认不出这是一篇作品），所以这里按「作品名」向 AI 取名，再给每一页补回编号。
+/// 返回 `None` 表示这不是多页作品，交给原来的单文件流程处理。
+async fn ai_rename_external_pages(
+    source: &youtube_source::Model,
+    video: &youtube_video::Model,
+    downloaded: &DownloadedYouTubeMedia,
+    video_prompt: Option<&str>,
+    audio_prompt: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    let pages = crate::douyin::image_post_page_paths(&downloaded.output_path);
+    if pages.len() < 2 {
+        return Ok(None);
+    }
+    let platform = source_platform_label(source);
+    let config = crate::config::reload_config().ai_rename;
+    let mut file = external_ai_file(source, video, downloaded, 1)?;
+    let Some((base_stem, _)) = crate::douyin::split_image_post_page_stem(&file.current_stem) else {
+        return Ok(None);
+    };
+    let old_base = base_stem.to_string();
+    file.current_stem = old_base.clone();
+    let prompt = if audio_prompt.is_some_and(|value| !value.trim().is_empty())
+        && file.ctx.is_audio
+    {
+        audio_prompt.unwrap_or_default()
+    } else {
+        video_prompt
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                if source.ai_rename_video_prompt.trim().is_empty() {
+                    &config.video_prompt_hint
+                } else {
+                    &source.ai_rename_video_prompt
+                }
+            })
+    };
+    let names = crate::utils::ai_rename::ai_generate_filenames_batch(
+        &config,
+        &format!("{}_{}", source_platform(source), source.id),
+        std::slice::from_ref(&file),
+        prompt,
+    )
+    .await?;
+    let Some(new_base) = names
+        .first()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if new_base == old_base {
+        return Ok(None);
+    }
+    let Some(parent) = downloaded.output_path.parent() else {
+        return Ok(None);
+    };
+    let ext = file.ext.clone();
+    let mut primary: Option<PathBuf> = None;
+    for (index, page) in pages.iter().enumerate() {
+        let page_stem = format!("{new_base}-P{:02}", index + 1);
+        let new_path = parent.join(format!("{page_stem}.{ext}"));
+        if *page != new_path {
+            if let Err(error) = std::fs::rename(page, &new_path) {
+                warn!(platform, path = %page.display(), %error, "{}图集分页 AI 重命名失败", platform);
+                if primary.is_none() {
+                    primary = Some(page.clone());
+                }
+                continue;
+            }
+            if let Err(error) =
+                crate::utils::ai_rename::rename_sidecars(page, &page_stem, &ext)
+            {
+                warn!(platform, %error, "{}图集分页侧车文件 AI 重命名失败", platform);
+            }
+            if let Err(error) = crate::utils::ai_rename::update_nfo_content(
+                &new_path.with_extension("nfo"),
+                &page_stem,
+            ) {
+                warn!(platform, %error, "{}图集分页 NFO 更新失败", platform);
+            }
+        }
+        if primary.is_none() {
+            primary = Some(new_path);
+        }
+    }
+    let old_image_dir = parent.join(format!("{old_base}-images"));
+    let new_image_dir = parent.join(format!("{new_base}-images"));
+    if old_image_dir.is_dir() && old_image_dir != new_image_dir {
+        if let Err(error) = std::fs::rename(&old_image_dir, &new_image_dir) {
+            warn!(platform, %error, "{}图集原图目录 AI 重命名失败", platform);
+        }
+    }
+    Ok(primary)
+}
+
 fn apply_external_ai_filename(
     file: &crate::utils::ai_rename::FileToRename,
     new_stem: &str,
@@ -3814,6 +3961,12 @@ async fn ai_rename_external_file(
             source.name
         );
         return Ok(downloaded.output_path.clone());
+    }
+    // 多段动态作品按整篇改名，保持 `<作品>-P01.mp4` 的分页编号。
+    if let Some(renamed) =
+        ai_rename_external_pages(source, video, downloaded, video_prompt, audio_prompt).await?
+    {
+        return Ok(renamed);
     }
     let config = crate::config::reload_config().ai_rename;
     let file = external_ai_file(source, video, downloaded, 1)?;
@@ -4106,7 +4259,7 @@ async fn download_youtube_media(
         .or_else(|| metadata.channel.clone())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| source.name.clone());
-    let output_path = youtube_output_path(source, video, &metadata, &title, &uploader)?;
+    let mut output_path = youtube_output_path(source, video, &metadata, &title, &uploader)?;
     info!(
         platform,
         source_id = source.id,
@@ -4189,7 +4342,16 @@ async fn download_youtube_media(
     if media_exists {
         // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
     } else if metadata.is_slideshow() {
-        crate::douyin::download_image_post(downloader, &metadata, &output_path, &filter_option, source).await?;
+        // 图集作品里的视频段会各自成页，主媒体文件（第一个分页）由下载函数返回：
+        // 封面、NFO、字幕等附属文件都跟着这个主文件走。
+        output_path = crate::douyin::download_image_post(
+            downloader,
+            &metadata,
+            &output_path,
+            &filter_option,
+            source,
+        )
+        .await?;
     } else if source.audio_only {
         let selected = selected.as_ref().context("图文作品不应进入音频流选择")?;
         if let Some(audio) = selected.audio.as_ref() {
@@ -4398,6 +4560,9 @@ async fn download_youtube_media(
         )
         .await
     };
+
+    // 多段动态作品的每个分页都要有自己的封面与信息文件，媒体库才会逐段显示。
+    ensure_image_post_page_sidecars(&metadata, &output_path, &video.url, &title, &uploader, source).await;
 
     // 图集判定要在 `metadata` 被部分移动前取好。
     let is_image_post = metadata.is_slideshow();
@@ -5637,6 +5802,48 @@ async fn download_youtube_cover(
         info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %fanart_path.display(), "{}视频源「{}」视频「{}」 fanart 生成完成", source_platform_label(source), source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
     }
     Ok(())
+}
+
+/// 图集作品的分页附属文件。
+///
+/// 视频段各自成页后，第 2 页起如果只有裸媒体文件，媒体库会显示成没有封面、
+/// 没有简介的空白条目，所以按分页文件名各补一份封面、fanart 与 NFO。
+async fn ensure_image_post_page_sidecars(
+    metadata: &ExternalMediaMetadata,
+    output_path: &Path,
+    video_url: &str,
+    title: &str,
+    uploader: &str,
+    source: &youtube_source::Model,
+) {
+    let pages = crate::douyin::image_post_page_paths(output_path);
+    if pages.len() < 2 {
+        return;
+    }
+    let platform = source_platform_label(source);
+    let primary_thumb = youtube_sidecar_path(output_path, "-thumb.jpg").ok();
+    let primary_fanart = youtube_sidecar_path(output_path, "-fanart.jpg").ok();
+    for page in pages.iter().skip(1) {
+        for (from, suffix) in [(&primary_thumb, "-thumb.jpg"), (&primary_fanart, "-fanart.jpg")] {
+            let Some(from) = from.as_ref() else {
+                continue;
+            };
+            let Ok(target) = youtube_sidecar_path(page, suffix) else {
+                continue;
+            };
+            if tokio::fs::metadata(&target).await.is_ok_and(|meta| meta.len() >= 1024) {
+                continue;
+            }
+            if let Err(error) = tokio::fs::copy(from, &target).await {
+                warn!(platform, path = %target.display(), %error, "{}图集分页封面生成失败", platform);
+            }
+        }
+        if let Err(error) =
+            generate_youtube_nfo(metadata, page, video_url, title, uploader, source).await
+        {
+            warn!(platform, path = %page.display(), %error, "{}图集分页 NFO 生成失败", platform);
+        }
+    }
 }
 
 /// 从 yt-dlp `creators` 中提取「联合创作者」频道名（主上传频道之外的名字）。
@@ -7042,6 +7249,22 @@ async fn recorded_output_files(output: &Path) -> Result<Vec<PathBuf>> {
         return Ok(vec![output.to_path_buf()]);
     };
     let output_stem = output.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+    // 图集作品的视频段各自成页（`<作品>-P01.mp4`…）：分页、分页侧车文件与主文件
+    // 属于同一篇作品，移动、删除、重置都要一起处理，否则会留下孤儿分页。
+    let base_stem = crate::douyin::split_image_post_page_stem(output_stem)
+        .map(|(base, _)| base)
+        .unwrap_or(output_stem);
+    let is_page_file = |name: &str| -> bool {
+        let Some(rest) = name.strip_prefix(&format!("{base_stem}-P")) else {
+            return false;
+        };
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits == 0 {
+            return false;
+        }
+        let tail = &rest[digits..];
+        tail.is_empty() || tail.starts_with('.') || tail.starts_with('-')
+    };
     let mut files = Vec::new();
     let mut entries = match tokio::fs::read_dir(parent).await {
         Ok(entries) => entries,
@@ -7058,7 +7281,7 @@ async fn recorded_output_files(output: &Path) -> Result<Vec<PathBuf>> {
             && (name.starts_with(&format!("{output_stem}."))
                 || name.starts_with(&format!("{output_stem}-thumb."))
                 || name.starts_with(&format!("{output_stem}-fanart.")));
-        if path == output || is_sidecar {
+        if path == output || is_sidecar || is_page_file(name) {
             files.push(path);
         }
     }
