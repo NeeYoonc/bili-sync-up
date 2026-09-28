@@ -22,6 +22,7 @@ pub mod status;
 pub mod submission_checkpoint;
 pub mod task_notifier;
 pub mod time_format;
+pub mod title_clean;
 
 use std::fmt;
 use tracing::{Event, Subscriber};

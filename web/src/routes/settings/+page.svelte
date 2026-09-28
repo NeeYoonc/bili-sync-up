@@ -527,7 +527,8 @@
 	// 变量说明
 	const variableHelp = {
 		video: [
-			{ name: '{{title}}', desc: '视频标题' },
+			{ name: '{{title}}', desc: '视频标题（抖音/TikTok/YouTube 会自动去掉话题标签、只保留第一行）' },
+			{ name: '{{title_full}}', desc: '完整原标题（仅抖音/TikTok/YouTube 可用，不做清洗）' },
 			{ name: '{{show_title}}', desc: '节目标题（与title相同）' },
 			{ name: '{{bvid}}', desc: 'BV号（视频编号）' },
 			{ name: '{{upper_name}}', desc: 'UP主名称' },
@@ -537,7 +538,8 @@
 			{ name: '{{ctime}}', desc: '视频创建时间' }
 		],
 		page: [
-			{ name: '{{title}}', desc: '视频标题（单P/多P模板可用）' },
+			{ name: '{{title}}', desc: '视频标题（单P/多P模板可用；抖音/TikTok/YouTube 会自动去掉话题标签、只保留第一行）' },
+			{ name: '{{title_full}}', desc: '完整原标题（仅抖音/TikTok/YouTube 可用，不做清洗）' },
 			{ name: '{{bvid}}', desc: 'BV号（视频编号，单P/多P模板可用）' },
 			{ name: '{{upper_name}}', desc: 'UP主名称（单P/多P模板可用）' },
 			{ name: '{{upper_mid}}', desc: 'UP主ID（单P/多P模板可用）' },

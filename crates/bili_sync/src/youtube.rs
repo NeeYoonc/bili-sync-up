@@ -5265,16 +5265,21 @@ fn youtube_output_path(
         .unwrap_or_else(crate::utils::time_format::now_naive);
     let time_format = crate::config::reload_config().time_format;
     let formatted_time = published_at.format(&time_format).to_string();
+    // 平台标题里塞满了 #话题、多行署名、回复前缀，原样进目录名会让文件夹又长又乱。
+    // 这里只清洗「用于生成路径」的标题，NFO 里仍是完整原标题；长度上限沿用与 B 站
+    // 完全相同的机制（模板渲染后每段最多 200 字节，见 utils::filenamify）。
+    let title_for_path = crate::utils::title_clean::clean_title_for_path(title);
     let args = serde_json::json!({
         "bvid": metadata.id,
-        "title": title,
+        "title": title_for_path,
+        "title_full": title,
         "upper_name": uploader,
         "upper_mid": metadata.channel_id.as_deref().unwrap_or(""),
         "pubtime": formatted_time,
         "fav_time": formatted_time,
-        "show_title": title,
-        "ptitle": title,
-        "long_title": title,
+        "show_title": title_for_path,
+        "ptitle": title_for_path,
+        "long_title": title_for_path,
         "pid": 1,
         "pid_pad": "01",
     });
@@ -8533,6 +8538,99 @@ mod tests {
         assert_eq!(path, expected, "短剧应输出 下载根/剧集名/Season 01/S01E03.mp4");
     }
 
+    #[test]
+    fn external_output_path_cleans_title_for_folder_name() {
+        use crate::external_media::ExternalMediaMetadata;
+        use bili_sync_entity::{youtube_source, youtube_video};
+        use std::collections::HashMap;
+
+        let mut source = youtube_source::Model::default();
+        source.id = 7;
+        source.source_type = "douyin_user".to_string();
+        source.name = "白铭(想接正片)".to_string();
+        source.path = "F:/Downloads/关注douyin".to_string();
+
+        let video = youtube_video::Model::default();
+        let metadata = ExternalMediaMetadata {
+            id: "7669751153546071303".to_string(),
+            title: None,
+            uploader: None,
+            uploader_url: None,
+            channel: None,
+            channel_id: None,
+            channel_url: None,
+            thumbnail: None,
+            description: None,
+            language: None,
+            upload_date: Some("20260822".to_string()),
+            duration: None,
+            formats: Vec::new(),
+            subtitles: HashMap::new(),
+            automatic_captions: HashMap::new(),
+            images: Vec::new(),
+            music_urls: Vec::new(),
+            creators: None,
+            slides: Vec::new(),
+        };
+        let title = "怎么不是最权威的大合唱呢 #乐意效劳 #kocchinokento #抖音音乐年终狂想 #抖音音乐年终接力赛";
+        let path = super::youtube_output_path(&source, &video, &metadata, title, "白铭").unwrap();
+        let folder = path
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_string();
+        assert_eq!(folder, "怎么不是最权威的大合唱呢", "外源目录名应使用清洗后的标题");
+    }
+
+    #[test]
+    fn external_output_path_length_budget_matches_bilibili() {
+        use crate::external_media::ExternalMediaMetadata;
+        use bili_sync_entity::{youtube_source, youtube_video};
+        use std::collections::HashMap;
+
+        let mut source = youtube_source::Model::default();
+        source.id = 8;
+        source.source_type = "douyin_user".to_string();
+        source.name = "作者".to_string();
+        source.path = "F:/Downloads/关注douyin".to_string();
+
+        let video = youtube_video::Model::default();
+        let metadata = ExternalMediaMetadata {
+            id: "1".to_string(),
+            title: None,
+            uploader: None,
+            uploader_url: None,
+            channel: None,
+            channel_id: None,
+            channel_url: None,
+            thumbnail: None,
+            description: None,
+            language: None,
+            upload_date: None,
+            duration: None,
+            formats: Vec::new(),
+            subtitles: HashMap::new(),
+            automatic_captions: HashMap::new(),
+            images: Vec::new(),
+            music_urls: Vec::new(),
+            creators: None,
+            slides: Vec::new(),
+        };
+        let long_title = "长".repeat(300);
+        let path = super::youtube_output_path(&source, &video, &metadata, &long_title, "作者").unwrap();
+        let folder = path
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_string();
+        assert!(
+            folder.len() <= 200,
+            "外源目录名超出 B 站同款 200 字节上限：{} 字节",
+            folder.len()
+        );
+    }
 }
 
 /// 迁移旧版 YouTube 凭证文件到数据库（升级兼容；成功后删除旧文件）。
