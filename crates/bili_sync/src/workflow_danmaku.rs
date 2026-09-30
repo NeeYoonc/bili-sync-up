@@ -14,7 +14,7 @@ use tracing::info;
 
 use crate::bilibili::{parse_event_name, DanmakuElem, DanmakuWriter, Dimension, PageInfo as BiliPageInfo, Video};
 use crate::config::Config;
-use crate::utils::danmaku_schedule::{should_sync_danmaku, stage_for_age, Decision, Stage};
+use crate::utils::danmaku_schedule::{resolve_sync_stage, should_sync_danmaku, stage_for_age, Decision, Stage};
 use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK};
 use crate::utils::time_format::{beijing_timezone, parse_time_string, to_standard_string};
 
@@ -430,9 +430,7 @@ pub async fn sync_page_danmaku(
     }
 
     let pubtime = stored_beijing_naive_to_utc(video_model.pubtime);
-    let resolved_stage = next_stage.unwrap_or_else(|| {
-        crate::utils::danmaku_schedule::stage_for_age(&config.danmaku_update_policy, pubtime, now, false)
-    });
+    let resolved_stage = resolve_sync_stage(&config.danmaku_update_policy, pubtime, now, next_stage);
     let (fresh_width, fresh_height) = extract_dimension(fresh.dimension.as_ref());
     let fresh_duration = if fresh.duration > 0 {
         fresh.duration
