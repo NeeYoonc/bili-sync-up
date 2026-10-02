@@ -148,28 +148,37 @@ impl Pugv {
     }
 
     /// 打印当前账号在该课程上的购买状态，便于排查「为什么下不了」。
+    ///
+    /// 注意：0 元课（「0元抢学」「免费试听」这类）压根没有购买记录，
+    /// `user_status.payed` 恒为 0，不能据此判定「未购买」并告警——
+    /// 这类课程的课时本来就能直接取流。
     pub async fn log_purchase_status(&self) {
         match self.get_season_info().await {
             Ok(data) => {
+                let title = data["title"].as_str().unwrap_or("未知");
                 let payed = data["user_status"]["payed"].as_i64();
-                let is_expired = data["user_status"]["is_expired"].as_bool();
-                let expiry = data["user_status"]["user_expiry_content"].as_str();
-                let price = data["payment"]["price_format"].as_str();
-                if payed.unwrap_or(0) > 0 {
-                    info!(
+                let price = course_price_display(&data);
+
+                match classify_course_purchase(&data) {
+                    CoursePurchaseState::Purchased => info!(
                         "课程「{}」当前账号已购买（payed={:?}, 有效期: {}）",
-                        data["title"].as_str().unwrap_or("未知"),
+                        title,
                         payed,
-                        expiry.unwrap_or("长期有效")
-                    );
-                } else {
-                    warn!(
+                        data["user_status"]["user_expiry_content"]
+                            .as_str()
+                            .unwrap_or("长期有效")
+                    ),
+                    CoursePurchaseState::Free => info!(
+                        "课程「{}」为免费课程（价格 {}），无需购买，全部课时可直接取流",
+                        title, price
+                    ),
+                    CoursePurchaseState::Unpurchased | CoursePurchaseState::Unknown => warn!(
                         "课程「{}」当前账号未检测到购买记录（payed={:?}, 是否过期: {:?}, 价格: {}），付费课时将无法取流；若确认已购买，请检查 B 站凭证是否有效",
-                        data["title"].as_str().unwrap_or("未知"),
+                        title,
                         payed,
-                        is_expired,
-                        price.unwrap_or("-")
-                    );
+                        data["user_status"]["is_expired"].as_bool(),
+                        price
+                    ),
                 }
             }
             Err(e) => warn!("获取课程购买状态失败: {:#}", e),
@@ -324,6 +333,65 @@ impl Pugv {
     }
 }
 
+/// 课程购买状态（只影响日志提示，不参与任何下载逻辑）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoursePurchaseState {
+    /// 当前账号已购买
+    Purchased,
+    /// 免费 / 0 元课，无需购买（这类课程 payed 恒为 0）
+    Free,
+    /// 付费课，但当前账号查不到购买记录
+    Unpurchased,
+    /// 接口没给价格，无法判断免费还是付费，保守按未购买提示
+    Unknown,
+}
+
+/// 判断课程购买状态。
+///
+/// 注意顺序：先看 `payed`，再看价格。免费课（0 元）永远不会产生购买记录，
+/// 只看 `payed` 会把「0元抢学」「免费试听」这类课程误报成「未购买」。
+fn classify_course_purchase(season_info: &serde_json::Value) -> CoursePurchaseState {
+    let payed = season_info["user_status"]["payed"].as_i64().unwrap_or(0);
+    if payed > 0 {
+        return CoursePurchaseState::Purchased;
+    }
+    match course_price(season_info) {
+        Some(price) if price <= 0.0 => CoursePurchaseState::Free,
+        Some(_) => CoursePurchaseState::Unpurchased,
+        None => CoursePurchaseState::Unknown,
+    }
+}
+
+/// 读取课程价格：优先 `payment.price`（数值），缺失时回退解析 `payment.price_format`。
+///
+/// 返回 `None` 表示响应里没有可用的价格字段（接口结构变化等），
+/// 此时**不能**断言课程免费，避免把付费课误判成免费课。
+fn course_price(season_info: &serde_json::Value) -> Option<f64> {
+    if let Some(price) = season_info["payment"]["price"].as_f64() {
+        return Some(price);
+    }
+    let raw = season_info["payment"]["price_format"].as_str()?;
+    let cleaned: String = raw
+        .chars()
+        .filter(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
+    cleaned.parse::<f64>().ok()
+}
+
+/// 日志里展示用的价格文本：优先用接口给的 `price_format`（如 "88"、"0"），否则退回数值。
+fn course_price_display(season_info: &serde_json::Value) -> String {
+    if let Some(raw) = season_info["payment"]["price_format"].as_str() {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    match course_price(season_info) {
+        Some(price) => price.to_string(),
+        None => "-".to_string(),
+    }
+}
+
 /// 校验 `{code, message, data}` 响应并返回 `data`
 fn validate(json: serde_json::Value) -> Result<serde_json::Value> {
     let (code, message) = match (json["code"].as_i64(), json["message"].as_str()) {
@@ -334,4 +402,65 @@ fn validate(json: serde_json::Value) -> Result<serde_json::Value> {
         return Err(crate::bilibili::BiliError::RequestFailed(code, message.to_string()).into());
     }
     Ok(json["data"].clone())
+}
+#[cfg(test)]
+mod tests {
+    use super::{classify_course_purchase, course_price, course_price_display, CoursePurchaseState};
+    use serde_json::json;
+
+    /// 真实响应（2026-10-03 抓取）：free 课 payment.price = 0.0 / price_format = "0"，
+    /// 且 user_status.payed 同样是 0 —— 这正是之前被误报「未检测到购买记录」的原因。
+    fn free_course_payload() -> serde_json::Value {
+        json!({
+            "title": "【0元抢学】颉斌斌 || 考研英语28考研早鸟班",
+            "payment": { "price": 0.0, "price_format": "0", "refresh_text": "免费报名" },
+            "user_status": { "payed": 0, "is_expired": false, "user_expiry_content": "长期有效" }
+        })
+    }
+
+    /// 真实响应：付费课 payment.price = 188.0，未购买账号 payed = 0
+    fn paid_course_payload() -> serde_json::Value {
+        json!({
+            "title": "颉斌斌 || 【188元】27考研英语全程班",
+            "payment": { "price": 188.0, "price_format": "188" },
+            "user_status": { "payed": 0, "is_expired": false, "user_expiry_content": "长期有效" }
+        })
+    }
+
+    #[test]
+    fn free_course_is_not_reported_as_unpurchased() {
+        let data = free_course_payload();
+        assert_eq!(classify_course_purchase(&data), CoursePurchaseState::Free);
+        assert_eq!(course_price(&data), Some(0.0));
+        assert_eq!(course_price_display(&data), "0");
+    }
+
+    #[test]
+    fn paid_course_without_purchase_still_warns() {
+        let data = paid_course_payload();
+        assert_eq!(classify_course_purchase(&data), CoursePurchaseState::Unpurchased);
+        assert_eq!(course_price_display(&data), "188");
+    }
+
+    #[test]
+    fn purchased_course_wins_over_price() {
+        let mut data = paid_course_payload();
+        data["user_status"]["payed"] = json!(1);
+        assert_eq!(classify_course_purchase(&data), CoursePurchaseState::Purchased);
+    }
+
+    #[test]
+    fn price_falls_back_to_price_format() {
+        let data = json!({ "payment": { "price_format": "¥ 88" } });
+        assert_eq!(course_price(&data), Some(88.0));
+        assert_eq!(classify_course_purchase(&data), CoursePurchaseState::Unpurchased);
+    }
+
+    #[test]
+    fn missing_payment_is_unknown_not_free() {
+        let data = json!({ "title": "x" });
+        assert_eq!(course_price(&data), None);
+        assert_eq!(classify_course_purchase(&data), CoursePurchaseState::Unknown);
+        assert_eq!(course_price_display(&data), "-");
+    }
 }
