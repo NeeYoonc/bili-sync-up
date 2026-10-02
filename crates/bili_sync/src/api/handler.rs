@@ -15,6 +15,7 @@ use crate::http::headers::{create_api_headers, create_image_headers};
 use crate::utils::time_format::{now_standard_string, to_standard_string};
 use bili_sync_entity::{
     collection, favorite, page, submission, video, video_source, watch_later, youtube_source, youtube_video,
+    VIDEO_SOURCE_TYPE_PUGV,
 };
 use bili_sync_migration::Expr;
 use reqwest;
@@ -127,6 +128,7 @@ struct SourceChargeVisibilityFilters {
     submission: Option<i32>,
     watch_later: Option<i32>,
     bangumi: Option<i32>,
+    pugv: Option<i32>,
 }
 
 impl From<&VideosRequest> for SourceChargeVisibilityFilters {
@@ -137,6 +139,7 @@ impl From<&VideosRequest> for SourceChargeVisibilityFilters {
             submission: params.submission,
             watch_later: params.watch_later,
             bangumi: params.bangumi,
+            pugv: params.pugv,
         }
     }
 }
@@ -149,6 +152,7 @@ impl From<&ResetSpecificTasksRequest> for SourceChargeVisibilityFilters {
             submission: params.submission,
             watch_later: params.watch_later,
             bangumi: params.bangumi,
+            pugv: params.pugv,
         }
     }
 }
@@ -160,6 +164,7 @@ impl SourceChargeVisibilityFilters {
             || self.submission.is_some()
             || self.watch_later.is_some()
             || self.bangumi.is_some()
+            || self.pugv.is_some()
     }
 }
 
@@ -221,6 +226,10 @@ async fn should_hide_charge_videos_for_source_filters(
 ) -> Result<bool, ApiError> {
     if let Some(id) = filters.bangumi {
         return Ok(!source_download_charge_videos_enabled(db, "bangumi", id).await?);
+    }
+
+    if let Some(id) = filters.pugv {
+        return Ok(!source_download_charge_videos_enabled(db, "pugv", id).await?);
     }
 
     for (source_type, id) in [
@@ -1882,6 +1891,58 @@ mod queue_sse_tests {
         .expect("应能插入测试视频");
     }
 
+    async fn insert_test_pugv_video(db: &DatabaseConnection, id: i32, title: &str, source_id: i32) {
+        let test_time = chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc();
+
+        video::ActiveModel {
+            id: Set(id),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(None),
+            source_id: Set(Some(source_id)),
+            source_type: Set(Some(VIDEO_SOURCE_TYPE_PUGV)),
+            upper_id: Set(2000 + i64::from(id)),
+            upper_name: Set("测试讲师".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set(title.to_string()),
+            path: Set(format!("/tmp/pugv-video-{id}")),
+            category: Set(2),
+            bvid: Set(format!("av{}", 1000 + id)),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(test_time),
+            pubtime: Set(test_time),
+            favtime: Set(test_time),
+            download_status: Set(0),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(true),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试课程视频");
+    }
+
     async fn set_test_submission_download_charge_videos(db: &DatabaseConnection, id: i32, enabled: bool) {
         submission::Entity::update(submission::ActiveModel {
             id: Unchanged(id),
@@ -2235,6 +2296,7 @@ mod queue_sse_tests {
                 submission: Some(1),
                 watch_later: None,
                 bangumi: None,
+                pugv: None,
                 query: None,
                 page: Some(0),
                 page_size: Some(10),
@@ -2344,6 +2406,46 @@ mod queue_sse_tests {
         assert_eq!(response.videos.len(), 1);
         assert_eq!(response.videos[0].id, 1);
         assert!(!response.videos[0].is_charge_video);
+    }
+
+    #[tokio::test]
+    async fn test_get_videos_filters_by_pugv_source() {
+        let db = create_test_db("videos-filter-pugv-source").await;
+        insert_test_pugv_video(db.as_ref(), 1, "课程课时一", 1).await;
+        insert_test_pugv_video(db.as_ref(), 2, "课程课时二", 1).await;
+        insert_test_pugv_video(db.as_ref(), 3, "另一门课程的课时", 2).await;
+        insert_test_video(db.as_ref(), 4, "普通投稿视频").await;
+
+        let all_response = get_videos(
+            Extension(db.clone()),
+            Query(VideosRequest {
+                page: Some(0),
+                page_size: Some(10),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("不筛选时应返回成功")
+        .into_data();
+        assert_eq!(all_response.total_count, 4, "不筛选时应返回全部视频");
+
+        let response = get_videos(
+            Extension(db.clone()),
+            Query(VideosRequest {
+                pugv: Some(1),
+                page: Some(0),
+                page_size: Some(10),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("按课程源筛选应返回成功")
+        .into_data();
+
+        assert_eq!(response.total_count, 2, "按课程源筛选应只返回该课程的课时");
+        let mut ids: Vec<i32> = response.videos.iter().map(|video| video.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
     }
 
     #[tokio::test]
@@ -3121,9 +3223,15 @@ pub async fn get_videos(
         query = query.filter(video::Column::Deleted.eq(0));
     }
 
-    // 直接检查是否存在bangumi参数，单独处理
+    // 直接检查是否存在bangumi / pugv参数，单独处理
     if let Some(id) = params.bangumi {
         query = query.filter(video::Column::SourceId.eq(id).and(video::Column::SourceType.eq(1)));
+    } else if let Some(id) = params.pugv {
+        query = query.filter(
+            video::Column::SourceId
+                .eq(id)
+                .and(video::Column::SourceType.eq(VIDEO_SOURCE_TYPE_PUGV)),
+        );
     } else {
         // 处理其他常规类型
         for (field, column) in [
@@ -4192,9 +4300,15 @@ pub async fn reset_all_videos(
         video_query = video_query.filter(video::Column::Deleted.eq(0));
     }
 
-    // 直接检查是否存在bangumi参数，单独处理
+    // 直接检查是否存在bangumi / pugv参数，单独处理
     if let Some(id) = params.bangumi {
         video_query = video_query.filter(video::Column::SourceId.eq(id).and(video::Column::SourceType.eq(1)));
+    } else if let Some(id) = params.pugv {
+        video_query = video_query.filter(
+            video::Column::SourceId
+                .eq(id)
+                .and(video::Column::SourceType.eq(VIDEO_SOURCE_TYPE_PUGV)),
+        );
     } else {
         // 处理其他常规类型
         for (field, column) in [
