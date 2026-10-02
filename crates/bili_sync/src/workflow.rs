@@ -527,6 +527,7 @@ fn download_risk_control_resume_source_key(video_source: &VideoSourceEnum) -> St
         VideoSourceEnum::Submission(source) => format!("submission:{}", source.id),
         VideoSourceEnum::WatchLater(source) => format!("watch_later:{}", source.id),
         VideoSourceEnum::BangumiSource(source) => format!("bangumi:{}", source.id),
+        VideoSourceEnum::PugvSource(source) => format!("pugv:{}", source.id),
     }
 }
 
@@ -1609,6 +1610,20 @@ pub async fn refresh_video_source<'a>(
                         Some(ep_id.clone()),
                     )
                 }
+                VideoInfo::Pugv {
+                    title,
+                    bvid,
+                    episode_number,
+                    ep_id,
+                    lecturer,
+                    ..
+                } => (
+                    title.clone(),
+                    bvid.clone(),
+                    lecturer.clone().unwrap_or_else(|| "课程".to_string()),
+                    *episode_number,
+                    Some(ep_id.clone()),
+                ),
             };
             temp_video_infos.push((title, bvid, upper_name, episode_num, ep_id));
         }
@@ -1624,6 +1639,7 @@ pub async fn refresh_video_source<'a>(
                 VideoInfo::Submission { bvid, .. } => bvid.clone(),
                 VideoInfo::Dynamic { bvid, .. } => bvid.clone(),
                 VideoInfo::Bangumi { bvid, .. } => bvid.clone(),
+                VideoInfo::Pugv { bvid, .. } => bvid.clone(),
             })
             .collect();
 
@@ -1661,7 +1677,9 @@ pub async fn refresh_video_source<'a>(
             // 为每个新插入的视频创建通知信息
             for new_video in newly_inserted {
                 // 查找对应的视频信息，对番剧使用ep_id进行精确匹配
-                let video_info_idx = if new_video.source_type == Some(1) && new_video.ep_id.is_some() {
+                let video_info_idx = if bili_sync_entity::is_episode_source_type(new_video.source_type)
+                    && new_video.ep_id.is_some()
+                {
                     // 番剧：使用ep_id匹配
                     temp_video_infos.iter().position(
                         |(_, _, _, _, ep_id): &(String, String, String, Option<i32>, Option<String>)| {
@@ -1937,9 +1955,16 @@ pub async fn fetch_video_details(
     let submission_collection_membership: Arc<Mutex<HashMap<String, (String, i32)>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // 分离出番剧和普通视频
-    let (bangumi_videos, normal_videos): (Vec<_>, Vec<_>) =
-        videos_model.into_iter().partition(|v| v.source_type == Some(1));
+    // 分离出番剧 / 课程 / 普通视频
+    let (bangumi_videos, rest): (Vec<_>, Vec<_>) = videos_model.into_iter().partition(|v| v.source_type == Some(1));
+    let (pugv_videos, normal_videos): (Vec<_>, Vec<_>) =
+        rest.into_iter().partition(|v| v.source_type == Some(2));
+
+    // 课程课时：cid 在入库时就已带上，这里只需补齐 page 记录
+    if !pugv_videos.is_empty() {
+        info!("开始处理 {} 个课程视频", pugv_videos.len());
+        fill_pugv_videos(bili_client, pugv_videos, connection, video_source).await?;
+    }
 
     // 优化后的番剧信息获取 - 使用数据库缓存和按季分组
     if !bangumi_videos.is_empty() {
@@ -2553,8 +2578,8 @@ pub async fn fetch_video_details(
             let mut missing_total = 0usize;
             let mut skipped_multipage = 0usize;
             for model in post_detail_models {
-                if model.source_type == Some(1) {
-                    continue; // 番剧不走投稿lists归属补抓
+                if bili_sync_entity::is_episode_source_type(model.source_type) {
+                    continue; // 番剧/课程不走投稿lists归属补抓
                 }
                 let season_missing = model
                     .season_id
@@ -3091,6 +3116,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
         VideoSourceEnum::Submission(_) => "投稿",
         VideoSourceEnum::WatchLater(_) => "稍后再看",
         VideoSourceEnum::BangumiSource(_) => "番剧",
+        VideoSourceEnum::PugvSource(_) => "课程",
     };
 
     let mut renamed_count = 0;
@@ -9232,6 +9258,13 @@ async fn fetch_page_video(
                         bili_video
                             .get_bangumi_page_analyzer_with_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)
                             .await
+                    } else if video_model.source_type == Some(2) && video_model.ep_id.is_some() {
+                        // 课程（pugv）使用课程专用API
+                        let ep_id = video_model.ep_id.as_ref().unwrap();
+                        debug!("使用带质量回退的课程API获取播放地址: ep_id={}", ep_id);
+                        bili_video
+                            .get_pugv_page_analyzer_with_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)
+                            .await
                     } else {
                         // 普通视频使用API降级机制（普通视频API -> 番剧API）
                         debug!("使用API降级机制获取播放地址（普通视频API -> 番剧API）");
@@ -12046,6 +12079,147 @@ async fn get_video_count_for_source(video_source: &VideoSourceEnum, connection: 
         .count(connection)
         .await?;
     Ok(count as usize)
+}
+
+// ============================ 课程（pugv）详情填充 ============================
+
+/// 批量填充课程课时详情。
+///
+/// 课程详情接口一次就能拿到整门课的「ep_id -> (cid, duration)」映射，
+/// 因此按 season 分组后每个课程只请求一次。
+async fn fill_pugv_videos(
+    bili_client: &BiliClient,
+    pugv_videos: Vec<video::Model>,
+    connection: &DatabaseConnection,
+    video_source: &VideoSourceEnum,
+) -> Result<()> {
+    let mut videos_by_season: HashMap<String, Vec<video::Model>> = HashMap::new();
+    let mut videos_without_season = Vec::new();
+
+    for video_model in pugv_videos {
+        match &video_model.season_id {
+            Some(season_id) => videos_by_season
+                .entry(season_id.clone())
+                .or_default()
+                .push(video_model),
+            None => videos_without_season.push(video_model),
+        }
+    }
+
+    for (season_id, videos) in videos_by_season {
+        let pugv = crate::bilibili::pugv::Pugv::new(bili_client, Some(season_id.clone()), None);
+        let episodes_map = match pugv.get_season_info().await {
+            Ok(info) => {
+                let title = info["title"].as_str().unwrap_or(&season_id).to_string();
+                info!(
+                    "课程 {}「{}」获取到 {} 个课时信息",
+                    season_id,
+                    title,
+                    info["episodes"].as_array().map(|v| v.len()).unwrap_or(0)
+                );
+                build_pugv_episode_map(&info)
+            }
+            Err(e) => {
+                warn!("获取课程 {} 详情失败，将使用视频记录里已有的 cid: {:#}", season_id, e);
+                HashMap::new()
+            }
+        };
+
+        for video_model in videos {
+            if let Err(e) = process_pugv_video(video_model, &episodes_map, connection, video_source).await {
+                error!("处理课程视频失败: {}", e);
+            }
+        }
+    }
+
+    // 理论上不该出现（入库时一定带 season_id），兜底处理避免视频卡在未填充状态
+    for video_model in videos_without_season {
+        warn!("课程视频「{}」缺少 season_id，尝试用已有 cid 填充", video_model.name);
+        if let Err(e) = process_pugv_video(video_model, &HashMap::new(), connection, video_source).await {
+            error!("处理课程视频失败: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// 从课程详情构造 ep_id -> (cid, duration 秒) 映射
+fn build_pugv_episode_map(info: &serde_json::Value) -> HashMap<String, (i64, u32)> {
+    let mut map = HashMap::new();
+    let Some(episodes) = info["episodes"].as_array() else {
+        return map;
+    };
+    for episode in episodes {
+        let Some(ep_id) = episode["id"].as_i64() else {
+            continue;
+        };
+        let cid = episode["cid"].as_i64().unwrap_or_default();
+        if cid <= 0 {
+            continue;
+        }
+        let duration = episode["duration"].as_i64().unwrap_or_default().max(0) as u32;
+        map.insert(ep_id.to_string(), (cid, duration));
+    }
+    map
+}
+
+/// 填充单个课程课时的 cid / page 记录。
+///
+/// 课程课时在入库时就带了 cid，因此这里不需要额外发请求；
+/// `episodes_map` 只用于补齐时长等展示信息。
+async fn process_pugv_video(
+    video_model: video::Model,
+    episodes_map: &HashMap<String, (i64, u32)>,
+    connection: &DatabaseConnection,
+    video_source: &VideoSourceEnum,
+) -> Result<()> {
+    let Some(ep_id) = video_model.ep_id.as_deref() else {
+        warn!("课程「{}」缺少 EP ID，跳过详情填充", video_model.name);
+        return Ok(());
+    };
+
+    let (actual_cid, duration) = match episodes_map.get(ep_id).copied() {
+        Some(v) if v.0 > 0 => v,
+        _ => match video_model.cid {
+            Some(cid) if cid > 0 => (cid, 0),
+            _ => {
+                warn!(
+                    "课程「{}」(EP{}) 无法获取 CID，跳过详情填充（保留未填充状态便于下次重试）",
+                    video_model.name, ep_id
+                );
+                return Ok(());
+            }
+        },
+    };
+
+    let should_update_video_cid = video_model.cid.is_none();
+
+    let txn = crate::database::begin_traced_transaction(connection, "workflow.fill_pugv_single_page").await?;
+
+    let page_info = PageInfo {
+        cid: actual_cid,
+        page: 1,
+        name: video_model.name.clone(),
+        duration,
+        first_frame: None,
+        dimension: None,
+    };
+
+    create_pages(vec![page_info], &video_model, &txn).await?;
+
+    let mut video_active_model: bili_sync_entity::video::ActiveModel = video_model.into();
+    video_source.set_relation_id(&mut video_active_model);
+    if should_update_video_cid {
+        video_active_model.cid = Set(Some(actual_cid));
+    }
+    video_active_model.single_page = Set(Some(true)); // 课程的每个课时都是单页
+    video_active_model.tags = Set(Some(serde_json::Value::Array(vec![])));
+    video_active_model.save(&txn).await?;
+
+    txn.commit().await?;
+    notify_videos_changed();
+
+    Ok(())
 }
 
 /// 获取特定视频源已识别的分P数量，用于少量视频但超多分P的投稿源触发下载保护。

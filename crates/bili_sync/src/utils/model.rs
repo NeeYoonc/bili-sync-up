@@ -28,6 +28,7 @@ fn extract_bvid(video_info: &VideoInfo) -> String {
         VideoInfo::WatchLater { bvid, .. } => bvid.clone(),
         VideoInfo::Collection { bvid, .. } => bvid.clone(),
         VideoInfo::Bangumi { bvid, .. } => bvid.clone(),
+        VideoInfo::Pugv { bvid, .. } => bvid.clone(),
     }
 }
 
@@ -41,6 +42,16 @@ fn extract_title(video_info: &VideoInfo) -> String {
         VideoInfo::WatchLater { title, .. } => title.clone(),
         VideoInfo::Collection { title, .. } => title.clone(),
         VideoInfo::Bangumi { title, .. } => title.clone(),
+        VideoInfo::Pugv {
+            title,
+            show_title,
+            share_copy,
+            ..
+        } => share_copy
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| show_title.clone())
+            .unwrap_or_else(|| title.clone()),
     }
 }
 
@@ -54,6 +65,7 @@ fn extract_pubtime(video_info: &VideoInfo) -> DateTime<Utc> {
         VideoInfo::WatchLater { pubtime, .. } => *pubtime,
         VideoInfo::Collection { pubtime, .. } => *pubtime,
         VideoInfo::Bangumi { pubtime, .. } => *pubtime,
+        VideoInfo::Pugv { pubtime, .. } => *pubtime,
     }
 }
 
@@ -77,6 +89,7 @@ fn extract_duration_seconds(video_info: &VideoInfo) -> Option<i32> {
             })
         }),
         VideoInfo::Bangumi { duration, .. } => *duration,
+        VideoInfo::Pugv { duration, .. } => *duration,
     }
 }
 

@@ -201,7 +201,7 @@ async fn source_download_charge_videos_enabled(
                 .one(db)
                 .await?
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             video_source::Entity::find_by_id(source_id)
                 .select_only()
                 .column(video_source::Column::DownloadChargeVideos)
@@ -2905,12 +2905,14 @@ pub async fn get_video_sources(
 
     // 确保bangumi_sources是一个数组，即使为空
     // 由于tuple最多支持12个元素，使用全模型查询方式
-    let bangumi_sources: Vec<VideoSource> = video_source::Entity::find()
-        .filter(video_source::Column::Type.eq(1))
+    // 番剧（type=1）与课程（type=2）共用 video_source 表，一起取出后按类型分组
+    let (bangumi_sources, pugv_sources): (Vec<VideoSource>, Vec<VideoSource>) = video_source::Entity::find()
+        .filter(video_source::Column::Type.is_in([1, 2]))
         .all(db.as_ref())
         .await?
         .into_iter()
         .map(|model| {
+            let __source_type = model.r#type;
             let selected_seasons =
                 model
                     .selected_seasons
@@ -2939,7 +2941,8 @@ pub async fn get_video_sources(
                 .as_ref()
                 .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok());
 
-            VideoSource {
+            (
+                VideoSource {
                 id: model.id,
                 name: model.name,
                 enabled: model.enabled,
@@ -2984,9 +2987,23 @@ pub async fn get_video_sources(
                 ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
                 ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
                 use_dynamic_api: None,
-            }
+                },
+                __source_type,
+            )
         })
-        .collect();
+        .collect::<Vec<(VideoSource, i32)>>()
+        .into_iter()
+        .fold(
+            (Vec::<VideoSource>::new(), Vec::<VideoSource>::new()),
+            |(mut bangumi, mut pugv), (source, source_type)| {
+                if source_type == 2 {
+                    pugv.push(source);
+                } else {
+                    bangumi.push(source);
+                }
+                (bangumi, pugv)
+            },
+        );
 
     // 返回响应，确保每个分类都是一个数组
     Ok(ApiResponse::ok(VideoSourcesResponse {
@@ -2995,6 +3012,7 @@ pub async fn get_video_sources(
         submission: submission_sources,
         watch_later: watch_later_sources,
         bangumi: bangumi_sources,
+        pugv: pugv_sources,
     }))
 }
 
@@ -3644,7 +3662,7 @@ fn build_video_source_tag(
 }
 
 async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model) -> Result<Option<VideoSourceTag>> {
-    if video.source_type == Some(1) {
+    if bili_sync_entity::is_episode_source_type(video.source_type) {
         if let Some(source_id) = video.source_id {
             let source = video_source::Entity::find_by_id(source_id).one(db).await?;
             let (source_name, split_chapters_after_download, audio_only, audio_only_m4a_only, flat_folder) = source
@@ -5848,6 +5866,78 @@ pub async fn add_video_source_internal(
                 }
             }
         }
+        "pugv" => {
+            // 课程（pugv / cheese）以 season_id 唯一标识，
+            // 链接形如 https://www.bilibili.com/cheese/play/ss713799843
+            if params.source_id.is_empty() {
+                return Err(anyhow!("课程标识不能为空，请提供课程的 season_id（课程链接中 ss 后面的数字）").into());
+            }
+
+            let existing = video_source::Entity::find()
+                .filter(video_source::Column::Type.eq(2))
+                .filter(video_source::Column::SeasonId.eq(&params.source_id))
+                .one(&txn)
+                .await?;
+
+            if let Some(existing) = existing {
+                return Ok(AddVideoSourceResponse {
+                    success: false,
+                    source_id: existing.id,
+                    source_type: "pugv".to_string(),
+                    message: format!("该课程已存在：{}", existing.name),
+                });
+            }
+
+            let keyword_filters_json = params
+                .keyword_filters
+                .as_ref()
+                .filter(|kf| !kf.is_empty())
+                .map(|kf| serde_json::to_string(kf).unwrap_or_default());
+            let keyword_filter_mode = params.keyword_filter_mode.clone();
+            let now = crate::utils::time_format::now_standard_string();
+
+            let pugv = video_source::ActiveModel {
+                id: sea_orm::ActiveValue::NotSet,
+                name: sea_orm::Set(params.name.clone()),
+                path: sea_orm::Set(params.path.clone()),
+                r#type: sea_orm::Set(2), // 2 表示课程类型
+                latest_row_at: sea_orm::Set(now.clone()),
+                created_at: sea_orm::Set(now),
+                season_id: sea_orm::Set(Some(params.source_id.clone())),
+                ep_id: sea_orm::Set(params.ep_id.clone()),
+                scan_deleted_videos: sea_orm::Set(false),
+                scan_deleted_videos_once: sea_orm::Set(false),
+                filter_option: sea_orm::Set(source_filter_option.clone()),
+                keyword_filters: sea_orm::Set(keyword_filters_json),
+                keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
+                audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
+                split_chapters_after_download: sea_orm::Set(params.split_chapters_after_download.unwrap_or(false)),
+                download_charge_videos: sea_orm::Set(params.download_charge_videos.unwrap_or(true)),
+                download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
+                download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
+                download_ai_subtitle: sea_orm::Set(params.download_ai_subtitle.unwrap_or(true)),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
+                ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
+                ai_rename_video_prompt: sea_orm::Set(params.ai_rename_video_prompt.clone().unwrap_or_default()),
+                ai_rename_audio_prompt: sea_orm::Set(params.ai_rename_audio_prompt.clone().unwrap_or_default()),
+                ai_rename_enable_multi_page: sea_orm::Set(params.ai_rename_enable_multi_page.unwrap_or(false)),
+                ai_rename_enable_collection: sea_orm::Set(params.ai_rename_enable_collection.unwrap_or(false)),
+                ai_rename_enable_bangumi: sea_orm::Set(params.ai_rename_enable_bangumi.unwrap_or(false)),
+                ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
+                ..Default::default()
+            };
+
+            let insert_result = video_source::Entity::insert(pugv).exec(&txn).await?;
+            std::fs::create_dir_all(&params.path).map_err(|e| anyhow!("创建目录失败: {}", e))?;
+            info!("新课程添加完成: {} (season_id={})", params.name, params.source_id);
+
+            AddVideoSourceResponse {
+                success: true,
+                source_id: insert_result.last_insert_id,
+                source_type: "pugv".to_string(),
+                message: "课程添加成功".to_string(),
+            }
+        }
         "watch_later" => {
             // 稍后观看只能有一个，检查是否已存在
             let existing = watch_later::Entity::find().count(&txn).await?;
@@ -6139,7 +6229,7 @@ pub async fn update_video_source_enabled_internal(
                 message: format!("稍后观看已{}", if enabled { "启用" } else { "禁用" }),
             }
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             let bangumi = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -6156,7 +6246,7 @@ pub async fn update_video_source_enabled_internal(
             crate::api::response::UpdateVideoSourceEnabledResponse {
                 success: true,
                 source_id: id,
-                source_type: "bangumi".to_string(),
+                source_type: source_type.to_string(),
                 enabled,
                 message: format!("番剧 {} 已{}", bangumi.name, if enabled { "启用" } else { "禁用" }),
             }
@@ -7297,7 +7387,7 @@ async fn delete_orphaned_videos_from_db(
 fn is_supported_delete_video_source_type(source_type: &str) -> bool {
     matches!(
         source_type,
-        "collection" | "favorite" | "submission" | "watch_later" | "bangumi" | "youtube" | "douyin" | "tiktok"
+        "collection" | "favorite" | "submission" | "watch_later" | "bangumi" | "pugv" | "youtube" | "douyin" | "tiktok"
     )
 }
 
@@ -7308,6 +7398,7 @@ fn delete_video_source_missing_message(source_type: &str) -> String {
         "submission" => "未找到指定的UP主投稿".to_string(),
         "watch_later" => "未找到指定的稍后再看".to_string(),
         "bangumi" => "未找到指定的番剧".to_string(),
+        "pugv" => "未找到指定的课程".to_string(),
         "youtube" => "未找到指定的 YouTube 视频源".to_string(),
         "douyin" => "未找到指定的抖音视频源".to_string(),
         "tiktok" => "未找到指定的 TikTok 视频源".to_string(),
@@ -7321,7 +7412,7 @@ async fn delete_video_source_record_exists(db: &impl ConnectionTrait, source_typ
         "favorite" => Ok(favorite::Entity::find_by_id(id).one(db).await?.is_some()),
         "submission" => Ok(submission::Entity::find_by_id(id).one(db).await?.is_some()),
         "watch_later" => Ok(watch_later::Entity::find_by_id(id).one(db).await?.is_some()),
-        "bangumi" => Ok(video_source::Entity::find_by_id(id).one(db).await?.is_some()),
+        "bangumi" | "pugv" => Ok(video_source::Entity::find_by_id(id).one(db).await?.is_some()),
         "youtube" | "douyin" | "tiktok" => {
             let Some(source) = youtube_source::Entity::find_by_id(id).one(db).await? else {
                 return Ok(false);
@@ -7352,6 +7443,9 @@ async fn find_videos_by_source_relation(
         "bangumi" => video::Entity::find()
             .filter(video::Column::SourceId.eq(id))
             .filter(video::Column::SourceType.eq(1)),
+        "pugv" => video::Entity::find()
+            .filter(video::Column::SourceId.eq(id))
+            .filter(video::Column::SourceType.eq(2)),
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type)),
     };
 
@@ -7400,7 +7494,7 @@ async fn clear_video_source_relation(conn: &impl ConnectionTrait, source_type: &
                 .exec(conn)
                 .await?;
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             video::Entity::update_many()
                 .col_expr(
                     video::Column::SourceId,
@@ -7804,7 +7898,7 @@ pub async fn delete_video_source_internal(
                 message: "稍后再看已成功删除".to_string(),
             }
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             // 查找要删除的番剧
             let bangumi = video_source::Entity::find_by_id(id)
                 .one(&txn)
@@ -7869,7 +7963,7 @@ pub async fn delete_video_source_internal(
             crate::api::response::DeleteVideoSourceResponse {
                 success: true,
                 source_id: id,
-                source_type: "bangumi".to_string(),
+                source_type: source_type.to_string(),
                 message: format!("番剧 {} 已成功删除", bangumi.name),
             }
         }
@@ -8104,6 +8198,7 @@ pub async fn retry_charge_videos_for_source_internal(
             )
         }
         "bangumi" => return Err(anyhow!("番剧源不支持重试充电视频").into()),
+        "pugv" => return Err(anyhow!("课程源不支持重试充电视频").into()),
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type).into()),
     };
 
@@ -8400,7 +8495,7 @@ pub async fn update_video_source_scan_deleted_internal(
                 ),
             }
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             let video_source = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -8425,7 +8520,7 @@ pub async fn update_video_source_scan_deleted_internal(
             crate::api::response::UpdateVideoSourceScanDeletedResponse {
                 success: true,
                 source_id: id,
-                source_type: "bangumi".to_string(),
+                source_type: source_type.to_string(),
                 scan_deleted_videos,
                 scan_deleted_videos_once,
                 message: build_scan_deleted_message(
@@ -8949,7 +9044,7 @@ pub async fn update_video_source_download_options_internal(
                 message: "稍后观看的下载选项已更新".to_string(),
             }
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             let video_source = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -9021,7 +9116,7 @@ pub async fn update_video_source_download_options_internal(
             crate::api::response::UpdateVideoSourceDownloadOptionsResponse {
                 success: true,
                 source_id: id,
-                source_type: "bangumi".to_string(),
+                source_type: source_type.to_string(),
                 collection_aggregate_enabled: false,
                 collection_aggregate_season_number: None,
                 audio_only,
@@ -10097,7 +10192,7 @@ pub async fn reset_video_source_path_internal(
                 message: "稍后再看路径重设完成".to_string(),
             }
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             let bangumi = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -10158,7 +10253,7 @@ pub async fn reset_video_source_path_internal(
             ResetVideoSourcePathResponse {
                 success: true,
                 source_id: id,
-                source_type: "bangumi".to_string(),
+                source_type: source_type.to_string(),
                 old_path,
                 new_path: request.new_path,
                 moved_files_count,
@@ -13570,7 +13665,7 @@ async fn rename_existing_files(
     for video in all_videos {
         // 检查视频类型，决定是否需要重命名
         let is_single_page = video.single_page.unwrap_or(true);
-        let is_bangumi = video.source_type == Some(1);
+        let is_bangumi = bili_sync_entity::is_episode_source_type(video.source_type);
         let is_collection = video.collection_id.is_some();
 
         // 根据视频类型和配置更新情况决定是否跳过
@@ -17714,6 +17809,9 @@ pub async fn get_video_bvid(
             if video_info.source_type == Some(1) && video_info.ep_id.is_some() {
                 // 番剧类型：使用 ep_id 生成番剧专用URL
                 format!("https://www.bilibili.com/bangumi/play/ep{}", video_info.ep_id.as_ref().unwrap())
+            } else if video_info.source_type == Some(2) && video_info.ep_id.is_some() {
+                // 课程类型：使用 ep_id 生成课程专用URL
+                format!("https://www.bilibili.com/cheese/play/ep{}", video_info.ep_id.as_ref().unwrap())
             } else {
                 // 普通视频：使用 bvid 生成视频URL
                 format!("https://www.bilibili.com/video/{}", video_info.bvid)
@@ -17935,6 +18033,12 @@ pub async fn get_video_play_info(
                 "https://www.bilibili.com/bangumi/play/ep{}",
                 video_info.ep_id.as_ref().unwrap()
             )
+        } else if video_info.source_type == Some(2) && video_info.ep_id.is_some() {
+            // 课程类型：使用 ep_id 生成课程专用URL
+            format!(
+                "https://www.bilibili.com/cheese/play/ep{}",
+                video_info.ep_id.as_ref().unwrap()
+            )
         } else {
             // 普通视频：使用 bvid 生成视频URL
             format!("https://www.bilibili.com/video/{}", video_info.bvid)
@@ -18096,6 +18200,21 @@ pub async fn get_video_play_info(
                 } else {
                     warn!("获取番剧视频分析器失败: {:#}", e);
                 }
+                return Ok(fail(message));
+            }
+        }
+    } else if video_info.source_type == Some(2) && video_info.ep_id.is_some() {
+        // 使用课程（pugv）专用API
+        let ep_id = video_info.ep_id.as_ref().unwrap();
+        debug!("API播放使用课程专用API: ep_id={}", ep_id);
+        match video
+            .get_pugv_page_analyzer_with_fallback_in_range(&page_info, ep_id, max_qn, min_qn)
+            .await
+        {
+            Ok(analyzer) => analyzer,
+            Err(e) => {
+                let message = build_error_message(&e);
+                warn!("获取课程视频分析器失败: {:#}", e);
                 return Ok(fail(message));
             }
         }
@@ -18275,7 +18394,7 @@ struct VideoPlayInfo {
 }
 
 async fn find_video_info(video_id: &str, db: &DatabaseConnection) -> Result<VideoPlayInfo> {
-    use crate::bilibili::bvid_to_aid;
+    use crate::bilibili::aid_from_bvid_or_av;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     // 首先尝试作为分页ID查找
@@ -18294,7 +18413,7 @@ async fn find_video_info(video_id: &str, db: &DatabaseConnection) -> Result<Vide
                 return Ok(VideoPlayInfo {
                     page_id: page_record.id,
                     bvid: video_record.bvid.clone(),
-                    aid: bvid_to_aid(&video_record.bvid).to_string(),
+                    aid: aid_from_bvid_or_av(&video_record.bvid),
                     cid: page_record.cid.to_string(),
                     duration: page_record.duration,
                     title: format!("{} - {}", video_record.name, page_record.name),
@@ -18333,7 +18452,7 @@ async fn find_video_info(video_id: &str, db: &DatabaseConnection) -> Result<Vide
     Ok(VideoPlayInfo {
         page_id: first_page.id,
         bvid: video.bvid.clone(),
-        aid: bvid_to_aid(&video.bvid).to_string(),
+        aid: aid_from_bvid_or_av(&video.bvid),
         cid: first_page.cid.to_string(),
         duration: first_page.duration,
         title: video.name,
@@ -19283,7 +19402,7 @@ async fn update_bangumi_video_path_in_database(
     let new_video_dir = Path::new(new_base_path);
 
     // 基于视频模型重新生成路径结构（使用番剧专用逻辑）
-    let new_video_path = if video.source_type == Some(1) {
+    let new_video_path = if bili_sync_entity::is_episode_source_type(video.source_type) {
         // 番剧使用专用的路径计算逻辑，与workflow.rs保持一致
 
         // 创建临时page模型用于格式化参数
@@ -19441,7 +19560,7 @@ async fn move_bangumi_files_to_new_path(
     let new_video_dir = Path::new(new_base_path);
 
     // 基于视频模型重新生成路径结构（使用番剧专用逻辑）
-    let new_video_path = if video.source_type == Some(1) {
+    let new_video_path = if bili_sync_entity::is_episode_source_type(video.source_type) {
         // 番剧使用专用的路径计算逻辑，与workflow.rs保持一致
 
         // 创建临时page模型用于格式化参数
@@ -21498,7 +21617,7 @@ pub async fn update_video_source_keyword_filters(
                 ),
             }
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             let record = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -21523,7 +21642,7 @@ pub async fn update_video_source_keyword_filters(
             crate::api::response::UpdateKeywordFiltersResponse {
                 success: true,
                 source_id: id,
-                source_type: "bangumi".to_string(),
+                source_type: source_type.to_string(),
                 blacklist_count,
                 whitelist_count,
                 message: format!(
@@ -21750,7 +21869,7 @@ pub async fn get_video_source_keyword_filters(
                 legacy_mode: record.keyword_filter_mode,
             }
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             let record = video_source::Entity::find_by_id(id)
                 .one(db.as_ref())
                 .await?
@@ -22046,7 +22165,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_rename_parent_dir,
             )
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             let source = video_source::Entity::find_by_id(id)
                 .one(db.as_ref())
                 .await?
@@ -22120,7 +22239,7 @@ pub async fn ai_rename_history(
 
     // 根据源类型计算目录结构提示（帮助 AI 按单P/多P/番剧/多P结构生成与文件一一对应的文件名）
     let structure_hint = match source_type.as_str() {
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             if config.bangumi_use_season_structure {
                 "番剧Season结构"
             } else {
@@ -22217,7 +22336,7 @@ async fn get_videos_with_pages_for_source(
                 .all(db)
                 .await?
         }
-        "bangumi" => {
+        "bangumi" | "pugv" => {
             video::Entity::find()
                 .filter(video::Column::SourceId.eq(source_id))
                 .order_by_asc(video::Column::Pubtime)

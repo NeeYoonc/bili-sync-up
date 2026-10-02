@@ -1839,9 +1839,9 @@
 																>
 															{/if}
 														{/if}
-													{:else if sourceConfig.type === 'bangumi'}
+												{:else if sourceConfig.type === 'bangumi' || sourceConfig.type === 'pugv'}
 														{#if source.season_id}<span class="block"
-																>主季度ID: {source.season_id}</span
+															>{sourceConfig.type === 'pugv' ? '课程ID' : '主季度ID'}: {source.season_id}</span
 															>{/if}
 														{#if source.selected_seasons?.length}
 															<span class="block"
@@ -1996,7 +1996,7 @@
 													/>
 												</Button>
 
-												{#if sourceConfig.type !== 'bangumi'}
+												{#if sourceConfig.type !== 'bangumi' && sourceConfig.type !== 'pugv'}
 													<Button
 														size="sm"
 														variant="ghost"

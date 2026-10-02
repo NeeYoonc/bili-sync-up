@@ -319,7 +319,12 @@
 		},
 		{ value: 'submission', label: 'UP主投稿', description: 'UP主ID可在UP主空间URL中获取' },
 		{ value: 'watch_later', label: '稍后观看', description: '同步稍后观看列表' },
-		{ value: 'bangumi', label: '番剧', description: '番剧season_id可在番剧页面URL中获取' }
+		{ value: 'bangumi', label: '番剧', description: '番剧season_id可在番剧页面URL中获取' },
+		{
+			value: 'pugv',
+			label: '课程',
+			description: 'B站课程（含付费课）。season_id 在课程链接 cheese/play/ss 后面，可直接粘贴整条链接'
+		}
 	];
 	const youtubeSourceTypeOptions = [
 		{
@@ -362,7 +367,8 @@
 		favorite: '收藏夹',
 		submission: 'UP主投稿',
 		watch_later: '稍后观看',
-		bangumi: '番剧'
+		bangumi: '番剧',
+		pugv: '课程'
 	};
 
 	// 合集类型选项
@@ -373,6 +379,14 @@
 
 	function getSourceTypeLabel(type: string): string {
 		return sourceTypeLabelMap[type] ?? type;
+	}
+
+	// 课程：允许直接粘贴整条链接，自动抽出 season_id
+	function normalizePugvSeasonId(raw: string): string {
+		const text = raw.trim();
+		if (!text) return '';
+		const matched = text.match(/cheese\/play\/ss(\d+)/i) ?? text.match(/\bss(\d+)\b/i) ?? text.match(/^(\d+)$/);
+		return matched ? matched[1] : text;
 	}
 
 	function handleYouTubeSourceTypeChange(nextValue: unknown) {
@@ -1565,6 +1579,8 @@
 						if (sourceType === 'bangumi') {
 							errorDescription =
 								'该番剧已经添加过了，请检查是否使用了相同的Season ID、Media ID或Episode ID';
+						} else if (sourceType === 'pugv') {
+							errorDescription = '该课程已经添加过了，请检查是否使用了相同的课程 Season ID';
 						} else if (sourceType === 'collection') {
 							errorDescription = '该合集已经添加过了，请检查是否使用了相同的合集ID和UP主ID';
 						} else if (sourceType === 'favorite') {
@@ -3949,21 +3965,29 @@
 									{:else if sourceType === 'favorite'}收藏夹ID
 									{:else if sourceType === 'submission'}UP主ID
 									{:else if sourceType === 'bangumi'}Season ID
+									{:else if sourceType === 'pugv'}课程 Season ID
 									{:else}ID{/if}
 								</Label>
 								<Input
 									id="source-id"
 									bind:value={sourceId}
-									placeholder={`请输入${sourceType === 'collection' ? '合集' : sourceType === 'favorite' ? '任意公开收藏夹' : sourceType === 'submission' ? 'UP主' : sourceType === 'bangumi' ? 'Season' : ''}ID`}
+									placeholder={`请输入${sourceType === 'collection' ? '合集' : sourceType === 'favorite' ? '任意公开收藏夹' : sourceType === 'submission' ? 'UP主' : sourceType === 'bangumi' ? 'Season' : sourceType === 'pugv' ? '课程 Season' : ''}ID`}
 									oninput={() => {
 										if (sourceType === 'collection') {
 											isManualInput = true;
 										} else if (sourceType === 'favorite') {
 											handleFavoriteIdChange();
+										} else if (sourceType === 'pugv') {
+											sourceId = normalizePugvSeasonId(sourceId);
 										}
 									}}
 									required
 								/>
+								{#if sourceType === 'pugv'}
+									<p class="text-muted-foreground text-xs">
+										可直接粘贴课程链接，例如 https://www.bilibili.com/cheese/play/ss713799843
+									</p>
+								{/if}
 								{#if sourceType === 'collection' && !isManualInput && sourceId}
 									<p class="mt-1 text-xs text-green-600">✓ 已从列表中选择合集，类型已自动识别</p>
 								{/if}
