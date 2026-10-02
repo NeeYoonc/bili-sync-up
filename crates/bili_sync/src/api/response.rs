@@ -732,6 +732,27 @@ pub struct BangumiSeasonsResponse {
     pub data: Vec<BangumiSeasonInfo>,
 }
 
+/// 讲师（UP 主）名下的一门课程
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PugvCourseItem {
+    pub season_id: String,
+    pub title: String,
+    pub cover: Option<String>,
+    /// 课时数
+    pub episode_count: Option<i64>,
+    /// 课程列表里的进度文案，例如「已更新479课时」
+    pub status: Option<String>,
+    pub subtitle: Option<String>,
+}
+
+/// 讲师（UP 主）名下全部课程的响应
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PugvUpCoursesResponse {
+    pub success: bool,
+    pub up_id: String,
+    pub data: Vec<PugvCourseItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SearchResult {
     pub result_type: String,       // video, bili_user, media_bangumi等
@@ -1022,11 +1043,15 @@ pub struct DashBoardResponse {
     pub enabled_collections: u64,
     pub enabled_submissions: u64,
     pub enabled_bangumi: u64,
+    /// 已启用的课程（pugv）源数量
+    pub enabled_pugv: u64,
     pub enable_watch_later: bool,
     pub total_favorites: u64,
     pub total_collections: u64,
     pub total_submissions: u64,
     pub total_bangumi: u64,
+    /// 课程（pugv）源总数
+    pub total_pugv: u64,
     pub total_watch_later: u64,
     pub enabled_youtube_sources: u64,
     pub total_youtube_sources: u64,

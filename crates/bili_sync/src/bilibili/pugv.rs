@@ -24,6 +24,18 @@ pub struct Pugv {
     ep_id: Option<String>,
 }
 
+/// 讲师（UP 主）名下的一门课程
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PugvUpCourse {
+    pub season_id: String,
+    pub title: String,
+    pub cover: Option<String>,
+    pub episode_count: Option<i64>,
+    /// 课程列表里的进度文案，例如「已更新479课时」
+    pub status: Option<String>,
+    pub subtitle: Option<String>,
+}
+
 impl Pugv {
     pub fn new(client: &BiliClient, season_id: Option<String>, ep_id: Option<String>) -> Self {
         Self {
@@ -31,6 +43,63 @@ impl Pugv {
             season_id,
             ep_id,
         }
+    }
+
+    /// 获取指定讲师（UP 主）名下的全部课程。
+    ///
+    /// 对应空间页「课程」标签使用的接口 `pugv/app/web/season/page`，
+    /// 未登录也能取到公开课程列表。
+    pub async fn fetch_up_courses(client: &BiliClient, up_mid: &str) -> Result<Vec<PugvUpCourse>> {
+        const PAGE_SIZE: u32 = 30;
+        /// 防御性上限，避免上游 `next` 字段异常时无限翻页
+        const MAX_PAGES: u32 = 20;
+
+        let mut courses = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let page_string = page.to_string();
+            let size_string = PAGE_SIZE.to_string();
+            let json: serde_json::Value = client
+                .request(Method::GET, "https://api.bilibili.com/pugv/app/web/season/page")
+                .await
+                .query(&[
+                    ("mid", up_mid),
+                    ("pn", page_string.as_str()),
+                    ("ps", size_string.as_str()),
+                ])
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+
+            let data = validate(json)?;
+            if let Some(items) = data["items"].as_array() {
+                for item in items {
+                    let season_id = match item["season_id"].as_i64() {
+                        Some(season_id) if season_id > 0 => season_id.to_string(),
+                        _ => match item["season_id"].as_str() {
+                            Some(season_id) if !season_id.is_empty() => season_id.to_string(),
+                            _ => continue,
+                        },
+                    };
+                    courses.push(PugvUpCourse {
+                        season_id,
+                        title: item["title"].as_str().unwrap_or_default().to_string(),
+                        cover: item["cover"].as_str().map(|s| s.to_string()),
+                        episode_count: item["ep_count"].as_i64(),
+                        status: item["status"].as_str().map(|s| s.to_string()),
+                        subtitle: item["subtitle"].as_str().map(|s| s.to_string()),
+                    });
+                }
+            }
+
+            if !data["page"]["next"].as_bool().unwrap_or(false) {
+                break;
+            }
+        }
+
+        debug!("讲师 {} 名下共获取到 {} 门课程", up_mid, courses.len());
+        Ok(courses)
     }
 
     /// 通过 season_id 获取课程详情。

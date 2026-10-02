@@ -27,6 +27,7 @@
 		BangumiSeasonInfo,
 		BangumiSourceOption,
 		BangumiSourceListResponse,
+		PugvCourseItem,
 		VideoSourcesResponse,
 		ValidateFavoriteResponse,
 		ConfigResponse,
@@ -228,6 +229,15 @@
 	let selectedSeasons: string[] = [];
 	let bangumiSeasonsFetchAttempted = false;
 	let seasonIdTimeout: ReturnType<typeof setTimeout> | null = null;
+
+	// 课程（pugv）相关：先选讲师（UP 主），再挑要下载的课程
+	let pugvUpMid = '';
+	let pugvUpName = '';
+	let pugvCourses: PugvCourseItem[] = [];
+	let loadingPugvCourses = false;
+	let pugvCoursesFetchAttempted = false;
+	let selectedPugvSeasonIds: string[] = [];
+	let existingPugvSeasonIds: Set<string> = new Set();
 
 	// 番剧合并相关
 	let existingBangumiSources: BangumiSourceOption[] = [];
@@ -865,6 +875,7 @@
 				case 'collection':
 				case 'submission':
 				case 'favorite': // 收藏夹类型也搜索UP主
+			case 'pugv': // 课程先按讲师（UP 主）搜索，再列出其名下课程
 					searchType = 'bili_user';
 					break;
 				case 'bangumi':
@@ -1068,6 +1079,20 @@
 					sourceId = result.season_id;
 					name = cleanTitle(result.title);
 					applyQuickSubscriptionPath('bangumi', name, true);
+				}
+				break;
+			case 'pugv':
+				// 课程：先选讲师（UP 主），随后列出该讲师名下所有课程供勾选
+				if (result.mid) {
+					pugvUpMid = result.mid.toString();
+					pugvUpName = cleanTitle(result.title);
+					pugvCourses = [];
+					selectedPugvSeasonIds = [];
+					pugvCoursesFetchAttempted = false;
+					name = pugvUpName;
+					applyQuickSubscriptionPath('pugv', name, true);
+					void fetchPugvUpCourses();
+					toast.success('已选择UP主', { description: '正在获取该UP主的课程列表…' });
 				}
 				break;
 			case 'favorite':
@@ -1428,7 +1453,8 @@
 		}
 
 		// 验证表单
-		if (sourceType !== 'watch_later' && !sourceId) {
+		const isPugvUpFlow = sourceType === 'pugv' && !!(pugvUpMid && pugvCourses.length > 0);
+		if (sourceType !== 'watch_later' && !sourceId && !isPugvUpFlow) {
 			toast.error('请输入ID', { description: '视频源ID不能为空' });
 			return;
 		}
@@ -1531,6 +1557,76 @@
 			}
 			// 注意：当前添加接口只支持单一模式，双列表需要后续通过编辑接口设置
 			// 如果同时有白名单，需要先添加视频源，然后再通过关键词过滤器编辑功能设置完整的双列表
+		}
+
+		// 课程：勾选的每门课各自作为一个视频源；未勾选则添加该讲师名下的全部课程
+		if (isPugvUpFlow) {
+			const targets =
+				selectedPugvSeasonIds.length > 0
+					? pugvCourses.filter((course) => selectedPugvSeasonIds.includes(course.season_id))
+					: pugvCourses;
+
+			const summary = await runRequest(
+				async () => {
+					let added = 0;
+					const failed: string[] = [];
+					for (const course of targets) {
+						if (existingPugvSeasonIds.has(course.season_id)) continue;
+						try {
+							const addedResult = await api.addVideoSource({
+								...params,
+								source_id: course.season_id,
+								name: course.title
+							});
+							if (addedResult.data.success) {
+								added += 1;
+								if (hasAdvancedFilters() && addedResult.data.source_id) {
+									try {
+										await api.updateVideoSourceKeywordFilters(
+											sourceType,
+											addedResult.data.source_id,
+											blacklistKeywords,
+											whitelistKeywords,
+											keywordCaseSensitive,
+											parsedMinDuration,
+											parsedMaxDuration,
+											publishedAfter,
+											publishedBefore
+										);
+									} catch (e) {
+										console.warn('更新课程关键词过滤器失败:', e);
+									}
+								}
+							} else {
+								failed.push(`${course.title}：${addedResult.data.message}`);
+							}
+						} catch (error) {
+							console.error('添加课程失败:', course.title, error);
+							failed.push(course.title);
+						}
+					}
+					return { added, failed };
+				},
+				{
+					setLoading: (value) => (loading = value),
+					context: '批量添加课程失败'
+				}
+			);
+			if (!summary) return;
+
+			const { added, failed } = summary;
+			if (added > 0) {
+				toast.success(`已添加 ${added} 门课程`, {
+					description:
+						failed.length > 0 ? `另有 ${failed.length} 门失败：${failed[0]}` : '可在视频源页查看'
+				});
+				goto('/video-sources');
+			} else if (failed.length > 0) {
+				toast.error('添加课程失败', { description: failed[0] });
+			} else {
+				toast.warning('没有需要添加的课程', { description: '所选课程都已经添加过了' });
+			}
+			return;
 		}
 
 		const result = await runRequest(
@@ -1963,6 +2059,69 @@
 		}
 	}
 
+	// 获取讲师（UP 主）名下的全部课程
+	async function fetchPugvUpCourses() {
+		if (!pugvUpMid.trim()) return;
+
+		pugvCoursesFetchAttempted = true;
+		const result = await runRequest(() => api.getPugvUpCourses(pugvUpMid.trim()), {
+			setLoading: (value) => (loadingPugvCourses = value),
+			context: '获取UP主课程列表失败',
+			onError: () => {
+				pugvCourses = [];
+				selectedPugvSeasonIds = [];
+			}
+		});
+		if (!result) return;
+
+		if (result.data && result.data.success) {
+			pugvCourses = result.data.data || [];
+			// 默认不勾选：不勾选即代表添加该 UP 主的全部课程
+			selectedPugvSeasonIds = [];
+			if (pugvCourses.length === 0) {
+				toast.warning('该UP主暂无课程', { description: '请确认搜索到的是正确的讲师账号' });
+			} else {
+				toast.success(`已获取到 ${pugvCourses.length} 门课程`, {
+					description: '勾选要下载的课程，不勾选则全部下载'
+				});
+			}
+		} else {
+			pugvCourses = [];
+			selectedPugvSeasonIds = [];
+		}
+	}
+
+	// 切换某门课程的勾选状态
+	function togglePugvSeasonSelection(seasonId: string) {
+		if (existingPugvSeasonIds.has(seasonId)) return;
+		if (selectedPugvSeasonIds.includes(seasonId)) {
+			selectedPugvSeasonIds = selectedPugvSeasonIds.filter((id) => id !== seasonId);
+		} else {
+			selectedPugvSeasonIds = [...selectedPugvSeasonIds, seasonId];
+		}
+	}
+
+	// 全选 / 取消全选（已添加过的课程不参与）
+	function toggleAllPugvCourses() {
+		const selectable = pugvCourses
+			.map((course) => course.season_id)
+			.filter((seasonId) => !existingPugvSeasonIds.has(seasonId));
+		if (selectedPugvSeasonIds.length > 0) {
+			selectedPugvSeasonIds = [];
+		} else {
+			selectedPugvSeasonIds = selectable;
+		}
+	}
+
+	// 关闭讲师课程面板
+	function clearPugvUpSelection() {
+		pugvUpMid = '';
+		pugvUpName = '';
+		pugvCourses = [];
+		selectedPugvSeasonIds = [];
+		pugvCoursesFetchAttempted = false;
+	}
+
 	// 获取番剧季度信息
 	async function fetchBangumiSeasons() {
 		if (!sourceId.trim() || sourceType !== 'bangumi') return;
@@ -2107,6 +2266,13 @@
 				}
 			}
 		});
+
+		// 处理课程（每门课程一个源，按 season_id 去重）
+		existingPugvSeasonIds = new Set(
+			(result.data.pugv ?? [])
+				.map((p) => (p.season_id ? p.season_id.toString() : ''))
+				.filter((seasonId) => seasonId.length > 0)
+		);
 	}
 
 	function normalizeCollectionType(collectionType?: string): string {
@@ -3732,6 +3898,8 @@
 												搜索UP主
 											{:else if sourceType === 'bangumi'}
 												搜索番剧
+											{:else if sourceType === 'pugv'}
+												搜索UP主（讲师）
 											{:else}
 												搜索B站内容
 											{/if}
@@ -3744,6 +3912,8 @@
 													? '搜索UP主...'
 													: sourceType === 'bangumi'
 														? '搜索番剧...'
+														: sourceType === 'pugv'
+															? '搜索UP主（讲师）...'
 														: '搜索视频...'}
 												onkeydown={(e) => e.key === 'Enter' && handleSearch()}
 											/>
@@ -3981,11 +4151,15 @@
 											sourceId = normalizePugvSeasonId(sourceId);
 										}
 									}}
-									required
+									required={!(sourceType === 'pugv' && !!pugvUpMid)}
 								/>
 								{#if sourceType === 'pugv'}
 									<p class="text-muted-foreground text-xs">
-										可直接粘贴课程链接，例如 https://www.bilibili.com/cheese/play/ss713799843
+										{#if pugvUpMid}
+											已在右侧选择讲师，此处可留空；添加时会使用勾选课程的课程 ID
+										{:else}
+											可直接粘贴课程链接，例如 https://www.bilibili.com/cheese/play/ss713799843
+										{/if}
 									</p>
 								{/if}
 								{#if sourceType === 'collection' && !isManualInput && sourceId}
@@ -6040,6 +6214,149 @@
 								>
 									{#snippet actions()}
 										<Button type="button" size="sm" variant="outline" onclick={fetchBangumiSeasons}>
+											重新获取
+										</Button>
+									{/snippet}
+								</EmptyState>
+							{/if}
+						</SidePanel>
+					</div>
+				{/if}
+
+				<!-- 课程（pugv）选择区域：选中讲师后列出其名下全部课程 -->
+				{#if sourceType === 'pugv' && pugvUpMid && (loadingPugvCourses || pugvCourses.length > 0 || pugvCoursesFetchAttempted)}
+					<div class={isCompactLayout ? 'w-full' : 'flex-1'}>
+						<SidePanel
+							isMobile={isCompactLayout}
+							title={`${pugvUpName || pugvUpMid} 的课程`}
+							subtitle={loadingPugvCourses
+								? '正在加载...'
+								: pugvCourses.length > 0
+									? `共 ${pugvCourses.length} 门课程`
+									: '未找到课程'}
+							headerClass="bg-indigo-50 dark:bg-indigo-950"
+							titleClass="text-base font-medium text-indigo-800 dark:text-indigo-200"
+							subtitleClass="text-sm text-indigo-600 dark:text-indigo-400"
+							bodyClass="flex-1 overflow-hidden p-3"
+						>
+							{#snippet actions()}
+								{#if pugvCourses.length > 0}
+									<Button
+										type="button"
+										size="sm"
+										variant="outline"
+										class="h-7 px-2 text-xs"
+										onclick={toggleAllPugvCourses}
+									>
+										{selectedPugvSeasonIds.length > 0 ? '取消全选' : '全选'}
+									</Button>
+									<span
+										class="rounded bg-indigo-100 px-2 py-1 text-xs text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300"
+									>
+										已选 {selectedPugvSeasonIds.length} 门
+									</span>
+								{/if}
+								<button
+									onclick={clearPugvUpSelection}
+									class="p-1 text-xl text-indigo-500 hover:text-indigo-700 dark:text-indigo-300"
+								>
+									<X class="h-5 w-5" />
+								</button>
+							{/snippet}
+
+							{#if loadingPugvCourses}
+								<div class="p-4 text-center">
+									<div class="text-sm text-indigo-700 dark:text-indigo-300">
+										正在加载课程列表...
+									</div>
+								</div>
+							{:else if pugvCourses.length > 0}
+								<div
+									class="grid gap-4 {isMobile ? 'grid-cols-1' : ''}"
+									style={isMobile
+										? ''
+										: 'grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));'}
+								>
+									{#each pugvCourses as course (course.season_id)}
+										{@const isExisting = existingPugvSeasonIds.has(course.season_id)}
+										<div
+											role="button"
+											tabindex="0"
+											class="relative rounded-lg border p-4 transition-all duration-300 {isExisting
+												? 'cursor-not-allowed bg-gray-50 opacity-60 dark:bg-gray-800'
+												: selectedPugvSeasonIds.includes(course.season_id)
+													? 'border-indigo-400 bg-indigo-50 dark:bg-indigo-950'
+													: 'cursor-pointer hover:scale-102 hover:bg-indigo-50 hover:shadow-md dark:hover:bg-indigo-900'} {isMobile
+												? 'h-auto'
+												: 'h-[120px]'}"
+											onclick={() => !isExisting && togglePugvSeasonSelection(course.season_id)}
+											onkeydown={(e) =>
+												!isExisting &&
+												(e.key === 'Enter' || e.key === ' ') &&
+												togglePugvSeasonSelection(course.season_id)}
+										>
+											<div class="flex gap-3 {isMobile ? '' : 'h-full'}">
+												<BiliImage
+													src={course.cover || undefined}
+													alt={course.title}
+													class="h-20 w-14 flex-shrink-0 rounded object-cover"
+													placeholder="无封面"
+												/>
+												<div class="min-w-0 flex-1">
+													<div class="absolute top-3 right-3">
+														<input
+															type="checkbox"
+															id="pugv-course-{course.season_id}"
+															checked={selectedPugvSeasonIds.includes(course.season_id)}
+															disabled={isExisting}
+															onchange={() => togglePugvSeasonSelection(course.season_id)}
+															class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 {isExisting
+																? 'cursor-not-allowed opacity-50'
+																: ''}"
+														/>
+													</div>
+													{#if course.episode_count}
+														<div class="absolute right-3 bottom-3">
+															<span
+																class="rounded bg-indigo-100 px-1.5 py-0.5 text-xs text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300"
+																>{course.episode_count}课时</span
+															>
+														</div>
+													{/if}
+													<label for="pugv-course-{course.season_id}" class="cursor-pointer">
+														<h4 class="truncate pr-6 text-sm font-medium" title={course.title}>
+															{course.title}
+														</h4>
+														{#if isExisting}
+															<span
+																class="mt-1 inline-block rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-300"
+																>已添加</span
+															>
+														{/if}
+														<p class="text-muted-foreground mt-1 text-xs">
+															课程 ID: {course.season_id}
+														</p>
+														{#if course.status}
+															<p class="text-muted-foreground text-xs">{course.status}</p>
+														{/if}
+													</label>
+												</div>
+											</div>
+										</div>
+									{/each}
+								</div>
+								<p class="mt-3 text-center text-xs text-indigo-600">
+									勾选要下载的课程；不勾选则添加该 UP 主的全部课程
+								</p>
+							{:else}
+								<EmptyState
+									icon={InfoIcon}
+									title="没有找到课程"
+									description="该 UP 主名下没有公开课程，可换一个讲师账号试试"
+									class="m-2"
+								>
+									{#snippet actions()}
+										<Button type="button" size="sm" variant="outline" onclick={fetchPugvUpCourses}>
 											重新获取
 										</Button>
 									{/snippet}

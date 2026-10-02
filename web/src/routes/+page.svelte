@@ -38,6 +38,7 @@
 	import ClockIcon from '@lucide/svelte/icons/clock';
 		import VideoIcon from '@lucide/svelte/icons/video';
 	import TvIcon from '@lucide/svelte/icons/tv';
+	import GraduationCapIcon from '@lucide/svelte/icons/graduation-cap';
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
 	import CpuIcon from '@lucide/svelte/icons/cpu';
 	import MemoryStickIcon from '@lucide/svelte/icons/memory-stick';
@@ -672,6 +673,15 @@
 												</div>
 												<Badge variant="outline"
 													>{dashboardData.enabled_bangumi} / {dashboardData.total_bangumi}</Badge
+												>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<GraduationCapIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">课程</span>
+												</div>
+												<Badge variant="outline"
+													>{dashboardData.enabled_pugv} / {dashboardData.total_pugv}</Badge
 												>
 											</div>
 										</div>

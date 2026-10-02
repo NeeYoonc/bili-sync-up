@@ -2525,7 +2525,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_downloads_progress, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, get_pugv_up_courses, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_downloads_progress, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -14528,6 +14528,58 @@ pub async fn get_bangumi_seasons(
     }
 }
 
+/// 获取某个讲师（UP 主）名下的全部课程
+#[utoipa::path(
+    get,
+    path = "/api/pugv/up-courses",
+    params(
+        ("up_id" = String, Query, description = "讲师（UP 主）的 mid")
+    ),
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::PugvUpCoursesResponse>),
+    )
+)]
+pub async fn get_pugv_up_courses(
+    Query(params): Query<crate::api::request::PugvUpCoursesRequest>,
+) -> Result<ApiResponse<crate::api::response::PugvUpCoursesResponse>, ApiError> {
+    use crate::bilibili::{BiliClient, pugv::Pugv};
+
+    let up_id = params.up_id.trim().to_string();
+    if up_id.is_empty() {
+        return Err(anyhow!("UP 主 ID 不能为空").into());
+    }
+    if !up_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(anyhow!("UP 主 ID 必须是纯数字的 mid").into());
+    }
+
+    // 课程列表不需要登录也能读取
+    let bili_client = BiliClient::new(String::new());
+    let courses = Pugv::fetch_up_courses(&bili_client, &up_id)
+        .await
+        .map_err(|e| {
+            error!("获取讲师 {} 的课程列表失败: {:#}", up_id, e);
+            e
+        })?;
+
+    let data = courses
+        .into_iter()
+        .map(|course| crate::api::response::PugvCourseItem {
+            season_id: course.season_id,
+            title: course.title,
+            cover: course.cover,
+            episode_count: course.episode_count,
+            status: course.status,
+            subtitle: course.subtitle,
+        })
+        .collect();
+
+    Ok(ApiResponse::ok(crate::api::response::PugvUpCoursesResponse {
+        success: true,
+        up_id,
+        data,
+    }))
+}
+
 /// 搜索bilibili内容
 #[utoipa::path(
     get,
@@ -20139,8 +20191,8 @@ struct ExternalDayCountRow {
 pub async fn get_dashboard_data(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<crate::api::response::DashBoardResponse>, ApiError> {
-    let (enabled_favorites, enabled_collections, enabled_submissions, enabled_watch_later, enabled_bangumi,
-         total_favorites, total_collections, total_submissions, total_watch_later, total_bangumi,
+    let (enabled_favorites, enabled_collections, enabled_submissions, enabled_watch_later, enabled_bangumi, enabled_pugv,
+         total_favorites, total_collections, total_submissions, total_watch_later, total_bangumi, total_pugv,
          youtube_sources, videos_by_day, external_day_rows) = tokio::try_join!(
         favorite::Entity::find()
             .filter(favorite::Column::Enabled.eq(true))
@@ -20158,6 +20210,10 @@ pub async fn get_dashboard_data(
             .filter(video_source::Column::Type.eq(1))
             .filter(video_source::Column::Enabled.eq(true))
             .count(db.as_ref()),
+        video_source::Entity::find()
+            .filter(video_source::Column::Type.eq(2))
+            .filter(video_source::Column::Enabled.eq(true))
+            .count(db.as_ref()),
         // 统计所有视频源（包括禁用的）
         favorite::Entity::find()
             .count(db.as_ref()),
@@ -20169,6 +20225,9 @@ pub async fn get_dashboard_data(
             .count(db.as_ref()),
         video_source::Entity::find()
             .filter(video_source::Column::Type.eq(1))
+            .count(db.as_ref()),
+        video_source::Entity::find()
+            .filter(video_source::Column::Type.eq(2))
             .count(db.as_ref()),
         youtube_source::Entity::find()
             .all(db.as_ref()),
@@ -20293,12 +20352,14 @@ ORDER BY
         + enabled_collections
         + enabled_submissions
         + enabled_bangumi
+        + enabled_pugv
         + if enabled_watch_later > 0 { 1 } else { 0 }
         + enabled_external_sources;
     let total_all_sources = total_favorites
         + total_collections
         + total_submissions
         + total_bangumi
+        + total_pugv
         + if total_watch_later > 0 { 1 } else { 0 }
         + total_external_sources;
     let inactive_sources = total_all_sources - active_sources;
@@ -20324,11 +20385,13 @@ ORDER BY
         enabled_collections,
         enabled_submissions,
         enabled_bangumi,
+        enabled_pugv,
         enable_watch_later: enabled_watch_later > 0,
         total_favorites,
         total_collections,
         total_submissions,
         total_bangumi,
+        total_pugv,
         total_watch_later,
         enabled_youtube_sources,
         total_youtube_sources,
