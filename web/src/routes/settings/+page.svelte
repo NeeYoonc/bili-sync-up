@@ -331,6 +331,7 @@
 	let collectionQuickSubscribePath = ''; // 添加源页：合集快捷订阅路径模板
 	let submissionQuickSubscribePath = ''; // 添加源页：UP主投稿快捷订阅路径模板
 	let bangumiQuickSubscribePath = ''; // 添加源页：番剧快捷订阅路径模板
+	let pugvQuickSubscribePath = ''; // 添加源页：课程快捷订阅路径模板
 	let ffmpegPath = ''; // ffmpeg可执行路径（文件或目录）
 
 	// B站凭证设置
@@ -753,6 +754,7 @@
 		collectionQuickSubscribePath = config.collection_quick_subscribe_path || '';
 		submissionQuickSubscribePath = config.submission_quick_subscribe_path || '';
 		bangumiQuickSubscribePath = config.bangumi_quick_subscribe_path || '';
+		pugvQuickSubscribePath = config.pugv_quick_subscribe_path || '';
 		ffmpegPath = config.ffmpeg_path || '';
 
 		// B站凭证设置
@@ -1356,6 +1358,7 @@
 			collection_quick_subscribe_path: collectionQuickSubscribePath,
 			submission_quick_subscribe_path: submissionQuickSubscribePath,
 			bangumi_quick_subscribe_path: bangumiQuickSubscribePath,
+			pugv_quick_subscribe_path: pugvQuickSubscribePath,
 			ffmpeg_path: ffmpegPath,
 			// UP主投稿风控配置
 			large_submission_threshold: normalizeNumberInput(
@@ -4230,7 +4233,7 @@
 					<div class="space-y-1">
 						<h4 class="text-sm font-medium">快捷订阅路径模板</h4>
 						<p class="text-muted-foreground text-sm">
-							添加收藏夹、合集、UP主投稿、番剧源时可直接带出保存路径。支持使用 <code
+							添加收藏夹、合集、UP主投稿、番剧、课程源时可直接带出保存路径。支持使用 <code
 								>{'{{name}}'}</code
 							>
 							代表源名称。
@@ -4274,6 +4277,15 @@
 								type="text"
 								bind:value={bangumiQuickSubscribePath}
 								placeholder={'/Downloads/番剧/{{name}}'}
+							/>
+						</div>
+						<div class="space-y-2 md:col-span-2">
+							<Label for="pugv-quick-subscribe-path">课程快捷订阅路径模板</Label>
+							<Input
+								id="pugv-quick-subscribe-path"
+								type="text"
+								bind:value={pugvQuickSubscribePath}
+								placeholder={'/Downloads/课程/{{name}}'}
 							/>
 						</div>
 					</div>

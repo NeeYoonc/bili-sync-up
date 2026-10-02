@@ -117,6 +117,7 @@
 	let favoriteQuickSubscribePathTemplate = '';
 	let collectionQuickSubscribePathTemplate = '';
 	let submissionQuickSubscribePathTemplate = '';
+	let pugvQuickSubscribePathTemplate = '';
 	let bangumiQuickSubscribePathTemplate = '';
 	let lastAutoAppliedPath = '';
 	let cover = '';
@@ -503,6 +504,8 @@
 				return submissionQuickSubscribePathTemplate;
 			case 'bangumi':
 				return bangumiQuickSubscribePathTemplate;
+			case 'pugv':
+				return pugvQuickSubscribePathTemplate;
 			default:
 				return '';
 		}
@@ -521,7 +524,9 @@
 					? submissionQuickSubscribePathTemplate.trim()
 					: currentQuickSubscriptionType === 'bangumi'
 						? bangumiQuickSubscribePathTemplate.trim()
-						: '';
+						: currentQuickSubscriptionType === 'pugv'
+							? pugvQuickSubscribePathTemplate.trim()
+							: '';
 
 	function sanitizeQuickSubscriptionName(value: string): string {
 		return value.trim().replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '_');
@@ -567,6 +572,7 @@
 		collectionQuickSubscribePathTemplate = config.collection_quick_subscribe_path || '';
 		submissionQuickSubscribePathTemplate = config.submission_quick_subscribe_path || '';
 		bangumiQuickSubscribePathTemplate = config.bangumi_quick_subscribe_path || '';
+		pugvQuickSubscribePathTemplate = config.pugv_quick_subscribe_path || '';
 		globalFilterOptionDefault = filterOptionFromConfig(config);
 		if (filterOptionInheritGlobal) {
 			filterOptionDraft = cloneFilterOption(globalFilterOptionDefault);
@@ -3256,6 +3262,7 @@
 		if (selectedSourceType === 'collection') return collectionQuickSubscribePathTemplate.trim();
 		if (selectedSourceType === 'submission') return submissionQuickSubscribePathTemplate.trim();
 		if (selectedSourceType === 'bangumi') return bangumiQuickSubscribePathTemplate.trim();
+		if (selectedSourceType === 'pugv') return pugvQuickSubscribePathTemplate.trim();
 		return '';
 	})();
 

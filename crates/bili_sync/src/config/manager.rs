@@ -69,6 +69,7 @@ pub(crate) fn describe_config_key(key: &str) -> &'static str {
         "collection_quick_subscribe_path" => "合集快捷订阅路径模板",
         "submission_quick_subscribe_path" => "UP主投稿快捷订阅路径模板",
         "bangumi_quick_subscribe_path" => "番剧快捷订阅路径模板",
+        "pugv_quick_subscribe_path" => "课程快捷订阅路径模板",
         "ffmpeg_path" => "ffmpeg可执行文件或目录路径",
         "proxy" => "外源网络代理（YouTube/TikTok 等平台共用）",
         "youtube_proxy" => "旧版 YouTube 专用代理（已迁移到 proxy）",
