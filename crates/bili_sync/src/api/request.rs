@@ -15,6 +15,7 @@ pub struct VideosRequest {
     pub submission: Option<i32>,
     pub watch_later: Option<i32>,
     pub bangumi: Option<i32>,
+    pub pugv: Option<i32>,
     pub query: Option<String>,
     pub page: Option<u64>,
     pub page_size: Option<u64>,
@@ -491,6 +492,7 @@ pub struct ResetSpecificTasksRequest {
     pub submission: Option<i32>,
     pub watch_later: Option<i32>,
     pub bangumi: Option<i32>,
+    pub pugv: Option<i32>,
     pub platform: Option<String>,
     pub youtube: Option<i32>,
     // 与 /api/videos 的过滤参数保持一致，便于“按当前筛选批量重置”

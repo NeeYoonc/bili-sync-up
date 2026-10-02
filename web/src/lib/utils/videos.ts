@@ -72,6 +72,9 @@ export function buildVideosRequest({
 				case 'bangumi':
 					params.bangumi = sourceId;
 					break;
+				case 'pugv':
+					params.pugv = sourceId;
+					break;
 			}
 		}
 	}
