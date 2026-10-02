@@ -393,6 +393,13 @@ pub struct SearchRequest {
     pub page_size: u32, // 每页数量，默认20
 }
 
+/// 查询某个讲师（UP 主）名下所有课程的请求
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PugvUpCoursesRequest {
+    /// 讲师（UP 主）的 mid
+    pub up_id: String,
+}
+
 fn default_page() -> u32 {
     1
 }

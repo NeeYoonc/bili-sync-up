@@ -962,6 +962,25 @@ export interface BangumiSeasonsResponse {
 	data: BangumiSeasonInfo[];
 }
 
+// 讲师（UP 主）名下的一门课程
+export interface PugvCourseItem {
+	season_id: string;
+	title: string;
+	cover?: string | null;
+	/** 课时数 */
+	episode_count?: number | null;
+	/** 课程列表里的进度文案，例如「已更新479课时」 */
+	status?: string | null;
+	subtitle?: string | null;
+}
+
+// 讲师（UP 主）名下全部课程响应类型
+export interface PugvUpCoursesResponse {
+	success: boolean;
+	up_id: string;
+	data: PugvCourseItem[];
+}
+
 // 番剧源选项（用于合并选择）
 export interface BangumiSourceOption {
 	id: number;
@@ -1333,11 +1352,15 @@ export interface DashBoardResponse {
 	enabled_collections: number;
 	enabled_submissions: number;
 	enabled_bangumi: number;
+	/** 已启用的课程（pugv）源数量 */
+	enabled_pugv: number;
 	enable_watch_later: boolean;
 	total_favorites: number;
 	total_collections: number;
 	total_submissions: number;
 	total_bangumi: number;
+	/** 课程（pugv）源总数 */
+	total_pugv: number;
 	total_watch_later: number;
 	enabled_youtube_sources: number;
 	total_youtube_sources: number;

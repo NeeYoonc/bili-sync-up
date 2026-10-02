@@ -95,6 +95,7 @@ use crate::api::handler::{
     get_logs,
     get_notification_config,
     get_notification_status,
+    get_pugv_up_courses,
     get_queue_status,
     get_recent_ingests,
     get_submission_videos,
@@ -390,6 +391,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/douyin/videos/{id}/retry", post(retry_douyin_video))
         .route("/api/douyin/queue-status", get(get_douyin_queue_status))
         .route("/api/bangumi/seasons/{season_id}", get(get_bangumi_seasons))
+        .route("/api/pugv/up-courses", get(get_pugv_up_courses))
         .route("/api/search", get(search_bilibili))
         .route("/api/user/favorites", get(get_user_favorites))
         .route("/api/user/{uid}/favorites", get(get_user_favorites_by_uid))

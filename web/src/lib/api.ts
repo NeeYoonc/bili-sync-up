@@ -1045,6 +1045,15 @@ class ApiClient {
 	}
 
 	/**
+	 * 获取讲师（UP 主）名下的全部课程
+	 */
+	async getPugvUpCourses(upId: string): Promise<
+		ApiResponse<import('./types').PugvUpCoursesResponse>
+	> {
+		return this.get<import('./types').PugvUpCoursesResponse>('/pugv/up-courses', { up_id: upId });
+	}
+
+	/**
 	 * 获取关注的UP主列表
 	 */
 	async getUserFollowings(): Promise<ApiResponse<UserFollowing[]>> {
@@ -1615,6 +1624,11 @@ export const api = {
 	 * 获取现有番剧源列表（用于合并选择）
 	 */
 	getBangumiSourcesForMerge: () => apiClient.getBangumiSourcesForMerge(),
+
+	/**
+	 * 获取讲师（UP 主）名下的全部课程
+	 */
+	getPugvUpCourses: (upId: string) => apiClient.getPugvUpCourses(upId),
 
 	/**
 	 * 获取关注的UP主列表
