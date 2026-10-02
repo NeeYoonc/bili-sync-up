@@ -608,6 +608,25 @@ async fn load_video_sources_from_db(
         });
     }
 
+    // 加载课程（pugv）源（只加载启用的）
+    let pugv_sources = entities::video_source::Entity::find()
+        .filter(entities::video_source::Column::Type.eq(2))
+        .filter(entities::video_source::Column::Enabled.eq(true))
+        .all(connection.as_ref())
+        .await?;
+
+    for pugv in pugv_sources {
+        video_sources.push(VideoSourceWithId {
+            id: pugv.id,
+            args: Args::Pugv {
+                season_id: pugv.season_id,
+                ep_id: pugv.ep_id,
+            },
+            path: PathBuf::from(pugv.path),
+            source_type: SourceType::Pugv,
+        });
+    }
+
     Ok(video_sources)
 }
 
@@ -639,6 +658,13 @@ async fn count_all_video_sources(
         .count(connection.as_ref())
         .await?;
     total_count += bangumi_count as usize;
+
+    // 统计课程（pugv）源
+    let pugv_count = entities::video_source::Entity::find()
+        .filter(entities::video_source::Column::Type.eq(2))
+        .count(connection.as_ref())
+        .await?;
+    total_count += pugv_count as usize;
 
     Ok(total_count)
 }
@@ -679,6 +705,13 @@ async fn count_enabled_video_sources(
         .count(connection.as_ref())
         .await?;
     total_count += bangumi_count as usize;
+
+    let pugv_count = entities::video_source::Entity::find()
+        .filter(entities::video_source::Column::Type.eq(2))
+        .filter(entities::video_source::Column::Enabled.eq(true))
+        .count(connection.as_ref())
+        .await?;
+    total_count += pugv_count as usize;
 
     Ok(total_count)
 }
@@ -1076,6 +1109,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                         crate::adapter::Args::Submission { .. } => "UP主投稿",
                         crate::adapter::Args::WatchLater => "稍后观看",
                         crate::adapter::Args::Bangumi { .. } => "番剧",
+                        crate::adapter::Args::Pugv { .. } => "课程",
                     };
                     debug!("  - {} (ID: {})", source_name, source.id);
                 }
@@ -1148,6 +1182,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             crate::adapter::Args::Collection { .. } => "合集",
                             crate::adapter::Args::WatchLater => "稍后再看",
                             crate::adapter::Args::Bangumi { .. } => "番剧",
+                            crate::adapter::Args::Pugv { .. } => "课程",
                         };
 
                         info!("处理下一个{}前延迟 {} 秒，避免触发风控...", source_type, delay_seconds);

@@ -1868,8 +1868,10 @@ impl NFO<'_> {
     /// 验证NFO数据的有效性
     fn validate_nfo_data(name: &str, bvid: &str, _upper_name: &str) -> bool {
         // 检查基本字段是否有效
-        !name.trim().is_empty() && !bvid.trim().is_empty() && bvid.starts_with("BV") && bvid.len() >= 10
-        // BV号最少10位
+        // BV号最少10位；课程（pugv）等没有真实 BV 号的内容用 `av<aid>` 占位，同样视为有效
+        let bvid = bvid.trim();
+        let valid_bvid = (bvid.starts_with("BV") && bvid.len() >= 10) || crate::bilibili::is_av_id(bvid);
+        !name.trim().is_empty() && valid_bvid
     }
 
     /// 根据配置策略获取演员信息（返回演员名称和角色名称）

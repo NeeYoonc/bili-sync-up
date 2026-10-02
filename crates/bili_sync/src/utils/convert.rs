@@ -255,6 +255,55 @@ impl VideoInfo {
                     ..default
                 }
             }
+            VideoInfo::Pugv {
+                title,
+                season_id,
+                ep_id,
+                bvid,
+                cid,
+                cover,
+                intro,
+                pubtime,
+                show_title,
+                episode_number,
+                share_copy,
+                lecturer,
+                lecturer_id,
+                lecturer_face,
+                ..
+            } => bili_sync_entity::video::ActiveModel {
+                bvid: Set(bvid),
+                // 优先用「课程名 课时名」，信息量最大，且与番剧的 share_copy 策略一致
+                name: Set(share_copy
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| show_title.clone())
+                    .unwrap_or(title)),
+                intro: Set(intro),
+                cover: Set(cover),
+                ctime: Set(pubtime
+                    .with_timezone(&crate::utils::time_format::beijing_timezone())
+                    .naive_local()),
+                pubtime: Set(pubtime
+                    .with_timezone(&crate::utils::time_format::beijing_timezone())
+                    .naive_local()),
+                favtime: Set(pubtime
+                    .with_timezone(&crate::utils::time_format::beijing_timezone())
+                    .naive_local()),
+                // 课程按普通视频的目录/命名逻辑落盘（category=2），
+                // 避免被误判为番剧而走 pgc 的弹幕/NFO 路径
+                category: Set(2),
+                valid: Set(true),
+                upper_name: Set(lecturer.unwrap_or_default()),
+                upper_id: Set(lecturer_id.unwrap_or_default()),
+                upper_face: Set(lecturer_face.unwrap_or_default()),
+                season_id: Set(Some(season_id)),
+                ep_id: Set(Some(ep_id)),
+                episode_number: Set(episode_number),
+                share_copy: Set(share_copy),
+                cid: Set(cid.parse::<i64>().ok()),
+                ..default
+            },
             _ => unreachable!(),
         }
     }
@@ -367,6 +416,9 @@ impl VideoInfo {
                     ..base_model.into_active_model()
                 }
             }
+            // 课程（pugv）不使用常规稿件详情接口，详情字段在入库时就已完整，
+            // 这里直接原样保留，避免误触发 unreachable。
+            VideoInfo::Pugv { .. } => base_model.into_active_model(),
             _ => unreachable!(),
         }
     }
@@ -379,7 +431,8 @@ impl VideoInfo {
             | VideoInfo::WatchLater { fav_time: time, .. }
             | VideoInfo::Submission { ctime: time, .. }
             | VideoInfo::Dynamic { pubtime: time, .. }
-            | VideoInfo::Bangumi { pubtime: time, .. } => time,
+            | VideoInfo::Bangumi { pubtime: time, .. }
+            | VideoInfo::Pugv { pubtime: time, .. } => time,
             _ => unreachable!(),
         }
     }

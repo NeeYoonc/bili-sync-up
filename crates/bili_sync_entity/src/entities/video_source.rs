@@ -10,6 +10,32 @@ pub enum SourceType {
     #[sea_orm(num_value = 1)]
     #[default]
     Bangumi = 1,
+    /// B 站课程（pugv/cheese），如 https://www.bilibili.com/cheese/play/ss713799843
+    #[sea_orm(num_value = 2)]
+    Pugv = 2,
+}
+
+/// `video` 表 `source_type` 列：番剧
+pub const VIDEO_SOURCE_TYPE_BANGUMI: i32 = 1;
+/// `video` 表 `source_type` 列：B 站课程（pugv/cheese）
+pub const VIDEO_SOURCE_TYPE_PUGV: i32 = 2;
+
+/// 是否为「剧集型」来源（番剧 / 课程）。
+///
+/// 两者都带 `season_id` + `ep_id` + 集数，共用按集组织的目录结构、
+/// S/E 命名、NFO 与取流时走专用接口的逻辑，因此统一判定。
+#[inline]
+pub fn is_episode_source_type(source_type: Option<i32>) -> bool {
+    matches!(
+        source_type,
+        Some(VIDEO_SOURCE_TYPE_BANGUMI) | Some(VIDEO_SOURCE_TYPE_PUGV)
+    )
+}
+
+/// 是否为 B 站课程
+#[inline]
+pub fn is_pugv_source_type(source_type: Option<i32>) -> bool {
+    source_type == Some(VIDEO_SOURCE_TYPE_PUGV)
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Default)]

@@ -320,6 +320,7 @@ export interface VideoSourcesResponse {
 	submission: VideoSource[];
 	watch_later: VideoSource[];
 	bangumi: VideoSource[];
+	pugv: VideoSource[];
 	youtube: VideoSource[];
 	douyin: VideoSource[];
 	tiktok: VideoSource[];
@@ -936,7 +937,13 @@ export interface UserCollectionsResponse {
 }
 
 // 视频分类类型
-export type VideoCategory = 'collection' | 'favorite' | 'submission' | 'watch_later' | 'bangumi';
+export type VideoCategory =
+	| 'collection'
+	| 'favorite'
+	| 'submission'
+	| 'watch_later'
+	| 'bangumi'
+	| 'pugv';
 
 // 番剧季度信息类型
 export interface BangumiSeasonInfo {

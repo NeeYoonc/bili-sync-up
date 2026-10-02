@@ -188,7 +188,7 @@ pub struct VideoChapter {
 
 impl<'a> Video<'a> {
     pub fn new(client: &'a BiliClient, bvid: String) -> Self {
-        let aid = bvid_to_aid(&bvid).to_string();
+        let aid = aid_from_bvid_or_av(&bvid);
         Self { client, aid, bvid }
     }
 
@@ -1644,6 +1644,119 @@ impl<'a> Video<'a> {
         Ok(PageAnalyzer::new(validated_res["result"].take()))
     }
 
+    /// 带质量回退的课程（pugv / cheese）页面分析器获取
+    pub async fn get_pugv_page_analyzer_with_fallback_in_range(
+        &self,
+        page: &PageInfo,
+        ep_id: &str,
+        max_qn: u32,
+        min_qn: u32,
+    ) -> Result<PageAnalyzer> {
+        let quality_levels = build_playurl_quality_fallback_levels(max_qn, min_qn);
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for (attempt, qn) in quality_levels.iter().enumerate() {
+            let qn_str = qn.to_string();
+            tracing::debug!(
+                "尝试获取课程视频流 (尝试 {}/{}): qn={}",
+                attempt + 1,
+                quality_levels.len(),
+                qn_str
+            );
+            match self.get_pugv_page_analyzer_with_quality(page, ep_id, &qn_str).await {
+                Ok(analyzer) => {
+                    tracing::debug!("✓ 成功获取课程视频流: qn={}", qn_str);
+                    return Ok(analyzer);
+                }
+                Err(e) => {
+                    tracing::debug!("× 课程质量 qn={} 获取失败: {}", qn_str, e);
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("无法获取任何质量的课程视频流")))
+    }
+
+    /// 使用指定质量获取课程（pugv）页面分析器
+    ///
+    /// 课程内容和普通稿件/番剧不是同一套接口：
+    /// 必须调用 `pugv/player/web/playurl`，且响应结构与常规接口一致（`data.dash`）。
+    async fn get_pugv_page_analyzer_with_quality(
+        &self,
+        page: &PageInfo,
+        ep_id: &str,
+        qn: &str,
+    ) -> Result<PageAnalyzer> {
+        let cid_string = page.cid.to_string();
+
+        let fingerprint = HardwareFingerprint::default();
+        let hardware = fingerprint.get_hardware();
+        let dm_img_str = hardware.generate_dm_img_str();
+        let dm_cover_img_str = hardware.generate_dm_cover_img_str();
+        let dm_img_list = fingerprint.generate_dm_img_list(page.duration as u32);
+        let dm_img_inter = fingerprint.generate_dm_img_inter();
+
+        let params = [
+            ("avid", self.aid.as_str()),
+            ("cid", cid_string.as_str()),
+            ("ep_id", ep_id),
+            ("qn", qn),
+            ("otype", "json"),
+            ("fnval", "4048"),
+            ("fourk", "1"),
+            ("voice_balance", "1"),
+            ("gaia_source", "pre-load"),
+            ("isGaiaAvoided", "true"),
+            ("web_location", "1315873"),
+            ("dm_img_str", dm_img_str.as_str()),
+            ("dm_cover_img_str", dm_cover_img_str.as_str()),
+            ("dm_img_list", dm_img_list.as_str()),
+            ("dm_img_inter", dm_img_inter.as_str()),
+        ];
+
+        let request_url = "https://api.bilibili.com/pugv/player/web/playurl";
+        tracing::debug!(
+            "发起课程playurl请求: {} - aid: {}, ep_id: {}, cid: {}, 质量: {}",
+            request_url,
+            self.aid,
+            ep_id,
+            page.cid,
+            qn
+        );
+
+        let request = self
+            .client
+            .request(Method::GET, request_url)
+            .await
+            .query(&params)
+            .headers(create_api_headers());
+
+        wait_for_scoped_playurl_rate_limit().await;
+        let res = request.send().await?.error_for_status()?.json::<serde_json::Value>().await?;
+
+        if let Some(code) = res["code"].as_i64() {
+            if code != 0 {
+                let message = res["message"].as_str().unwrap_or("未知错误").to_string();
+                return Err(crate::bilibili::BiliError::RequestFailed(code, message).into());
+            }
+        }
+
+        if res["data"]["dash"]["video"].as_array().is_none_or(|v| v.is_empty()) {
+            tracing::warn!(
+                "课程视频流为空，完整data字段: {}",
+                serde_json::to_string_pretty(&res["data"]).unwrap_or_else(|_| "无法序列化".to_string())
+            );
+            return Err(
+                crate::bilibili::BiliError::VideoStreamEmpty("课程API返回的视频流为空（可能需要购买该课程）".to_string())
+                    .into(),
+            );
+        }
+
+        let mut validated_res = res.validate()?;
+        Ok(PageAnalyzer::new(validated_res["data"].take()))
+    }
+
     pub async fn get_subtitles(&self, page: &PageInfo) -> Result<Vec<SubTitle>> {
         self.get_subtitles_with_options(page, &SubtitleDownloadOptions::default())
             .await
@@ -1654,14 +1767,18 @@ impl<'a> Video<'a> {
         page: &PageInfo,
         options: &SubtitleDownloadOptions,
     ) -> Result<Vec<SubTitle>> {
+        let cid_string = page.cid.to_string();
+        let mut query_params = vec![("cid", cid_string.as_str()), ("aid", self.aid.as_str())];
+        // 课程（pugv）等没有真实 BV 号的内容用 `av<aid>` 占位，
+        // 这类内容不能带 bvid 参数，否则接口直接返回错误
+        if is_bvid(&self.bvid) {
+            query_params.push(("bvid", self.bvid.as_str()));
+        }
         let res = self
             .client
             .request(Method::GET, "https://api.bilibili.com/x/player/wbi/v2")
             .await
-            .query(&encoded_query(
-                vec![("cid", &page.cid.to_string()), ("bvid", &self.bvid), ("aid", &self.aid)],
-                MIXIN_KEY.load().as_deref(),
-            ))
+            .query(&encoded_query(query_params, MIXIN_KEY.load().as_deref()))
             .send()
             .await?
             .error_for_status()?
@@ -1843,6 +1960,38 @@ pub fn bvid_to_aid(bvid: &str) -> u64 {
         tmp = tmp * BASE + idx as u64;
     }
     (tmp & MASK_CODE) ^ XOR_CODE
+}
+
+/// 判断字符串是否是合法形态的 bvid（长度 12 且以 BV 开头）
+pub fn is_bvid(value: &str) -> bool {
+    let v = value.trim();
+    v.len() == 12 && v.starts_with("BV") && v.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// 判断字符串是否是合法形态的 `av<aid>` 占位 ID
+///
+/// 课程（pugv）等没有 bvid 的内容会用 `av<aid>` 存进 `video.bvid` 列。
+pub fn is_av_id(value: &str) -> bool {
+    let v = value.trim();
+    let Some(digits) = v.strip_prefix("av").or_else(|| v.strip_prefix("AV")) else {
+        return false;
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// 从 `bvid` 或 `av<aid>` 推导 aid（字符串形式）。
+///
+/// 课程（pugv）等特殊内容没有 bvid，我们把 aid 以 `av<aid>` 的形式存进 video.bvid 列，
+/// 这里统一处理，避免 `bvid_to_aid` 在非 BV 字符串上 panic。
+pub fn aid_from_bvid_or_av(value: &str) -> String {
+    let v = value.trim();
+    if is_bvid(v) {
+        return bvid_to_aid(v).to_string();
+    }
+    if is_av_id(v) {
+        return v[2..].to_string();
+    }
+    "0".to_string()
 }
 
 #[cfg(test)]

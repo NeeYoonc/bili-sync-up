@@ -19,6 +19,8 @@ pub struct LastScannedIds {
     pub watch_later: Option<i32>,
     #[serde(default)]
     pub bangumi: Option<i32>,
+    #[serde(default)]
+    pub pugv: Option<i32>,
 
     // 记录每种类型源上次处理的ID（用于断点续传）
     #[serde(default)]
@@ -31,6 +33,8 @@ pub struct LastScannedIds {
     pub last_processed_watch_later: Option<i32>,
     #[serde(default)]
     pub last_processed_bangumi: Option<i32>,
+    #[serde(default)]
+    pub last_processed_pugv: Option<i32>,
 }
 
 const CONFIG_KEY: &str = "last_scanned_ids";
@@ -107,6 +111,7 @@ pub enum SourceType {
     Submission,
     WatchLater,
     Bangumi,
+    Pugv,
 }
 
 /// 将视频源按新旧分组，并支持断点续传
@@ -127,6 +132,7 @@ pub fn group_sources_by_new_old(
                 last_scanned_ids.last_processed_watch_later,
             ),
             SourceType::Bangumi => (last_scanned_ids.bangumi, last_scanned_ids.last_processed_bangumi),
+            SourceType::Pugv => (last_scanned_ids.pugv, last_scanned_ids.last_processed_pugv),
         };
 
         // 如果没有记录（首次运行）或ID大于最大ID，则为新源
@@ -220,6 +226,9 @@ impl MaxIdRecorder {
                 SourceType::Bangumi => {
                     last_scanned_ids.bangumi = Some(max_id.max(last_scanned_ids.bangumi.unwrap_or(0)));
                 }
+                SourceType::Pugv => {
+                    last_scanned_ids.pugv = Some(max_id.max(last_scanned_ids.pugv.unwrap_or(0)));
+                }
             }
         }
 
@@ -241,6 +250,9 @@ impl MaxIdRecorder {
                 SourceType::Bangumi => {
                     last_scanned_ids.last_processed_bangumi = Some(processed_id);
                 }
+                SourceType::Pugv => {
+                    last_scanned_ids.last_processed_pugv = Some(processed_id);
+                }
             }
         }
     }
@@ -254,5 +266,6 @@ impl LastScannedIds {
         self.last_processed_submission = None;
         self.last_processed_watch_later = None;
         self.last_processed_bangumi = None;
+        self.last_processed_pugv = None;
     }
 }

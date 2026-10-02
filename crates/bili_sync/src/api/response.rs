@@ -17,6 +17,9 @@ pub struct VideoSourcesResponse {
     pub watch_later: Vec<VideoSource>,
     #[serde(default)]
     pub bangumi: Vec<VideoSource>,
+    /// B 站课程（pugv / cheese）
+    #[serde(default)]
+    pub pugv: Vec<VideoSource>,
 }
 
 #[derive(Serialize, ToSchema)]

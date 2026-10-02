@@ -23,10 +23,12 @@ pub(crate) use subtitle::{SubtitleDownloadOptions, DEFAULT_AI_SUBTITLE_LANGUAGE}
 pub use verification_coordinator::{VerificationRequest, VERIFICATION_COORDINATOR};
 pub(crate) use video::effective_playurl_qn_range;
 pub use video::{
-    bvid_to_aid, with_playurl_rate_limit, Dimension, PageInfo, PlayurlRateLimitConfig, Video, VideoChapter,
+    aid_from_bvid_or_av, bvid_to_aid, is_av_id, is_bvid, with_playurl_rate_limit, Dimension, PageInfo,
+    PlayurlRateLimitConfig, Video, VideoChapter,
 };
 pub use watch_later::WatchLater;
 pub mod bangumi;
+pub mod pugv;
 
 mod analyzer;
 mod captcha_server;
@@ -295,6 +297,36 @@ pub enum VideoInfo {
         show_season_type: Option<i32>,
         /// 演员信息字符串，从API获取
         actors: Option<String>,
+    },
+    /// 从 B 站课程（pugv / cheese）接口获取的视频信息
+    ///
+    /// 注意：`VideoInfo` 是 untagged enum，serde 按声明顺序匹配，
+    /// 因此该变体必须放在最后，避免影响常规变体的反序列化。
+    Pugv {
+        /// 课程总标题
+        title: String,
+        season_id: String,
+        ep_id: String,
+        /// 课程没有 bvid，使用 `av<aid>` 形式占位
+        bvid: String,
+        aid: String,
+        cid: String,
+        cover: String,
+        intro: String,
+        #[serde(with = "ts_seconds")]
+        pubtime: DateTime<Utc>,
+        duration: Option<i32>,
+        /// 课时标题
+        show_title: Option<String>,
+        /// 课时序号（课程接口的 index）
+        episode_number: Option<i32>,
+        share_copy: Option<String>,
+        /// 讲师名
+        lecturer: Option<String>,
+        /// 讲师 mid（课程详情的 `up_info.mid`）
+        lecturer_id: Option<i64>,
+        /// 讲师头像（课程详情的 `up_info.avatar`）
+        lecturer_face: Option<String>,
     },
 }
 

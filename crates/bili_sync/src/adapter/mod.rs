@@ -1,4 +1,5 @@
 pub mod bangumi;
+pub mod pugv;
 mod collection;
 mod favorite;
 mod submission;
@@ -11,6 +12,7 @@ mod watch_later;
 // pub use watch_later::init_watch_later_source;
 
 pub use bangumi::BangumiSource;
+pub use pugv::PugvSource;
 
 use std::path::Path;
 use std::pin::Pin;
@@ -42,6 +44,7 @@ pub enum VideoSourceEnum {
     Submission,
     WatchLater,
     BangumiSource,
+    PugvSource,
 }
 
 #[enum_dispatch(VideoSourceEnum)]
@@ -270,6 +273,11 @@ pub enum Args {
         media_id: Option<String>,
         ep_id: Option<String>,
     },
+    /// B 站课程（pugv / cheese）
+    Pugv {
+        season_id: Option<String>,
+        ep_id: Option<String>,
+    },
 }
 
 pub async fn video_source_from<'a>(
@@ -294,6 +302,7 @@ pub async fn video_source_from<'a>(
             media_id,
             ep_id,
         } => bangumi_from(season_id, media_id, ep_id, path, bili_client, connection).await,
+        Args::Pugv { season_id, ep_id } => pugv_from(season_id, ep_id, path, bili_client, connection).await,
     }
 }
 
@@ -303,6 +312,7 @@ pub enum _ActiveModel {
     Submission(bili_sync_entity::submission::ActiveModel),
     WatchLater(bili_sync_entity::watch_later::ActiveModel),
     Bangumi(Box<bili_sync_entity::video_source::ActiveModel>),
+    Pugv(Box<bili_sync_entity::video_source::ActiveModel>),
 }
 
 impl _ActiveModel {
@@ -321,6 +331,9 @@ impl _ActiveModel {
                 model.save(connection).await?;
             }
             _ActiveModel::Bangumi(model) => {
+                model.save(connection).await?;
+            }
+            _ActiveModel::Pugv(model) => {
                 model.save(connection).await?;
             }
         }
@@ -610,4 +623,121 @@ pub async fn bangumi_from<'a>(
     };
 
     Ok((VideoSourceEnum::BangumiSource(bangumi_source), video_stream))
+}
+
+/// 构造课程（pugv）视频源。
+pub async fn pugv_from<'a>(
+    season_id: &Option<String>,
+    ep_id: &Option<String>,
+    path: &'a Path,
+    bili_client: &'a BiliClient,
+    connection: &DatabaseConnection,
+) -> Result<(
+    VideoSourceEnum,
+    Pin<Box<dyn Stream<Item = Result<VideoInfo>> + 'a + Send>>,
+)> {
+    let mut query = bili_sync_entity::video_source::Entity::find()
+        .filter(bili_sync_entity::video_source::Column::Type.eq(2));
+
+    if let Some(season_id_value) = season_id {
+        query = query.filter(bili_sync_entity::video_source::Column::SeasonId.eq(season_id_value));
+    }
+    if let Some(ep_id_value) = ep_id {
+        query = query.filter(bili_sync_entity::video_source::Column::EpId.eq(ep_id_value));
+    }
+
+    let model = query.one(connection).await?;
+
+    let pugv_source = if let Some(model) = model {
+        PugvSource {
+            id: model.id,
+            name: model.name,
+            latest_row_at: model.latest_row_at,
+            season_id: model.season_id,
+            ep_id: model.ep_id,
+            path: path.to_path_buf(),
+            scan_deleted_videos: model.scan_deleted_videos,
+            scan_deleted_videos_once: model.scan_deleted_videos_once,
+            keyword_filters: model.keyword_filters,
+            keyword_filter_mode: model.keyword_filter_mode,
+            blacklist_keywords: model.blacklist_keywords,
+            whitelist_keywords: model.whitelist_keywords,
+            keyword_case_sensitive: model.keyword_case_sensitive,
+            min_duration_seconds: model.min_duration_seconds,
+            max_duration_seconds: model.max_duration_seconds,
+            published_after: model.published_after,
+            published_before: model.published_before,
+            filter_option: model.filter_option,
+            audio_only: model.audio_only,
+            audio_only_m4a_only: model.audio_only_m4a_only,
+            flat_folder: model.flat_folder,
+            split_chapters_after_download: model.split_chapters_after_download,
+            download_charge_videos: model.download_charge_videos,
+            download_danmaku: model.download_danmaku,
+            download_subtitle: model.download_subtitle,
+            download_ai_subtitle: model.download_ai_subtitle,
+            ai_subtitle_language: model.ai_subtitle_language,
+            ai_rename: model.ai_rename,
+            ai_rename_video_prompt: model.ai_rename_video_prompt,
+            ai_rename_audio_prompt: model.ai_rename_audio_prompt,
+            ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
+            ai_rename_enable_collection: model.ai_rename_enable_collection,
+            ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
+            ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
+        }
+    } else {
+        let id_desc = match (season_id, ep_id) {
+            (Some(s), _) => format!("season_id: {}", s),
+            (_, Some(e)) => format!("ep_id: {}", e),
+            _ => "未提供ID".to_string(),
+        };
+        warn!("数据库中未找到课程 {} 的记录，使用临时ID", id_desc);
+        PugvSource {
+            id: 0,
+            name: format!("课程 {}", id_desc),
+            latest_row_at: "1970-01-01 00:00:00".to_string(),
+            season_id: season_id.clone(),
+            ep_id: ep_id.clone(),
+            path: path.to_path_buf(),
+            scan_deleted_videos: false,
+            scan_deleted_videos_once: false,
+            keyword_filters: None,
+            keyword_filter_mode: None,
+            blacklist_keywords: None,
+            whitelist_keywords: None,
+            keyword_case_sensitive: true,
+            min_duration_seconds: None,
+            max_duration_seconds: None,
+            published_after: None,
+            published_before: None,
+            filter_option: None,
+            audio_only: false,
+            audio_only_m4a_only: false,
+            flat_folder: false,
+            split_chapters_after_download: false,
+            download_charge_videos: true,
+            download_danmaku: true,
+            download_subtitle: true,
+            download_ai_subtitle: true,
+            ai_subtitle_language: "zh-CN".to_string(),
+            ai_rename: false,
+            ai_rename_video_prompt: String::new(),
+            ai_rename_audio_prompt: String::new(),
+            ai_rename_enable_multi_page: false,
+            ai_rename_enable_collection: false,
+            ai_rename_enable_bangumi: false,
+            ai_rename_rename_parent_dir: false,
+        }
+    };
+
+    let video_stream = pugv_source.video_stream_from(bili_client, path, connection).await?;
+
+    let video_stream = unsafe {
+        std::mem::transmute::<
+            Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>>,
+            Pin<Box<dyn Stream<Item = Result<VideoInfo>> + 'a + Send>>,
+        >(video_stream)
+    };
+
+    Ok((VideoSourceEnum::PugvSource(pugv_source), video_stream))
 }
