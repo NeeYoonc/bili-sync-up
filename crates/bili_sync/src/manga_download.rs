@@ -443,7 +443,14 @@ async fn download_single_page(
     let bytes = fetch_image_bytes(client, url)
         .await
         .with_context(|| format!("下载第{}页失败", pid))?;
-    let ext = sniff_image_ext(&bytes);
+    let Some(ext) = sniff_image_ext(&bytes) else {
+        bail!(
+            "第{}页拿到的不是图片（{} 字节，首 4 字节 {}）：B 站加密原图（mangaup + cpx）当前本地无法解码",
+            pid,
+            bytes.len(),
+            payload_head_hex(&bytes)
+        );
+    };
     let target = staging_dir.join(format!("{:04}.{}", pid, ext));
     tokio::fs::write(&target, &bytes)
         .await
@@ -452,20 +459,35 @@ async fn download_single_page(
 }
 
 /// 按文件头判断图片格式（B 漫 CDN 会按客户端返回 webp / avif / jpeg）。
-fn sniff_image_ext(bytes: &[u8]) -> &'static str {
+///
+/// 返回 `None` 表示载荷根本不是可识别的图片：B 漫把「加密原图」放在 `mangaup.hdslb.com`，
+/// 直链带 `cpx` 参数、ImageToken 里 `hit_encrpyt = true`，落地的是边缘节点逐响应改写的
+/// DRM 载荷（首字节固定 `0x08`，尾部仍是明文 JPEG 尾字节）。这种数据本地解不开，
+/// 必须当作下载失败——否则 CBZ 里会被塞进一堆非图片字节，分页状态还显示「已完成」。
+fn sniff_image_ext(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
-        return "jpg";
+        return Some("jpg");
     }
     if bytes.len() >= 12 && &bytes[4..12] == b"ftypavif" {
-        return "avif";
+        return Some("avif");
     }
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return "webp";
+        return Some("webp");
     }
     if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
-        return "png";
+        return Some("png");
     }
-    "jpg"
+    None
+}
+
+/// 载荷首几字节的十六进制，用于下载失败时说明到底拿到了什么。
+fn payload_head_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(4)
+        .map(|byte| format!("{:02X}", byte))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 写入分页进度（打包完成后 `packaged = true`，此时 `page.image` 指向 CBZ 内的页）。
@@ -589,4 +611,30 @@ fn write_cbz(path: &Path, entries: &[(String, PathBuf)]) -> Result<()> {
     zip.finish().context("完成 CBZ 写入失败")?;
     std::fs::rename(&temp, path).with_context(|| format!("重命名 CBZ 失败: {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{payload_head_hex, sniff_image_ext};
+
+    #[test]
+    fn sniff_accepts_real_image_headers() {
+        assert_eq!(sniff_image_ext(b"\xff\xd8\xff\xdb\x00\x84"), Some("jpg"));
+        assert_eq!(sniff_image_ext(b"RIFF\x00\x00\x00\x00WEBPVP8 "), Some("webp"));
+        assert_eq!(
+            sniff_image_ext(b"\x00\x00\x00\x20ftypavif\x00\x00\x00\x00"),
+            Some("avif")
+        );
+        assert_eq!(sniff_image_ext(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00"), Some("png"));
+    }
+
+    /// B 漫加密原图（mangaup + cpx）的载荷首字节固定 0x08，不能被当成 jpg 收下。
+    #[test]
+    fn sniff_rejects_bilibili_encrypted_payload() {
+        let payload = [0x08u8, 0x71, 0x4B, 0xCD, 0x65, 0xFB, 0x66, 0x36, 0x6E, 0xCB];
+        assert_eq!(sniff_image_ext(&payload), None);
+        assert_eq!(sniff_image_ext(b""), None);
+        assert_eq!(sniff_image_ext(b"<html>403"), None);
+        assert_eq!(payload_head_hex(&payload), "08 71 4B CD");
+    }
 }
