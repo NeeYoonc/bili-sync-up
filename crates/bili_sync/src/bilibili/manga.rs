@@ -27,7 +27,7 @@ use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::VideoInfo;
 use crate::config::CONFIG_DIR;
@@ -319,7 +319,48 @@ fn parse_pubtime(raw: &str) -> DateTime<Utc> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::normalize_comic_id;
+
+    #[test]
+    fn search_slot_first_call_is_immediate() {
+        let now = Instant::now();
+        let mut last = None;
+        assert_eq!(reserve_search_slot(&mut last, now, Duration::from_secs(2)), Duration::ZERO);
+        assert!(last.is_some());
+    }
+
+    #[test]
+    fn search_slot_throttles_rapid_repeat() {
+        let now = Instant::now();
+        let mut last = None;
+        reserve_search_slot(&mut last, now, Duration::from_secs(2));
+        // 0.5 秒后又来一次：需要再等 1.5 秒
+        let wait = reserve_search_slot(&mut last, now + Duration::from_millis(500), Duration::from_secs(2));
+        assert_eq!(wait, Duration::from_millis(1500));
+        // 第三次紧跟其后：因为第二次预约在 2.0s，这里要等到 4.0s
+        let wait = reserve_search_slot(&mut last, now + Duration::from_millis(600), Duration::from_secs(2));
+        assert_eq!(wait, Duration::from_millis(3400));
+    }
+
+    #[test]
+    fn search_slot_slow_human_is_not_delayed() {
+        let now = Instant::now();
+        let mut last = None;
+        reserve_search_slot(&mut last, now, Duration::from_secs(2));
+        let wait = reserve_search_slot(&mut last, now + Duration::from_secs(30), Duration::from_secs(2));
+        assert_eq!(wait, Duration::ZERO);
+    }
+
+    #[test]
+    fn risk_control_blocks_until_deadline_then_recovers() {
+        let now = Instant::now();
+        let mut until = Some(now + Duration::from_secs(60));
+        assert!(risk_control_active(&mut until, now));
+        assert!(!risk_control_active(&mut until, now + Duration::from_secs(61)));
+        assert!(until.is_none(), "到期后应清空冷却标记");
+        assert!(!risk_control_active(&mut until, now + Duration::from_secs(120)));
+    }
 
     #[test]
     fn normalize_comic_id_accepts_url_and_plain_id() {
@@ -426,10 +467,50 @@ pub struct MangaSearchItem {
 static SEARCH_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>, bool)>>> = OnceLock::new();
 /// 搜索缓存有效期。搜索结果本身是低频且稳定的，缓存主要用来挡掉重复点击与连续搜索。
 const SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
+/// 两次「真正打站点」的搜索之间的最小间隔：连续点击 / 连续换词时自动排队，
+/// 避免把 B 站搜索风控打出来（正常手速不受影响，第一次搜索永远是立即发出）。
+const SEARCH_MIN_INTERVAL: Duration = Duration::from_secs(2);
+/// 触发风控后的冷却时长：冷却期内直接返回提示，不再去打站点（否则会不断续期封禁）。
+const SEARCH_COOLDOWN: Duration = Duration::from_secs(120);
 
 fn search_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>, bool)>> {
     SEARCH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+/// 下一次允许真正发请求的时间点（用于搜索的突发保护）。
+static LAST_SEARCH_SLOT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+/// 风控冷却截止时间。
+static SEARCH_COOLDOWN_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+/// 预约一次搜索发送时间；返回还需要等待多久（纯函数，便于单测）。
+///
+/// `last` 存的是「上一次预约的发送时刻」，并发调用者会依次排队，
+/// 保证相邻两次真正发出的请求至少间隔 `min_interval`。
+fn reserve_search_slot(last: &mut Option<Instant>, now: Instant, min_interval: Duration) -> Duration {
+    // 预约时刻 = max(现在, 上一次预约 + 最小间隔)
+    let scheduled = match *last {
+        Some(previous) => std::cmp::max(now, previous + min_interval),
+        None => now,
+    };
+    *last = Some(scheduled);
+    scheduled.saturating_duration_since(now)
+}
+
+/// 风控冷却是否仍然生效；生效时调用方应直接快速失败（纯函数，便于单测）。
+fn risk_control_active(until: &mut Option<Instant>, now: Instant) -> bool {
+    match *until {
+        Some(deadline) if now < deadline => true,
+        Some(_) => {
+            *until = None;
+            false
+        }
+        None => false,
+    }
+}
+
+/// 触发风控时的统一提示文案。
+const SEARCH_RISK_CONTROL_MESSAGE: &str =
+    "B站要求人机验证：短时间内搜索太频繁，请等 1~2 分钟再试（也可以直接粘贴漫画链接添加）";
 
 /// 关键词搜索漫画。
 ///
@@ -456,6 +537,26 @@ pub async fn search_comics(keyword: &str, page: u32, page_size: u32) -> Result<(
         }
     }
 
+    // 风控冷却期内直接快速失败：继续请求只会把封禁续期
+    if let Ok(mut guard) = SEARCH_COOLDOWN_UNTIL.get_or_init(|| Mutex::new(None)).lock() {
+        if risk_control_active(&mut guard, Instant::now()) {
+            bail!("{}", SEARCH_RISK_CONTROL_MESSAGE);
+        }
+    }
+
+    // 突发保护：连续搜索之间留出最小间隔（并发调用者按序排队）
+    let wait = {
+        let mut guard = LAST_SEARCH_SLOT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        reserve_search_slot(&mut guard, Instant::now(), SEARCH_MIN_INTERVAL)
+    };
+    if !wait.is_zero() {
+        debug!("漫画搜索排队等待 {:?}（突发保护）", wait);
+        tokio::time::sleep(wait).await;
+    }
+
     let result = run_sidecar(
         "search",
         serde_json::json!({ "keyword": keyword, "page": page, "page_size": page_size }),
@@ -464,7 +565,11 @@ pub async fn search_comics(keyword: &str, page: u32, page_size: u32) -> Result<(
     .map_err(|error| {
         let text = format!("{error:#}");
         if text.contains("人机验证") || text.contains("code=401") {
-            anyhow!("B站要求人机验证：短时间内搜索太频繁，请稍等一会儿再试")
+            if let Ok(mut guard) = SEARCH_COOLDOWN_UNTIL.get_or_init(|| Mutex::new(None)).lock() {
+                *guard = Some(Instant::now() + SEARCH_COOLDOWN);
+            }
+            warn!("漫画搜索触发 B 站风控，进入 {}s 冷却", SEARCH_COOLDOWN.as_secs());
+            anyhow!("{}", SEARCH_RISK_CONTROL_MESSAGE)
         } else {
             error
         }
