@@ -795,7 +795,13 @@ impl Manga {
                 }
 
                 let display_title = episode.display_title();
-                let share_copy = Some(format!("{} {}", comic.title, display_title));
+                // video.name 就是管理页 / 通知 / 重命名模板里显示的标题。正篇带上话号
+                //（`作品名 0001 话标题`），否则一话一条列出来全是一模一样的作品名开头，
+                //看不出这是第几话；特典没有正篇序号，保持「作品名 标题」。
+                let share_copy = Some(match episode.episode_number() {
+                    Some(number) => format!("{} {:04} {}", comic.title, number, display_title),
+                    None => format!("{} {}", comic.title, display_title),
+                });
                 emitted += 1;
                 yield VideoInfo::Manga {
                     title: comic.title.clone(),

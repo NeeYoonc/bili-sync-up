@@ -280,6 +280,9 @@ fn chapter_display_title(video_model: &video::Model, source_name: &str) -> Strin
         .map(str::trim)
         .filter(|rest| !rest.is_empty())
         .unwrap_or(name);
+    // video.name 里带着话号（「作品名 0001 话标题」），而话号在文件名里由 label 单独生成，
+    // 这里要去掉，否则 CBZ 会变成「作品名 - 0001 0001 话标题」
+    let stripped = strip_chapter_label(stripped);
     if !stripped.is_empty() {
         return stripped.to_string();
     }
@@ -287,6 +290,21 @@ fn chapter_display_title(video_model: &video::Model, source_name: &str) -> Strin
         Some(number) => format!("第{}话", number),
         None => "特典".to_string(),
     }
+}
+
+/// 去掉话标题开头的 4 位话号（「0001 话标题」→「话标题」）。
+///
+/// 只认「3 位以上数字 + 空格」这种明显是话号的前缀，避免误伤本身以数字开头的标题。
+fn strip_chapter_label(title: &str) -> &str {
+    let trimmed = title.trim_start();
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    if digits >= 3 {
+        let rest = &trimmed[digits..];
+        if rest.starts_with(' ') {
+            return rest.trim_start();
+        }
+    }
+    trimmed
 }
 
 /// 计算特典在同源特典里的序号（按发布时间升序，新特典追加在末尾，序号稳定）。
@@ -667,6 +685,20 @@ mod tests {
             Some("avif")
         );
         assert_eq!(sniff_image_ext(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00"), Some("png"));
+    }
+
+    /// 话号只在 `video.name` 里给管理页显示用，文件名由 label 单独生成，不能重复。
+    #[test]
+    fn chapter_label_is_stripped_from_file_title() {
+        assert_eq!(
+            super::strip_chapter_label("0001 我喜欢，碧池类型的"),
+            "我喜欢，碧池类型的"
+        );
+        // 没有紧跟空格的不算话号前缀
+        assert_eq!(super::strip_chapter_label("1234"), "1234");
+        // 两位数开头的标题不能被误伤
+        assert_eq!(super::strip_chapter_label("86 -不存在的战区-"), "86 -不存在的战区-");
+        assert_eq!(super::strip_chapter_label("特典上线"), "特典上线");
     }
 
     /// B 漫加密原图（mangaup + cpx）的载荷首字节固定 0x08，不能被当成 jpg 收下。

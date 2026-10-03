@@ -1209,7 +1209,9 @@
 								</div>
 							{/if}
 							{#if isMangaChapter}
-								<div class="bg-card rounded-lg border p-3">
+								<!-- 阅读器整块最多占满一屏：窗口特别矮时面板内部自己滚动，
+								     不让底部翻页控件被 sticky 面板顶到可视区域外面 -->
+								<div class="bg-card max-h-[calc(100vh-6rem)] overflow-y-auto rounded-lg border p-3">
 									<MangaReader videoId={videoData.video.id} chapterTitle={videoData.video.name} />
 								</div>
 							{:else}

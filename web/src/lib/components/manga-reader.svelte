@@ -333,7 +333,7 @@
 				onscroll={handleScroll}
 				ontouchstart={handleTouchStart}
 				ontouchend={handleTouchEnd}
-				class="relative max-h-[75vh] overflow-y-auto rounded-lg bg-black"
+				class="manga-reader-area relative overflow-y-auto rounded-lg bg-black"
 				role="group"
 				aria-label="漫画连续滚动区域"
 			>
@@ -351,7 +351,7 @@
 			</div>
 		{:else}
 			<div
-				class="relative flex min-h-[320px] items-center justify-center rounded-lg bg-black"
+				class="manga-reader-area relative flex overflow-auto rounded-lg bg-black"
 				role="group"
 				aria-label="漫画单页阅读区域"
 				ontouchstart={handleTouchStart}
@@ -379,8 +379,8 @@
 							src={pageUrl(pageIndex)}
 							alt={`${chapterTitle || manifest.title} 第 ${pageIndex + 1} 页`}
 							class={fitWidth
-								? 'block h-auto w-full object-contain'
-								: 'block h-auto max-h-[75vh] w-auto max-w-full object-contain'}
+								? 'm-auto block h-auto w-full object-contain'
+								: 'm-auto block h-auto max-h-full w-auto max-w-full object-contain'}
 							class:opacity-0={imageLoading && !imageFailed}
 							draggable="false"
 							onload={() => {
@@ -502,3 +502,12 @@
 {:else}
 	<div class="rounded-lg bg-black px-4 py-10 text-center text-sm text-white">没有可阅读的页面</div>
 {/if}
+
+<style>
+	/* 阅读区域高度跟着窗口走：减掉标题栏 / 翻页控件占的地方，保证整页图都能看见，
+	 * 而不是只按 75vh 算导致图片和控件被挤到可视区域外面去。 */
+	.manga-reader-area {
+		height: clamp(240px, calc(100vh - 300px), 80vh);
+		height: clamp(240px, calc(100dvh - 300px), 80vh);
+	}
+</style>
