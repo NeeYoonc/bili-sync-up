@@ -411,6 +411,17 @@ pub struct MangaComicRequest {
     pub comic_id: String,
 }
 
+/// 关键词搜索漫画的请求
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct MangaSearchRequest {
+    /// 搜索关键词（漫画名 / 作者名）
+    pub keyword: String,
+    #[serde(default = "default_page")]
+    pub page: u32,
+    #[serde(default = "default_page_size")]
+    pub page_size: u32,
+}
+
 fn default_page() -> u32 {
     1
 }

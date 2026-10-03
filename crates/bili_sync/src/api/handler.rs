@@ -2636,7 +2636,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, get_pugv_up_courses, get_manga_comic, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_downloads_progress, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, get_pugv_up_courses, get_manga_comic, get_manga_search, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_downloads_progress, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -14880,6 +14880,58 @@ pub async fn get_manga_comic(
         intro: comic.intro,
         episode_count: comic.episodes.len() as u64,
         is_finish: comic.is_finish,
+    }))
+}
+
+/// 关键词搜索哔哩哔哩漫画（添加漫画源时按名字挑作品）
+#[utoipa::path(
+    get,
+    path = "/api/manga/search",
+    params(
+        ("keyword" = String, Query, description = "搜索关键词（漫画名 / 作者名）"),
+        ("page" = Option<u32>, Query, description = "页码，默认 1"),
+        ("page_size" = Option<u32>, Query, description = "每页数量，默认 20，最大 50")
+    ),
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::MangaSearchResponse>),
+    )
+)]
+pub async fn get_manga_search(
+    Query(params): Query<crate::api::request::MangaSearchRequest>,
+) -> Result<ApiResponse<crate::api::response::MangaSearchResponse>, ApiError> {
+    let keyword = params.keyword.trim().to_string();
+    if keyword.is_empty() {
+        return Err(anyhow!("请输入搜索关键词").into());
+    }
+    let page = params.page.max(1);
+    let page_size = params.page_size.clamp(1, 50);
+
+    let items = crate::bilibili::manga::search_comics(&keyword, page, page_size)
+        .await
+        .map_err(|e| {
+            error!("搜索漫画「{}」失败: {:#}", keyword, e);
+            e
+        })?;
+    // 站点接口不返回总数，只能按「本页是否装满」判断还有没有下一页
+    let has_more = items.len() as u32 >= page_size;
+
+    Ok(ApiResponse::ok(crate::api::response::MangaSearchResponse {
+        success: true,
+        keyword,
+        page,
+        has_more,
+        results: items
+            .into_iter()
+            .map(|item| crate::api::response::MangaSearchItemResponse {
+                comic_id: item.comic_id,
+                title: item.title,
+                author: item.author,
+                cover: item.cover,
+                styles: item.styles,
+                is_finish: item.is_finish,
+                url: item.url,
+            })
+            .collect(),
     }))
 }
 

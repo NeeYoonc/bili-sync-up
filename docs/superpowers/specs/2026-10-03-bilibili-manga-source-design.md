@@ -286,6 +286,27 @@ ImageToken(urls, m1)   → 19 条 complete_url（自生成 m1 被接受，bytesD
   否则多行里的裸字符串行会污染 Rust 侧按行解析。
 - 环境变量：`MANGA_COOKIE`、`MANGA_BUVID3`、`MANGA_CACHE`、`MANGA_PROXY`。
 
+### 漫画搜索（`Comic/Search`）
+
+「添加视频源 → 漫画」的关键词搜索走 B 漫自带的 `POST /twirp/comic.v1.Comic/Search`，
+请求体为 `{key_word, page_num, page_size, search_type, m2}`，**响应是明文 `data`**（没有 `bytesData`），
+因此 signer 对这条链路单独放开了明文分支（`allowPlaintext`）；`data.list[]` 里 `id` 即 comic_id，
+`title` 带 `<em class="keyword">` 高亮标签需要剥离（优先取 `org_title`/`real_title`），
+封面偶尔给 `http://`，统一升级成 https。
+
+接口**不返回总数**：`total` 等于本页条目数，只能按「本页是否装满 page_size」判断还有没有下一页，
+所以前端结果是「搜索 + 加载更多」逐页追加，而不是页码分页。
+
+**风控**：该接口有独立于人机验证的风控（`code=401 需要人机验证`）。实测同一 IP 连续搜索 3~4 次后即触发，
+且短时间内（≥10 分钟）持续被拒。缓解措施：
+
+- 后端对「关键词 + 页码 + 每页数量」做 300 秒结果缓存，重复搜索不再打站点；
+- 触发风控时把报错改写成可读文案「B站要求人机验证：短时间内搜索太频繁，请稍等一会儿再试」；
+- 前端提示里保留「也可以直接粘贴漫画链接」，搜索不可用时整条添加链路不受影响。
+
+剩余风险：首次搜索仍可能撞上风控，彻底解决需要在 sidecar 里补站点 wasm 的风控上报
+（`ca0962…h2_process_report` / `dda35c…a1_h17mj9`），当前版本未做。
+
 ### 与设计稿的差异
 
 | 设计稿 | 实际实现 | 原因 |

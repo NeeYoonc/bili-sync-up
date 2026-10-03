@@ -96,6 +96,7 @@ use crate::api::handler::{
     get_notification_config,
     get_notification_status,
     get_manga_comic,
+    get_manga_search,
     get_pugv_up_courses,
     get_queue_status,
     get_recent_ingests,
@@ -394,6 +395,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/bangumi/seasons/{season_id}", get(get_bangumi_seasons))
         .route("/api/pugv/up-courses", get(get_pugv_up_courses))
         .route("/api/manga/comic", get(get_manga_comic))
+        .route("/api/manga/search", get(get_manga_search))
         .route("/api/search", get(search_bilibili))
         .route("/api/user/favorites", get(get_user_favorites))
         .route("/api/user/{uid}/favorites", get(get_user_favorites_by_uid))

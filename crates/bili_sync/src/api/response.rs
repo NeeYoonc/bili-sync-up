@@ -757,6 +757,32 @@ pub struct PugvUpCoursesResponse {
     pub data: Vec<PugvCourseItem>,
 }
 
+/// 哔哩哔哩漫画搜索结果条目
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaSearchItemResponse {
+    /// comic_id，可直接作为漫画源 ID
+    pub comic_id: String,
+    pub title: String,
+    pub author: String,
+    pub cover: String,
+    /// 题材标签
+    pub styles: Vec<String>,
+    pub is_finish: bool,
+    /// 站点详情页链接
+    pub url: String,
+}
+
+/// 哔哩哔哩漫画关键词搜索响应
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaSearchResponse {
+    pub success: bool,
+    pub keyword: String,
+    pub page: u32,
+    /// 本页之后是否还有更多结果
+    pub has_more: bool,
+    pub results: Vec<MangaSearchItemResponse>,
+}
+
 /// 哔哩哔哩漫画作品信息（添加漫画源时自动填名用）
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MangaComicResponse {

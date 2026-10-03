@@ -890,6 +890,8 @@ export interface SearchResultItem {
 	follower?: number; // 粉丝数（UP主搜索结果）
 	youtube_url?: string;
 	channel_id?: string;
+	/** 漫画搜索结果携带的 comic_id（result_type === 'manga'） */
+	manga_comic_id?: string;
 }
 
 // 搜索响应类型
@@ -998,6 +1000,28 @@ export interface MangaComicResponse {
 	/** 章节总数 */
 	episode_count: number;
 	is_finish: boolean;
+}
+
+// 哔哩哔哩漫画关键词搜索结果
+export interface MangaSearchResult {
+	comic_id: string;
+	title: string;
+	author: string;
+	cover: string;
+	/** 题材标签 */
+	styles: string[];
+	is_finish: boolean;
+	/** 站点详情页链接 */
+	url: string;
+}
+
+export interface MangaSearchResponse {
+	success: boolean;
+	keyword: string;
+	page: number;
+	/** 本页之后是否还有更多结果 */
+	has_more: boolean;
+	results: MangaSearchResult[];
 }
 
 // 番剧源选项（用于合并选择）

@@ -244,6 +244,11 @@
 
 	// 漫画相关：粘贴链接 / comic_id 后自动解析作品信息
 	let mangaComic: MangaComicResponse | null = null;
+	// 漫画搜索：关键词 → 结果列表（按页追加）；已添加的漫画用于置灰标记
+	let mangaSearchPage = 0;
+	let mangaSearchHasMore = false;
+	let loadingMoreManga = false;
+	let existingMangaComicIds: Set<string> = new Set();
 	let loadingMangaComic = false;
 	let lastRequestedComicId = '';
 	let mangaLookupTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -816,6 +821,61 @@
 	}
 
 	// 搜索B站内容
+	/** 检查漫画是否已添加（搜索结果置灰用） */
+	function isMangaComicExists(comicId?: string): boolean {
+		return !!comicId && existingMangaComicIds.has(comicId.toString());
+	}
+
+	/**
+	 * 关键词搜索漫画（B 漫自带搜索接口）。
+	 *
+	 * 该接口不返回总数，只能按「本页是否装满」判断有没有下一页，
+	 * 因此结果列表支持「加载更多」逐页追加。
+	 */
+	async function searchMangaComics(page: number) {
+		const keyword = searchKeyword.trim();
+		if (!keyword) {
+			toast.error('请输入搜索关键词');
+			return;
+		}
+		const response = await runRequest(() => api.searchManga(keyword, page, 20), {
+			setLoading: (value) => {
+				if (page === 1) searchLoading = value;
+				else loadingMoreManga = value;
+			},
+			context: '搜索漫画失败'
+		});
+		if (!response) return;
+
+		const mapped: SearchResultItem[] = response.data.results.map((item) => {
+			const meta = [item.styles?.join(' / '), item.is_finish ? '已完结' : '连载中']
+				.filter((part) => !!part)
+				.join(' · ');
+			return {
+				result_type: 'manga',
+				title: item.title,
+				author: item.author,
+				cover: item.cover,
+				description: meta,
+				manga_comic_id: item.comic_id
+			};
+		});
+
+		searchResults = page === 1 ? mapped : [...searchResults, ...mapped];
+		mangaSearchPage = page;
+		mangaSearchHasMore = response.data.has_more;
+		searchTotalResults = searchResults.length;
+		showSearchResults = true;
+
+		if (page === 1) {
+			if (mapped.length > 0) {
+				toast.success(`搜索完成，共找到 ${mapped.length} 部漫画`);
+			} else {
+				toast.info('未找到匹配的漫画，可换个关键词或直接粘贴漫画链接');
+			}
+		}
+	}
+
 	async function handleSearch(overrideSearchType?: string) {
 		const isTiktokCollectionSearch =
 			sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_collection';
@@ -911,6 +971,12 @@
 			} else {
 				toast.info('未找到匹配的 YouTube 来源');
 			}
+			return;
+		}
+
+		// 漫画走 B 漫自带的搜索接口（不是 B 站视频搜索）
+		if (sourceType === 'manga') {
+			await searchMangaComics(1);
 			return;
 		}
 
@@ -1136,6 +1202,23 @@
 					sourceId = result.season_id;
 					name = cleanTitle(result.title);
 					applyQuickSubscriptionPath('bangumi', name, true);
+				}
+				break;
+			case 'manga':
+				// 漫画：选中作品后自动填充 comic_id，并拉一次作品信息确认
+				if (result.manga_comic_id) {
+					const comicId = result.manga_comic_id;
+					sourceId = comicId;
+					name = cleanTitle(result.title);
+					applyQuickSubscriptionPath('manga', name, true);
+					if (lastRequestedComicId === comicId) {
+						// 同一个作品再次点击时，响应式监听不会重新触发，这里强制刷新一次
+						lastRequestedComicId = '';
+						void fetchMangaComic(comicId);
+					}
+					toast.success('已选择漫画', {
+						description: '已填充漫画 ID，正在确认作品信息…'
+					});
 				}
 				break;
 			case 'pugv':
@@ -2337,6 +2420,13 @@
 				}
 			}
 		});
+
+		// 处理漫画（每个作品一个源，comic_id 存在 media_id 里）
+		existingMangaComicIds = new Set(
+			(result.data.manga ?? [])
+				.map((m) => (m.media_id ? m.media_id.toString() : ''))
+				.filter((comicId) => comicId.length > 0)
+		);
 
 		// 处理课程（每门课程一个源，按 season_id 去重）
 		existingPugvSeasonIds = new Set(
@@ -3982,6 +4072,8 @@
 												搜索番剧
 											{:else if sourceType === 'pugv'}
 												搜索UP主（讲师）
+											{:else if sourceType === 'manga'}
+												搜索漫画
 											{:else}
 												搜索B站内容
 											{/if}
@@ -3996,8 +4088,16 @@
 														? '搜索番剧...'
 														: sourceType === 'pugv'
 															? '搜索UP主（讲师）...'
-														: '搜索视频...'}
-												onkeydown={(e) => e.key === 'Enter' && handleSearch()}
+															: sourceType === 'manga'
+																? '搜索漫画名或作者，例如：碧蓝之海'
+																: '搜索视频...'}
+												onkeydown={(e) => {
+													if (e.key === 'Enter') {
+														// 阻止表单隐式提交，避免在「漫画 ID」等必填项上弹出校验提示
+														e.preventDefault();
+														handleSearch();
+													}
+												}}
 											/>
 											<div class="flex gap-2">
 												<Button
@@ -4042,6 +4142,8 @@
 												搜索并选择UP主，将自动填充UP主ID
 											{:else if sourceType === 'bangumi'}
 												搜索并选择番剧，将自动填充Season ID
+											{:else if sourceType === 'manga'}
+												搜索并选择漫画，将自动填充漫画 ID（也可以直接粘贴漫画链接）
 											{:else}
 												根据当前选择的视频源类型搜索对应内容
 											{/if}
@@ -5498,6 +5600,7 @@
 											sourceType === 'bangumi' &&
 											!!result.season_id &&
 											isBangumiSeasonExists(result.season_id)}
+											{@const isMangaExisting = sourceType === 'manga' && isMangaComicExists(result.manga_comic_id)}
 										{@const itemKey = `search_${result.youtube_url || result.bvid || result.season_id || result.mid || i}`}
 										<button
 											onclick={() => {
@@ -5521,7 +5624,7 @@
 												delay: enableSearchAnimations ? i * 50 : 0
 											}}
 											animate:flip={{ duration: enableSearchAnimations ? 300 : 0 }}
-											disabled={isBangumiExisting}
+											disabled={isBangumiExisting || isMangaExisting}
 										>
 											<!-- 批量模式下的复选框 -->
 											{#if batchMode && sourceType === 'submission'}
@@ -5540,7 +5643,7 @@
 												result.result_type === 'douyin_user' ||
 												result.result_type === 'tiktok_user'
 													? 'h-14 w-14 rounded-full'
-													: sourceType === 'bangumi'
+												: sourceType === 'bangumi' || sourceType === 'manga'
 													? 'h-20 w-14'
 													: 'h-14 w-20'} flex-shrink-0 rounded object-cover"
 												placeholder="无图片"
@@ -5556,6 +5659,8 @@
 															class="flex-shrink-0 rounded px-1.5 py-0.5 text-xs {result.result_type ===
 															'media_bangumi'
 																? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300'
+																: result.result_type === 'manga'
+																	? 'bg-pink-100 text-pink-700 dark:bg-pink-900 dark:text-pink-300'
 																: result.result_type === 'media_ft'
 																	? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
 																: result.result_type === 'bili_user' ||
@@ -5570,6 +5675,8 @@
 														>
 															{result.result_type === 'media_bangumi'
 																? '番剧'
+																: result.result_type === 'manga'
+																	? '漫画'
 																: result.result_type === 'media_ft'
 																	? '影视'
 																	: result.result_type === 'bili_user'
@@ -5598,6 +5705,13 @@
 														</span>
 													{/if}
 													{#if isBangumiExisting}
+														<span
+															class="flex-shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-300"
+														>
+															已添加
+														</span>
+													{/if}
+													{#if isMangaExisting}
 														<span
 															class="flex-shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-300"
 														>
@@ -5635,6 +5749,18 @@
 										（总共 {searchTotalResults} 个）
 									{/if}
 								</span>
+								{#if sourceType === 'manga' && mangaSearchHasMore}
+										<div class="mt-2">
+											<Button
+												size="sm"
+												variant="outline"
+												disabled={loadingMoreManga}
+												onclick={() => void searchMangaComics(mangaSearchPage + 1)}
+											>
+												{loadingMoreManga ? '加载中...' : '加载更多'}
+											</Button>
+										</div>
+									{/if}
 							{/snippet}
 						</SidePanel>
 					</div>

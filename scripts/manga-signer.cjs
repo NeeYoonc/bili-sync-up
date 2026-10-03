@@ -17,6 +17,7 @@
  *   node manga-signer.cjs image-token  '{"ep_id":934687}'
  *   node manga-signer.cjs chapter-pages '{"ep_id":934687}'
  *   node manga-signer.cjs download     '{"url":"https://...","out":"C:/tmp/1.jpg"}'
+ *   node manga-signer.cjs search       '{"keyword":"碧蓝之海"}'
  *
  * 用法（常驻，NDJSON over stdin/stdout，供 Rust 复用同一个 wasm 运行时）：
  *   node manga-signer.cjs serve
@@ -357,7 +358,7 @@ function decodeDecrypted(out) {
 }
 
 /** 发送一次 twirp 请求（body 已构造）并解密响应；不触发 bootstrap */
-async function twirpSend(method, body, sn, rt) {
+async function twirpSend(method, body, sn, rt, options) {
   const ts = Date.now();
   const sign = rt.sign(CANONICAL_QUERY, body, ts).sign;
   const urlPath = "/twirp/comic.v1.Comic/" + method + URL_SUFFIX.replace("{sign}", sign);
@@ -383,17 +384,22 @@ async function twirpSend(method, body, sn, rt) {
     return { error: "响应不是 JSON（HTTP " + res.status + "）" };
   }
   if (!json.bytesData) {
+    // 少数接口（如 Search）的响应本来就是明文 data，不会给 bytesData；
+    // 只有 code 非 0 或 data 也为空时才算被拒（例如 sn 不匹配的软拒绝）。
+    if (options && options.allowPlaintext && json.code === 0 && json.data !== undefined && json.data !== null) {
+      return { error: "", data: json.data, plaintext: true };
+    }
     return { error: "服务端未返回密文（code=" + json.code + ", msg=" + json.msg + "）", code: json.code, msg: json.msg };
   }
   return decodeDecrypted(rt.decrypt(urlPath, json.bytesData, buvid3(), "web", body));
 }
 
 /** 按站点约定组装带 m2 的请求体后发送 */
-async function sendTwirp(method, payload, seedId, sn, rt) {
+async function sendTwirp(method, payload, seedId, sn, rt, options) {
   const ts = Date.now();
   const m2 = rt.m2(String(seedId) + "_" + (ts % 10000000));
   const body = JSON.stringify(Object.assign({}, payload, { m2: m2 }));
-  return await twirpSend(method, body, sn, rt);
+  return await twirpSend(method, body, sn, rt, options);
 }
 
 // ------------------------------------------------------------ bootstrap
@@ -553,10 +559,10 @@ async function bootstrap(force) {
 
 // ---------------------------------------------------------------- 业务
 
-async function callTwirp(method, payload, seedId) {
+async function callTwirp(method, payload, seedId, options) {
   const meta = await bootstrap(false);
   const rt = runtime(meta);
-  const res = await sendTwirp(method, payload, seedId, meta.sn, rt);
+  const res = await sendTwirp(method, payload, seedId, meta.sn, rt, options);
   if (res.error) throw new Error(method + " 失败：" + res.error);
   return res.data;
 }
@@ -634,6 +640,25 @@ async function chapterPages(params) {
   return { ep_id: epId, count: pages.length, pages: pages };
 }
 
+/** 关键词搜索漫画（Comic/Search），供「添加视频源 → 漫画」按名字挑作品 */
+async function searchComic(params) {
+  const keyword = String(params.keyword || params.key_word || "").trim();
+  if (!keyword) throw new Error("缺少搜索关键词");
+  const pageNum = Math.max(1, Number(params.page || params.page_num || 1) || 1);
+  const pageSize = Math.min(50, Math.max(1, Number(params.page_size || 20) || 20));
+  const payload = {
+    key_word: keyword,
+    page_num: pageNum,
+    page_size: pageSize,
+    search_type: Number(params.search_type || 0) || 0,
+  };
+  const data = await callTwirp("Search", payload, pageNum * 7919 + pageSize, { allowPlaintext: true });
+  const list = Array.isArray(data)
+    ? data
+    : (data && (data.list || data.comics || data.result)) || [];
+  return { keyword: keyword, page: pageNum, page_size: pageSize, total: (data && data.total) || list.length, list: list };
+}
+
 async function download(params) {
   if (!params.url) throw new Error("缺少 url");
   const buf = await fetchBinary(params.url);
@@ -661,6 +686,7 @@ const COMMANDS = {
   "image-index": imageIndex,
   "image-token": imageToken,
   "chapter-pages": chapterPages,
+  search: searchComic,
   download: download,
 };
 
@@ -717,7 +743,7 @@ async function main() {
   }
   if (!COMMANDS[command]) {
     console.log(
-      "用法: node manga-signer.cjs <bootstrap|comic-detail|image-index|image-token|chapter-pages|download|serve> '<json args>'"
+      "用法: node manga-signer.cjs <bootstrap|comic-detail|image-index|image-token|chapter-pages|search|download|serve> '<json args>'"
     );
     process.exit(2);
   }

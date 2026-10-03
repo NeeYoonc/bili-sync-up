@@ -4,6 +4,7 @@
 //! - 作品详情：`POST /twirp/comic.v1.Comic/ComicDetail`（响应加密）
 //! - 单话页面清单：`POST /twirp/comic.v1.Comic/GetImageIndex`（响应加密）
 //! - 页面下载地址：`POST /twirp/comic.v1.Comic/ImageToken`（响应加密）
+//! - 关键词搜索：`POST /twirp/comic.v1.Comic/Search`（响应为明文；有风控，短时间多次请求会要求人机验证）
 //!
 //! 这三个接口的请求体需要站点 wasm 生成的 `m2`，URL 需要 `ultra_sign`，响应需要
 //! 用 `buvid3` 解密，另外还必须携带站点构建产物里的 `x-bili-data-sn` 常量。
@@ -13,10 +14,12 @@
 //!
 //! 漫画 URL 形如 <https://manga.bilibili.com/detail/mc25969>，其中的 `25969` 即 `comic_id`。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_stream::try_stream;
@@ -402,6 +405,152 @@ pub async fn fetch_comic_detail(comic_id: &str) -> Result<MangaComic> {
         is_finish: data["is_finish"].as_i64().unwrap_or_default() != 0,
         episodes,
     })
+}
+
+/// 漫画搜索结果条目（`Comic/Search`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MangaSearchItem {
+    pub comic_id: String,
+    pub title: String,
+    pub author: String,
+    pub cover: String,
+    /// 题材标签（如「都市」「恋爱」）
+    pub styles: Vec<String>,
+    pub is_finish: bool,
+    /// 站点详情页链接
+    pub url: String,
+}
+
+/// 搜索结果缓存：B 漫搜索有风控，短时间连续请求会被要求人机验证，
+/// 因此同一个「关键词 + 页码 + 每页数量」在短时间内直接复用结果。
+static SEARCH_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>)>>> = OnceLock::new();
+/// 搜索缓存有效期。搜索结果本身是低频且稳定的，缓存主要用来挡掉重复点击与连续搜索。
+const SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
+
+fn search_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>)>> {
+    SEARCH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 关键词搜索漫画。
+///
+/// 与详情类接口不同，`Search` 的响应是明文 `data`（没有 `bytesData`），
+/// sidecar 侧对这条链路放开了明文分支。
+pub async fn search_comics(keyword: &str, page: u32, page_size: u32) -> Result<Vec<MangaSearchItem>> {
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        bail!("搜索关键词不能为空");
+    }
+    let page = page.max(1);
+    let page_size = page_size.clamp(1, 50);
+
+    let cache_key = format!("{keyword}#{page}#{page_size}");
+    if let Ok(cache) = search_cache().lock() {
+        if let Some((stored_at, items)) = cache.get(&cache_key) {
+            if stored_at.elapsed() < SEARCH_CACHE_TTL {
+                debug!("漫画搜索命中缓存：{}", cache_key);
+                return Ok(items.clone());
+            }
+        }
+    }
+
+    let result = run_sidecar(
+        "search",
+        serde_json::json!({ "keyword": keyword, "page": page, "page_size": page_size }),
+    )
+    .await
+    .map_err(|error| {
+        let text = format!("{error:#}");
+        if text.contains("人机验证") || text.contains("code=401") {
+            anyhow!("B站要求人机验证：短时间内搜索太频繁，请稍等一会儿再试")
+        } else {
+            error
+        }
+    })?;
+
+    let mut items = Vec::new();
+    for item in result["list"].as_array().cloned().unwrap_or_default() {
+        // 搜索结果的 `id` 就是 comic_id
+        let Some(comic_id) = item["id"].as_i64() else {
+            continue;
+        };
+        // `title` 带 `<em class="keyword">` 高亮标签，优先用原始标题字段
+        let highlighted = strip_html_tags(item["title"].as_str().unwrap_or_default());
+        let title = first_non_empty(&[
+            item["org_title"].as_str().unwrap_or_default(),
+            item["real_title"].as_str().unwrap_or_default(),
+            highlighted.as_str(),
+        ]);
+        if title.is_empty() {
+            continue;
+        }
+        let author = item["author_name"]
+            .as_array()
+            .map(|authors| {
+                authors
+                    .iter()
+                    .filter_map(|author| author.as_str())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            })
+            .unwrap_or_default();
+        let cover = normalize_cover_url(first_non_empty(&[
+            item["vertical_cover"].as_str().unwrap_or_default(),
+            item["square_cover"].as_str().unwrap_or_default(),
+            item["horizontal_cover"].as_str().unwrap_or_default(),
+        ]));
+        let styles = item["styles"]
+            .as_array()
+            .map(|styles| {
+                styles
+                    .iter()
+                    .filter_map(|style| style.as_str())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let url = first_non_empty(&[
+            item["jump_value"].as_str().unwrap_or_default(),
+            &format!("https://manga.bilibili.com/detail/mc{comic_id}"),
+        ]);
+        items.push(MangaSearchItem {
+            comic_id: comic_id.to_string(),
+            title,
+            author,
+            cover,
+            styles,
+            is_finish: item["is_finish"].as_i64().unwrap_or_default() != 0,
+            url,
+        });
+    }
+    if let Ok(mut cache) = search_cache().lock() {
+        // 顺手清掉过期条目，避免长时间运行后无限增长
+        cache.retain(|_, (stored_at, _)| stored_at.elapsed() < SEARCH_CACHE_TTL);
+        cache.insert(cache_key, (Instant::now(), items.clone()));
+    }
+    Ok(items)
+}
+
+/// 去掉搜索结果标题里的高亮标签（`<em class="keyword">…</em>`）。
+fn strip_html_tags(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
+/// 搜索接口偶尔给出 `http://` 封面，站点是 https，需要升级协议避免混合内容被浏览器拦截。
+fn normalize_cover_url(url: String) -> String {
+    if let Some(rest) = url.strip_prefix("http://") {
+        return format!("https://{rest}");
+    }
+    url
 }
 
 /// 给 CDN 直链补上 `code=DanmakuInfo`。

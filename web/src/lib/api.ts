@@ -1061,6 +1061,21 @@ class ApiClient {
 	}
 
 	/**
+	 * 关键词搜索哔哩哔哩漫画（添加漫画源时按名字挑作品）
+	 */
+	async searchManga(
+		keyword: string,
+		page = 1,
+		pageSize = 20
+	): Promise<ApiResponse<import('./types').MangaSearchResponse>> {
+		return this.get<import('./types').MangaSearchResponse>('/manga/search', {
+			keyword,
+			page,
+			page_size: pageSize
+		});
+	}
+
+	/**
 	 * 获取关注的UP主列表
 	 */
 	async getUserFollowings(): Promise<ApiResponse<UserFollowing[]>> {
@@ -1641,6 +1656,12 @@ export const api = {
 	 * 获取哔哩哔哩漫画作品信息（添加漫画源时自动填名）
 	 */
 	getMangaComic: (comicId: string) => apiClient.getMangaComic(comicId),
+
+	/**
+	 * 关键词搜索哔哩哔哩漫画（添加漫画源时按名字挑作品）
+	 */
+	searchManga: (keyword: string, page?: number, pageSize?: number) =>
+		apiClient.searchManga(keyword, page, pageSize),
 
 	/**
 	 * 获取关注的UP主列表
