@@ -14,6 +14,8 @@
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import AlertCircleIcon from '@lucide/svelte/icons/alert-circle';
 	import BookOpenIcon from '@lucide/svelte/icons/book-open';
+	import MaximizeIcon from '@lucide/svelte/icons/maximize';
+	import MinimizeIcon from '@lucide/svelte/icons/minimize';
 	import { onDestroy } from 'svelte';
 
 	// 当前阅读的漫画话：一个 video 对应一个 CBZ 压缩包，CBZ 内的图片才是一页
@@ -36,6 +38,11 @@
 	let retryToken = 0;
 
 	let scrollContainer: HTMLDivElement | null = null;
+	// 全屏阅读：优先用 Fullscreen API，浏览器不支持时退回「伪全屏」（固定在视口上）
+	let readerRoot: HTMLDivElement | null = null;
+	let isFullscreen = false;
+	let pseudoFullscreen = false;
+	$: fullscreenActive = isFullscreen || pseudoFullscreen;
 	let pageElements: (HTMLDivElement | null)[] = [];
 	let scrollQueued = false;
 	let touchStartX = 0;
@@ -193,11 +200,83 @@
 		}
 	}
 
+	type FullscreenDocument = Document & {
+		webkitFullscreenElement?: Element | null;
+		webkitExitFullscreen?: () => Promise<void> | void;
+	};
+
+	type FullscreenElement = HTMLElement & {
+		webkitRequestFullscreen?: () => Promise<void> | void;
+		webkitRequestFullScreen?: () => Promise<void> | void;
+	};
+
+	function syncFullscreenState() {
+		if (typeof document === 'undefined') return;
+		const doc = document as FullscreenDocument;
+		const element = doc.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+		isFullscreen = !!element && element === readerRoot;
+	}
+
+	function lockBodyScroll(locked: boolean) {
+		if (typeof document === 'undefined') return;
+		if (locked) {
+			document.body.style.setProperty('overflow', 'hidden');
+		} else {
+			document.body.style.removeProperty('overflow');
+		}
+	}
+
+	async function exitFullscreen() {
+		if (pseudoFullscreen) {
+			pseudoFullscreen = false;
+			lockBodyScroll(false);
+		}
+		if (typeof document !== 'undefined' && isFullscreen) {
+			const doc = document as FullscreenDocument;
+			try {
+				if (typeof doc.exitFullscreen === 'function') {
+					await doc.exitFullscreen();
+				} else if (typeof doc.webkitExitFullscreen === 'function') {
+					await doc.webkitExitFullscreen();
+				}
+			} catch {
+				// 退出失败时按状态收尾即可，不用打断阅读
+			}
+		}
+		isFullscreen = false;
+	}
+
+	async function toggleFullscreen() {
+		if (isFullscreen || pseudoFullscreen) {
+			await exitFullscreen();
+			return;
+		}
+		const element = readerRoot as FullscreenElement | null;
+		const request = element?.requestFullscreen ?? element?.webkitRequestFullscreen ?? element?.webkitRequestFullScreen;
+		if (element && request) {
+			try {
+				await request.call(element);
+				// requestFullscreen 成功后 fullscreenchange 是异步来的，这里先按成功记状态
+				isFullscreen = true;
+				return;
+			} catch {
+				// 某些浏览器（iOS Safari）对任意元素全屏直接拒绝，下面走伪全屏
+			}
+		}
+		pseudoFullscreen = true;
+		lockBodyScroll(true);
+	}
+
 	function handleKeydown(event: KeyboardEvent) {
 		const target = event.target as HTMLElement | null;
 		const tag = target?.tagName?.toLowerCase();
 		if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
+		if (event.key === 'Escape' && pseudoFullscreen) {
+			event.preventDefault();
+			void exitFullscreen();
+			return;
+		}
 		switch (event.key) {
 			case 'ArrowLeft':
 			case 'PageUp':
@@ -217,6 +296,11 @@
 			case 'End':
 				event.preventDefault();
 				goToPage(pageCount - 1);
+				break;
+			case 'f':
+			case 'F':
+				event.preventDefault();
+				void toggleFullscreen();
 				break;
 			default:
 				break;
@@ -264,9 +348,19 @@
 	if (typeof window !== 'undefined') {
 		window.addEventListener('keydown', handleKeydown);
 	}
+	if (typeof document !== 'undefined') {
+		// 用户按 F11 / Esc 或浏览器自己退出全屏时同步状态
+		document.addEventListener('fullscreenchange', syncFullscreenState);
+		document.addEventListener('webkitfullscreenchange', syncFullscreenState);
+	}
 	onDestroy(() => {
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('keydown', handleKeydown);
+		}
+		if (typeof document !== 'undefined') {
+			document.removeEventListener('fullscreenchange', syncFullscreenState);
+			document.removeEventListener('webkitfullscreenchange', syncFullscreenState);
+			lockBodyScroll(false);
 		}
 	});
 </script>
@@ -287,7 +381,12 @@
 		</Button>
 	</div>
 {:else if manifest}
-	<div class="space-y-3">
+	<div
+		bind:this={readerRoot}
+		class="space-y-3"
+		class:manga-reader-root={fullscreenActive}
+		class:manga-reader-pseudo={pseudoFullscreen}
+	>
 		<div class="bg-muted/50 flex flex-wrap items-center justify-between gap-2 rounded-lg px-3 py-2">
 			<div class="min-w-0">
 				<div class="flex items-center gap-2 text-sm font-medium">
@@ -323,6 +422,18 @@
 					}}
 				>
 					<RowsIcon class="mr-1.5 h-4 w-4" />连续滚动
+				</Button>
+				<Button
+					size="sm"
+					variant="outline"
+					title={fullscreenActive ? '退出全屏阅读（Esc）' : '全屏阅读，整页铺满屏幕（F）'}
+					onclick={toggleFullscreen}
+				>
+					{#if fullscreenActive}
+						<MinimizeIcon class="mr-1.5 h-4 w-4" />退出全屏
+					{:else}
+						<MaximizeIcon class="mr-1.5 h-4 w-4" />全屏
+					{/if}
 				</Button>
 			</div>
 		</div>
@@ -485,7 +596,7 @@
 						<StretchHorizontalIcon class="h-3.5 w-3.5" />适应高度
 					{/if}
 				</button>
-				<span>← → 翻页 · 空格下一页 · 触屏左右滑动</span>
+				<span>← → 翻页 · 空格下一页 · F 全屏 · 触屏左右滑动</span>
 			</div>
 			{#if pageIndex > 0}
 				<button
@@ -509,5 +620,27 @@
 	.manga-reader-area {
 		height: clamp(240px, calc(100vh - 300px), 80vh);
 		height: clamp(240px, calc(100dvh - 300px), 80vh);
+	}
+
+	/* 全屏阅读：整块铺满屏幕，图片区域吃掉标题栏 / 翻页控件之外的剩余高度 */
+	.manga-reader-root {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		padding: 0.75rem;
+		overflow: hidden;
+		background: var(--background);
+	}
+
+	.manga-reader-pseudo {
+		position: fixed;
+		inset: 0;
+		z-index: 1000;
+	}
+
+	.manga-reader-root .manga-reader-area {
+		flex: 1 1 auto;
+		height: auto;
+		min-height: 160px;
 	}
 </style>
