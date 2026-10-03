@@ -423,11 +423,11 @@ pub struct MangaSearchItem {
 
 /// 搜索结果缓存：B 漫搜索有风控，短时间连续请求会被要求人机验证，
 /// 因此同一个「关键词 + 页码 + 每页数量」在短时间内直接复用结果。
-static SEARCH_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>)>>> = OnceLock::new();
+static SEARCH_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>, bool)>>> = OnceLock::new();
 /// 搜索缓存有效期。搜索结果本身是低频且稳定的，缓存主要用来挡掉重复点击与连续搜索。
 const SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
 
-fn search_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>)>> {
+fn search_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>, bool)>> {
     SEARCH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -435,7 +435,10 @@ fn search_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<MangaSearchIte
 ///
 /// 与详情类接口不同，`Search` 的响应是明文 `data`（没有 `bytesData`），
 /// sidecar 侧对这条链路放开了明文分支。
-pub async fn search_comics(keyword: &str, page: u32, page_size: u32) -> Result<Vec<MangaSearchItem>> {
+///
+/// 返回 `(本页条目, 是否还有下一页)`。站点接口不返回总数，只能按「本页是否装满 page_size」
+/// 判断有没有下一页，因此这里回传原始条数推导出的标记，而不是过滤后的条数。
+pub async fn search_comics(keyword: &str, page: u32, page_size: u32) -> Result<(Vec<MangaSearchItem>, bool)> {
     let keyword = keyword.trim();
     if keyword.is_empty() {
         bail!("搜索关键词不能为空");
@@ -445,10 +448,10 @@ pub async fn search_comics(keyword: &str, page: u32, page_size: u32) -> Result<V
 
     let cache_key = format!("{keyword}#{page}#{page_size}");
     if let Ok(cache) = search_cache().lock() {
-        if let Some((stored_at, items)) = cache.get(&cache_key) {
+        if let Some((stored_at, items, has_more)) = cache.get(&cache_key) {
             if stored_at.elapsed() < SEARCH_CACHE_TTL {
                 debug!("漫画搜索命中缓存：{}", cache_key);
-                return Ok(items.clone());
+                return Ok((items.clone(), *has_more));
             }
         }
     }
@@ -467,8 +470,11 @@ pub async fn search_comics(keyword: &str, page: u32, page_size: u32) -> Result<V
         }
     })?;
 
+    let raw_list = result["list"].as_array().cloned().unwrap_or_default();
+    let has_more = raw_list.len() as u32 >= page_size;
+
     let mut items = Vec::new();
-    for item in result["list"].as_array().cloned().unwrap_or_default() {
+    for item in raw_list {
         // 搜索结果的 `id` 就是 comic_id
         let Some(comic_id) = item["id"].as_i64() else {
             continue;
@@ -524,10 +530,10 @@ pub async fn search_comics(keyword: &str, page: u32, page_size: u32) -> Result<V
     }
     if let Ok(mut cache) = search_cache().lock() {
         // 顺手清掉过期条目，避免长时间运行后无限增长
-        cache.retain(|_, (stored_at, _)| stored_at.elapsed() < SEARCH_CACHE_TTL);
-        cache.insert(cache_key, (Instant::now(), items.clone()));
+        cache.retain(|_, (stored_at, _, _)| stored_at.elapsed() < SEARCH_CACHE_TTL);
+        cache.insert(cache_key, (Instant::now(), items.clone(), has_more));
     }
-    Ok(items)
+    Ok((items, has_more))
 }
 
 /// 去掉搜索结果标题里的高亮标签（`<em class="keyword">…</em>`）。

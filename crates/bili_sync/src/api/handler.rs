@@ -14906,14 +14906,12 @@ pub async fn get_manga_search(
     let page = params.page.max(1);
     let page_size = params.page_size.clamp(1, 50);
 
-    let items = crate::bilibili::manga::search_comics(&keyword, page, page_size)
+    let (items, has_more) = crate::bilibili::manga::search_comics(&keyword, page, page_size)
         .await
         .map_err(|e| {
             error!("搜索漫画「{}」失败: {:#}", keyword, e);
             e
         })?;
-    // 站点接口不返回总数，只能按「本页是否装满」判断还有没有下一页
-    let has_more = items.len() as u32 >= page_size;
 
     Ok(ApiResponse::ok(crate::api::response::MangaSearchResponse {
         success: true,
