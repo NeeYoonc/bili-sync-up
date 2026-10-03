@@ -52,11 +52,15 @@ POST /twirp/comic.v1.Comic/<Method>?device=pc&platform=web&ultra_sign=<S>&nov=27
 3. `ImageToken(images[].path)` → `complete_url`，**立即下载**（token 与完整 URL 绑定，不可缓存、不可改后缀）。
 4. 全部页面就绪后打包 CBZ，写 `ComicInfo.xml`，更新 `page.path` 与 `video.download_status`。
 
-图片 CDN 实测：
+图片 CDN 实测（2026-10-03 落地时修正）：
 
-- 裸 GET 可下载（无需 Cookie / Referer），无 token 或改动 `@1100w.avif` 后缀返回 403。
-- 浏览器上下文得到 AVIF（约 150KB/页），普通 HTTP 客户端得到 WebP（约 250–400KB/页）。
-- 页漫约 2000×2858；条漫为 1000×600 左右的横切片，需要纵向拼接。
+- `ImageToken` 返回的 `complete_url` 指向加密原图 CDN `mangaup.hdslb.com`。裸 GET（不带 `code=DanmakuInfo`）
+  会被直接挡回 `HTTP 400 {"code":250617}`；**必须在 URL 上补 `&code=DanmakuInfo`**，同一链路立即 `200` 并返回原图 JPEG。
+- 反过来，**不能**再加 `@1100w.avif` 一类阅读器缩放后缀（会 400 / `2410`）。Node 侧拿到的就是原图。
+- 实测原图约 1.1–2.0 MB/页、`2000×2858` 级别的页漫；比浏览器阅读器的 1100w 缩略质量更高。
+- 加密原图 CDN **不接受 Range 分片**：请求带 `Range` 时返回 `200 OK` 全量体，而项目通用 `UnifiedDownloader`
+  会因「Range 响应异常: 200 OK」判定整话下载失败，因此漫画页改用一次性普通 GET（见下文 `Client::media_request`）。
+- 条漫为 `1000×600` 左右的横切片，需要纵向拼接（当前版本先按单页落盘，拼接留待后续）。
 
 ## 目录与命名规范
 
@@ -124,18 +128,27 @@ ComicInfo.xml
 | `crates/bili_sync_entity/src/entities/video_source.rs` | `SourceType::Manga = 3`、`VIDEO_SOURCE_TYPE_MANGA`、`is_manga_source_type()` |
 | `crates/bili_sync/src/bilibili/manga.rs`（新增） | 接口调用 + 加密 sidecar + 增量流 |
 | `crates/bili_sync/src/bilibili/mod.rs` | `VideoInfo::Manga` 变体（放最后）+ 模块导出 |
+| `crates/bili_sync/src/bilibili/client.rs` | 新增 `media_request()`：一次性普通 GET，绕开 Range 分片 |
 | `crates/bili_sync/src/adapter/manga.rs`（新增） | `MangaSource` + `VideoSource` 实现 |
-| `crates/bili_sync/src/adapter/mod.rs` | `VideoSourceEnum` / `Args::Manga` / `_ActiveModel::Manga` / `video_source_from` |
+| `crates/bili_sync/src/adapter/mod.rs` | `VideoSourceEnum::MangaSource` / `Args::Manga` / `_ActiveModel::Manga` / `manga_from` |
+| `crates/bili_sync/src/manga_download.rs`（新增） | 话级下载（`.pages/` 暂存）→ store 模式 CBZ + `ComicInfo.xml` → 落库与断点续传 |
 | `crates/bili_sync/src/utils/scan_id_tracker.rs` | `SourceType::Manga`、`last_scanned_ids.manga`、`last_processed_manga` |
 | `crates/bili_sync/src/task/video_downloader.rs` | 加载 `type = 3` 的启用源、类型标签 |
-| `crates/bili_sync/src/api/handler.rs` | `add_video_source_internal` 增加 `"manga"` 分支；补 `SourceType.eq(3)` 过滤点 |
-| `crates/bili_sync/src/workflow.rs` | `fill_manga_videos`；下载阶段漫画分支（取图 → 打包 → ComicInfo） |
+| `crates/bili_sync/src/api/handler.rs` | `add_video_source_internal` 增加 `"manga"` 分支；13 处 `"bangumi \| pugv"` 全部扩为 `\| "manga"`；新增 `bili_source_type_code()` / `bili_source_type_label()` 替代硬编码；新增 `GET /api/manga/comic` |
+| `crates/bili_sync/src/api/request.rs` / `response.rs` | `VideosRequest.manga`、`ResetSpecificTasksRequest.manga`、`SourceChargeVisibilityFilters.manga`、dashboard 的 `enabled_manga` / `total_manga` |
+| `crates/bili_sync/src/main.rs` / `task/http_server.rs` | 注册 `mod manga_download`、路由与任务字段 |
+| `crates/bili_sync/src/workflow.rs` | `fill_manga_videos` / `process_manga_video`；`download_video_pages` 开头的漫画分支（取图 → 打包 → ComicInfo） |
 
 ## 前端改动
 
-- `web/src/routes/add-source/+page.svelte`：源类型选项增加「漫画」，支持粘贴 `manga.bilibili.com/detail/mc25969` 自动解析
-  `comic_id`；`sourceTypeLabelMap` 增加映射。
-- 视频源列表与视频列表增加「漫画」类型标签与筛选。
+- `web/src/lib/consts.ts`：新增 `MANGA` 类型与 `BookOpen` 图标。
+- `web/src/lib/types.ts` / `api.ts`：`manga` 字段、`VideoCategory`、`MangaComicResponse`、dashboard 统计字段、`getMangaComic()`。
+- `web/src/lib/utils/videos.ts`：请求参数带上 `params.manga`。
+- `web/src/routes/add-source/+page.svelte`：源类型选项增加「漫画」，支持粘贴 `manga.bilibili.com/detail/mc25969` 等链接自动解析
+  `comic_id`（`normalizeComicId`）；输入防抖调用 `fetchMangaComic` 校验并预览作品信息；提交前规范化；
+  `sourceTypeLabelMap` 增加映射（顺带补回缺失的 `YouTubeSource` 类型导入）。
+- `web/src/routes/+page.svelte`：首页「当前监听」增加漫画统计卡片。
+- `web/src/routes/video-sources/+page.svelte`：漫画源显示漫画 ID 行、隐藏不适用的「充电重试」。
 
 ## 风险
 
@@ -229,17 +242,78 @@ plaintext = wasm(e461bfa6).c1_r9k2m7(url, bytesData, buvid3, "web", body)
 
 ### 仍未打通：`ImageToken` 的 `m1`
 
-`ImageToken` 的请求体除 `urls` 外还必须有 `m1`（88 字符 base64）。实测 `m1 = btoa(<65 字节二进制>)`，
-由页面 JS（很可能经 CryptoJS / 某个未定位的入口）生成，尚需定位其生成函数。
+**已破解（第三轮实测）**：`m1` = **客户端 ECDH P-256 公钥**（raw 未压缩点，65 字节，`0x04` 开头）的 base64，
+共 88 字符。reader.js 中的实现为：
 
-已知：
+```js
+generateECDHKeyPair()                                    // crypto.subtle.generateKey({name:'ECDH', namedCurve:'P-256'}, ...)
+publicKey = crypto.subtle.exportKey('raw', keyPair.publicKey)
+m1 = btoa(String.fromCharCode.apply(null, new Uint8Array(publicKey)))
+```
 
-- 页面生成的 `m1` 与 `urls` 一起参与 `ultra_sign` 计算，因此 `m1` 必须在 Node 侧自行生成。
-- `m1` 不是 `m2` 模块的产物（页面内 `a1_o8iso5` 无论输入什么都返回 19228 字符）。
-- 待办：hook `CryptoJS`/`atob`/`btoa` 调用链，定位 65 字节明文来源。
+Node 侧用 `crypto.createECDH('prime256v1').getPublicKey()` 自行生成同样格式的公钥即可，服务端接受。
 
-### 下一步
+### `x-bili-data-sn` 的真实性质
 
-1. 定位 `m1` 生成函数（`ImageToken` 的前置条件）。
-2. 定位 `x-bili-data-sn` 的生成算法；若无法定位，退化为「一次性从站点获取并缓存该设备序列号」。
-3. 两项齐备后即可用纯 Node sidecar 完成「列表 → 取图 → 下载 → 打包」全流程。
+**是站点构建产物中的硬编码常量**（当前 reader.js 中为 `1E74C20E5720FBF3BB351965D7A9DFC1`），
+因此跨浏览器、跨 UA、跨视口、跨账号、跨 buvid 全部相同，且随机值会被拒绝。
+
+实现方式：运行时抓取当前 `reader.js`，从字符串表中提取 32 位大写十六进制常量，并用一次探测请求
+（`ComicDetail`，校验 `bytesData` 非空）自校验；站点重新构建导致常量变化时自动更新。
+
+### 纯 Node 端到端验证结果（2026-10-03）
+
+```
+ComicDetail(25969)     → 解密 95710 字节明文
+GetImageIndex(934687)  → 19 页页面清单
+ImageToken(urls, m1)   → 19 条 complete_url（自生成 m1 被接受，bytesData 10240）
+下载第 1 页            → HTTP 200，image/jpeg，1963934 字节（原始 JPEG，非缩略）
+下载第 2 页            → HTTP 200，1333277 字节
+```
+
+注意：Node 侧拿到的 `complete_url` 不带 `@1100w.avif` 后缀，返回的是**原图 JPEG**
+（约 1.3–2.0 MB/页），比浏览器阅读器的 1100w 缩略质量更高。
+
+## 附录 B：落地记录（2026-10-03，实现完成）
+
+### sidecar 位置与契约
+
+- 实现位置为仓库内 `scripts/manga-signer.cjs`（与 `scripts/tiktok-signer.cjs` / `douyin-signer.cjs` 同级）；
+  运行时会被释放/复制到 `CONFIG_DIR/tools/manga/`，wasm 与 `reader.js` 缓存放在 `CONFIG_DIR/tools/manga/cache/`。
+- 子命令：`bootstrap`、`comic-detail`、`image-index`、`image-token`、`chapter-pages`、`download`、`serve`。
+- `serve` 为常驻模式（stdin 逐行收请求、stdout 逐行回响应），避免每页都重启 Node + 重载 wasm。
+- **stdout 契约：每次只输出一行紧凑 JSON**（`ok` 字段为成功标记）。不可用 `JSON.stringify(x, null, 2)` 美化输出，
+  否则多行里的裸字符串行会污染 Rust 侧按行解析。
+- 环境变量：`MANGA_COOKIE`、`MANGA_BUVID3`、`MANGA_CACHE`、`MANGA_PROXY`。
+
+### 与设计稿的差异
+
+| 设计稿 | 实际实现 | 原因 |
+|---|---|---|
+| 新增 `tools/manga/` 目录 | 仓库内 `scripts/manga-signer.cjs`，运行时释放到 `CONFIG_DIR/tools/manga/` | 与既有 signer 的发布方式一致（单一源文件 + 运行时释放） |
+| 页面用通用下载器 | 新增 `Client::media_request()`（`crates/bili_sync/src/bilibili/client.rs`） | `mangaup` 原图 CDN 拒绝 Range，通用分片逻辑会误判失败 |
+| 直链直接用 `complete_url` | `with_cdn_code()` 统一补 `&code=DanmakuInfo` | 缺该参数直接 400 / `250617` |
+| 新增独立 `/api/manga/...` 命名空间 | 只新增 `GET /api/manga/comic`（供前端解析/校验漫画 ID），其余全部复用现有源接口 | 「全部复用」 |
+| 默认保留 CDN 返回格式（WebP） | 实际保存原图 JPEG | 原图链路不带缩放后缀，拿到的就是 JPEG |
+| 逐页落盘 + 打包 CBZ | 一致：话级下载到 `<作品目录>/.pages/<话>/` 暂存，全部就绪后打包 CBZ 并回收空 `.pages` | — |
+
+### 端到端实测（真实账号，2026-10-03）
+
+运行环境：临时配置目录、端口 `12345`。流程与结果：
+
+1. `GET /api/manga/comic?comic_id=<完整链接>` → `200`，返回《碧蓝之海》、作者、137 话。
+2. `POST /api/video-sources {source_type:"manga", source_id:"25969"}` → 建源成功，`source_id = 1`。
+3. 白名单 `野岛元的受难` → 扫描 → 下载 → 日志 `漫画「碧蓝之海」第0089话已打包 …（19 页，27.2 MB）`；
+   数据库 `video.download_status` 为完成态、19 个 `page` 全部完成且 `path` 指向同一个 CBZ。
+4. CBZ 校验：20 个条目（`0001.jpg`…`0019.jpg` + `ComicInfo.xml`），`compress_type = 0 (Stored)`，
+   `ComicInfo.xml` 的 Series / Number / Title / Summary / Writer / Penciller / Web / PageCount /
+   LanguageISO / Year / Month / Day / Manga=YesAndRightToLeft 全部正确，JPEG magic `ff d8 ff`。
+5. 特典流程：白名单 `贺图,出版社声明` → 产出 `Specials/碧蓝之海 SP01 贺图.cbz` 与
+   `Specials/碧蓝之海 SP02 出版社声明.cbz`，`ComicInfo.xml` 含 `Number=SP01/SP02`、`Format=Special`。
+
+### 已知遗留（非阻塞）
+
+- `reset_video_source_path` 对漫画源仍走番剧那套「移动单文件」逻辑；漫画是「作品目录 + CBZ」，重设路径后需要人工复核。
+- 漫画源的 AI 重命名路径未做实测。
+- 特典 `SP` 序号按 `pubtime` 排序，若之后补充更早发布的特典，已有编号可能整体漂移。
+- 前端「批量添加漫画」未测试。

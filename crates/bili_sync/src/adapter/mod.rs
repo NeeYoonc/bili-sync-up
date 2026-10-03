@@ -1,4 +1,5 @@
 pub mod bangumi;
+pub mod manga;
 pub mod pugv;
 mod collection;
 mod favorite;
@@ -12,6 +13,7 @@ mod watch_later;
 // pub use watch_later::init_watch_later_source;
 
 pub use bangumi::BangumiSource;
+pub use manga::MangaSource;
 pub use pugv::PugvSource;
 
 use std::path::Path;
@@ -45,6 +47,7 @@ pub enum VideoSourceEnum {
     WatchLater,
     BangumiSource,
     PugvSource,
+    MangaSource,
 }
 
 #[enum_dispatch(VideoSourceEnum)]
@@ -278,6 +281,10 @@ pub enum Args {
         season_id: Option<String>,
         ep_id: Option<String>,
     },
+    /// 哔哩哔哩漫画（manga.bilibili.com/detail/mc{media_id}）
+    Manga {
+        media_id: String,
+    },
 }
 
 pub async fn video_source_from<'a>(
@@ -303,6 +310,7 @@ pub async fn video_source_from<'a>(
             ep_id,
         } => bangumi_from(season_id, media_id, ep_id, path, bili_client, connection).await,
         Args::Pugv { season_id, ep_id } => pugv_from(season_id, ep_id, path, bili_client, connection).await,
+        Args::Manga { media_id } => manga_from(media_id, path, bili_client, connection).await,
     }
 }
 
@@ -313,6 +321,7 @@ pub enum _ActiveModel {
     WatchLater(bili_sync_entity::watch_later::ActiveModel),
     Bangumi(Box<bili_sync_entity::video_source::ActiveModel>),
     Pugv(Box<bili_sync_entity::video_source::ActiveModel>),
+    Manga(Box<bili_sync_entity::video_source::ActiveModel>),
 }
 
 impl _ActiveModel {
@@ -334,6 +343,9 @@ impl _ActiveModel {
                 model.save(connection).await?;
             }
             _ActiveModel::Pugv(model) => {
+                model.save(connection).await?;
+            }
+            _ActiveModel::Manga(model) => {
                 model.save(connection).await?;
             }
         }
@@ -740,4 +752,109 @@ pub async fn pugv_from<'a>(
     };
 
     Ok((VideoSourceEnum::PugvSource(pugv_source), video_stream))
+}
+
+/// 构造漫画视频源。
+///
+/// 漫画以 `comic_id`（B 漫 `mc<id>` 里的数字）唯一标识，存在 `video_source.media_id`。
+pub async fn manga_from<'a>(
+    media_id: &str,
+    path: &'a Path,
+    bili_client: &'a BiliClient,
+    connection: &DatabaseConnection,
+) -> Result<(
+    VideoSourceEnum,
+    Pin<Box<dyn Stream<Item = Result<VideoInfo>> + 'a + Send>>,
+)> {
+    let model = bili_sync_entity::video_source::Entity::find()
+        .filter(bili_sync_entity::video_source::Column::Type.eq(3))
+        .filter(bili_sync_entity::video_source::Column::MediaId.eq(media_id))
+        .one(connection)
+        .await?;
+
+    let manga_source = if let Some(model) = model {
+        MangaSource {
+            id: model.id,
+            name: model.name,
+            latest_row_at: model.latest_row_at,
+            media_id: model.media_id,
+            path: path.to_path_buf(),
+            scan_deleted_videos: model.scan_deleted_videos,
+            scan_deleted_videos_once: model.scan_deleted_videos_once,
+            keyword_filters: model.keyword_filters,
+            keyword_filter_mode: model.keyword_filter_mode,
+            blacklist_keywords: model.blacklist_keywords,
+            whitelist_keywords: model.whitelist_keywords,
+            keyword_case_sensitive: model.keyword_case_sensitive,
+            min_duration_seconds: model.min_duration_seconds,
+            max_duration_seconds: model.max_duration_seconds,
+            published_after: model.published_after,
+            published_before: model.published_before,
+            filter_option: model.filter_option,
+            audio_only: model.audio_only,
+            audio_only_m4a_only: model.audio_only_m4a_only,
+            flat_folder: model.flat_folder,
+            split_chapters_after_download: model.split_chapters_after_download,
+            download_charge_videos: model.download_charge_videos,
+            download_danmaku: model.download_danmaku,
+            download_subtitle: model.download_subtitle,
+            download_ai_subtitle: model.download_ai_subtitle,
+            ai_subtitle_language: model.ai_subtitle_language,
+            ai_rename: model.ai_rename,
+            ai_rename_video_prompt: model.ai_rename_video_prompt,
+            ai_rename_audio_prompt: model.ai_rename_audio_prompt,
+            ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
+            ai_rename_enable_collection: model.ai_rename_enable_collection,
+            ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
+            ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
+        }
+    } else {
+        warn!("数据库中未找到漫画 mc{} 的记录，使用临时ID", media_id);
+        MangaSource {
+            id: 0,
+            name: format!("漫画 mc{}", media_id),
+            latest_row_at: "1970-01-01 00:00:00".to_string(),
+            media_id: Some(media_id.to_string()),
+            path: path.to_path_buf(),
+            scan_deleted_videos: false,
+            scan_deleted_videos_once: false,
+            keyword_filters: None,
+            keyword_filter_mode: None,
+            blacklist_keywords: None,
+            whitelist_keywords: None,
+            keyword_case_sensitive: true,
+            min_duration_seconds: None,
+            max_duration_seconds: None,
+            published_after: None,
+            published_before: None,
+            filter_option: None,
+            audio_only: false,
+            audio_only_m4a_only: false,
+            flat_folder: false,
+            split_chapters_after_download: false,
+            download_charge_videos: true,
+            download_danmaku: false,
+            download_subtitle: false,
+            download_ai_subtitle: false,
+            ai_subtitle_language: "zh-CN".to_string(),
+            ai_rename: false,
+            ai_rename_video_prompt: String::new(),
+            ai_rename_audio_prompt: String::new(),
+            ai_rename_enable_multi_page: false,
+            ai_rename_enable_collection: false,
+            ai_rename_enable_bangumi: false,
+            ai_rename_rename_parent_dir: false,
+        }
+    };
+
+    let video_stream = manga_source.video_stream_from(bili_client, path, connection).await?;
+
+    let video_stream = unsafe {
+        std::mem::transmute::<
+            Pin<Box<dyn Stream<Item = Result<VideoInfo>> + Send>>,
+            Pin<Box<dyn Stream<Item = Result<VideoInfo>> + 'a + Send>>,
+        >(video_stream)
+    };
+
+    Ok((VideoSourceEnum::MangaSource(manga_source), video_stream))
 }

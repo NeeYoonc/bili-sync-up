@@ -1054,6 +1054,13 @@ class ApiClient {
 	}
 
 	/**
+	 * 获取哔哩哔哩漫画作品信息（添加漫画源时自动填名）
+	 */
+	async getMangaComic(comicId: string): Promise<ApiResponse<import('./types').MangaComicResponse>> {
+		return this.get<import('./types').MangaComicResponse>('/manga/comic', { comic_id: comicId });
+	}
+
+	/**
 	 * 获取关注的UP主列表
 	 */
 	async getUserFollowings(): Promise<ApiResponse<UserFollowing[]>> {
@@ -1629,6 +1636,11 @@ export const api = {
 	 * 获取讲师（UP 主）名下的全部课程
 	 */
 	getPugvUpCourses: (upId: string) => apiClient.getPugvUpCourses(upId),
+
+	/**
+	 * 获取哔哩哔哩漫画作品信息（添加漫画源时自动填名）
+	 */
+	getMangaComic: (comicId: string) => apiClient.getMangaComic(comicId),
 
 	/**
 	 * 获取关注的UP主列表

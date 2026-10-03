@@ -28,6 +28,7 @@
 		BangumiSourceOption,
 		BangumiSourceListResponse,
 		PugvCourseItem,
+		MangaComicResponse,
 		VideoSourcesResponse,
 		ValidateFavoriteResponse,
 		ConfigResponse,
@@ -38,6 +39,7 @@
 		VideoQuality,
 		AudioQuality,
 		VideoCodec,
+		YouTubeSource,
 		YouTubeSourceType,
 		YouTubeStatusResponse,
 		DouyinStatusResponse,
@@ -240,6 +242,12 @@
 	let selectedPugvSeasonIds: string[] = [];
 	let existingPugvSeasonIds: Set<string> = new Set();
 
+	// 漫画相关：粘贴链接 / comic_id 后自动解析作品信息
+	let mangaComic: MangaComicResponse | null = null;
+	let loadingMangaComic = false;
+	let lastRequestedComicId = '';
+	let mangaLookupTimeout: ReturnType<typeof setTimeout> | null = null;
+
 	// 番剧合并相关
 	let existingBangumiSources: BangumiSourceOption[] = [];
 	let loadingBangumiSources = false;
@@ -335,6 +343,12 @@
 			value: 'pugv',
 			label: '课程',
 			description: 'B站课程（含付费课）。season_id 在课程链接 cheese/play/ss 后面，可直接粘贴整条链接'
+		},
+		{
+			value: 'manga',
+			label: '漫画',
+			description:
+				'哔哩哔哩漫画。粘贴漫画链接（manga.bilibili.com/detail/mc25969）或直接填写 comic_id，每话打包为一个 CBZ'
 		}
 	];
 	const youtubeSourceTypeOptions = [
@@ -379,7 +393,8 @@
 		submission: 'UP主投稿',
 		watch_later: '稍后观看',
 		bangumi: '番剧',
-		pugv: '课程'
+		pugv: '课程',
+		manga: '漫画'
 	};
 
 	// 合集类型选项
@@ -398,6 +413,42 @@
 		if (!text) return '';
 		const matched = text.match(/cheese\/play\/ss(\d+)/i) ?? text.match(/\bss(\d+)\b/i) ?? text.match(/^(\d+)$/);
 		return matched ? matched[1] : text;
+	}
+
+	// 漫画：允许直接粘贴整条链接 / 分享文案，自动抽出 comic_id
+	function normalizeComicId(raw: string): string {
+		const text = raw.trim();
+		if (!text) return '';
+		if (/^\d+$/.test(text)) return text;
+		const matched = text.match(/mc(\d+)/i) ?? text.match(/comic[^\d]*(\d{3,})/i);
+		return matched ? matched[1] : text;
+	}
+
+	async function fetchMangaComic(comicId: string): Promise<void> {
+		loadingMangaComic = true;
+		try {
+			const result = await runRequest(() => api.getMangaComic(comicId), {
+				showErrorToast: false,
+				context: '获取漫画信息失败'
+			});
+			if (!result) {
+				mangaComic = null;
+				toast.error('获取漫画信息失败', {
+					description: '请确认 comic_id 正确，且当前账号有权限访问该漫画'
+				});
+				return;
+			}
+			mangaComic = result.data;
+			if (mangaComic?.title) {
+				name = mangaComic.title;
+				applyQuickSubscriptionPath('manga', name, true);
+			}
+			toast.success('已获取漫画信息', {
+				description: `${mangaComic.title} · 共 ${mangaComic.episode_count} 话`
+			});
+		} finally {
+			loadingMangaComic = false;
+		}
 	}
 
 	function handleYouTubeSourceTypeChange(nextValue: unknown) {
@@ -1465,6 +1516,18 @@
 			return;
 		}
 
+		// 漫画：提交前把链接 / 分享文案规范化成 comic_id
+		if (sourceType === 'manga') {
+			const comicId = normalizeComicId(sourceId);
+			if (!comicId || !/^\d+$/.test(comicId)) {
+				toast.error('漫画 ID 无效', {
+					description: '请粘贴漫画链接（manga.bilibili.com/detail/mc25969）或直接填写 comic_id'
+				});
+				return;
+			}
+			sourceId = comicId;
+		}
+
 		if (sourceType === 'collection' && !upId) {
 			toast.error('请输入UP主ID', { description: '合集需要提供UP主ID' });
 			return;
@@ -1691,6 +1754,8 @@
 							errorDescription = '该UP主的投稿已经添加过了，请检查是否使用了相同的UP主ID';
 						} else if (sourceType === 'watch_later') {
 							errorDescription = '稍后观看只能配置一个，请先删除现有配置';
+						} else if (sourceType === 'manga') {
+							errorDescription = '该漫画已经添加过了，请检查是否使用了相同的 comic_id';
 						}
 
 						toast.error('重复添加', {
@@ -2410,6 +2475,16 @@
 	// 监听 source_id 变化，自动获取季度信息
 	$: if (sourceType === 'bangumi' && sourceId) {
 		fetchBangumiSeasons();
+	}
+
+	// 监听 source_id 变化，自动解析漫画作品信息（防抖，避免逐字请求）
+	$: if (sourceType === 'manga' && sourceId) {
+		const comicId = normalizeComicId(sourceId);
+		if (comicId && /^\d+$/.test(comicId) && comicId !== lastRequestedComicId) {
+			lastRequestedComicId = comicId;
+			if (mangaLookupTimeout) clearTimeout(mangaLookupTimeout);
+			mangaLookupTimeout = setTimeout(() => void fetchMangaComic(comicId), 400);
+		}
 	}
 
 	// 切换源类型时，如处于批量模式且已有选择，则清空选择防止跨源类型
@@ -4143,12 +4218,15 @@
 									{:else if sourceType === 'submission'}UP主ID
 									{:else if sourceType === 'bangumi'}Season ID
 									{:else if sourceType === 'pugv'}课程 Season ID
+									{:else if sourceType === 'manga'}漫画 ID
 									{:else}ID{/if}
 								</Label>
 								<Input
 									id="source-id"
 									bind:value={sourceId}
-									placeholder={`请输入${sourceType === 'collection' ? '合集' : sourceType === 'favorite' ? '任意公开收藏夹' : sourceType === 'submission' ? 'UP主' : sourceType === 'bangumi' ? 'Season' : sourceType === 'pugv' ? '课程 Season' : ''}ID`}
+									placeholder={sourceType === 'manga'
+										? '粘贴漫画链接或 comic_id，例如 https://manga.bilibili.com/detail/mc25969'
+										: `请输入${sourceType === 'collection' ? '合集' : sourceType === 'favorite' ? '任意公开收藏夹' : sourceType === 'submission' ? 'UP主' : sourceType === 'bangumi' ? 'Season' : sourceType === 'pugv' ? '课程 Season' : ''}ID`}
 									oninput={() => {
 										if (sourceType === 'collection') {
 											isManualInput = true;
@@ -4168,6 +4246,20 @@
 											可直接粘贴课程链接，例如 https://www.bilibili.com/cheese/play/ss713799843
 										{/if}
 									</p>
+								{/if}
+								{#if sourceType === 'manga'}
+									<p class="text-muted-foreground text-xs">
+										可直接粘贴漫画链接（mc 后面的数字即 comic_id）。添加后按「作品目录 + 每话一个 CBZ」落盘，适配
+										Komga / Kavita / Mihon
+									</p>
+									{#if loadingMangaComic}
+										<p class="mt-1 text-xs text-blue-600 dark:text-blue-400">🔍 正在获取漫画信息...</p>
+									{:else if mangaComic}
+										<p class="mt-1 text-xs text-green-600">
+											✓ {mangaComic.title}{mangaComic.author ? ` · ${mangaComic.author}` : ''} · 共 {mangaComic.episode_count}
+											话{mangaComic.is_finish ? ' · 已完结' : ''}
+										</p>
+									{/if}
 								{/if}
 								{#if sourceType === 'collection' && !isManualInput && sourceId}
 									<p class="mt-1 text-xs text-green-600">✓ 已从列表中选择合集，类型已自动识别</p>

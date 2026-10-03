@@ -16,6 +16,7 @@ pub struct VideosRequest {
     pub watch_later: Option<i32>,
     pub bangumi: Option<i32>,
     pub pugv: Option<i32>,
+    pub manga: Option<i32>,
     pub query: Option<String>,
     pub page: Option<u64>,
     pub page_size: Option<u64>,
@@ -403,6 +404,13 @@ pub struct PugvUpCoursesRequest {
     pub up_id: String,
 }
 
+/// 查询哔哩哔哩漫画作品信息的请求
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct MangaComicRequest {
+    /// 漫画 comic_id（可传 `mc25969` 或完整链接）
+    pub comic_id: String,
+}
+
 fn default_page() -> u32 {
     1
 }
@@ -493,6 +501,7 @@ pub struct ResetSpecificTasksRequest {
     pub watch_later: Option<i32>,
     pub bangumi: Option<i32>,
     pub pugv: Option<i32>,
+    pub manga: Option<i32>,
     pub platform: Option<String>,
     pub youtube: Option<i32>,
     // 与 /api/videos 的过滤参数保持一致，便于“按当前筛选批量重置”

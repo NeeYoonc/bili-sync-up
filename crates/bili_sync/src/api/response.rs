@@ -20,6 +20,9 @@ pub struct VideoSourcesResponse {
     /// B 站课程（pugv / cheese）
     #[serde(default)]
     pub pugv: Vec<VideoSource>,
+    /// 哔哩哔哩漫画
+    #[serde(default)]
+    pub manga: Vec<VideoSource>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -754,6 +757,21 @@ pub struct PugvUpCoursesResponse {
     pub data: Vec<PugvCourseItem>,
 }
 
+/// 哔哩哔哩漫画作品信息（添加漫画源时自动填名用）
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaComicResponse {
+    pub success: bool,
+    /// 规范化后的 comic_id
+    pub comic_id: String,
+    pub title: String,
+    pub author: String,
+    pub cover: String,
+    pub intro: String,
+    /// 章节总数
+    pub episode_count: u64,
+    pub is_finish: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SearchResult {
     pub result_type: String,       // video, bili_user, media_bangumi等
@@ -1046,6 +1064,8 @@ pub struct DashBoardResponse {
     pub enabled_bangumi: u64,
     /// 已启用的课程（pugv）源数量
     pub enabled_pugv: u64,
+    /// 已启用的漫画源数量
+    pub enabled_manga: u64,
     pub enable_watch_later: bool,
     pub total_favorites: u64,
     pub total_collections: u64,
@@ -1053,6 +1073,8 @@ pub struct DashBoardResponse {
     pub total_bangumi: u64,
     /// 课程（pugv）源总数
     pub total_pugv: u64,
+    /// 漫画源总数
+    pub total_manga: u64,
     pub total_watch_later: u64,
     pub enabled_youtube_sources: u64,
     pub total_youtube_sources: u64,

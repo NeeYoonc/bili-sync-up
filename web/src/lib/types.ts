@@ -207,6 +207,7 @@ export interface VideosRequest {
 	watch_later?: number;
 	bangumi?: number;
 	pugv?: number;
+	manga?: number;
 	query?: string;
 	page?: number;
 	page_size?: number;
@@ -322,6 +323,7 @@ export interface VideoSourcesResponse {
 	watch_later: VideoSource[];
 	bangumi: VideoSource[];
 	pugv: VideoSource[];
+	manga: VideoSource[];
 	youtube: VideoSource[];
 	douyin: VideoSource[];
 	tiktok: VideoSource[];
@@ -946,7 +948,8 @@ export type VideoCategory =
 	| 'submission'
 	| 'watch_later'
 	| 'bangumi'
-	| 'pugv';
+	| 'pugv'
+	| 'manga';
 
 // 番剧季度信息类型
 export interface BangumiSeasonInfo {
@@ -982,6 +985,19 @@ export interface PugvUpCoursesResponse {
 	success: boolean;
 	up_id: string;
 	data: PugvCourseItem[];
+}
+
+// 哔哩哔哩漫画作品信息（添加漫画源时自动填名）
+export interface MangaComicResponse {
+	success: boolean;
+	comic_id: string;
+	title: string;
+	author: string;
+	cover: string;
+	intro: string;
+	/** 章节总数 */
+	episode_count: number;
+	is_finish: boolean;
 }
 
 // 番剧源选项（用于合并选择）
@@ -1357,6 +1373,8 @@ export interface DashBoardResponse {
 	enabled_bangumi: number;
 	/** 已启用的课程（pugv）源数量 */
 	enabled_pugv: number;
+	/** 已启用的漫画源数量 */
+	enabled_manga: number;
 	enable_watch_later: boolean;
 	total_favorites: number;
 	total_collections: number;
@@ -1364,6 +1382,8 @@ export interface DashBoardResponse {
 	total_bangumi: number;
 	/** 课程（pugv）源总数 */
 	total_pugv: number;
+	/** 漫画源总数 */
+	total_manga: number;
 	total_watch_later: number;
 	enabled_youtube_sources: number;
 	total_youtube_sources: number;
