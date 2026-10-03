@@ -188,9 +188,58 @@ plaintext = wasm(TFZa).<export>(url, bytesData, buvid, platform, bodyJSON)
 
 ### 尚未打通的环节
 
-Node 侧请求虽然返回 `code 0`，但响应 `bytesData` 为空，需继续定位：
+### 2026-10-03 第二轮实测：已打通主链路
 
-1. 页面生成的 `m2` 长度为 19228 字符，Node 侧仅 824 字符，怀疑 Go 模块依赖 JSVMP 包装层在调用前写入的
-   会话/载荷状态（`h1_o8j1i2(seed)` 与 `b1_0ccy7b(seed)` 成对出现）。
-2. 浏览器请求原样回放同样返回空 `bytesData`，不排除服务端对 `m2` 做一次性校验。
-3. 需要在页面侧对 `b1_0ccy7b` 调用点做快照（`globalThis` 差异、KV SDK、localStorage），据此补齐 Node 侧状态。
+**关键发现：请求必须携带 `x-bili-data-sn` 头**（32 位大写十六进制）。缺少该头时服务端返回 `code 0` 但
+`bytesData` 为空（软拒绝）；带上正确值后立即返回完整密文。
+
+实测结论：
+
+| 项 | 结论 |
+|---|---|
+| `x-bili-data-sn` 是否随机可用 | ❌ 随机值 / 全 0 / 空值均被拒，必须精确匹配 |
+| 是否与 cookie 相关 | ❌ 换成随机 buvid3/4、甚至不带登录态，同一浏览器产出的值不变 |
+| 是否与 TLS 指纹相关 | ❌ curl_cffi `chrome131/124` 模拟无效 |
+| 是否与请求内容相关 | ❌ 与 `m2`、`body`、`url`、时间戳的 MD5 均不匹配 |
+| 实际性质 | **设备序列号**：同一机器恒定（实测恒为 `1E74C20E5720FBF3BB351965D7A9DFC1`） |
+| `m2` 长度是否重要 | ❌ Node 侧仅 824 字符（页面为 19228）同样被服务端接受 |
+
+**纯 Node（无浏览器）已验证可用的完整链路**：
+
+```
+m2        = wasm(2ad56ae2).a1_o8iso5("<id>_<nonce>")                     // 824 字符即可
+ultra_sign= wasm(efae82c9).y1_z2w2a3("device=pc&platform=web&nov=27&eot=812", body, tsMs).sign
+POST      /twirp/comic.v1.Comic/<Method>?...&ultra_sign=<sign>&nov=27&a=810
+          headers: Content-Type / Referer / Origin / Cookie / x-bili-data-sn
+plaintext = wasm(e461bfa6).c1_r9k2m7(url, bytesData, buvid3, "web", body)
+```
+
+- `ComicDetail(25969)` → 解密得到 **95710 字节** 明文（`{"id":25969,"title":"碧蓝之海",...}`）。
+- `GetImageIndex(934687)` → 解密得到 **19 页** 页面清单（与浏览器一致）。
+
+**wasm 导出名（运行时确认，Node 侧可直接调用）**：
+
+| wasm | 导出名 | 签名 |
+|---|---|---|
+| `2ad56ae2…` | `a1_o8iso5` | `(seed) -> string` |
+| `efae82c9…` | `y1_z2w2a3` | `(query, body, timestamp) -> {error, sign}` |
+| `e461bfa6…` | `c1_r9k2m7` | `(url, bytesData, buvid, platform, bodyJSON) -> {error, data}` |
+| `ca0962…` | `h2_process_report` / `h2_reset_state` | 上报 |
+| `dda35c…` | `a1_h17mj9` | 上报（4 参数） |
+
+### 仍未打通：`ImageToken` 的 `m1`
+
+`ImageToken` 的请求体除 `urls` 外还必须有 `m1`（88 字符 base64）。实测 `m1 = btoa(<65 字节二进制>)`，
+由页面 JS（很可能经 CryptoJS / 某个未定位的入口）生成，尚需定位其生成函数。
+
+已知：
+
+- 页面生成的 `m1` 与 `urls` 一起参与 `ultra_sign` 计算，因此 `m1` 必须在 Node 侧自行生成。
+- `m1` 不是 `m2` 模块的产物（页面内 `a1_o8iso5` 无论输入什么都返回 19228 字符）。
+- 待办：hook `CryptoJS`/`atob`/`btoa` 调用链，定位 65 字节明文来源。
+
+### 下一步
+
+1. 定位 `m1` 生成函数（`ImageToken` 的前置条件）。
+2. 定位 `x-bili-data-sn` 的生成算法；若无法定位，退化为「一次性从站点获取并缓存该设备序列号」。
+3. 两项齐备后即可用纯 Node sidecar 完成「列表 → 取图 → 下载 → 打包」全流程。
