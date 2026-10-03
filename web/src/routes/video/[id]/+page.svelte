@@ -6,6 +6,7 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { DANMAKU_SYNC_STAGE_LABELS } from '$lib/consts';
 	import VideoCard from '$lib/components/video-card.svelte';
+	import MangaReader from '$lib/components/manga-reader.svelte';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import {
 		appStateStore,
@@ -23,6 +24,7 @@
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import EditIcon from '@lucide/svelte/icons/edit';
 	import PlayIcon from '@lucide/svelte/icons/play';
+	import BookOpenIcon from '@lucide/svelte/icons/book-open';
 	import ImageIcon from '@lucide/svelte/icons/image';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
@@ -70,6 +72,8 @@
 		: 'aspect-ratio: 16/9; max-height: 70vh;';
 	$: imageUrls = videoData?.video.image_urls ?? [];
 	$: isImagePost = Boolean(videoData?.video.is_image_post);
+	// 漫画源：一话就是一个 CBZ 压缩包，详情页用网页阅读器代替视频播放器
+	$: isMangaChapter = videoData?.source?.source_type === 'manga';
 	// 只由视频段组成的图集（多段视频/动态）没有原图，不能再提示「图片尚未下载」
 	$: imagePostVideoOnly = Boolean(videoData?.video.image_post_video_only);
 	$: safeImageIndex = imageUrls.length > 0 ? Math.min(Math.max(currentImageIndex, 0), imageUrls.length - 1) : 0;
@@ -933,11 +937,31 @@
 	<section>
 		{#if videoData.pages && videoData.pages.length > 0}
 			<div class="mb-4 flex {isMobile ? 'flex-col gap-2' : 'items-center justify-between'}">
-				<h2 class="{isMobile ? 'text-lg' : 'text-xl'} font-semibold">分页列表</h2>
+				<h2 class="{isMobile ? 'text-lg' : 'text-xl'} font-semibold">{isMangaChapter ? '漫画分页' : '分页列表'}</h2>
 				<div class="flex {isMobile ? 'flex-col gap-2' : 'items-center gap-2'}">
 					<div class="text-muted-foreground text-sm">
-						共 {videoData.pages.length} 个分页
+						{isMangaChapter
+							? `共 ${videoData.pages.length} 页（整话存于同一个 CBZ 压缩包）`
+							: `共 ${videoData.pages.length} 个分页`}
 					</div>
+					{#if isMangaChapter}
+						<Button
+							size="sm"
+							variant="default"
+							class={isMobile ? 'w-full' : ''}
+							title="在网页里阅读本话（读取本地 CBZ，与分页下载状态无关）"
+							onclick={() => {
+								currentPlayingPageIndex = 0;
+								imageViewMode = false;
+								onlinePlayMode = false;
+								chargeLockedDisplayMode = null;
+								showVideoPlayer = true;
+							}}
+						>
+							<BookOpenIcon class="mr-2 h-4 w-4" />
+							阅读本话
+						</Button>
+					{/if}
 					{#if !isExternal}
 					<Button
 						size="sm"
@@ -1089,7 +1113,7 @@
 											{imageUrls.length > 0 ? `查看图片（${imageUrls.length}）` : '图片尚未下载'}
 										</Button>
 									{/if}
-									{#if pageInfo.download_status[1] === 7}
+									{#if !isMangaChapter && pageInfo.download_status[1] === 7}
 										<Button
 											size="sm"
 											variant="default"
@@ -1108,7 +1132,7 @@
 											播放视频
 										</Button>
 									{/if}
-									{#if getEmbeddedPlayerUrl() && (!isImagePost || isExternal)}
+									{#if getEmbeddedPlayerUrl() && !isMangaChapter && (!isImagePost || isExternal)}
 									<Button
 										size="sm"
 										variant="outline"
@@ -1134,23 +1158,25 @@
 
 				<!-- 右侧/下方：视频播放器 -->
 				{#if showVideoPlayer && videoData}
-					<div class="w-full shrink-0 xl:w-[45%] 2xl:w-[40%]">
+					<div class="w-full shrink-0 {isMangaChapter ? 'xl:w-[60%] 2xl:w-[55%]' : 'xl:w-[45%] 2xl:w-[40%]'}">
 						<div class="sticky top-4">
 							<div class="mb-4 flex items-center justify-between">
 								<div class="flex items-center gap-2">
-									<h3 class="text-lg font-semibold">{imageViewMode ? '图片查看' : '视频播放'}</h3>
+									<h3 class="text-lg font-semibold">{imageViewMode ? '图片查看' : isMangaChapter ? '漫画阅读' : '视频播放'}</h3>
 									<span
-										class="rounded px-2 py-1 text-sm {imageViewMode
+										class="rounded px-2 py-1 text-sm {isMangaChapter
+											? 'bg-emerald-100 text-emerald-700'
+											: imageViewMode
 											? 'bg-fuchsia-100 text-fuchsia-700'
 											: onlinePlayMode
 											? 'bg-blue-100 text-blue-700'
 											: 'bg-gray-100 text-gray-700'}"
 									>
-										{imageViewMode ? `图文原图 ${safeImageIndex + 1}/${imageUrls.length}` : onlinePlayMode ? `${platformLabel}内嵌播放` : '本地播放'}
+										{isMangaChapter ? '漫画阅读' : imageViewMode ? `图文原图 ${safeImageIndex + 1}/${imageUrls.length}` : onlinePlayMode ? `${platformLabel}内嵌播放` : '本地播放'}
 									</span>
 								</div>
 								<div class="flex items-center gap-2">
-									{#if getEmbeddedPlayerUrl() && !imageViewMode}
+									{#if getEmbeddedPlayerUrl() && !imageViewMode && !isMangaChapter}
 										<Button size="sm" variant="ghost" onclick={togglePlayMode}>
 											{onlinePlayMode ? '切换到本地' : `切换到${platformLabel}内嵌`}
 										</Button>
@@ -1163,7 +1189,7 @@
 							</div>
 
 							<!-- 当前播放的分页信息 -->
-							{#if videoData.pages.length > 1}
+							{#if videoData.pages.length > 1 && !isMangaChapter}
 								<div class="mb-2 text-sm text-gray-600">
 									正在播放: P{videoData.pages[safePlayingPageIndex].pid} - {videoData.pages[
 										safePlayingPageIndex
@@ -1182,64 +1208,70 @@
 									⚠️ 该视频未达到最低下载标准，未下载本地媒体，无法进行本地播放。
 								</div>
 							{/if}
-							<div class="overflow-hidden rounded-lg bg-black">
-								{#if imageViewMode && imageUrls.length > 0}
-									<img
-										src={imageUrls[safeImageIndex]}
-										alt={`${videoData.video.name} - 第 ${safeImageIndex + 1} 张原图`}
-										class="block h-auto max-h-[70vh] w-full object-contain"
-									/>
-								{:else if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
-									<div class="flex h-64 items-center justify-center text-white">
-										<div>{isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频未付费' : '充电视频未充电'}</div>
-									</div>
-								{:else if onlinePlayMode}
-									{#if getEmbeddedPlayerUrl()}
-										{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
-											<iframe
-												class="embedded-player-frame block border-0 {isDouyin || isTikTok ? 'mx-auto w-auto' : 'h-auto w-full'}"
-												style={embeddedFrameStyle}
-												src={getEmbeddedPlayerUrl() ?? undefined}
-												title={getEmbeddedPlayerTitle()}
-												allow="autoplay; fullscreen"
-												referrerpolicy="unsafe-url"
-											></iframe>
-										{/key}
-									{:else}
+							{#if isMangaChapter}
+								<div class="bg-card rounded-lg border p-3">
+									<MangaReader videoId={videoData.video.id} chapterTitle={videoData.video.name} />
+								</div>
+							{:else}
+								<div class="overflow-hidden rounded-lg bg-black">
+									{#if imageViewMode && imageUrls.length > 0}
+										<img
+											src={imageUrls[safeImageIndex]}
+											alt={`${videoData.video.name} - 第 ${safeImageIndex + 1} 张原图`}
+											class="block h-auto max-h-[70vh] w-full object-contain"
+										/>
+									{:else if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
 										<div class="flex h-64 items-center justify-center text-white">
-											<div>当前视频缺少 {platformLabel} 标识，无法内嵌播放</div>
+											<div>{isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频未付费' : '充电视频未充电'}</div>
 										</div>
+									{:else if onlinePlayMode}
+										{#if getEmbeddedPlayerUrl()}
+											{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
+												<iframe
+													class="embedded-player-frame block border-0 {isDouyin || isTikTok ? 'mx-auto w-auto' : 'h-auto w-full'}"
+													style={embeddedFrameStyle}
+													src={getEmbeddedPlayerUrl() ?? undefined}
+													title={getEmbeddedPlayerTitle()}
+													allow="autoplay; fullscreen"
+													referrerpolicy="unsafe-url"
+												></iframe>
+											{/key}
+										{:else}
+											<div class="flex h-64 items-center justify-center text-white">
+												<div>当前视频缺少 {platformLabel} 标识，无法内嵌播放</div>
+											</div>
+										{/if}
+									{:else}
+										{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
+											<div class="video-container relative" role="group">
+												<video
+													controls
+													autoplay
+													class="h-auto w-full"
+													style="aspect-ratio: 16/9; max-height: 70vh;"
+													src={getVideoSource()}
+													onerror={(event) => {
+														console.warn('视频加载错误:', event);
+														if (videoData?.video.is_charge_video) {
+															chargeLockedDisplayMode = 'local';
+															showChargeLockedToast('local');
+														} else if (videoData?.video.skip_reason) {
+															showSkipReasonToast();
+														}
+													}}
+													onloadstart={() => {
+														console.log('开始加载视频:', getVideoSource());
+													}}
+												>
+													<!-- 默认空字幕轨道用于无障碍功能 -->
+													<track kind="captions" srclang="zh" label="无字幕" default />
+													您的浏览器不支持视频播放。
+												</video>
+											</div>
+										{/key}
 									{/if}
-								{:else}
-									{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
-										<div class="video-container relative" role="group">
-											<video
-												controls
-												autoplay
-												class="h-auto w-full"
-												style="aspect-ratio: 16/9; max-height: 70vh;"
-												src={getVideoSource()}
-												onerror={(event) => {
-													console.warn('视频加载错误:', event);
-													if (videoData?.video.is_charge_video) {
-														chargeLockedDisplayMode = 'local';
-														showChargeLockedToast('local');
-													} else if (videoData?.video.skip_reason) {
-														showSkipReasonToast();
-													}
-												}}
-												onloadstart={() => {
-													console.log('开始加载视频:', getVideoSource());
-												}}
-											>
-												<!-- 默认空字幕轨道用于无障碍功能 -->
-												<track kind="captions" srclang="zh" label="无字幕" default />
-												您的浏览器不支持视频播放。
-											</video>
-										</div>
-									{/key}
-								{/if}
-							</div>
+								</div>
+							{/if}
 
 							{#if imageViewMode && imageUrls.length > 0}
 								<div class="mt-3 space-y-3">
@@ -1268,7 +1300,7 @@
 							{/if}
 
 							<!-- 分页选择按钮 -->
-							{#if videoData.pages.length > 1 && !imageViewMode}
+							{#if videoData.pages.length > 1 && !imageViewMode && !isMangaChapter}
 								<div class="mt-4 space-y-2">
 									<div class="text-sm font-medium text-gray-700">选择分页:</div>
 									<div class="grid max-h-60 grid-cols-2 gap-2 overflow-y-auto">

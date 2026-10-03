@@ -757,6 +757,30 @@ pub struct PugvUpCoursesResponse {
     pub data: Vec<PugvCourseItem>,
 }
 
+/// 漫画一话里的单页（网页阅读器用）
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaChapterPageResponse {
+    /// 页号，从 0 起
+    pub index: usize,
+    /// CBZ 里的条目名（如 `0001.jpg`）
+    pub name: String,
+    pub size: u64,
+}
+
+/// 漫画一话的清单（网页阅读器用）
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaChapterResponse {
+    pub success: bool,
+    pub video_id: i32,
+    /// 话名
+    pub title: String,
+    /// CBZ 文件路径
+    pub path: String,
+    pub size_bytes: u64,
+    pub page_count: u64,
+    pub pages: Vec<MangaChapterPageResponse>,
+}
+
 /// 哔哩哔哩漫画搜索结果条目
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MangaSearchItemResponse {

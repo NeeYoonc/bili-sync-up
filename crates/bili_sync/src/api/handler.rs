@@ -2636,7 +2636,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, get_pugv_up_courses, get_manga_comic, get_manga_search, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_downloads_progress, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, get_pugv_up_courses, get_manga_comic, get_manga_search, get_manga_chapter, get_manga_page, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_downloads_progress, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -3791,6 +3791,34 @@ fn build_video_source_tag(
 }
 
 async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model) -> Result<Option<VideoSourceTag>> {
+    // 漫画：一话 = 一个 video，前端靠这个标签走「网页阅读器」而不是播放器
+    if bili_sync_entity::is_manga_source_type(video.source_type) {
+        if let Some(source_id) = video.source_id {
+            let source = video_source::Entity::find_by_id(source_id).one(db).await?;
+            let (source_name, split_chapters_after_download, audio_only, audio_only_m4a_only, flat_folder) = source
+                .map(|source| {
+                    (
+                        source.name,
+                        source.split_chapters_after_download,
+                        source.audio_only,
+                        source.audio_only_m4a_only,
+                        source.flat_folder,
+                    )
+                })
+                .unwrap_or_else(|| (format!("已删除漫画源 #{}", source_id), false, false, false, false));
+            return Ok(Some(build_video_source_tag(
+                source_id,
+                "manga",
+                "漫画",
+                source_name,
+                split_chapters_after_download,
+                audio_only,
+                audio_only_m4a_only,
+                flat_folder,
+            )));
+        }
+    }
+
     if bili_sync_entity::is_episode_source_type(video.source_type) {
         if let Some(source_id) = video.source_id {
             let source = video_source::Entity::find_by_id(source_id).one(db).await?;
@@ -14881,6 +14909,114 @@ pub async fn get_manga_comic(
         episode_count: comic.episodes.len() as u64,
         is_finish: comic.is_finish,
     }))
+}
+
+/// 取漫画一话的页面清单（详情页的网页阅读器用）
+#[utoipa::path(
+    get,
+    path = "/api/manga/chapter/{video_id}",
+    params(
+        ("video_id" = i32, Path, description = "漫画话（video）id")
+    ),
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::MangaChapterResponse>),
+    )
+)]
+pub async fn get_manga_chapter(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path(video_id): Path<i32>,
+) -> Result<ApiResponse<crate::api::response::MangaChapterResponse>, ApiError> {
+    let video = video::Entity::find_by_id(video_id)
+        .one(db.as_ref())
+        .await?
+        .ok_or(InnerApiError::NotFound(video_id))?;
+    if !bili_sync_entity::is_manga_source_type(video.source_type) {
+        return Err(InnerApiError::BadRequest(format!("视频 #{} 不是漫画话，没有可阅读的 CBZ", video_id)).into());
+    }
+    let path = video.path.clone();
+    if path.trim().is_empty() {
+        return Err(InnerApiError::BadRequest(format!("漫画话「{}」还没有落盘文件", video.name)).into());
+    }
+
+    let manifest_path = path.clone();
+    let manifest = tokio::task::spawn_blocking(move || {
+        crate::manga_reader::read_chapter_manifest(std::path::Path::new(&manifest_path))
+    })
+    .await
+    .map_err(|error| anyhow!("读取漫画话失败: {}", error))?
+    .map_err(|error| {
+        error!("读取漫画话「{}」失败: {:#}", video.name, error);
+        error
+    })?;
+
+    Ok(ApiResponse::ok(crate::api::response::MangaChapterResponse {
+        success: true,
+        video_id,
+        title: video.name,
+        path: manifest.path,
+        size_bytes: manifest.size_bytes,
+        page_count: manifest.pages.len() as u64,
+        pages: manifest
+            .pages
+            .into_iter()
+            .map(|page| crate::api::response::MangaChapterPageResponse {
+                index: page.index,
+                name: page.name,
+                size: page.size,
+            })
+            .collect(),
+    }))
+}
+
+/// 取漫画一话里的某一页图片（详情页的网页阅读器用）
+#[utoipa::path(
+    get,
+    path = "/api/manga/page/{video_id}/{index}",
+    params(
+        ("video_id" = i32, Path, description = "漫画话（video）id"),
+        ("index" = usize, Path, description = "页号，从 0 起")
+    ),
+    responses(
+        (status = 200, description = "图片数据", content_type = "image/*"),
+    )
+)]
+pub async fn get_manga_page(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path((video_id, index)): Path<(i32, usize)>,
+) -> Result<axum::response::Response, ApiError> {
+    let video = video::Entity::find_by_id(video_id)
+        .one(db.as_ref())
+        .await?
+        .ok_or(InnerApiError::NotFound(video_id))?;
+    if !bili_sync_entity::is_manga_source_type(video.source_type) {
+        return Err(InnerApiError::BadRequest(format!("视频 #{} 不是漫画话", video_id)).into());
+    }
+    let path = video.path.clone();
+    if path.trim().is_empty() {
+        return Err(InnerApiError::BadRequest(format!("漫画话「{}」还没有落盘文件", video.name)).into());
+    }
+
+    let page_path = path.clone();
+    let (bytes, content_type) = tokio::task::spawn_blocking(move || {
+        crate::manga_reader::read_chapter_page(std::path::Path::new(&page_path), index)
+    })
+    .await
+    .map_err(|error| anyhow!("读取漫画分页失败: {}", error))?
+    .map_err(|error| {
+        if let Some(out_of_range) = error.downcast_ref::<crate::manga_reader::PageOutOfRange>() {
+            return ApiError::bad_request(format!("漫画「{}」{}", video.name, out_of_range));
+        }
+        debug!("读取漫画「{}」第 {} 页失败: {:#}", video.name, index + 1, error);
+        ApiError::from(error)
+    })?;
+
+    Ok(axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", content_type)
+        .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+        .header("X-Image-Cache", "LOCAL")
+        .body(axum::body::Body::from(bytes))
+        .unwrap())
 }
 
 /// 关键词搜索哔哩哔哩漫画（添加漫画源时按名字挑作品）

@@ -21,6 +21,7 @@ mod http;
 mod ingest_log;
 mod initialization;
 mod manga_download;
+mod manga_reader;
 mod task;
 mod tiktok;
 mod tiktok_impersonate;

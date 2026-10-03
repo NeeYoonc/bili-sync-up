@@ -63,6 +63,7 @@ pub async fn auth(headers: HeaderMap, request: Request, next: Next) -> Result<Re
         "/api/setup/auth-token",      // 设置auth token不需要认证
         "/api/credential",            // 更新凭证在初始设置时不需要认证
         "/api/videos/stream",         // 视频流API不需要认证（供播放器使用）
+        "/api/manga/page",            // 漫画单页图片不需要认证（供网页阅读器的 <img> 使用）
         "/api/videos/proxy-stream",   // 视频流代理API不需要认证（供在线播放器使用）
         "/api/auth/qr/generate",      // 生成登录二维码不需要认证
         "/api/auth/qr/poll",          // 轮询登录状态不需要认证

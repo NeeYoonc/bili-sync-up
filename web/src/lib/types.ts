@@ -383,6 +383,24 @@ export interface VideoSourceTag {
 	flat_folder: boolean;
 }
 
+// 漫画一话（一个 CBZ 压缩包）里的单页
+export interface MangaChapterPage {
+	index: number;
+	name: string;
+	size: number;
+}
+
+// 漫画一话的阅读清单（对应本地 CBZ 压缩包）
+export interface MangaChapterResponse {
+	success: boolean;
+	video_id: number;
+	title: string;
+	path: string;
+	size_bytes: number;
+	page_count: number;
+	pages: MangaChapterPage[];
+}
+
 // 单个视频响应类型
 export interface VideoResponse {
 	video: VideoInfo;

@@ -74,7 +74,8 @@ import type {
 	YouTubeVideo,
 	CreateYouTubeSourceRequest,
 	UpdateYouTubeSourceRequest,
-	YouTubeQueueStatusResponse
+	YouTubeQueueStatusResponse,
+	MangaChapterResponse
 } from './types';
 import { ErrorType } from './types';
 import { wsManager } from './ws';
@@ -1207,6 +1208,13 @@ class ApiClient {
 	async getVideoBvid(videoId: string | number): Promise<ApiResponse<VideoBvidResponse>> {
 		return this.get<VideoBvidResponse>(`/videos/${videoId}/bvid`);
 	}
+	/**
+	 * 获取漫画一话的阅读清单（本地 CBZ 压缩包里的分页）
+	 * @param videoId 漫画话（video）ID
+	 */
+	async getMangaChapter(videoId: string | number): Promise<ApiResponse<MangaChapterResponse>> {
+		return this.get<MangaChapterResponse>(`/manga/chapter/${videoId}`);
+	}
 
 	/**
 	 * 获取代理视频流URL
@@ -1873,6 +1881,7 @@ export const api = {
 	 * 获取视频BVID信息（用于构建B站链接）
 	 */
 	getVideoBvid: (videoId: string | number) => apiClient.getVideoBvid(videoId),
+	getMangaChapter: (videoId: string | number) => apiClient.getMangaChapter(videoId),
 
 	/**
 	 * 获取代理视频流URL
