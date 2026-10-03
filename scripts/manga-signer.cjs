@@ -7,6 +7,8 @@
  *   - 响应体 {"code":0,"data":null,"bytesData":"<密文>"}
  *   - 必需请求头 x-bili-data-sn（站点构建产物中的硬编码常量）
  *   - ImageToken 额外需要 m1（客户端 ECDH P-256 公钥 raw 点的 base64）
+ *   - 加密原图的直链走 `mangaup.hdslb.com` + `cpx`，响应是逐次改写的 DRM 载荷（首字节 0x08），
+ *     只能用站点自带的图片解密 wasm 还原（见 fetch-image）
  *
  * 用 Node + 官方 Go wasm 胶水直接运行站点 wasm，不依赖浏览器。
  *
@@ -18,6 +20,7 @@
  *   node manga-signer.cjs chapter-pages '{"ep_id":934687}'
  *   node manga-signer.cjs download     '{"url":"https://...","out":"C:/tmp/1.jpg"}'
  *   node manga-signer.cjs search       '{"keyword":"碧蓝之海"}'
+ *   node manga-signer.cjs fetch-image  '{"url":"https://mangaup...","key":"<chapter-pages 的 key>","out":"C:/tmp/p004.jpg"}'
  *
  * 用法（常驻，NDJSON over stdin/stdout，供 Rust 复用同一个 wasm 运行时）：
  *   node manga-signer.cjs serve
@@ -294,19 +297,29 @@ function loadWasmModule(wasmPath) {
   Promise.resolve(go.run(inst)).catch((e) => log("wasm 运行时退出：" + path.basename(wasmPath) + " " + e.message));
   const names = Object.keys(globalThis).filter((k) => !before.has(k) && typeof globalThis[k] === "function");
   if (!names.length) throw new Error("wasm 未导出函数：" + wasmPath);
-  const record = { exportName: names[0], exportNames: names, fn: globalThis[names[0]] };
+  const record = { exportName: names[0], exportNames: names, fn: globalThis[names[0]], go: go };
   LOADED_WASM.set(wasmPath, record);
   return record;
 }
 
 /** 通过「探测调用」反推 wasm 角色：m2 / sign / decrypt / other */
-function classifyWasm(fn) {
+/**
+ * m2 探针：传一个字符串，正常返回 200+ 字符的密文。
+ *
+ * 只能在「可能是 m2」的导出上调用：图片解密器（a1_h17mj9）遇到这个参数会让 Go 程序直接退出，
+ * 所以调用方必须在探测后重建该 wasm 实例。
+ */
+function probeIsM2(fn) {
   try {
     const out = fn("probe");
-    if (typeof out === "string" && out.length > 200) return "m2";
+    return typeof out === "string" && out.length > 200;
   } catch (e) {
-    /* 继续下一项探测 */
+    return false;
   }
+}
+
+function classifyWasm(fn) {
+  if (probeIsM2(fn)) return "m2";
   try {
     const out = fn();
     if (out && typeof out === "object" && typeof out.error === "string") {
@@ -331,7 +344,11 @@ function runtime(meta) {
     if (!info) throw new Error("缺少 " + role + " 模块，请重新 bootstrap");
     return loadWasmModule(path.join(CACHE_DIR, info.file)).fn;
   };
-  RUNTIME = { m2: load("m2"), sign: load("sign"), decrypt: load("decrypt") };
+  const optional = (role) => {
+    const info = meta.roles && meta.roles[role];
+    return info ? loadWasmModule(path.join(CACHE_DIR, info.file)).fn : null;
+  };
+  RUNTIME = { m2: load("m2"), sign: load("sign"), decrypt: load("decrypt"), image: optional("image") };
   return RUNTIME;
 }
 
@@ -414,6 +431,7 @@ async function downloadWasm(meta, name, force) {
 
 function probeRoles(wasmNames) {
   const roles = { report: [] };
+  const dirty = new Set();
   for (const name of wasmNames) {
     const target = path.join(CACHE_DIR, name);
     let rec;
@@ -425,21 +443,56 @@ function probeRoles(wasmNames) {
     }
     const warn = console.warn;
     console.warn = () => {};
-    let role;
     try {
-      role = classifyWasm(rec.fn);
+      for (const exportName of rec.exportNames) {
+        // h2_* 是上报 SDK，与下载无关
+        if (/^h2_/.test(exportName)) {
+          roles.report.push({ file: name, exportName: exportName, exportNames: rec.exportNames });
+          continue;
+        }
+        let role;
+        if (/^a1_/.test(exportName)) {
+          // a1_* 里既有 m2（返回长密文）也有图片解密器（探测调用会让 Go 程序退出）
+          role = probeIsM2(globalThis[exportName]) ? "m2" : "image";
+          if (role === "image" && rec.go && rec.go.exited) dirty.add(name);
+        } else {
+          role = classifyWasm(globalThis[exportName]);
+        }
+        if (role === "m2" || role === "sign" || role === "decrypt" || role === "image") {
+          if (roles[role]) {
+            log("角色 " + role + " 重复（" + roles[role].file + " / " + name + "），保留先到的");
+          } else {
+            roles[role] = { file: name, exportName: exportName };
+            log("角色 " + role + " = " + name + " (" + exportName + ")");
+          }
+        } else {
+          roles.report.push({ file: name, exportName: exportName, exportNames: rec.exportNames });
+        }
+      }
     } finally {
       console.warn = warn;
     }
-    if (role === "m2" || role === "sign" || role === "decrypt") {
-      if (roles[role]) {
-        log("角色 " + role + " 重复（" + roles[role].file + " / " + name + "），保留先到的");
-      } else {
-        roles[role] = { file: name, exportName: rec.exportName };
-        log("角色 " + role + " = " + name + " (" + rec.exportName + ")");
+  }
+  // 识别图片解密器时用的探针会终止它的 Go 程序，这里重建一个干净实例
+  for (const name of dirty) {
+    const target = path.join(CACHE_DIR, name);
+    const previous = LOADED_WASM.get(target);
+    // 旧实例已经把导出挂到 globalThis 上了，先清掉，否则重建时「新增全局」判定会认为没导出任何函数
+    if (previous) {
+      for (const exportName of previous.exportNames) {
+        try {
+          delete globalThis[exportName];
+        } catch (e) {
+          /* 只读时忽略 */
+        }
       }
-    } else {
-      roles.report.push({ file: name, exportName: rec.exportName, exportNames: rec.exportNames });
+    }
+    LOADED_WASM.delete(target);
+    try {
+      loadWasmModule(target);
+      log("重新实例化 " + name + "（识别探针会终止图片解密器的 Go 程序）");
+    } catch (e) {
+      log("重建 " + name + " 失败：" + e.message);
     }
   }
   return roles;
@@ -510,18 +563,23 @@ async function collectSnCandidates(meta, force) {
 async function bootstrap(force) {
   ensureDir(CACHE_DIR);
   let meta = force ? null : loadMeta();
-  if (meta && meta.ready && !force) return meta;
+  // 旧缓存里没有 image 角色（图片解密器是后加的），复探一次；复探过就记 imageProbed，避免每次启动都重试
+  if (meta && meta.ready && !force && ((meta.roles && meta.roles.image) || meta.imageProbed)) return meta;
 
   meta = await collectAssets(meta, force);
   await ensureGlue(force);
   ensureGoLoaded();
 
-  if (!meta.roles || !meta.roles.m2 || !meta.roles.sign || !meta.roles.decrypt || force) {
+  if (!meta.roles || !meta.roles.m2 || !meta.roles.sign || !meta.roles.decrypt || !meta.roles.image || force) {
     for (const name of meta.wasmNames) await downloadWasm(meta, name, force);
     meta.roles = probeRoles(meta.wasmNames);
+    meta.imageProbed = true;
   }
   if (!meta.roles.m2 || !meta.roles.sign || !meta.roles.decrypt) {
     throw new Error("未能识别 wasm 角色（m2/sign/decrypt），站点可能已改版");
+  }
+  if (!meta.roles.image) {
+    log("警告：未识别到图片解密模块，加密原图（mangaup + cpx）将无法下载");
   }
   meta.ready = false;
   saveMeta(meta);
@@ -579,6 +637,27 @@ async function imageIndex(params) {
   return { data: await callTwirp("GetImageIndex", { ep_id: id }, id) };
 }
 
+/**
+ * 生成客户端 ECDH P-256 密钥对。
+ *
+ * - `m1`：公钥 raw 点（65 字节）的 base64，ImageToken 请求体用它，服务端据此加密原图；
+ * - `key`：私钥 JWK JSON 的 base64，解密加密原图时交给站点 wasm。
+ *
+ * 两者必须来自同一对密钥——服务端只会用 m1 对应的私钥加密，换一对就解不出来。
+ */
+async function generateEcdhKeyPair() {
+  const pair = await crypto.webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, [
+    "deriveKey",
+    "deriveBits",
+  ]);
+  const raw = await crypto.webcrypto.subtle.exportKey("raw", pair.publicKey);
+  const jwk = await crypto.webcrypto.subtle.exportKey("jwk", pair.privateKey);
+  return {
+    m1: Buffer.from(raw).toString("base64"),
+    key: Buffer.from(JSON.stringify(jwk)).toString("base64"),
+  };
+}
+
 /** ImageToken：body 为明文 {urls, m1}，m1 = 客户端 ECDH P-256 公钥 raw 点的 base64 */
 async function imageToken(params) {
   const meta = await bootstrap(false);
@@ -588,17 +667,15 @@ async function imageToken(params) {
   const paths = (data.images || []).map((i) => i.path);
   if (!paths.length) throw new Error("该话没有页面");
 
-  const ecdh = crypto.createECDH("prime256v1");
-  ecdh.generateKeys();
-  const m1 = ecdh.getPublicKey().toString("base64");
+  const pair = await generateEcdhKeyPair();
 
-  const body = JSON.stringify({ urls: JSON.stringify(paths), m1: m1 });
+  const body = JSON.stringify({ urls: JSON.stringify(paths), m1: pair.m1 });
   const res = await twirpSend("ImageToken", body, meta.sn, rt);
   if (res.error) throw new Error("ImageToken 失败：" + res.error);
   const list = Array.isArray(res.data)
     ? res.data.map((item) => Object.assign({}, item, { complete_url: withCdnCode(item.complete_url) }))
     : res.data;
-  return { data: list, m1: m1 };
+  return { data: list, m1: pair.m1, key: pair.key };
 }
 
 /**
@@ -635,9 +712,11 @@ async function chapterPages(params) {
       y: img.y || 0,
       size: t.size || 0,
       token_path: t.path || "",
+      // ImageToken 用 hit_encrpyt 标记「加密原图」（mangaup.hdslb.com + cpx）
+      encrypted: !!t.hit_encrpyt,
     };
   });
-  return { ep_id: epId, count: pages.length, pages: pages };
+  return { ep_id: epId, count: pages.length, key: token.key, pages: pages };
 }
 
 /** 关键词搜索漫画（Comic/Search），供「添加视频源 → 漫画」按名字挑作品 */
@@ -669,6 +748,63 @@ async function download(params) {
   return { bytes: buf.length, format: sniffFormat(buf), out: params.out || null };
 }
 
+/**
+ * 抓取一页图片，命中「加密原图」时用站点 wasm 解密。
+ *
+ * 站点对加密原图（mangaup.hdslb.com + cpx）按响应逐次改写载荷：首字节固定 0x08，
+ * 本地（含 Rust 侧）解不开，只能交给站点自带的图片解密 wasm：
+ *
+ *   image(key, cipherBytes, url, 3) -> Uint8Array（内容是 JSON 文本）
+ *   JSON = { code: 0, bcode: 0, msg: "", data: "<base64 明文图片>" }
+ *
+ * 两个坑：
+ * 1. 第 4 个参数必须是数字 3，传字符串会让 Go 程序直接退出（返回 undefined）；
+ * 2. key 必须与 ImageToken 那次请求的 m1 配对，所以要把 chapter-pages 返回的 key 带过来。
+ */
+async function fetchImage(params) {
+  if (!params.url) throw new Error("缺少 url");
+  if (!params.key) throw new Error("缺少 key（ImageToken 的 ECDH 私钥）");
+  // 只加载图片解密模块：Rust 侧是「一页一次 sidecar 调用」，把 m2/sign/decrypt 也实例化一遍纯属浪费
+  const meta = await bootstrap(false);
+  const imageRole = meta.roles && meta.roles.image;
+  if (!imageRole) throw new Error("未识别到图片解密模块，请重新 bootstrap");
+  const decryptImage = loadWasmModule(path.join(CACHE_DIR, imageRole.file)).fn;
+  const buf = await fetchBinary(params.url);
+  const encrypted = buf[0] === 0x08 && sniffFormat(buf) === "unknown";
+  let bytes = buf;
+  if (encrypted) {
+    const raw = decryptImage(params.key, new Uint8Array(buf), params.url, 3);
+    if (!raw || !raw.byteLength) throw new Error("图片解密失败：站点 wasm 没有返回结果");
+    const text = Buffer.from(raw.buffer || raw, raw.byteOffset || 0, raw.byteLength).toString("utf8");
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      throw new Error("图片解密结果不是 JSON：" + text.slice(0, 120));
+    }
+    if (parsed.code !== 0) throw new Error("图片解密失败：code=" + parsed.code + " " + (parsed.msg || ""));
+    if (!parsed.data) throw new Error("图片解密结果缺少 data 字段");
+    bytes = Buffer.from(parsed.data, "base64");
+  }
+  const format = sniffFormat(bytes);
+  if (format === "unknown") {
+    throw new Error(
+      "拿到的不是图片（" + bytes.length + " 字节，首 4 字节 " + bytes.slice(0, 4).toString("hex") + "）"
+    );
+  }
+  if (params.out) {
+    ensureDir(path.dirname(params.out));
+    fs.writeFileSync(params.out, bytes);
+  }
+  return {
+    bytes: bytes.length,
+    cipher_bytes: encrypted ? buf.length : 0,
+    format: format,
+    encrypted: encrypted,
+    out: params.out || null,
+  };
+}
+
 function sniffFormat(buf) {
   const magic = buf.slice(0, 4).toString("hex");
   if (magic.indexOf("ffd8ff") === 0) return "jpeg";
@@ -688,6 +824,7 @@ const COMMANDS = {
   "chapter-pages": chapterPages,
   search: searchComic,
   download: download,
+  "fetch-image": fetchImage,
 };
 
 async function runOne(cmd, args) {

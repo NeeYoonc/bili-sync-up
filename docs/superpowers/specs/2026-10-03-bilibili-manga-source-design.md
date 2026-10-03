@@ -338,3 +338,58 @@ ImageToken(urls, m1)   → 19 条 complete_url（自生成 m1 被接受，bytesD
 - 漫画源的 AI 重命名路径未做实测。
 - 特典 `SP` 序号按 `pubtime` 排序，若之后补充更早发布的特典，已有编号可能整体漂移。
 - 前端「批量添加漫画」未测试。
+
+## 附录 C：加密原图解密（2026-10-03 晚，已打通并落地）
+
+### 现象
+
+`ImageToken` 对一部作品的部分页面返回 `hit_encrpyt = true`：`url` / `token` 为空，只有
+`complete_url`，指向 `mangaup.hdslb.com/bfs/manga/<x>/<sha1>.jpg?cpx=…&token=…&ts=…&code=DanmakuInfo`。
+响应体不是图片：首字节固定 `0x08`，边缘节点对同一份明文的每个响应还会改写前缀
+（两次抓取前 25599 字节几乎全不同，之后只差约 120 个孤立字节）。
+
+### 怎么定位到解密函数
+
+在真实阅读器页面里给 `globalThis` 上的站点 wasm 导出逐个打桩（用 `Object.defineProperty` 的 setter 包一层），
+录到一次调用：
+
+```text
+a1_h17mj9(
+  base64(私钥 JWK JSON),      // {"crv":"P-256","d":…,"kty":"EC","x":…,"y":…}
+  Uint8Array(83287),          // 密文
+  "https://mangaup.hdslb.com/bfs/manga/7/….jpg@850w.avif?cpx=…&token=…",
+  3
+) -> Uint8Array(110995)       // 内容是 JSON 文本
+```
+
+返回的 JSON 形如 `{"code":0,"bcode":0,"msg":"","data":"<base64 明文图片>"}`，
+`data` 解出来是原始 JPEG（`ff d8 ff db … ff d9`）。函数由 `dda35c98742815151e46.wasm` 导出
+（该 wasm 里带 `ecdh` / `AES` 字符串），归为 sidecar 的 `image` 角色。
+
+### 两个必须注意的坑
+
+1. **第 4 个参数必须是数字 `3`**。传字符串 `"3"` 时 Go 程序会直接退出（返回 `undefined`，
+   之后再调用报 `Go program has already exited`），看起来像「函数不存在」。
+2. **私钥必须与 `ImageToken` 请求里的 `m1` 配对**。`m1` 是客户端 ECDH P-256 公钥 raw 点（65 字节）的 base64，
+   服务端据此加密原图；解密要用同一对密钥的私钥 JWK（base64 后的 JSON）。所以「取 token」和「解密」
+   必须共用一把密钥：`chapter-pages` 会把它作为 `key` 一起返回。
+
+### 角色识别
+
+`a1_*` 导出里既有 m2 也有图片解密器，且**任何探测调用都会终止图片解密器的 Go 程序**。
+因此 `probeRoles` 对 `a1_*` 只做「m2 探针」（传字符串看是否返回 200+ 字符密文），不是 m2 就判为 `image`；
+若探针把它打死（`go.exited`），则删掉旧实例、清掉它注册的全局后重新实例化。
+
+### 落地
+
+- sidecar 新增 `fetch-image '{"url":…,"key":…,"out":…}'`：拉取 → 判断首字节 `0x08` →
+  调 `image(key, 密文, url, 3)` → 解 base64 → 落盘，返回 `{bytes,cipher_bytes,format,encrypted}`。
+- Rust 侧 `MangaPage` 增加 `encrypted`，`fetch_chapter_pages` 一并返回 `key`；
+  `download_manga_chapter` 对加密页走 `download_encrypted_page`（sidecar 解密 + 改名），
+  未加密页仍走原来的直连下载。
+
+### 实测
+
+- 单话 `ep_id 1656375`（75 页，72 页加密）：密文 370361 → 明文 370291 字节 JPEG，头 `ff d8 ff db`、尾 `ff d9`。
+- 整库重下（9 话正篇，其中每话第 4 页起加密）：9 个 CBZ 全部重新生成，逐包检查无一个非图片条目，
+  抽页渲染正常；日志 `下载阶段完成：… 已处理 1 个视频（成功 1，失败 0，跳过 0）`。

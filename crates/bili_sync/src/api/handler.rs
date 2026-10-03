@@ -19127,7 +19127,7 @@ pub async fn proxy_video_stream(
             anyhow::bail!("B站视频流返回错误状态: {}", status);
         }
 
-        let mut cmd = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"));
+        let mut cmd = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"));
         cmd.args([
             "-hide_banner",
             "-loglevel",

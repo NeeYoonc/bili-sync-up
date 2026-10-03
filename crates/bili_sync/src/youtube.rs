@@ -4635,7 +4635,7 @@ fn format_urls<'a>(format: &'a ExternalMediaFormat, platform: &str) -> Result<Ve
 
 async fn extract_audio_track(input: &Path, output: &Path, platform: &str) -> Result<()> {
     remove_file_if_exists(output).await?;
-    let result = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+    let result = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
         .args(["-y", "-i"])
         .arg(input)
         .args(["-map", "0:a:0", "-vn", "-c:a", "copy"])
@@ -4656,7 +4656,7 @@ async fn is_reusable_media_file(path: &Path) -> bool {
     {
         return false;
     }
-    tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffprobe"))
+    crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffprobe"))
         .args([
             "-v",
             "error",
@@ -6611,7 +6611,7 @@ async fn ytdlp_version() -> Option<String> {
 async fn ytdlp_version_at(executable: &Path) -> Option<String> {
     let output = tokio::time::timeout(
         YTDLP_VERSION_TIMEOUT,
-        Command::new(executable).arg("--version").output(),
+        crate::utils::process::tokio_command(executable).arg("--version").output(),
     )
     .await
     .ok()?
@@ -7413,7 +7413,7 @@ fn append_ytdlp_tab_args(command: &mut Command) {
 /// 忽略该环境变量，因此 `command_error` 里还有 GBK 回退解码兜底，保证 Windows
 /// 本地化错误文本（如“远程主机强迫关闭了一个现有的连接”）不乱码。
 pub(crate) fn ytdlp_command() -> Command {
-    let mut command = Command::new(ytdlp_executable());
+    let mut command = crate::utils::process::tokio_command(ytdlp_executable());
     command.env("PYTHONUTF8", "1");
     command.env("PYTHONIOENCODING", "utf-8");
     command

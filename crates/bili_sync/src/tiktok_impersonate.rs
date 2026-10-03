@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use tokio::process::Command;
+
 use tracing::{info, warn};
 
 use crate::config::CONFIG_DIR;
@@ -310,7 +310,7 @@ async fn set_executable_permissions(path: &Path) -> Result<()> {
 }
 
 async fn impersonate_binary_usable(path: &Path) -> bool {
-    Command::new(path)
+    crate::utils::process::tokio_command(path)
         .arg("--version")
         .output()
         .await
@@ -336,7 +336,7 @@ pub(crate) async fn tiktok_impersonated_get(
         HEADER_DUMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     let binary = ensure_tiktok_impersonate().await?;
-    let mut command = Command::new(&binary);
+    let mut command = crate::utils::process::tokio_command(&binary);
     command
         .arg("--impersonate")
         .arg("chrome131")
@@ -423,7 +423,7 @@ pub(crate) async fn tiktok_impersonated_download(
     timeout: Duration,
 ) -> Result<()> {
     let binary = ensure_tiktok_impersonate().await?;
-    let mut command = Command::new(&binary);
+    let mut command = crate::utils::process::tokio_command(&binary);
     command
         .arg("--impersonate")
         .arg("chrome131")

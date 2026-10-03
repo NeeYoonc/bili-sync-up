@@ -3,7 +3,9 @@
 //! 漫画不走通用视频下载链路（取流 / m4s 合并 / NFO / 弹幕），而是：
 //! 1. 调 sidecar 拿到一话全部页面的带 token 直链（token 短时效，必须立刻下载）；
 //! 2. 逐页落盘到隐藏暂存目录 `系列目录/.pages/<话名>/`，复用 `page.download_status`
-//!    实现断点续传；
+//!    实现断点续传；其中「加密原图」（`hit_encrpyt = true`，直链走 `mangaup.hdslb.com`
+//!    + `cpx`）拿到的不是图片而是逐次改写的 DRM 载荷，改由 sidecar 用站点 wasm 解成
+//!    明文 JPEG 再落盘（见 `download_encrypted_page`）；
 //! 3. 全部页面就绪后写成 `ComicInfo.xml` 并打包成 store 模式的 CBZ；
 //! 4. 更新 `page.path` / `page.image` / `video.path` 与状态位，并清理暂存目录。
 //!
@@ -33,7 +35,7 @@ use tracing::{debug, info};
 use bili_sync_entity::{page, video};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
-use crate::bilibili::manga::fetch_chapter_pages;
+use crate::bilibili::manga::{fetch_chapter_pages, fetch_page_image};
 use crate::bilibili::{BiliClient, Client};
 use crate::utils::filenamify::filenamify;
 use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK};
@@ -100,10 +102,12 @@ pub async fn download_manga_chapter(
     ensure_series_assets(&series_dir, &video_model, &media_client, &token).await;
 
     // 1) 取该话全部页面的直链（token 短时效，拿到后立刻下载）
-    let fetched = fetch_chapter_pages(&ep_id)
+    let (fetched, page_key) = fetch_chapter_pages(&ep_id)
         .await
         .with_context(|| format!("获取漫画章节 {} 的页面清单失败", ep_id))?;
     let page_total = fetched.len();
+    // 加密页解密要用的 ECDH 私钥：与本次 ImageToken 的 m1 配对，整话共用一把
+    let page_key: Option<Arc<str>> = page_key.map(Arc::from);
 
     // 2) 对齐 page 行（B 漫的 image_count 与实际页面数可能不一致）
     let page_models = reconcile_pages(&video_model, pages, page_total, connection).await?;
@@ -122,12 +126,18 @@ pub async fn download_manga_chapter(
     let page_client = media_client.clone();
     // 先把任务摊平成「自有数据」，避免在闭包里捕获 `&MangaPage`（会引入高阶生命周期，
     // 让整个下载 future 无法证明 Send）
-    let jobs: Vec<(i32, String)> = fetched
+    let jobs: Vec<(i32, String, Option<Arc<str>>)> = fetched
         .iter()
         .enumerate()
-        .map(|(index, page_info)| (index as i32 + 1, page_info.url.clone()))
+        .map(|(index, page_info)| {
+            (
+                index as i32 + 1,
+                page_info.url.clone(),
+                page_info.encrypted.then(|| page_key.clone()).flatten(),
+            )
+        })
         .collect();
-    let mut stream = futures::stream::iter(jobs.into_iter().map(|(pid, url)| {
+    let mut stream = futures::stream::iter(jobs.into_iter().map(|(pid, url, key)| {
         let staging_dir = staging_dir.clone();
         let semaphore = Arc::clone(&semaphore);
         let token = token.clone();
@@ -146,7 +156,7 @@ pub async fn download_manga_chapter(
                 return (pid, cached.map(Ok));
             }
             let _permit = semaphore.acquire_owned().await;
-            let result = download_single_page(&client, &staging_dir, pid, &url, &token).await;
+            let result = download_single_page(&client, &staging_dir, pid, &url, key.as_deref(), &token).await;
             (pid, Some(result))
         }
     }))
@@ -435,17 +445,22 @@ async fn download_single_page(
     staging_dir: &Path,
     pid: i32,
     url: &str,
+    key: Option<&str>,
     token: &CancellationToken,
 ) -> Result<PathBuf> {
     if token.is_cancelled() {
         return Err(anyhow!("任务已取消"));
+    }
+    // 加密原图走 sidecar 解密；非加密页仍然是明文图片，直接拉取即可
+    if let Some(key) = key {
+        return download_encrypted_page(staging_dir, pid, url, key, token).await;
     }
     let bytes = fetch_image_bytes(client, url)
         .await
         .with_context(|| format!("下载第{}页失败", pid))?;
     let Some(ext) = sniff_image_ext(&bytes) else {
         bail!(
-            "第{}页拿到的不是图片（{} 字节，首 4 字节 {}）：B 站加密原图（mangaup + cpx）当前本地无法解码",
+            "第{}页拿到的不是图片（{} 字节，首 4 字节 {}）：该页既没有标记为加密原图，载荷也不是可识别的图片",
             pid,
             bytes.len(),
             payload_head_hex(&bytes)
@@ -455,6 +470,32 @@ async fn download_single_page(
     tokio::fs::write(&target, &bytes)
         .await
         .with_context(|| format!("写入分页失败: {}", target.display()))?;
+    Ok(target)
+}
+
+/// 「加密原图」专线：把整页交给 sidecar，用站点 wasm 解出明文图片再落盘。
+///
+/// 站点对 `mangaup.hdslb.com` + `cpx` 的响应逐次改写：首字节固定 `0x08`，本地（含
+/// Rust 侧）解不开；解法封装在站点自带的 Go wasm 里，且要求私钥与 ImageToken 的
+/// `m1` 同源。sidecar 会按真实格式决定扩展名，这里先落固定临时名再改名。
+async fn download_encrypted_page(
+    staging_dir: &Path,
+    pid: i32,
+    url: &str,
+    key: &str,
+    token: &CancellationToken,
+) -> Result<PathBuf> {
+    if token.is_cancelled() {
+        return Err(anyhow!("任务已取消"));
+    }
+    let temp = staging_dir.join(format!("{:04}.dec", pid));
+    let format = fetch_page_image(url, key, &temp)
+        .await
+        .with_context(|| format!("下载并解密第{}页失败", pid))?;
+    let target = staging_dir.join(format!("{:04}.{}", pid, format));
+    tokio::fs::rename(&temp, &target)
+        .await
+        .with_context(|| format!("重命名解密分页失败: {}", target.display()))?;
     Ok(target)
 }
 

@@ -15,7 +15,7 @@
 //! 漫画 URL 形如 <https://manga.bilibili.com/detail/mc25969>，其中的 `25969` 即 `comic_id`。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
@@ -132,7 +132,7 @@ async fn run_sidecar(command: &str, args: serde_json::Value) -> Result<serde_jso
     let config = crate::config::reload_config();
     let credential = config.credential.load_full();
 
-    let mut cmd = tokio::process::Command::new(&node);
+    let mut cmd = crate::utils::process::tokio_command(&node);
     cmd.arg(&signer).arg(command);
     if !args.is_null() {
         cmd.arg(args.to_string());
@@ -278,6 +278,9 @@ pub struct MangaPage {
     pub url: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// ImageToken 的 `hit_encrpyt`：这一页是「加密原图」，下下来的字节是 DRM 载荷，
+    /// 必须交给 sidecar 用站点 wasm 还原（见 `fetch_page_image`）。
+    pub encrypted: bool,
 }
 
 /// 从链接 / 分享文案 / 纯数字里解析 `comic_id`。
@@ -679,8 +682,12 @@ fn with_cdn_code(url: String) -> String {
 
 /// 拉取一话的完整页面清单（含带 token 的下载地址）。
 ///
+/// 返回 `(页面清单, 加密页解密用的 ECDH 私钥)`：密钥是 base64 的私钥 JWK，
+/// 与本次 ImageToken 请求里的 `m1` 配对，服务端正是用它加密了「加密原图」；
+/// 一话里没有加密页时为 `None`。
+///
 /// 注意：`complete_url` 与 token 绑定且有较短时效，必须拿到后立刻下载。
-pub async fn fetch_chapter_pages(ep_id: &str) -> Result<Vec<MangaPage>> {
+pub async fn fetch_chapter_pages(ep_id: &str) -> Result<(Vec<MangaPage>, Option<String>)> {
     let result = run_sidecar("chapter-pages", serde_json::json!({ "ep_id": ep_id })).await?;
     let mut pages = Vec::new();
     for (index, item) in result["pages"].as_array().cloned().unwrap_or_default().iter().enumerate() {
@@ -695,12 +702,49 @@ pub async fn fetch_chapter_pages(ep_id: &str) -> Result<Vec<MangaPage>> {
             url,
             width: item["x"].as_u64().map(|v| v as u32).filter(|v| *v > 0),
             height: item["y"].as_u64().map(|v| v as u32).filter(|v| *v > 0),
+            encrypted: item["encrypted"].as_bool().unwrap_or(false),
         });
     }
     if pages.is_empty() {
         bail!("漫画章节 {} 未取到任何页面", ep_id);
     }
-    Ok(pages)
+    let key = result["key"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Ok((pages, key))
+}
+
+/// 抓取一页「加密原图」，交给 sidecar 用站点 wasm 解密后写到 `out`。
+///
+/// 为什么不能在 Rust 侧自己解：站点对 `mangaup.hdslb.com` + `cpx` 的响应逐次改写成
+/// DRM 载荷（首字节固定 `0x08`），解法封装在站点自带的 Go wasm 里，且要求
+/// `(私钥 JWK, 密文, url, 3)` 四个参数完全匹配——私钥必须与 ImageToken 那次的 `m1` 同源。
+/// 这里复用项目既有的「Node 子进程跑站点 wasm」路线，返回解密后的图片扩展名。
+pub async fn fetch_page_image(url: &str, key: &str, out: &Path) -> Result<String> {
+    let result = run_sidecar(
+        "fetch-image",
+        serde_json::json!({
+            "url": url,
+            "key": key,
+            "out": out.to_string_lossy(),
+        }),
+    )
+    .await?;
+    let format = result["format"].as_str().unwrap_or_default().to_string();
+    if format.is_empty() || format == "unknown" {
+        bail!("漫画图片解密后仍无法识别格式（{}）", short_url_for_log(url));
+    }
+    Ok(format)
+}
+
+/// 日志里只保留直链的关键信息，避免把 cpx/token 整段打出去。
+fn short_url_for_log(url: &str) -> String {
+    match url.split_once('?') {
+        Some((head, _)) => format!("{head}?…"),
+        None => url.to_string(),
+    }
 }
 
 /// 哔哩哔哩漫画源。
