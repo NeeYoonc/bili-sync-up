@@ -4243,7 +4243,7 @@
 						</p>
 					</div>
 
-					<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+					<div class="grid grid-cols-1 items-start gap-4 md:grid-cols-2">
 						<div class="space-y-2">
 							<Label for="favorite-quick-subscribe-path">收藏夹快捷订阅路径模板</Label>
 							<Input
@@ -4264,7 +4264,7 @@
 							/>
 						</div>
 
-						<div class="space-y-2 md:col-span-2">
+						<div class="space-y-2">
 							<Label for="submission-quick-subscribe-path">UP主投稿快捷订阅路径模板</Label>
 							<Input
 								id="submission-quick-subscribe-path"
@@ -4273,7 +4273,7 @@
 								placeholder={'/Downloads/UP投稿/{{name}}'}
 							/>
 						</div>
-						<div class="space-y-2 md:col-span-2">
+						<div class="space-y-2">
 							<Label for="bangumi-quick-subscribe-path">番剧快捷订阅路径模板</Label>
 							<Input
 								id="bangumi-quick-subscribe-path"
@@ -4282,7 +4282,7 @@
 								placeholder={'/Downloads/番剧/{{name}}'}
 							/>
 						</div>
-						<div class="space-y-2 md:col-span-2">
+						<div class="space-y-2">
 							<Label for="pugv-quick-subscribe-path">课程快捷订阅路径模板</Label>
 							<Input
 								id="pugv-quick-subscribe-path"
@@ -4291,7 +4291,7 @@
 								placeholder={'/Downloads/课程/{{name}}'}
 							/>
 						</div>
-						<div class="space-y-2 md:col-span-2">
+						<div class="space-y-2">
 							<Label for="manga-quick-subscribe-path">漫画快捷订阅路径模板</Label>
 							<Input
 								id="manga-quick-subscribe-path"
