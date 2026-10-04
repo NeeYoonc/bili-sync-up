@@ -2363,11 +2363,18 @@ pub async fn update_unified_youtube_status(
     let mut video_status = VideoStatus::from(video.video_task_status);
     let mut page_status = PageStatus::from(video.page_task_status);
     let mut changed = false;
+    // 「已完成」被打回「未开始」的子任务：用户明确要求重跑，需要先删掉旧产物。
+    let mut cleared_video = Vec::new();
+    let mut cleared_page = Vec::new();
 
     // 与 B 站 update_video_status 一致：直接覆盖对应子任务状态位。
     for update in &request.video_updates {
         if update.status_index < 5 {
-            if video_status.get(update.status_index) != update.status_value {
+            let current = video_status.get(update.status_index);
+            if current != update.status_value {
+                if current == STATUS_OK && update.status_value == 0 {
+                    cleared_video.push(update.status_index);
+                }
                 video_status.set(update.status_index, update.status_value);
                 changed = true;
             }
@@ -2377,7 +2384,11 @@ pub async fn update_unified_youtube_status(
         // 外源视频只有一条合成页面，page_id 即视频 id。
         for update in &page.updates {
             if update.status_index < 5 {
-                if page_status.get(update.status_index) != update.status_value {
+                let current = page_status.get(update.status_index);
+                if current != update.status_value {
+                    if current == STATUS_OK && update.status_value == 0 {
+                        cleared_page.push(update.status_index);
+                    }
                     page_status.set(update.status_index, update.status_value);
                     changed = true;
                 }
@@ -2386,6 +2397,17 @@ pub async fn update_unified_youtube_status(
     }
 
     if changed {
+        // 删掉被打回的子任务产物，否则 worker 下一轮会因为文件还在而直接跳过：
+        // 媒体会被「目标文件已存在，复用现有文件」复用、UP头像/UP主信息会被缓存命中，
+        // 只有先把产物删掉，重置为「未开始」才是真的重跑（与批量重置一致）。
+        if !(cleared_video.is_empty() && cleared_page.is_empty()) {
+            if let Some(source) = youtube_source::Entity::find_by_id(video.source_id)
+                .one(db)
+                .await?
+            {
+                remove_youtube_task_artifact(&video, &source, &cleared_video, &cleared_page).await?;
+            }
+        }
         let video_bits: u32 = video_status.into();
         let page_bits: u32 = page_status.into();
         let mut active: youtube_video::ActiveModel = video.into();
@@ -2430,7 +2452,9 @@ async fn regenerate_youtube_artifacts(
     else {
         bail!("该视频还没有已下载的媒体文件，无法重建{platform}附属文件（请先完成下载）");
     };
-    let metadata = if regen.cover || regen.nfo {
+    // UP头像/UP主信息也要元数据：抖音合集/放映厅/收藏源的 source.url 是作品列表
+    // 链接，只有作品元数据里的频道主页地址能解析出作者头像，拿源链接会直接失败。
+    let metadata = if regen.cover || regen.nfo || regen.upper_face || regen.upper_info {
         let metadata = extract_youtube_metadata(&video.url, Some(&source))
             .await
             .with_context(|| format!("重新解析{platform}元数据失败"))?;
@@ -8803,6 +8827,29 @@ mod tests {
             "外源目录名超出 B 站同款 200 字节上限：{} 字节",
             folder.len()
         );
+    }
+
+    /// 「编辑状态」把已完成的「分P下载」重置为「未开始」后必须删掉本地媒体：
+    /// 留着文件的话 worker 只会打印「目标文件已存在，复用现有文件」跳过重下，
+    /// 用户看到的“重置”就变成了什么都不做。
+    #[tokio::test]
+    async fn clearing_media_task_removes_local_media_file() {
+        let root = std::env::temp_dir().join(format!("bili-sync-reset-media-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let media = root.join("20260101000000-7573135187270192425.mp4");
+        tokio::fs::write(&media, vec![0u8; 4096]).await.unwrap();
+
+        let mut video = super::youtube_video::Model::default();
+        video.output_path = Some(media.display().to_string());
+        let source = super::youtube_source::Model::default();
+
+        // 视频子任务 4 = 分P下载
+        super::remove_youtube_task_artifact(&video, &source, &[4], &[])
+            .await
+            .unwrap();
+        assert!(!media.exists(), "重置分P下载后应删除本地媒体文件");
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 }
 
