@@ -75,6 +75,9 @@ export function buildVideosRequest({
 				case 'pugv':
 					params.pugv = sourceId;
 					break;
+				case 'manga':
+					params.manga = sourceId;
+					break;
 			}
 		}
 	}

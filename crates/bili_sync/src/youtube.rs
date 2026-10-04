@@ -2474,9 +2474,19 @@ async fn regenerate_youtube_artifacts(
         let nfo_path = output_path.with_extension("nfo");
         remove_file_if_exists(&nfo_path).await?;
         let metadata = metadata.as_ref().expect("NFO 重建需要元数据");
-        generate_youtube_nfo(metadata, &output_path, &video.url, &video.title, &video.uploader, &source)
-            .await
-            .with_context(|| format!("重新生成{platform}视频信息/NFO失败"))?;
+        let profile_url = metadata.channel_url.as_deref().or(metadata.uploader_url.as_deref());
+        let avatar_url = avatar_url_for_nfo(&source, profile_url, None, &nfo_path).await;
+        generate_youtube_nfo(
+            metadata,
+            &output_path,
+            &video.url,
+            &video.title,
+            &video.uploader,
+            avatar_url.as_deref(),
+            &source,
+        )
+        .await
+        .with_context(|| format!("重新生成{platform}视频信息/NFO失败"))?;
         // 抖音短剧/放映厅/合集是番剧结构：单集 NFO 之外还要刷新剧集 tvshow.nfo。
         if is_episodic_douyin_source(&source) {
             if let (Some(season_dir), Some(downloader)) = (output_path.parent(), downloader.as_deref()) {
@@ -2506,7 +2516,7 @@ async fn regenerate_youtube_artifacts(
         let profile_url = metadata
             .as_ref()
             .and_then(|metadata| metadata.channel_url.as_deref().or(metadata.uploader_url.as_deref()));
-        download_youtube_upper_face(downloader, &video.uploader, profile_url, &source)
+        let _ = download_youtube_upper_face(downloader, &video.uploader, profile_url, &source)
             .await
             .with_context(|| format!("重新生成{platform}UP头像/UP主信息失败"))?;
     }
@@ -4546,8 +4556,8 @@ async fn download_youtube_media(
         }
     }
 
-    let warning_message = if source.audio_only && source.audio_only_m4a_only && !metadata.is_slideshow() {
-        None
+    let sidecars = if source.audio_only && source.audio_only_m4a_only && !metadata.is_slideshow() {
+        YoutubeSidecarOutcome::default()
     } else {
         ensure_youtube_sidecars(
             downloader,
@@ -4562,7 +4572,16 @@ async fn download_youtube_media(
     };
 
     // 多段动态作品的每个分页都要有自己的封面与信息文件，媒体库才会逐段显示。
-    ensure_image_post_page_sidecars(&metadata, &output_path, &video.url, &title, &uploader, source).await;
+    ensure_image_post_page_sidecars(
+        &metadata,
+        &output_path,
+        &video.url,
+        &title,
+        &uploader,
+        sidecars.avatar_url.as_deref(),
+        source,
+    )
+    .await;
 
     // 图集判定要在 `metadata` 被部分移动前取好。
     let is_image_post = metadata.is_slideshow();
@@ -4576,7 +4595,7 @@ async fn download_youtube_media(
             .duration
             .and_then(|value| i32::try_from(value.round() as i64).ok()),
         is_image_post,
-        warning_message,
+        warning_message: sidecars.warning,
         paid_content: false,
         skipped: false,
     })
@@ -4635,7 +4654,7 @@ fn format_urls<'a>(format: &'a ExternalMediaFormat, platform: &str) -> Result<Ve
 
 async fn extract_audio_track(input: &Path, output: &Path, platform: &str) -> Result<()> {
     remove_file_if_exists(output).await?;
-    let result = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+    let result = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
         .args(["-y", "-i"])
         .arg(input)
         .args(["-map", "0:a:0", "-vn", "-c:a", "copy"])
@@ -4656,7 +4675,7 @@ async fn is_reusable_media_file(path: &Path) -> bool {
     {
         return false;
     }
-    tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffprobe"))
+    crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffprobe"))
         .args([
             "-v",
             "error",
@@ -5334,6 +5353,22 @@ fn youtube_output_path(
     }
 }
 
+/// 附属文件子任务的结果：告警文案 + 本次解析到的头像地址。
+struct YoutubeSidecarOutcome {
+    warning: Option<String>,
+    /// 本轮解析到的 UP 头像地址，透传给图集分页 NFO，避免重复请求平台接口。
+    avatar_url: Option<String>,
+}
+
+impl Default for YoutubeSidecarOutcome {
+    fn default() -> Self {
+        Self {
+            warning: None,
+            avatar_url: None,
+        }
+    }
+}
+
 async fn ensure_youtube_sidecars(
     downloader: &UnifiedDownloader,
     metadata: &ExternalMediaMetadata,
@@ -5342,19 +5377,33 @@ async fn ensure_youtube_sidecars(
     title: &str,
     uploader: &str,
     source: &youtube_source::Model,
-) -> Option<String> {
+) -> YoutubeSidecarOutcome {
     let mut warnings = Vec::new();
     let platform = source_platform_label(source);
     let profile_url = metadata.channel_url.as_deref().or(metadata.uploader_url.as_deref());
-    if let Err(error) = download_youtube_upper_face(downloader, uploader, profile_url, source).await {
-        warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但 UP 头像子任务失败", platform, source.name, title);
-        warnings.push(format!("UP头像下载失败：{error:#}"));
+    let mut resolved_avatar_url = None;
+    match download_youtube_upper_face(downloader, uploader, profile_url, source).await {
+        Ok(url) => resolved_avatar_url = url,
+        Err(error) => {
+            warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但 UP 头像子任务失败", platform, source.name, title);
+            warnings.push(format!("UP头像下载失败：{error:#}"));
+        }
     }
+    // NFO 的 <actor><thumb> 用同一份头像地址；头像文件已在缓存里时这里会按需补解析一次。
+    let avatar_url = avatar_url_for_nfo(
+        source,
+        profile_url,
+        resolved_avatar_url,
+        &output_path.with_extension("nfo"),
+    )
+    .await;
     if let Err(error) = download_youtube_cover(downloader, metadata, output_path, source).await {
         warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但封面子任务失败", platform, source.name, title);
         warnings.push(format!("封面下载失败：{error:#}"));
     }
-    if let Err(error) = generate_youtube_nfo(metadata, output_path, video_url, title, uploader, source).await {
+    if let Err(error) =
+        generate_youtube_nfo(metadata, output_path, video_url, title, uploader, avatar_url.as_deref(), source).await
+    {
         warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但 NFO 子任务失败", platform, source.name, title);
         warnings.push(format!("NFO 生成失败：{error:#}"));
     }
@@ -5405,7 +5454,10 @@ async fn ensure_youtube_sidecars(
             warnings.push(format!("剧集附属文件生成失败：{error:#}"));
         }
     }
-    (!warnings.is_empty()).then(|| format!("媒体已完成；{}", warnings.join("；")))
+    YoutubeSidecarOutcome {
+        warning: (!warnings.is_empty()).then(|| format!("媒体已完成；{}", warnings.join("；"))),
+        avatar_url,
+    }
 }
 
 fn is_episodic_douyin_source(source: &youtube_source::Model) -> bool {
@@ -5539,12 +5591,98 @@ fn generate_youtube_season_nfo() -> String {
         .to_string()
 }
 
+/// 解析外源 UP / 频道的头像地址。
+///
+/// 同一份地址有两个用处：下载 `upper_path` 下的头像文件，以及写进视频 NFO 的
+/// `<actor><thumb>`（媒体库据此显示作者头像）。抖音 / TikTok / YouTube 取法各不相同，
+/// 统一收在这里，避免两处各写一份。
+async fn resolve_platform_avatar_url(
+    source: &youtube_source::Model,
+    profile_url: Option<&str>,
+) -> Result<String> {
+    if crate::tiktok::is_tiktok_source(source) {
+        let author_handle = profile_url
+            .and_then(crate::tiktok::tiktok_handle_from_url)
+            .ok_or_else(|| anyhow!("TikTok 元数据没有频道主页地址，无法获取 UP 头像"))?;
+        return crate::tiktok::fetch_tiktok_author_avatar_url(&author_handle)
+            .await?
+            .ok_or_else(|| anyhow!("TikTok 作者作品接口没有返回头像地址"));
+    }
+    if is_douyin_source(source) {
+        let author_profile_url = profile_url
+            .filter(|url| url.contains("douyin.com/user/"))
+            .unwrap_or(&source.url);
+        return crate::douyin::fetch_profile(author_profile_url)
+            .await?
+            .avatar_url
+            .context("抖音作者资料没有返回头像");
+    }
+    let profile_url = profile_url
+        .filter(|url| url.starts_with("http"))
+        .context("YouTube 元数据没有频道主页地址")?;
+    extract_youtube_source_metadata(profile_url)
+        .await?
+        .thumbnails
+        .iter()
+        .filter(|thumbnail| {
+            thumbnail
+                .id
+                .as_deref()
+                .is_some_and(|id| id.to_ascii_lowercase().contains("avatar"))
+                || thumbnail
+                    .width
+                    .zip(thumbnail.height)
+                    .is_some_and(|(width, height)| width == height)
+        })
+        .max_by_key(|thumbnail| {
+            let avatar = thumbnail
+                .id
+                .as_deref()
+                .is_some_and(|id| id.to_ascii_lowercase().contains("avatar"));
+            (
+                i32::from(avatar),
+                thumbnail
+                    .width
+                    .unwrap_or_default()
+                    .saturating_mul(thumbnail.height.unwrap_or_default()),
+            )
+        })
+        .map(|thumbnail| thumbnail.url.clone())
+        .context("YouTube 频道主页没有返回 UP 头像")
+}
+
+/// NFO 里 `<actor><thumb>` 用的头像地址。
+///
+/// 优先复用刚下载头像时解析到的地址（不额外请求平台）；头像文件早就在缓存里、
+/// 只有 NFO 还缺时才现解析一次，失败就退化成不写头像，不影响其它字段。
+async fn avatar_url_for_nfo(
+    source: &youtube_source::Model,
+    profile_url: Option<&str>,
+    resolved: Option<String>,
+    nfo_path: &Path,
+) -> Option<String> {
+    if let Some(url) = resolved.filter(|url| !url.trim().is_empty()) {
+        return Some(url);
+    }
+    if !crate::config::reload_config().nfo_config.enabled {
+        return None;
+    }
+    if tokio::fs::metadata(nfo_path)
+        .await
+        .is_ok_and(|metadata| metadata.len() > 0)
+    {
+        // NFO 已存在，本轮不会再写，不必多打一次平台接口
+        return None;
+    }
+    resolve_platform_avatar_url(source, profile_url).await.ok()
+}
+
 async fn download_youtube_upper_face(
     downloader: &UnifiedDownloader,
     uploader: &str,
     profile_url: Option<&str>,
     source: &youtube_source::Model,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let uploader = crate::utils::filenamify::filenamify(uploader);
     let platform = source_platform_label(source);
     if crate::tiktok::is_tiktok_source(source) {
@@ -5562,19 +5700,15 @@ async fn download_youtube_upper_face(
             .await
             .is_ok_and(|metadata| metadata.len() > 0);
         if face_exists && person_nfo_exists {
-            return Ok(());
+            return Ok(None);
         }
         tokio::fs::create_dir_all(&upper_dir)
             .await
             .with_context(|| format!("创建{platform} UP头像目录失败: {}", upper_dir.display()))?;
 
+        let mut resolved_avatar_url = None;
         if !face_exists {
-            let author_handle = profile_url.and_then(crate::tiktok::tiktok_handle_from_url).ok_or_else(|| {
-                anyhow!("TikTok 元数据没有频道主页地址，无法获取 UP 头像")
-            })?;
-            let avatar_url = crate::tiktok::fetch_tiktok_author_avatar_url(&author_handle)
-                .await?
-                .ok_or_else(|| anyhow!("TikTok 作者作品接口没有返回头像地址"))?;
+            let avatar_url = resolve_platform_avatar_url(source, profile_url).await?;
             let temporary = unique_download_path(&upper_dir.join("folder.jpg"));
             if let Err(error) = fetch_platform_asset(downloader, source, &[avatar_url.as_str()], &temporary)
                 .await
@@ -5585,6 +5719,7 @@ async fn download_youtube_upper_face(
             }
             replace_file(&temporary, &face_path).await?;
             info!(platform = source_platform_label(source), uploader, path = %face_path.display(), "{}视频源「{}」 UP头像「{}」下载完成", source_platform_label(source), source.name, uploader);
+            resolved_avatar_url = Some(avatar_url);
         }
 
         if !person_nfo_exists {
@@ -5603,7 +5738,7 @@ async fn download_youtube_upper_face(
             replace_file(&temporary, &person_nfo_path).await?;
             info!(platform = source_platform_label(source), uploader, path = %person_nfo_path.display(), "{}视频源「{}」 UP主 person.nfo「{}」生成完成", source_platform_label(source), source.name, uploader);
         }
-        return Ok(());
+        return Ok(resolved_avatar_url);
     }
     if uploader.is_empty() {
         bail!("{platform} UP主名称为空");
@@ -5620,56 +5755,16 @@ async fn download_youtube_upper_face(
         .await
         .is_ok_and(|metadata| metadata.len() > 0);
     if face_exists && person_nfo_exists {
-        return Ok(());
+        return Ok(None);
     }
 
     tokio::fs::create_dir_all(&upper_dir)
         .await
         .with_context(|| format!("创建{platform} UP头像目录失败: {}", upper_dir.display()))?;
 
+    let mut resolved_avatar_url = None;
     if !face_exists {
-        let avatar_url = if is_douyin_source(source) {
-            let author_profile_url = profile_url
-                .filter(|url| url.contains("douyin.com/user/"))
-                .unwrap_or(&source.url);
-            crate::douyin::fetch_profile(author_profile_url)
-                .await?
-                .avatar_url
-                .context("抖音作者资料没有返回头像")?
-        } else {
-            let profile_url = profile_url
-                .filter(|url| url.starts_with("http"))
-                .context("YouTube 元数据没有频道主页地址")?;
-            extract_youtube_source_metadata(profile_url)
-                .await?
-                .thumbnails
-                .iter()
-                .filter(|thumbnail| {
-                    thumbnail
-                        .id
-                        .as_deref()
-                        .is_some_and(|id| id.to_ascii_lowercase().contains("avatar"))
-                        || thumbnail
-                            .width
-                            .zip(thumbnail.height)
-                            .is_some_and(|(width, height)| width == height)
-                })
-                .max_by_key(|thumbnail| {
-                    let avatar = thumbnail
-                        .id
-                        .as_deref()
-                        .is_some_and(|id| id.to_ascii_lowercase().contains("avatar"));
-                    (
-                        i32::from(avatar),
-                        thumbnail
-                            .width
-                            .unwrap_or_default()
-                            .saturating_mul(thumbnail.height.unwrap_or_default()),
-                    )
-                })
-                .map(|thumbnail| thumbnail.url.clone())
-                .context("YouTube 频道主页没有返回 UP 头像")?
-        };
+        let avatar_url = resolve_platform_avatar_url(source, profile_url).await?;
         let temporary = unique_download_path(&upper_dir.join("folder.jpg"));
         if let Err(error) = fetch_platform_asset(downloader, source, &[avatar_url.as_str()], &temporary)
             .await
@@ -5680,6 +5775,7 @@ async fn download_youtube_upper_face(
         }
         replace_file(&temporary, &face_path).await?;
         info!(platform = source_platform_label(source), uploader, path = %face_path.display(), "{}视频源「{}」 UP头像「{}」下载完成", source_platform_label(source), source.name, uploader);
+        resolved_avatar_url = Some(avatar_url);
     }
 
     if !person_nfo_exists {
@@ -5712,7 +5808,7 @@ async fn download_youtube_upper_face(
         replace_file(&temporary, &person_nfo_path).await?;
         info!(platform = source_platform_label(source), uploader, path = %person_nfo_path.display(), "{}视频源「{}」 UP主「{}」 person.nfo 生成完成", source_platform_label(source), source.name, uploader);
     }
-    Ok(())
+    Ok(resolved_avatar_url)
 }
 
 fn generate_youtube_person_nfo(uploader: &str, channel_id: &str, platform: &str) -> String {
@@ -5819,6 +5915,7 @@ async fn ensure_image_post_page_sidecars(
     video_url: &str,
     title: &str,
     uploader: &str,
+    avatar_url: Option<&str>,
     source: &youtube_source::Model,
 ) {
     let pages = crate::douyin::image_post_page_paths(output_path);
@@ -5844,7 +5941,7 @@ async fn ensure_image_post_page_sidecars(
             }
         }
         if let Err(error) =
-            generate_youtube_nfo(metadata, page, video_url, title, uploader, source).await
+            generate_youtube_nfo(metadata, page, video_url, title, uploader, avatar_url, source).await
         {
             warn!(platform, path = %page.display(), %error, "{}图集分页 NFO 生成失败", platform);
         }
@@ -5883,7 +5980,8 @@ fn youtube_co_creators(metadata: &ExternalMediaMetadata, uploader: &str) -> Vec<
 /// - `studio`：平台名（如 YouTube/抖音），写入 `<studio>`；
 /// - `aired`：上传时间，分别写入 `<year>/<premiered>/<aired>`。
 /// - `uploader`：主频道，写入 `<director>` 并作为第一个 `<actor>`；
-/// - `co_creators`：联合投稿的合作频道名，逐个补写 `<actor>`。
+/// - `co_creators`：联合投稿的合作频道名，逐个补写 `<actor>`；
+/// - `avatar_url`：主频道头像地址，写进 `<actor><thumb>`，媒体库里才有作者头像。
 /// 注意 `<aired>` 与 `<studio>` 两个标签的参数顺序不能写反，
 /// 否则会出现"工作室=日期、首播=平台名"的错位。
 fn build_youtube_movie_nfo_xml(
@@ -5897,14 +5995,31 @@ fn build_youtube_movie_nfo_xml(
     co_creators: &[String],
     thumbnail: &str,
     video_url: &str,
+    avatar_url: Option<&str>,
 ) -> String {
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
-    let actor_lines = std::iter::once(uploader)
+    let avatar = avatar_url.filter(|url| !url.trim().is_empty());
+    let mut actors = Vec::new();
+    for (index, name) in std::iter::once(uploader)
         .chain(co_creators.iter().map(String::as_str))
         .filter(|name| !name.trim().is_empty())
-        .map(|name| format!("    <actor><name>{}</name><role>频道</role></actor>", escape(name)))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .enumerate()
+    {
+        // 头像只有主频道有，合作频道没有单独的头像地址可写
+        let thumb = if index == 0 {
+            avatar
+                .map(|url| format!("<thumb>{}</thumb>", escape(url)))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        actors.push(format!(
+            "    <actor><name>{}</name><role>频道</role>{}</actor>",
+            escape(name),
+            thumb
+        ));
+    }
+    let actor_lines = actors.join("\n");
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n\
 <movie>\n\
@@ -5946,6 +6061,7 @@ async fn generate_youtube_nfo(
     video_url: &str,
     title: &str,
     uploader: &str,
+    avatar_url: Option<&str>,
     source: &youtube_source::Model,
 ) -> Result<()> {
     if !crate::config::reload_config().nfo_config.enabled {
@@ -5979,6 +6095,7 @@ async fn generate_youtube_nfo(
         &co_creators,
         thumbnail,
         video_url,
+        avatar_url,
     );
     let temporary = nfo_path.with_extension("nfo.download");
     tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
@@ -6611,7 +6728,7 @@ async fn ytdlp_version() -> Option<String> {
 async fn ytdlp_version_at(executable: &Path) -> Option<String> {
     let output = tokio::time::timeout(
         YTDLP_VERSION_TIMEOUT,
-        Command::new(executable).arg("--version").output(),
+        crate::utils::process::tokio_command(executable).arg("--version").output(),
     )
     .await
     .ok()?
@@ -7413,7 +7530,7 @@ fn append_ytdlp_tab_args(command: &mut Command) {
 /// 忽略该环境变量，因此 `command_error` 里还有 GBK 回退解码兜底，保证 Windows
 /// 本地化错误文本（如“远程主机强迫关闭了一个现有的连接”）不乱码。
 pub(crate) fn ytdlp_command() -> Command {
-    let mut command = Command::new(ytdlp_executable());
+    let mut command = crate::utils::process::tokio_command(ytdlp_executable());
     command.env("PYTHONUTF8", "1");
     command.env("PYTHONIOENCODING", "utf-8");
     command
@@ -8167,6 +8284,7 @@ mod tests {
             &[],
             "https://example.com/thumb.jpg",
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            None,
         );
         assert!(xml.contains("<studio>YouTube</studio>"), "studio 应为平台名: {xml}");
         assert!(xml.contains("<aired>2026-09-01</aired>"), "aired 应为日期: {xml}");
@@ -8195,6 +8313,7 @@ mod tests {
             &["合作频道A".to_string(), "合作频道B".to_string()],
             "https://example.com/thumb.jpg",
             "https://www.youtube.com/watch?v=vid123",
+            None,
         );
         assert_eq!(xml.matches("<actor>").count(), 3, "主频道+2个合作频道共3个 actor: {xml}");
         assert!(xml.contains("<actor><name>主频道</name><role>频道</role></actor>"), "{xml}");
@@ -8202,6 +8321,60 @@ mod tests {
         assert!(xml.contains("<actor><name>合作频道B</name><role>频道</role></actor>"), "{xml}");
         assert!(xml.contains("<director>主频道</director>"), "director 应为主频道: {xml}");
         assert_eq!(xml.matches("主频道").count(), 2, "主频道只在 director 与第一个 actor 出现: {xml}");
+    }
+
+    #[test]
+    fn youtube_movie_nfo_writes_uploader_avatar_thumb() {
+        // 抖音等外源的作者头像地址要写进主频道 actor，媒体库才显示 UP 头像；
+        // 合作频道没有各自的头像地址，不应误写同一个 <thumb>。
+        let aired = chrono::NaiveDate::from_ymd_opt(2026, 10, 4)
+            .expect("有效日期")
+            .and_hms_opt(0, 0, 0)
+            .expect("有效时间");
+        let xml = super::build_youtube_movie_nfo_xml(
+            "抖音作品",
+            "简介",
+            "douyin",
+            "抖音",
+            "7515762262805777727",
+            aired,
+            "古德末泥(高智版)",
+            &[],
+            "https://example.com/cover.jpg",
+            "https://www.douyin.com/video/7515762262805777727",
+            Some("https://p3.douyinpic.com/avatar.jpeg"),
+        );
+        assert!(
+            xml.contains("<actor><name>古德末泥(高智版)</name><role>频道</role><thumb>https://p3.douyinpic.com/avatar.jpeg</thumb></actor>"),
+            "主频道 actor 应带 <thumb> 头像: {xml}"
+        );
+        assert_eq!(
+            xml.matches("<role>频道</role><thumb>").count(),
+            1,
+            "只有主频道 actor 写头像 <thumb>: {xml}"
+        );
+        assert!(xml.contains("<fanart><thumb>https://example.com/cover.jpg</thumb></fanart>"), "{xml}");
+
+        // 空白头像地址不写 <thumb>，避免生成空标签
+        let xml = super::build_youtube_movie_nfo_xml(
+            "抖音作品",
+            "简介",
+            "douyin",
+            "抖音",
+            "7515762262805777727",
+            aired,
+            "古德末泥(高智版)",
+            &[],
+            "https://example.com/cover.jpg",
+            "https://www.douyin.com/video/7515762262805777727",
+            Some("   "),
+        );
+        assert!(xml.contains("<actor><name>古德末泥(高智版)</name><role>频道</role></actor>"), "{xml}");
+        assert_eq!(
+            xml.matches("<role>频道</role><thumb>").count(),
+            0,
+            "空白头像地址不应写 <thumb>: {xml}"
+        );
     }
 
     #[test]

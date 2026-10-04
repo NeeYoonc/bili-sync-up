@@ -528,6 +528,7 @@ fn download_risk_control_resume_source_key(video_source: &VideoSourceEnum) -> St
         VideoSourceEnum::WatchLater(source) => format!("watch_later:{}", source.id),
         VideoSourceEnum::BangumiSource(source) => format!("bangumi:{}", source.id),
         VideoSourceEnum::PugvSource(source) => format!("pugv:{}", source.id),
+        VideoSourceEnum::MangaSource(source) => format!("manga:{}", source.id),
     }
 }
 
@@ -1624,6 +1625,20 @@ pub async fn refresh_video_source<'a>(
                     *episode_number,
                     Some(ep_id.clone()),
                 ),
+                VideoInfo::Manga {
+                    title,
+                    bvid,
+                    episode_number,
+                    ep_id,
+                    author,
+                    ..
+                } => (
+                    title.clone(),
+                    bvid.clone(),
+                    author.clone().unwrap_or_else(|| "漫画".to_string()),
+                    *episode_number,
+                    Some(ep_id.clone()),
+                ),
             };
             temp_video_infos.push((title, bvid, upper_name, episode_num, ep_id));
         }
@@ -1640,6 +1655,7 @@ pub async fn refresh_video_source<'a>(
                 VideoInfo::Dynamic { bvid, .. } => bvid.clone(),
                 VideoInfo::Bangumi { bvid, .. } => bvid.clone(),
                 VideoInfo::Pugv { bvid, .. } => bvid.clone(),
+                VideoInfo::Manga { bvid, .. } => bvid.clone(),
             })
             .collect();
 
@@ -1957,13 +1973,22 @@ pub async fn fetch_video_details(
 
     // 分离出番剧 / 课程 / 普通视频
     let (bangumi_videos, rest): (Vec<_>, Vec<_>) = videos_model.into_iter().partition(|v| v.source_type == Some(1));
-    let (pugv_videos, normal_videos): (Vec<_>, Vec<_>) =
+    let (pugv_videos, rest): (Vec<_>, Vec<_>) =
         rest.into_iter().partition(|v| v.source_type == Some(2));
+    // 漫画章节
+    let (manga_videos, normal_videos): (Vec<_>, Vec<_>) =
+        rest.into_iter().partition(|v| v.source_type == Some(3));
 
     // 课程课时：cid 在入库时就已带上，这里只需补齐 page 记录
     if !pugv_videos.is_empty() {
         info!("开始处理 {} 个课程视频", pugv_videos.len());
         fill_pugv_videos(bili_client, pugv_videos, connection, video_source).await?;
+    }
+
+    // 漫画章节：作品详情一次就能拿到「话 -> 页数」映射，按源请求一次即可
+    if !manga_videos.is_empty() {
+        info!("开始处理 {} 个漫画章节", manga_videos.len());
+        fill_manga_videos(manga_videos, connection, video_source).await?;
     }
 
     // 优化后的番剧信息获取 - 使用数据库缓存和按季分组
@@ -3117,6 +3142,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
         VideoSourceEnum::WatchLater(_) => "稍后再看",
         VideoSourceEnum::BangumiSource(_) => "番剧",
         VideoSourceEnum::PugvSource(_) => "课程",
+        VideoSourceEnum::MangaSource(_) => "漫画",
     };
 
     let mut renamed_count = 0;
@@ -3923,6 +3949,21 @@ async fn download_video_pages(
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
         permit = semaphore.acquire() => permit.context("acquire semaphore failed")?,
     };
+
+    // 漫画：一话 = 一个 video、一页 = 一个 page，产物是该话的 CBZ。
+    // 取流 / 合并 / NFO / 弹幕这些通用步骤对漫画都不适用，直接走漫画专用链路。
+    if matches!(video_source, VideoSourceEnum::MangaSource(_)) {
+        return crate::manga_download::download_manga_chapter(
+            video_source,
+            video_model,
+            pages,
+            connection,
+            bili_client,
+            token,
+        )
+        .await;
+    }
+
     let mut status = VideoStatus::from(video_model.download_status);
     let separate_status = status.should_run();
     let should_run_video_nfo = video_status_should_run_nfo(&separate_status);
@@ -12082,6 +12123,104 @@ async fn get_video_count_for_source(video_source: &VideoSourceEnum, connection: 
 }
 
 // ============================ 课程（pugv）详情填充 ============================
+
+// ============================ 漫画详情填充 ============================
+
+/// 批量填充漫画章节的分页记录。
+///
+/// 作品详情接口一次返回整部漫画的 `ep_list`（含每话 `image_count`），
+/// 因此一个漫画源只请求一次；真实页面尺寸在下载阶段拿到页面清单后再回填。
+async fn fill_manga_videos(
+    manga_videos: Vec<video::Model>,
+    connection: &DatabaseConnection,
+    video_source: &VideoSourceEnum,
+) -> Result<()> {
+    let VideoSourceEnum::MangaSource(manga_source) = video_source else {
+        return Ok(());
+    };
+    let Some(media_id) = manga_source.media_id.clone() else {
+        warn!("漫画源「{}」缺少 comic_id，跳过章节详情填充", manga_source.name);
+        return Ok(());
+    };
+
+    let page_counts = match crate::bilibili::manga::fetch_comic_detail(&media_id).await {
+        Ok(comic) => {
+            info!(
+                "漫画「{}」获取到 {} 话元信息",
+                comic.title,
+                comic.episodes.len()
+            );
+            comic
+                .episodes
+                .into_iter()
+                .map(|episode| (episode.ep_id, episode.image_count.max(1)))
+                .collect::<HashMap<String, u32>>()
+        }
+        Err(error) => {
+            warn!(
+                "获取漫画 mc{} 详情失败，将退化为按已有信息填充: {:#}",
+                media_id, error
+            );
+            HashMap::new()
+        }
+    };
+
+    for video_model in manga_videos {
+        if let Err(error) = process_manga_video(video_model, &page_counts, connection, video_source).await {
+            error!("处理漫画章节失败: {:#}", error);
+        }
+    }
+    Ok(())
+}
+
+/// 填充单个漫画章节的分页记录。
+async fn process_manga_video(
+    video_model: video::Model,
+    page_counts: &HashMap<String, u32>,
+    connection: &DatabaseConnection,
+    video_source: &VideoSourceEnum,
+) -> Result<()> {
+    let Some(ep_id) = video_model.ep_id.clone() else {
+        warn!("漫画章节「{}」缺少 ep_id，跳过详情填充", video_model.name);
+        return Ok(());
+    };
+    // 详情接口没取到时保守按 1 页处理，下载阶段会用真实页面清单纠正
+    let page_count = page_counts.get(&ep_id).copied().unwrap_or(1).max(1);
+
+    let existing = page::Entity::find()
+        .filter(page::Column::VideoId.eq(video_model.id))
+        .count(connection)
+        .await
+        .context("统计漫画分页失败")?;
+
+    let txn = crate::database::begin_traced_transaction(connection, "workflow.fill_manga_pages").await?;
+    if existing == 0 {
+        for pid in 1..=page_count as i32 {
+            page::ActiveModel {
+                video_id: Set(video_model.id),
+                cid: Set(0),
+                pid: Set(pid),
+                name: Set(format!("第{}页", pid)),
+                duration: Set(0),
+                download_status: Set(0),
+                created_at: Set(crate::utils::time_format::now_standard_string()),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await
+            .with_context(|| format!("插入漫画分页失败: video_id={}, pid={}", video_model.id, pid))?;
+        }
+    }
+
+    let mut video_active_model: bili_sync_entity::video::ActiveModel = video_model.into();
+    video_source.set_relation_id(&mut video_active_model);
+    video_active_model.single_page = Set(Some(page_count <= 1));
+    video_active_model.tags = Set(Some(serde_json::Value::Array(vec![])));
+    video_active_model.save(&txn).await?;
+    txn.commit().await?;
+    notify_videos_changed();
+    Ok(())
+}
 
 /// 批量填充课程课时详情。
 ///

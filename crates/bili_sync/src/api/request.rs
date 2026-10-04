@@ -16,6 +16,7 @@ pub struct VideosRequest {
     pub watch_later: Option<i32>,
     pub bangumi: Option<i32>,
     pub pugv: Option<i32>,
+    pub manga: Option<i32>,
     pub query: Option<String>,
     pub page: Option<u64>,
     pub page_size: Option<u64>,
@@ -323,6 +324,8 @@ pub struct UpdateConfigRequest {
     pub bangumi_quick_subscribe_path: Option<String>,
     // 添加源页：课程快捷订阅路径模板
     pub pugv_quick_subscribe_path: Option<String>,
+    // 添加源页：漫画快捷订阅路径模板
+    pub manga_quick_subscribe_path: Option<String>,
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: Option<String>,
     pub split_chapters_after_download: Option<bool>,
@@ -401,6 +404,24 @@ pub struct SearchRequest {
 pub struct PugvUpCoursesRequest {
     /// 讲师（UP 主）的 mid
     pub up_id: String,
+}
+
+/// 查询哔哩哔哩漫画作品信息的请求
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct MangaComicRequest {
+    /// 漫画 comic_id（可传 `mc25969` 或完整链接）
+    pub comic_id: String,
+}
+
+/// 关键词搜索漫画的请求
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct MangaSearchRequest {
+    /// 搜索关键词（漫画名 / 作者名）
+    pub keyword: String,
+    #[serde(default = "default_page")]
+    pub page: u32,
+    #[serde(default = "default_page_size")]
+    pub page_size: u32,
 }
 
 fn default_page() -> u32 {
@@ -493,6 +514,7 @@ pub struct ResetSpecificTasksRequest {
     pub watch_later: Option<i32>,
     pub bangumi: Option<i32>,
     pub pugv: Option<i32>,
+    pub manga: Option<i32>,
     pub platform: Option<String>,
     pub youtube: Option<i32>,
     // 与 /api/videos 的过滤参数保持一致，便于“按当前筛选批量重置”

@@ -14,6 +14,7 @@ pub mod live_updates;
 pub mod model;
 pub mod netscape_cookies;
 pub mod nfo;
+pub mod process;
 pub mod notification;
 pub mod scan_collector;
 pub mod scan_id_tracker;

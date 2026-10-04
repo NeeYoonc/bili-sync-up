@@ -20,6 +20,9 @@ pub struct VideoSourcesResponse {
     /// B 站课程（pugv / cheese）
     #[serde(default)]
     pub pugv: Vec<VideoSource>,
+    /// 哔哩哔哩漫画
+    #[serde(default)]
+    pub manga: Vec<VideoSource>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -603,6 +606,8 @@ pub struct ConfigResponse {
     // 添加源页：番剧快捷订阅路径模板
     pub bangumi_quick_subscribe_path: String,
     pub pugv_quick_subscribe_path: String,
+    // 添加源页：漫画快捷订阅路径模板
+    pub manga_quick_subscribe_path: String,
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: String,
     pub split_chapters_after_download: bool,
@@ -752,6 +757,71 @@ pub struct PugvUpCoursesResponse {
     pub success: bool,
     pub up_id: String,
     pub data: Vec<PugvCourseItem>,
+}
+
+/// 漫画一话里的单页（网页阅读器用）
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaChapterPageResponse {
+    /// 页号，从 0 起
+    pub index: usize,
+    /// CBZ 里的条目名（如 `0001.jpg`）
+    pub name: String,
+    pub size: u64,
+}
+
+/// 漫画一话的清单（网页阅读器用）
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaChapterResponse {
+    pub success: bool,
+    pub video_id: i32,
+    /// 话名
+    pub title: String,
+    /// CBZ 文件路径
+    pub path: String,
+    pub size_bytes: u64,
+    pub page_count: u64,
+    pub pages: Vec<MangaChapterPageResponse>,
+}
+
+/// 哔哩哔哩漫画搜索结果条目
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaSearchItemResponse {
+    /// comic_id，可直接作为漫画源 ID
+    pub comic_id: String,
+    pub title: String,
+    pub author: String,
+    pub cover: String,
+    /// 题材标签
+    pub styles: Vec<String>,
+    pub is_finish: bool,
+    /// 站点详情页链接
+    pub url: String,
+}
+
+/// 哔哩哔哩漫画关键词搜索响应
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaSearchResponse {
+    pub success: bool,
+    pub keyword: String,
+    pub page: u32,
+    /// 本页之后是否还有更多结果
+    pub has_more: bool,
+    pub results: Vec<MangaSearchItemResponse>,
+}
+
+/// 哔哩哔哩漫画作品信息（添加漫画源时自动填名用）
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MangaComicResponse {
+    pub success: bool,
+    /// 规范化后的 comic_id
+    pub comic_id: String,
+    pub title: String,
+    pub author: String,
+    pub cover: String,
+    pub intro: String,
+    /// 章节总数
+    pub episode_count: u64,
+    pub is_finish: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1046,6 +1116,8 @@ pub struct DashBoardResponse {
     pub enabled_bangumi: u64,
     /// 已启用的课程（pugv）源数量
     pub enabled_pugv: u64,
+    /// 已启用的漫画源数量
+    pub enabled_manga: u64,
     pub enable_watch_later: bool,
     pub total_favorites: u64,
     pub total_collections: u64,
@@ -1053,6 +1125,8 @@ pub struct DashBoardResponse {
     pub total_bangumi: u64,
     /// 课程（pugv）源总数
     pub total_pugv: u64,
+    /// 漫画源总数
+    pub total_manga: u64,
     pub total_watch_later: u64,
     pub enabled_youtube_sources: u64,
     pub total_youtube_sources: u64,

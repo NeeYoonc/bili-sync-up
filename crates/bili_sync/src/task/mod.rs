@@ -158,6 +158,7 @@ pub struct UpdateConfigTask {
     pub submission_quick_subscribe_path: Option<String>,
     pub bangumi_quick_subscribe_path: Option<String>,
     pub pugv_quick_subscribe_path: Option<String>,
+    pub manga_quick_subscribe_path: Option<String>,
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: Option<String>,
     pub split_chapters_after_download: Option<bool>,
@@ -2447,6 +2448,7 @@ impl ConfigTaskQueue {
                 submission_quick_subscribe_path: task.submission_quick_subscribe_path.clone(),
                 bangumi_quick_subscribe_path: task.bangumi_quick_subscribe_path.clone(),
                 pugv_quick_subscribe_path: task.pugv_quick_subscribe_path.clone(),
+                manga_quick_subscribe_path: task.manga_quick_subscribe_path.clone(),
                 // ffmpeg 路径
                 ffmpeg_path: task.ffmpeg_path.clone(),
                 split_chapters_after_download: task.split_chapters_after_download,

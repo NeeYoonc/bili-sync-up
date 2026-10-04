@@ -627,6 +627,26 @@ async fn load_video_sources_from_db(
         });
     }
 
+    // 加载漫画源（只加载启用的）
+    let manga_sources = entities::video_source::Entity::find()
+        .filter(entities::video_source::Column::Type.eq(3))
+        .filter(entities::video_source::Column::Enabled.eq(true))
+        .all(connection.as_ref())
+        .await?;
+
+    for manga in manga_sources {
+        let Some(media_id) = manga.media_id.clone() else {
+            warn!("漫画源「{}」(ID: {}) 缺少 comic_id，跳过", manga.name, manga.id);
+            continue;
+        };
+        video_sources.push(VideoSourceWithId {
+            id: manga.id,
+            args: Args::Manga { media_id },
+            path: PathBuf::from(manga.path),
+            source_type: SourceType::Manga,
+        });
+    }
+
     Ok(video_sources)
 }
 
@@ -665,6 +685,13 @@ async fn count_all_video_sources(
         .count(connection.as_ref())
         .await?;
     total_count += pugv_count as usize;
+
+    // 统计漫画源
+    let manga_count = entities::video_source::Entity::find()
+        .filter(entities::video_source::Column::Type.eq(3))
+        .count(connection.as_ref())
+        .await?;
+    total_count += manga_count as usize;
 
     Ok(total_count)
 }
@@ -712,6 +739,13 @@ async fn count_enabled_video_sources(
         .count(connection.as_ref())
         .await?;
     total_count += pugv_count as usize;
+
+    let manga_count = entities::video_source::Entity::find()
+        .filter(entities::video_source::Column::Type.eq(3))
+        .filter(entities::video_source::Column::Enabled.eq(true))
+        .count(connection.as_ref())
+        .await?;
+    total_count += manga_count as usize;
 
     Ok(total_count)
 }
@@ -1110,6 +1144,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                         crate::adapter::Args::WatchLater => "稍后观看",
                         crate::adapter::Args::Bangumi { .. } => "番剧",
                         crate::adapter::Args::Pugv { .. } => "课程",
+                        crate::adapter::Args::Manga { .. } => "漫画",
                     };
                     debug!("  - {} (ID: {})", source_name, source.id);
                 }
@@ -1183,6 +1218,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             crate::adapter::Args::WatchLater => "稍后再看",
                             crate::adapter::Args::Bangumi { .. } => "番剧",
                             crate::adapter::Args::Pugv { .. } => "课程",
+                            crate::adapter::Args::Manga { .. } => "漫画",
                         };
 
                         info!("处理下一个{}前延迟 {} 秒，避免触发风控...", source_type, delay_seconds);

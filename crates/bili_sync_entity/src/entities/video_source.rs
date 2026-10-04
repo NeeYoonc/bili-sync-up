@@ -13,12 +13,17 @@ pub enum SourceType {
     /// B 站课程（pugv/cheese），如 https://www.bilibili.com/cheese/play/ss713799843
     #[sea_orm(num_value = 2)]
     Pugv = 2,
+    /// 哔哩哔哩漫画，如 https://manga.bilibili.com/detail/mc25969
+    #[sea_orm(num_value = 3)]
+    Manga = 3,
 }
 
 /// `video` 表 `source_type` 列：番剧
 pub const VIDEO_SOURCE_TYPE_BANGUMI: i32 = 1;
 /// `video` 表 `source_type` 列：B 站课程（pugv/cheese）
 pub const VIDEO_SOURCE_TYPE_PUGV: i32 = 2;
+/// `video` 表 `source_type` 列：哔哩哔哩漫画
+pub const VIDEO_SOURCE_TYPE_MANGA: i32 = 3;
 
 /// 是否为「剧集型」来源（番剧 / 课程）。
 ///
@@ -36,6 +41,16 @@ pub fn is_episode_source_type(source_type: Option<i32>) -> bool {
 #[inline]
 pub fn is_pugv_source_type(source_type: Option<i32>) -> bool {
     source_type == Some(VIDEO_SOURCE_TYPE_PUGV)
+}
+
+/// 是否为哔哩哔哩漫画源。
+///
+/// 漫画走「一话 = 一个 video、一页 = 一个 page」的复用结构，但目录布局是
+/// Komga/Kavita/Mihon 通用的 `系列目录 + 每话一个 CBZ`，因此不能算「剧集型」，
+/// 需要单独判定以走漫画专用的下载与打包逻辑。
+#[inline]
+pub fn is_manga_source_type(source_type: Option<i32>) -> bool {
+    source_type == Some(VIDEO_SOURCE_TYPE_MANGA)
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Default)]

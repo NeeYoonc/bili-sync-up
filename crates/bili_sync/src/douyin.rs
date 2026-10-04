@@ -2653,7 +2653,7 @@ async fn sign_douyin_url(url: &str) -> Result<String> {
         )
     })?;
     let signer_env_dir = sync_douyin_signer_env().await?;
-    let mut command = tokio::process::Command::new(&node);
+    let mut command = crate::utils::process::tokio_command(&node);
     command
         .arg(&signer)
         .arg(url)
@@ -4282,7 +4282,7 @@ async fn compose_still_page(
     platform: &str,
 ) -> Result<()> {
     let temporary = target.with_extension("still.mp4");
-    let result = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+    let result = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
         .args(["-y", "-loop", "1", "-framerate", "30", "-i"])
         .arg(image_path)
         .args(["-t", &SLIDESHOW_SECONDS_PER_IMAGE.to_string()])
@@ -4390,7 +4390,7 @@ async fn compose_image_slideshow(
         .saturating_mul(SLIDESHOW_SECONDS_PER_IMAGE)
         .max(3);
     let temporary = output_path.with_extension("slideshow.mp4");
-    let mut command = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"));
+    let mut command = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"));
     command
         .args(["-y", "-f", "concat", "-safe", "0", "-i"])
         .arg(&concat_path);
@@ -4449,7 +4449,7 @@ pub(crate) async fn merge_encrypted_dash(
     validate_content_key(video_key)?;
     validate_content_key(audio_key)?;
     remove_file_if_exists(output_path).await?;
-    let output = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+    let output = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
         .args(["-y", "-decryption_key", video_key, "-i"])
         .arg(video_path)
         .args(["-decryption_key", audio_key, "-i"])
@@ -4480,7 +4480,7 @@ pub(crate) async fn merge_encrypted_dash(
 pub(crate) async fn decrypt_dash_stream(input_path: &Path, key: &str, output_path: &Path) -> Result<()> {
     validate_content_key(key)?;
     remove_file_if_exists(output_path).await?;
-    let output = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+    let output = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
         .args(["-y", "-decryption_key", key, "-i"])
         .arg(input_path)
         .args(["-map", "0", "-c", "copy", "-movflags", "+faststart"])
@@ -4504,7 +4504,7 @@ fn validate_content_key(key: &str) -> Result<()> {
 }
 
 async fn verify_playable_media(path: &Path) -> Result<()> {
-    let output = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"))
+    let output = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
         .args(["-v", "error", "-i"])
         .arg(path)
         .args(["-t", "2", "-f", "null", "-"])
@@ -5243,7 +5243,7 @@ mod tests {
     }
 
     async fn probe_media_duration(path: &Path) -> f64 {
-        let output = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffprobe"))
+        let output = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffprobe"))
             .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"])
             .arg(path)
             .output()

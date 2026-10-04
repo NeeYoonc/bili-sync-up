@@ -35,6 +35,8 @@ CLAUDE.MD
 *.swo
 *~
 
+.playwright-cli/
+
 # 操作系统文件
 /issues
 .DS_Store

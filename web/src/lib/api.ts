@@ -74,7 +74,8 @@ import type {
 	YouTubeVideo,
 	CreateYouTubeSourceRequest,
 	UpdateYouTubeSourceRequest,
-	YouTubeQueueStatusResponse
+	YouTubeQueueStatusResponse,
+	MangaChapterResponse
 } from './types';
 import { ErrorType } from './types';
 import { wsManager } from './ws';
@@ -1054,6 +1055,28 @@ class ApiClient {
 	}
 
 	/**
+	 * 获取哔哩哔哩漫画作品信息（添加漫画源时自动填名）
+	 */
+	async getMangaComic(comicId: string): Promise<ApiResponse<import('./types').MangaComicResponse>> {
+		return this.get<import('./types').MangaComicResponse>('/manga/comic', { comic_id: comicId });
+	}
+
+	/**
+	 * 关键词搜索哔哩哔哩漫画（添加漫画源时按名字挑作品）
+	 */
+	async searchManga(
+		keyword: string,
+		page = 1,
+		pageSize = 20
+	): Promise<ApiResponse<import('./types').MangaSearchResponse>> {
+		return this.get<import('./types').MangaSearchResponse>('/manga/search', {
+			keyword,
+			page,
+			page_size: pageSize
+		});
+	}
+
+	/**
 	 * 获取关注的UP主列表
 	 */
 	async getUserFollowings(): Promise<ApiResponse<UserFollowing[]>> {
@@ -1184,6 +1207,13 @@ class ApiClient {
 	 */
 	async getVideoBvid(videoId: string | number): Promise<ApiResponse<VideoBvidResponse>> {
 		return this.get<VideoBvidResponse>(`/videos/${videoId}/bvid`);
+	}
+	/**
+	 * 获取漫画一话的阅读清单（本地 CBZ 压缩包里的分页）
+	 * @param videoId 漫画话（video）ID
+	 */
+	async getMangaChapter(videoId: string | number): Promise<ApiResponse<MangaChapterResponse>> {
+		return this.get<MangaChapterResponse>(`/manga/chapter/${videoId}`);
 	}
 
 	/**
@@ -1631,6 +1661,17 @@ export const api = {
 	getPugvUpCourses: (upId: string) => apiClient.getPugvUpCourses(upId),
 
 	/**
+	 * 获取哔哩哔哩漫画作品信息（添加漫画源时自动填名）
+	 */
+	getMangaComic: (comicId: string) => apiClient.getMangaComic(comicId),
+
+	/**
+	 * 关键词搜索哔哩哔哩漫画（添加漫画源时按名字挑作品）
+	 */
+	searchManga: (keyword: string, page?: number, pageSize?: number) =>
+		apiClient.searchManga(keyword, page, pageSize),
+
+	/**
 	 * 获取关注的UP主列表
 	 */
 	getUserFollowings: () => apiClient.getUserFollowings(),
@@ -1840,6 +1881,7 @@ export const api = {
 	 * 获取视频BVID信息（用于构建B站链接）
 	 */
 	getVideoBvid: (videoId: string | number) => apiClient.getVideoBvid(videoId),
+	getMangaChapter: (videoId: string | number) => apiClient.getMangaChapter(videoId),
 
 	/**
 	 * 获取代理视频流URL

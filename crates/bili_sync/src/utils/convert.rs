@@ -304,6 +304,46 @@ impl VideoInfo {
                 cid: Set(cid.parse::<i64>().ok()),
                 ..default
             },
+            VideoInfo::Manga {
+                title,
+                ep_id,
+                bvid,
+                cover,
+                intro,
+                pubtime,
+                show_title,
+                episode_number,
+                share_copy,
+                author,
+                ..
+            } => bili_sync_entity::video::ActiveModel {
+                bvid: Set(bvid),
+                // 与课程一致：优先「作品名 话标题」，信息量最大
+                name: Set(share_copy
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| show_title.clone())
+                    .unwrap_or(title)),
+                intro: Set(intro),
+                cover: Set(cover),
+                ctime: Set(pubtime
+                    .with_timezone(&crate::utils::time_format::beijing_timezone())
+                    .naive_local()),
+                pubtime: Set(pubtime
+                    .with_timezone(&crate::utils::time_format::beijing_timezone())
+                    .naive_local()),
+                favtime: Set(pubtime
+                    .with_timezone(&crate::utils::time_format::beijing_timezone())
+                    .naive_local()),
+                // 漫画按普通视频的 category 落库，但下载阶段会走漫画专用分支
+                category: Set(2),
+                valid: Set(true),
+                upper_name: Set(author.unwrap_or_default()),
+                ep_id: Set(Some(ep_id)),
+                episode_number: Set(episode_number),
+                share_copy: Set(share_copy),
+                ..default
+            },
             _ => unreachable!(),
         }
     }
@@ -419,6 +459,8 @@ impl VideoInfo {
             // 课程（pugv）不使用常规稿件详情接口，详情字段在入库时就已完整，
             // 这里直接原样保留，避免误触发 unreachable。
             VideoInfo::Pugv { .. } => base_model.into_active_model(),
+            // 漫画同理：详情字段（章节元信息）在入库时就已完整。
+            VideoInfo::Manga { .. } => base_model.into_active_model(),
             _ => unreachable!(),
         }
     }
@@ -432,7 +474,8 @@ impl VideoInfo {
             | VideoInfo::Submission { ctime: time, .. }
             | VideoInfo::Dynamic { pubtime: time, .. }
             | VideoInfo::Bangumi { pubtime: time, .. }
-            | VideoInfo::Pugv { pubtime: time, .. } => time,
+            | VideoInfo::Pugv { pubtime: time, .. }
+            | VideoInfo::Manga { pubtime: time, .. } => time,
             _ => unreachable!(),
         }
     }

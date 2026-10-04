@@ -1963,7 +1963,7 @@ async fn sign_tiktok_url_with_sdk(url: &str, sdk: Option<&str>) -> Result<String
         )
     })?;
     let signer_env_dir = sync_tiktok_signer_env().await?;
-    let mut command = Command::new(&node);
+    let mut command = crate::utils::process::tokio_command(&node);
     command
         .arg(&signer)
         .arg(url)
@@ -3103,7 +3103,7 @@ async fn run_tiktok_sdk_manager(
             "未找到 Node.js 运行时：TikTok webmssdk SDK 自动更新需要 Node.js。请安装 Node.js，或通过环境变量 BILI_SYNC_TIKTOK_NODE 指定 node 路径"
         )
     })?;
-    let mut command = Command::new(&node);
+    let mut command = crate::utils::process::tokio_command(&node);
     command
         .arg(manager)
         .args(args)
