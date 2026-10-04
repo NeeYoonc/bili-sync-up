@@ -1225,9 +1225,12 @@ pub async fn create_youtube_source(
     Json(request): Json<CreateYouTubeSourceRequest>,
 ) -> Result<ApiResponse<YouTubeSourceResponse>, ApiError> {
     let source_type = normalize_source_type(&request.source_type)?;
-    let url = resolve_source_url(source_type, request.url.as_deref())?;
+    let mut url = resolve_source_url(source_type, request.url.as_deref())?;
     if source_type == "douyin" {
-        crate::douyin::resolve_sec_user_id(&url).await?;
+        // 统一存成作者主页链接：搜索页、分享短链、主页链接都归一到 sec_uid，
+        // 同一个作者才不会因为链接写法不同被当成两个源重复添加。
+        let sec_uid = crate::douyin::resolve_sec_user_id(&url).await?;
+        url = format!("https://www.douyin.com/user/{sec_uid}");
     } else if source_type == "tiktok" {
         if !crate::tiktok::is_tiktok_url(&url) {
             return Err(ApiError::from(anyhow!("TikTok 来源必须是有效的 tiktok.com 链接")));
@@ -1249,6 +1252,8 @@ pub async fn create_youtube_source(
     if name.is_empty() {
         return Err(ApiError::from(anyhow!("视频源名称不能为空")));
     }
+    // 外源互斥：同一个源只能有一条记录，重复添加会重复扫描、重复下载。
+    ensure_external_source_not_duplicated(db.as_ref(), source_type, &url).await?;
     let model = youtube_source::ActiveModel {
         source_type: Set(source_type.to_string()),
         name: Set(name.to_string()),
@@ -6704,6 +6709,72 @@ fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
     }
 }
 
+/// 外源「同一个源」的判定键。
+///
+/// 外源不像 B 站那样有现成的业务主键（收藏夹 fid / UP mid / 番剧 season_id），
+/// 只能从链接里取：抖音作者取 sec_uid、合集 / 放映厅 / 短剧取末段数字 id，
+/// TikTok 取 handle（大小写不敏感）、YouTube 取频道 id / 播放列表 id；
+/// 「稍后再看」「我的喜欢」这类天然只能有一个的源用固定键。
+fn external_source_identity(source_type: &str, url: &str) -> String {
+    let lower = url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let without_query = lower.split(['?', '#']).next().unwrap_or("");
+    let last_segment = without_query
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("");
+    let query_param = |key: &str| {
+        lower
+            .split_once('?')
+            .map(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix(&format!("{key}="))))
+            .flatten()
+            .unwrap_or("")
+    };
+    match source_type {
+        "douyin" => format!("douyin:user:{last_segment}"),
+        "douyin_collection" => format!("douyin:collection:{last_segment}"),
+        "douyin_theater" => format!("douyin:theater:{last_segment}"),
+        "douyin_series" => format!("douyin:series:{last_segment}"),
+        "douyin_liked" => "douyin:liked".to_string(),
+        "douyin_watch_later" => "douyin:watch_later".to_string(),
+        "tiktok" => format!("tiktok:user:{last_segment}"),
+        "tiktok_collection" => format!("tiktok:collection:{last_segment}"),
+        "tiktok_favorite" => "tiktok:favorite".to_string(),
+        "channel" => format!("youtube:channel:{last_segment}"),
+        "playlist" => {
+            let list = query_param("list");
+            format!("youtube:playlist:{}", if list.is_empty() { last_segment } else { list })
+        }
+        "subscriptions" => "youtube:subscriptions".to_string(),
+        "liked" => "youtube:liked".to_string(),
+        "watch_later" => "youtube:watch_later".to_string(),
+        _ => lower,
+    }
+}
+
+/// 外源互斥校验：同一个源（同平台 + 同一个身份）只允许存在一条记录。
+///
+/// 允许重复添加会导致同一个作者 / 合集被扫描两遍、同一批作品各下一份，
+/// 所以这里直接拒绝，并把已存在的那条告诉用户。
+async fn ensure_external_source_not_duplicated(
+    db: &DatabaseConnection,
+    source_type: &str,
+    url: &str,
+) -> Result<(), ApiError> {
+    let identity = external_source_identity(source_type, url);
+    let existing = youtube_source::Entity::find().all(db).await?;
+    if let Some(duplicated) = existing
+        .iter()
+        .find(|source| external_source_identity(&source.source_type, &source.url) == identity)
+    {
+        let platform = source_platform_label(duplicated);
+        return Err(ApiError::bad_request(format!(
+            "{platform}视频源已存在：\"{}\"（保存路径：{}）。同一个源不能重复添加，如需修改设置请先删除现有源。",
+            duplicated.name, duplicated.path
+        )));
+    }
+    Ok(())
+}
+
 fn youtube_search_url(keyword: &str, source_type: &str) -> Result<reqwest::Url> {
     let filter = match source_type {
         "channel" => "EgIQAg%3D%3D",
@@ -8850,6 +8921,59 @@ mod tests {
             .unwrap();
         assert!(!media.exists(), "重置分P下载后应删除本地媒体文件");
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// 外源互斥的判定键：同一个源不能因为链接写法不同（尾斜杠 / 大小写 /
+    /// 多余的查询参数）被当成两个源重复添加。
+    #[test]
+    fn external_source_identity_normalizes_links() {
+        let identity = super::external_source_identity;
+
+        // 抖音作者：尾斜杠不影响
+        assert_eq!(
+            identity("douyin", "https://www.douyin.com/user/MS4wLjABAAAAtest"),
+            identity("douyin", "https://www.douyin.com/user/MS4wLjABAAAAtest/"),
+        );
+        // 抖音合集 / 放映厅 / 短剧：按末段 id
+        assert_eq!(
+            identity("douyin_collection", "https://www.douyin.com/collection/7672884606911354673?from=web"),
+            "douyin:collection:7672884606911354673",
+        );
+        assert_eq!(
+            identity("douyin_theater", "https://www.douyin.com/lvdetail/7633372107832820276"),
+            "douyin:theater:7633372107832820276",
+        );
+        assert_eq!(
+            identity("douyin_series", "https://www.douyin.com/series/7663823934580033574"),
+            "douyin:series:7663823934580033574",
+        );
+        // TikTok handle 大小写不敏感
+        assert_eq!(
+            identity("tiktok", "https://www.tiktok.com/@Nkuu666"),
+            identity("tiktok", "https://www.tiktok.com/@nkuu666/"),
+        );
+        // YouTube 频道 / 播放列表
+        assert_eq!(
+            identity("channel", "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv"),
+            "youtube:channel:ucabcdefghijklmnopqrstuv",
+        );
+        assert_eq!(
+            identity("playlist", "https://www.youtube.com/playlist?list=PLabc123&si=xyz"),
+            identity("playlist", "https://www.youtube.com/playlist?list=PLabc123"),
+        );
+        // 天然只有一个的源：不同账号也是同一个键
+        assert_eq!(identity("watch_later", "https://www.youtube.com/playlist?list=WL"), "youtube:watch_later");
+        assert_eq!(identity("liked", "https://www.youtube.com/playlist?list=LL"), "youtube:liked");
+        assert_eq!(identity("douyin_liked", "https://www.douyin.com/user/self?tab=like"), "douyin:liked");
+        // 不同源必须不同
+        assert_ne!(
+            identity("douyin", "https://www.douyin.com/user/AAA"),
+            identity("douyin", "https://www.douyin.com/user/BBB"),
+        );
+        assert_ne!(
+            identity("douyin_collection", "https://www.douyin.com/collection/111"),
+            identity("douyin_collection", "https://www.douyin.com/collection/222"),
+        );
     }
 }
 

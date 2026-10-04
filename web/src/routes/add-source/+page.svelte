@@ -266,6 +266,8 @@
 	// 过滤已有视频源相关
 	let existingVideoSources: VideoSourcesResponse | null = null;
 	let existingDouyinSources: YouTubeSource[] = [];
+	let existingYouTubeSources: YouTubeSource[] = [];
+	let existingTikTokSources: YouTubeSource[] = [];
 	let existingCollectionIds: Set<string> = new Set();
 	let existingFavoriteIds: Set<number> = new Set();
 	let existingSubmissionIds: Set<number> = new Set();
@@ -786,7 +788,12 @@
 				isActive: true
 			}
 		]);
-		await Promise.all([loadExistingVideoSources(), loadExistingDouyinSources(), loadQuickSubscriptionTemplates()]);
+		await Promise.all([
+			loadExistingVideoSources(),
+			loadExistingDouyinSources(),
+			loadExistingExternalSources(),
+			loadQuickSubscriptionTemplates()
+		]);
 		if (sourcePlatform === 'youtube') {
 			await loadYouTubeDefaults();
 		} else if (sourcePlatform === 'douyin') {
@@ -2333,24 +2340,6 @@
 		}
 	}
 
-	// 已添加的抖音收藏夹 ID 集合（用于添加源界面的互斥置灰）
-	$: existingDouyinCollectionIds = new Set(
-		existingDouyinSources
-			.filter((s) => s.source_type === 'douyin_collection')
-			.map((s) => collectionIdFromDouyinUrl(s.url ?? ''))
-			.filter((id): id is string => id !== null)
-	);
-
-	function collectionIdFromDouyinUrl(url: string): string | null {
-		const match = url.match(/\/collection\/(\d+)/);
-		return match ? match[1] : null;
-	}
-
-	function isDouyinCollectionAdded(item: SearchResultItem): boolean {
-		const id = collectionIdFromDouyinUrl(item.youtube_url ?? '');
-		return id !== null && existingDouyinCollectionIds.has(id);
-	}
-
 	// 加载已有抖音源（用于收藏夹互斥置灰）
 	async function loadExistingDouyinSources() {
 		const result = await runRequest(() => api.getDouyinSources(), {
@@ -2360,6 +2349,107 @@
 		if (result && Array.isArray(result.data)) {
 			existingDouyinSources = result.data;
 		}
+	}
+
+	// 加载已有 YouTube / TikTok 源（外源互斥置灰用）
+	async function loadExistingExternalSources() {
+		const [youtube, tiktok] = await Promise.all([
+			runRequest(() => api.getYouTubeSources(), { showErrorToast: false, context: '加载已有 YouTube 源失败' }),
+			runRequest(() => api.getTikTokSources(), { showErrorToast: false, context: '加载已有 TikTok 源失败' })
+		]);
+		if (youtube && Array.isArray(youtube.data)) existingYouTubeSources = youtube.data;
+		if (tiktok && Array.isArray(tiktok.data)) existingTikTokSources = tiktok.data;
+	}
+
+	/**
+	 * 外源「同一个源」的规范化键，与后端 external_source_identity 保持一致：
+	 * 同一个源不能因为链接写法不同（尾斜杠、大小写、多余查询参数）被当成两个源。
+	 */
+	function externalSourceIdentityKey(sourceType: string, url: string): string {
+		const lower = url.trim().replace(/\/+$/, '').toLowerCase();
+		const withoutQuery = lower.split(/[?#]/)[0];
+		const segments = withoutQuery.split('/').filter(Boolean);
+		const last = segments.length > 0 ? segments[segments.length - 1] : '';
+		const query = new URLSearchParams(lower.includes('?') ? lower.slice(lower.indexOf('?') + 1) : '');
+		switch (sourceType) {
+			case 'douyin':
+				return `douyin:user:${last}`;
+			case 'douyin_collection':
+				return `douyin:collection:${last}`;
+			case 'douyin_theater':
+				return `douyin:theater:${last}`;
+			case 'douyin_series':
+				return `douyin:series:${last}`;
+			case 'douyin_liked':
+				return 'douyin:liked';
+			case 'douyin_watch_later':
+				return 'douyin:watch_later';
+			case 'tiktok':
+				return `tiktok:user:${last}`;
+			case 'tiktok_collection':
+				return `tiktok:collection:${last}`;
+			case 'tiktok_favorite':
+				return 'tiktok:favorite';
+			case 'channel':
+				return `youtube:channel:${last}`;
+			case 'playlist':
+				return `youtube:playlist:${query.get('list') || last}`;
+			case 'subscriptions':
+				return 'youtube:subscriptions';
+			case 'liked':
+				return 'youtube:liked';
+			case 'watch_later':
+				return 'youtube:watch_later';
+			default:
+				return lower;
+		}
+	}
+
+	// 已添加的外源身份集合（三个平台一起比对）
+	$: existingExternalIdentities = new Set(
+		[...existingDouyinSources, ...existingYouTubeSources, ...existingTikTokSources].map((source) =>
+			externalSourceIdentityKey(source.source_type, source.url ?? '')
+		)
+	);
+
+	/** 该外源是否已经添加过 */
+	function isExternalSourceAdded(sourceType: string, url: string | undefined | null): boolean {
+		if (!url) return false;
+		return existingExternalIdentities.has(externalSourceIdentityKey(sourceType, url));
+	}
+
+	/** 搜索结果里的外源条目是否已经添加过（用于置灰） */
+	function isExternalResultAdded(result: SearchResultItem): boolean {
+		const url = result.youtube_url;
+		if (!url) return false;
+		switch (result.result_type) {
+			case 'youtube_channel':
+				return isExternalSourceAdded('channel', url);
+			case 'youtube_playlist':
+				return isExternalSourceAdded('playlist', url);
+			case 'douyin_user':
+				return isExternalSourceAdded('douyin', url);
+			case 'douyin_collection':
+				return isExternalSourceAdded('douyin_collection', url);
+			case 'douyin_theater':
+				return isExternalSourceAdded('douyin_theater', url);
+			case 'douyin_series':
+				return isExternalSourceAdded('douyin_series', url);
+			case 'tiktok_user':
+				return isExternalSourceAdded('tiktok', url);
+			case 'tiktok_playlist':
+				return isExternalSourceAdded('tiktok_collection', url);
+			default:
+				return false;
+		}
+	}
+
+	/** 抖音右侧列表（收藏夹 / 放映厅 / 短剧）条目是否已经添加过 */
+	function isDouyinCatalogItemAdded(item: SearchResultItem): boolean {
+		const url = item.youtube_url ?? '';
+		if (url.includes('/lvdetail/')) return isExternalSourceAdded('douyin_theater', url);
+		if (url.includes('/series/')) return isExternalSourceAdded('douyin_series', url);
+		return isExternalSourceAdded('douyin_collection', url);
 	}
 
 	// 加载已有视频源（用于过滤）
@@ -5608,6 +5698,7 @@
 											!!result.season_id &&
 											isBangumiSeasonExists(result.season_id)}
 											{@const isMangaExisting = sourceType === 'manga' && isMangaComicExists(result.manga_comic_id)}
+										{@const isExternalExisting = isExternalResultAdded(result)}
 										{@const itemKey = `search_${result.youtube_url || result.bvid || result.season_id || result.mid || i}`}
 										<button
 											onclick={() => {
@@ -5631,7 +5722,7 @@
 												delay: enableSearchAnimations ? i * 50 : 0
 											}}
 											animate:flip={{ duration: enableSearchAnimations ? 300 : 0 }}
-											disabled={isBangumiExisting || isMangaExisting}
+											disabled={isBangumiExisting || isMangaExisting || isExternalExisting}
 										>
 											<!-- 批量模式下的复选框 -->
 											{#if batchMode && sourceType === 'submission'}
@@ -5694,6 +5785,12 @@
 																				? '抖音作者'
 																				: result.result_type === 'tiktok_user'
 																					? 'TikTok 作者'
+																			: result.result_type === 'douyin_theater'
+																				? '抖音放映厅'
+																			: result.result_type === 'douyin_series'
+																				? '抖音短剧'
+																			: result.result_type === 'douyin_collection'
+																				? '抖音收藏夹'
 																			: result.result_type === 'tiktok_playlist'
 																				? 'TikTok 收藏夹'
 																			: result.result_type === 'youtube_playlist'
@@ -5704,6 +5801,13 @@
 														</span>
 													{/if}
 													<!-- 显示已存在标记 -->
+													{#if isExternalExisting}
+														<span
+															class="flex-shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-300"
+														>
+															已添加
+														</span>
+													{/if}
 													{#if sourceType === 'submission' && result.mid && isSubmissionExists(Number(result.mid))}
 														<span
 															class="flex-shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-300"
@@ -5794,7 +5898,7 @@
 							{:else}
 								<div class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}" style={isMobile ? '' : 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}>
 									{#each douyinCatalog as item (item.youtube_url)}
-										{@const isAdded = isDouyinCollectionAdded(item)}
+										{@const isAdded = isDouyinCatalogItemAdded(item)}
 										<SelectableCardButton
 											onclick={() => selectSearchResult(item)}
 											disabled={isAdded}
@@ -5811,6 +5915,7 @@
 														<span class="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">已添加</span>
 													{/if}
 												</div>
+											</div>
 										</SelectableCardButton>
 									{/each}
 								</div>
@@ -5838,13 +5943,17 @@
 							{:else}
 								<div class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}" style={isMobile ? '' : 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}>
 									{#each youtubeChannelPlaylists as item (item.youtube_url)}
-										<SelectableCardButton onclick={() => selectSearchResult(item)} class="p-3">
+										{@const isAdded = isExternalSourceAdded('playlist', item.youtube_url)}
+										<SelectableCardButton onclick={() => selectSearchResult(item)} disabled={isAdded} class="p-3">
 											<div class="flex items-start gap-3">
 												<BiliImage src={item.cover} alt={item.title} class="h-16 w-12 flex-shrink-0 rounded object-cover" placeholder="封面" />
 												<div class="min-w-0 flex-1">
 													<h4 class="line-clamp-2 text-sm font-medium">{item.title}</h4>
 													<p class="text-muted-foreground mt-1 text-xs">{item.author}</p>
 													{#if item.description}<p class="text-muted-foreground/70 mt-1 line-clamp-2 text-xs">{item.description}</p>{/if}
+													{#if isAdded}
+														<span class="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">已添加</span>
+													{/if}
 												</div>
 											</div>
 										</SelectableCardButton>
