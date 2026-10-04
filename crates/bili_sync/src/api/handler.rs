@@ -11183,6 +11183,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         submission_quick_subscribe_path: config.submission_quick_subscribe_path.to_string(),
         bangumi_quick_subscribe_path: config.bangumi_quick_subscribe_path.to_string(),
         pugv_quick_subscribe_path: config.pugv_quick_subscribe_path.to_string(),
+        manga_quick_subscribe_path: config.manga_quick_subscribe_path.to_string(),
         // ffmpeg 路径
         ffmpeg_path: config.ffmpeg_path.clone(),
         split_chapters_after_download: config.split_chapters_after_download,
@@ -11787,6 +11788,7 @@ pub async fn update_config(
             submission_quick_subscribe_path: params.submission_quick_subscribe_path.clone(),
             bangumi_quick_subscribe_path: params.bangumi_quick_subscribe_path.clone(),
             pugv_quick_subscribe_path: params.pugv_quick_subscribe_path.clone(),
+            manga_quick_subscribe_path: params.manga_quick_subscribe_path.clone(),
             // ffmpeg 路径
             ffmpeg_path: params.ffmpeg_path.clone(),
             split_chapters_after_download: params.split_chapters_after_download,
@@ -11909,6 +11911,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "submission_quick_subscribe_path" => Some("UP主投稿快捷订阅路径模板"),
         "bangumi_quick_subscribe_path" => Some("番剧快捷订阅路径模板"),
         "pugv_quick_subscribe_path" => Some("课程快捷订阅路径模板"),
+        "manga_quick_subscribe_path" => Some("漫画快捷订阅路径模板"),
         "ffmpeg_path" => Some("ffmpeg路径"),
         "split_chapters_after_download" => Some("下载后按章节切分"),
         "youtube_proxy" => Some("YouTube专用代理"),
@@ -12098,6 +12101,7 @@ pub async fn update_config_internal(
     let original_submission_quick_subscribe_path = config.submission_quick_subscribe_path.clone();
     let original_bangumi_quick_subscribe_path = config.bangumi_quick_subscribe_path.clone();
     let original_pugv_quick_subscribe_path = config.pugv_quick_subscribe_path.clone();
+    let original_manga_quick_subscribe_path = config.manga_quick_subscribe_path.clone();
     let original_danmaku_update_enabled = config.danmaku_update_policy.enabled;
 
     // 更新配置字段
@@ -12239,6 +12243,14 @@ pub async fn update_config_internal(
         if trimmed != original_pugv_quick_subscribe_path.as_ref() {
             config.pugv_quick_subscribe_path = Cow::Owned(trimmed.to_string());
             updated_fields.push("pugv_quick_subscribe_path");
+        }
+    }
+
+    if let Some(manga_quick_subscribe_path) = params.manga_quick_subscribe_path {
+        let trimmed = manga_quick_subscribe_path.trim();
+        if trimmed != original_manga_quick_subscribe_path.as_ref() {
+            config.manga_quick_subscribe_path = Cow::Owned(trimmed.to_string());
+            updated_fields.push("manga_quick_subscribe_path");
         }
     }
 
@@ -13351,6 +13363,14 @@ pub async fn update_config_internal(
                         .update_config_item(
                             "pugv_quick_subscribe_path",
                             serde_json::to_value(&config.pugv_quick_subscribe_path)?,
+                        )
+                        .await
+                }
+                "manga_quick_subscribe_path" => {
+                    manager
+                        .update_config_item(
+                            "manga_quick_subscribe_path",
+                            serde_json::to_value(&config.manga_quick_subscribe_path)?,
                         )
                         .await
                 }

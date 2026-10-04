@@ -120,6 +120,7 @@
 	let collectionQuickSubscribePathTemplate = '';
 	let submissionQuickSubscribePathTemplate = '';
 	let pugvQuickSubscribePathTemplate = '';
+	let mangaQuickSubscribePathTemplate = '';
 	let bangumiQuickSubscribePathTemplate = '';
 	let lastAutoAppliedPath = '';
 	let cover = '';
@@ -562,6 +563,8 @@
 				return bangumiQuickSubscribePathTemplate;
 			case 'pugv':
 				return pugvQuickSubscribePathTemplate;
+			case 'manga':
+				return mangaQuickSubscribePathTemplate;
 			default:
 				return '';
 		}
@@ -582,7 +585,9 @@
 						? bangumiQuickSubscribePathTemplate.trim()
 						: currentQuickSubscriptionType === 'pugv'
 							? pugvQuickSubscribePathTemplate.trim()
-							: '';
+							: currentQuickSubscriptionType === 'manga'
+								? mangaQuickSubscribePathTemplate.trim()
+								: '';
 
 	function sanitizeQuickSubscriptionName(value: string): string {
 		return value.trim().replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '_');
@@ -629,6 +634,7 @@
 		submissionQuickSubscribePathTemplate = config.submission_quick_subscribe_path || '';
 		bangumiQuickSubscribePathTemplate = config.bangumi_quick_subscribe_path || '';
 		pugvQuickSubscribePathTemplate = config.pugv_quick_subscribe_path || '';
+		mangaQuickSubscribePathTemplate = config.manga_quick_subscribe_path || '';
 		globalFilterOptionDefault = filterOptionFromConfig(config);
 		if (filterOptionInheritGlobal) {
 			filterOptionDraft = cloneFilterOption(globalFilterOptionDefault);
@@ -3428,6 +3434,7 @@
 		if (selectedSourceType === 'submission') return submissionQuickSubscribePathTemplate.trim();
 		if (selectedSourceType === 'bangumi') return bangumiQuickSubscribePathTemplate.trim();
 		if (selectedSourceType === 'pugv') return pugvQuickSubscribePathTemplate.trim();
+		if (selectedSourceType === 'manga') return mangaQuickSubscribePathTemplate.trim();
 		return '';
 	})();
 

@@ -664,6 +664,7 @@ export interface ConfigResponse {
 	submission_quick_subscribe_path?: string;
 	bangumi_quick_subscribe_path?: string;
 	pugv_quick_subscribe_path?: string;
+	manga_quick_subscribe_path?: string;
 	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
 	ffmpeg_path?: string;
 	// 风控验证配置
@@ -840,6 +841,7 @@ export interface UpdateConfigRequest {
 	submission_quick_subscribe_path?: string;
 	bangumi_quick_subscribe_path?: string;
 	pugv_quick_subscribe_path?: string;
+	manga_quick_subscribe_path?: string;
 	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
 	ffmpeg_path?: string;
 	// 风控验证配置

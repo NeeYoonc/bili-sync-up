@@ -203,6 +203,9 @@ pub struct Config {
     pub bangumi_quick_subscribe_path: Cow<'static, str>,
     #[serde(default = "default_quick_subscribe_path_template")]
     pub pugv_quick_subscribe_path: Cow<'static, str>,
+    /// 漫画（哔哩哔哩漫画）快捷订阅路径模板
+    #[serde(default = "default_quick_subscribe_path_template")]
+    pub manga_quick_subscribe_path: Cow<'static, str>,
     /// 可选的 ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     #[serde(default = "default_ffmpeg_path")]
     pub ffmpeg_path: String,
@@ -703,6 +706,7 @@ impl Clone for Config {
             submission_quick_subscribe_path: self.submission_quick_subscribe_path.clone(),
             bangumi_quick_subscribe_path: self.bangumi_quick_subscribe_path.clone(),
             pugv_quick_subscribe_path: self.pugv_quick_subscribe_path.clone(),
+            manga_quick_subscribe_path: self.manga_quick_subscribe_path.clone(),
             ffmpeg_path: self.ffmpeg_path.clone(),
             split_chapters_after_download: self.split_chapters_after_download,
             proxy: self.proxy.clone(),
@@ -756,6 +760,7 @@ impl Default for Config {
             submission_quick_subscribe_path: default_quick_subscribe_path_template(),
             bangumi_quick_subscribe_path: default_quick_subscribe_path_template(),
             pugv_quick_subscribe_path: default_quick_subscribe_path_template(),
+            manga_quick_subscribe_path: default_quick_subscribe_path_template(),
             ffmpeg_path: default_ffmpeg_path(),
             split_chapters_after_download: default_split_chapters_after_download(),
             proxy: String::new(),

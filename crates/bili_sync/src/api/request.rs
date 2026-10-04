@@ -324,6 +324,8 @@ pub struct UpdateConfigRequest {
     pub bangumi_quick_subscribe_path: Option<String>,
     // 添加源页：课程快捷订阅路径模板
     pub pugv_quick_subscribe_path: Option<String>,
+    // 添加源页：漫画快捷订阅路径模板
+    pub manga_quick_subscribe_path: Option<String>,
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: Option<String>,
     pub split_chapters_after_download: Option<bool>,
