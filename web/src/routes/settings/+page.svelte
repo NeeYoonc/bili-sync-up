@@ -4299,11 +4299,11 @@
 								bind:value={mangaQuickSubscribePath}
 								placeholder="/Downloads/漫画"
 							/>
-							<p class="text-muted-foreground text-sm">
-								作品文件夹（作品名）会自动建在该路径下，一般填父目录即可
-							</p>
 						</div>
 					</div>
+					<p class="text-muted-foreground text-sm">
+						漫画源的作品文件夹（作品名）会自动建在该路径下，一般填父目录即可
+					</p>
 				</div>
 
 				<div class="space-y-2">
