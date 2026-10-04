@@ -1039,7 +1039,7 @@ impl Downloader {
             &output_path_str,
         ];
 
-        let output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+        let output = crate::utils::process::tokio_command(resolve_media_tool_path("ffmpeg"))
             .args(args)
             .output()
             .await?;
@@ -1077,7 +1077,7 @@ impl Downloader {
 
         // 使用ffprobe快速验证文件格式
         let file_path_str = file_path.to_string_lossy().to_string();
-        let result = tokio::process::Command::new(resolve_media_tool_path("ffprobe"))
+        let result = crate::utils::process::tokio_command(resolve_media_tool_path("ffprobe"))
             .args([
                 "-v",
                 "quiet", // 静默模式
@@ -1418,7 +1418,7 @@ pub async fn remux_with_ffmpeg(input_path: &Path, output_path: &Path) -> Result<
         &output_path_str,
     ];
 
-    let output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+    let output = crate::utils::process::tokio_command(resolve_media_tool_path("ffmpeg"))
         .args(args)
         .output()
         .await?;
@@ -1454,7 +1454,7 @@ fn is_ipod_muxer_flac_unsupported_error(stderr: &str) -> bool {
 
 async fn probe_primary_audio_codec(audio_path: &Path) -> Option<String> {
     let audio_path_str = audio_path.to_string_lossy().to_string();
-    let output = match tokio::process::Command::new(resolve_media_tool_path("ffprobe"))
+    let output = match crate::utils::process::tokio_command(resolve_media_tool_path("ffprobe"))
         .args([
             "-v",
             "error",
@@ -1571,7 +1571,7 @@ pub async fn embed_cover_into_m4a_with_ffmpeg(audio_path: &Path, cover_path: &Pa
 
     let args = build_embed_cover_args(&audio_path_str, &cover_path_str, &tmp_output_path_str, force_mp4_muxer);
 
-    let mut output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+    let mut output = crate::utils::process::tokio_command(resolve_media_tool_path("ffmpeg"))
         .args(args)
         .output()
         .await?;
@@ -1584,7 +1584,7 @@ pub async fn embed_cover_into_m4a_with_ffmpeg(audio_path: &Path, cover_path: &Pa
                 audio_path.display()
             );
             let retry_args = build_embed_cover_args(&audio_path_str, &cover_path_str, &tmp_output_path_str, true);
-            output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+            output = crate::utils::process::tokio_command(resolve_media_tool_path("ffmpeg"))
                 .args(retry_args)
                 .output()
                 .await?;
@@ -1673,7 +1673,7 @@ pub async fn split_media_segments_with_ffmpeg(
         .collect::<Vec<_>>()
         .join(",");
 
-    let output = tokio::process::Command::new(resolve_media_tool_path("ffmpeg"))
+    let output = crate::utils::process::tokio_command(resolve_media_tool_path("ffmpeg"))
         .args([
             "-y",
             "-i",

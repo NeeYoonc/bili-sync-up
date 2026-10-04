@@ -1851,6 +1851,11 @@
 														{#if source.media_id}<span class="block"
 																>Media ID: {source.media_id}</span
 															>{/if}
+													{:else if sourceConfig.type === 'manga'}
+														{#if source.media_id}
+															<span class="block">漫画ID: {source.media_id}</span>
+														{/if}
+														<span class="block">按「作品目录 + 每话一个 CBZ」落盘</span>
 													{:else if sourceConfig.type === 'watch_later'}
 														稍后再看 (无特定ID)
 													{:else if isExternalSourceType(sourceConfig.type)}
@@ -1996,7 +2001,7 @@
 													/>
 												</Button>
 
-												{#if sourceConfig.type !== 'bangumi' && sourceConfig.type !== 'pugv'}
+												{#if sourceConfig.type !== 'bangumi' && sourceConfig.type !== 'pugv' && sourceConfig.type !== 'manga'}
 													<Button
 														size="sm"
 														variant="ghost"

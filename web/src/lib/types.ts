@@ -207,6 +207,7 @@ export interface VideosRequest {
 	watch_later?: number;
 	bangumi?: number;
 	pugv?: number;
+	manga?: number;
 	query?: string;
 	page?: number;
 	page_size?: number;
@@ -322,6 +323,7 @@ export interface VideoSourcesResponse {
 	watch_later: VideoSource[];
 	bangumi: VideoSource[];
 	pugv: VideoSource[];
+	manga: VideoSource[];
 	youtube: VideoSource[];
 	douyin: VideoSource[];
 	tiktok: VideoSource[];
@@ -379,6 +381,24 @@ export interface VideoSourceTag {
 	audio_only: boolean;
 	audio_only_m4a_only: boolean;
 	flat_folder: boolean;
+}
+
+// 漫画一话（一个 CBZ 压缩包）里的单页
+export interface MangaChapterPage {
+	index: number;
+	name: string;
+	size: number;
+}
+
+// 漫画一话的阅读清单（对应本地 CBZ 压缩包）
+export interface MangaChapterResponse {
+	success: boolean;
+	video_id: number;
+	title: string;
+	path: string;
+	size_bytes: number;
+	page_count: number;
+	pages: MangaChapterPage[];
 }
 
 // 单个视频响应类型
@@ -644,6 +664,7 @@ export interface ConfigResponse {
 	submission_quick_subscribe_path?: string;
 	bangumi_quick_subscribe_path?: string;
 	pugv_quick_subscribe_path?: string;
+	manga_quick_subscribe_path?: string;
 	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
 	ffmpeg_path?: string;
 	// 风控验证配置
@@ -820,6 +841,7 @@ export interface UpdateConfigRequest {
 	submission_quick_subscribe_path?: string;
 	bangumi_quick_subscribe_path?: string;
 	pugv_quick_subscribe_path?: string;
+	manga_quick_subscribe_path?: string;
 	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
 	ffmpeg_path?: string;
 	// 风控验证配置
@@ -888,6 +910,8 @@ export interface SearchResultItem {
 	follower?: number; // 粉丝数（UP主搜索结果）
 	youtube_url?: string;
 	channel_id?: string;
+	/** 漫画搜索结果携带的 comic_id（result_type === 'manga'） */
+	manga_comic_id?: string;
 }
 
 // 搜索响应类型
@@ -946,7 +970,8 @@ export type VideoCategory =
 	| 'submission'
 	| 'watch_later'
 	| 'bangumi'
-	| 'pugv';
+	| 'pugv'
+	| 'manga';
 
 // 番剧季度信息类型
 export interface BangumiSeasonInfo {
@@ -982,6 +1007,41 @@ export interface PugvUpCoursesResponse {
 	success: boolean;
 	up_id: string;
 	data: PugvCourseItem[];
+}
+
+// 哔哩哔哩漫画作品信息（添加漫画源时自动填名）
+export interface MangaComicResponse {
+	success: boolean;
+	comic_id: string;
+	title: string;
+	author: string;
+	cover: string;
+	intro: string;
+	/** 章节总数 */
+	episode_count: number;
+	is_finish: boolean;
+}
+
+// 哔哩哔哩漫画关键词搜索结果
+export interface MangaSearchResult {
+	comic_id: string;
+	title: string;
+	author: string;
+	cover: string;
+	/** 题材标签 */
+	styles: string[];
+	is_finish: boolean;
+	/** 站点详情页链接 */
+	url: string;
+}
+
+export interface MangaSearchResponse {
+	success: boolean;
+	keyword: string;
+	page: number;
+	/** 本页之后是否还有更多结果 */
+	has_more: boolean;
+	results: MangaSearchResult[];
 }
 
 // 番剧源选项（用于合并选择）
@@ -1357,6 +1417,8 @@ export interface DashBoardResponse {
 	enabled_bangumi: number;
 	/** 已启用的课程（pugv）源数量 */
 	enabled_pugv: number;
+	/** 已启用的漫画源数量 */
+	enabled_manga: number;
 	enable_watch_later: boolean;
 	total_favorites: number;
 	total_collections: number;
@@ -1364,6 +1426,8 @@ export interface DashBoardResponse {
 	total_bangumi: number;
 	/** 课程（pugv）源总数 */
 	total_pugv: number;
+	/** 漫画源总数 */
+	total_manga: number;
 	total_watch_later: number;
 	enabled_youtube_sources: number;
 	total_youtube_sources: number;

@@ -282,7 +282,7 @@ impl Aria2Downloader {
         #[cfg(target_os = "windows")]
         {
             // Windows: 使用taskkill强制终止所有aria2进程
-            let output = tokio::process::Command::new("taskkill")
+            let output = crate::utils::process::tokio_command("taskkill")
                 .args(["/F", "/IM", "aria2c.exe"])
                 .output()
                 .await;
@@ -305,7 +305,7 @@ impl Aria2Downloader {
         #[cfg(target_os = "linux")]
         {
             // Linux: 使用pkill强制终止
-            let output = tokio::process::Command::new("pkill")
+            let output = crate::utils::process::tokio_command("pkill")
                 .args(["-9", "-f", "aria2c"])
                 .output()
                 .await;
@@ -327,7 +327,7 @@ impl Aria2Downloader {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             // macOS: 使用pkill强制终止
-            let output = tokio::process::Command::new("pkill")
+            let output = crate::utils::process::tokio_command("pkill")
                 .args(["-9", "-f", "aria2c"])
                 .output()
                 .await;
@@ -715,7 +715,7 @@ impl Aria2Downloader {
         }
 
         // 尝试执行 aria2c --version 来验证
-        match tokio::process::Command::new(path).arg("--version").output().await {
+        match crate::utils::process::tokio_command(path).arg("--version").output().await {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -750,7 +750,7 @@ impl Aria2Downloader {
         };
 
         // 尝试使用which命令查找
-        match tokio::process::Command::new("which").arg("aria2c").output().await {
+        match crate::utils::process::tokio_command("which").arg("aria2c").output().await {
             Ok(output) if output.status.success() => {
                 let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let system_path = PathBuf::from(path_str);
@@ -766,7 +766,7 @@ impl Aria2Downloader {
         // 在Windows上尝试where命令
         #[cfg(target_os = "windows")]
         {
-            match tokio::process::Command::new("where").arg("aria2c").output().await {
+            match crate::utils::process::tokio_command("where").arg("aria2c").output().await {
                 Ok(output) if output.status.success() => {
                     let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     let system_path = PathBuf::from(path_str);
@@ -902,7 +902,7 @@ impl Aria2Downloader {
         }
 
         // 启动aria2进程，保留stderr用于诊断
-        let mut child = tokio::process::Command::new(&self.aria2_binary_path)
+        let mut child = crate::utils::process::tokio_command(&self.aria2_binary_path)
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -1606,7 +1606,7 @@ impl Aria2Downloader {
                 #[cfg(target_os = "windows")]
                 {
                     if let Some(pid) = instance.process.id() {
-                        let _ = tokio::process::Command::new("taskkill")
+                        let _ = crate::utils::process::tokio_command("taskkill")
                             .args(["/F", "/PID", &pid.to_string()])
                             .output()
                             .await;
@@ -1617,7 +1617,7 @@ impl Aria2Downloader {
                 #[cfg(target_os = "linux")]
                 {
                     if let Some(pid) = instance.process.id() {
-                        let _ = tokio::process::Command::new("kill")
+                        let _ = crate::utils::process::tokio_command("kill")
                             .args(["-9", &pid.to_string()])
                             .output()
                             .await;
@@ -1628,7 +1628,7 @@ impl Aria2Downloader {
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 {
                     if let Some(pid) = instance.process.id() {
-                        let _ = tokio::process::Command::new("kill")
+                        let _ = crate::utils::process::tokio_command("kill")
                             .args(["-9", &pid.to_string()])
                             .output()
                             .await;
@@ -1855,7 +1855,7 @@ impl Aria2Downloader {
                     }
 
                     // 测试执行
-                    match tokio::process::Command::new(&binary_path)
+                    match crate::utils::process::tokio_command(&binary_path)
                         .arg("--version")
                         .output()
                         .await
@@ -1888,7 +1888,7 @@ impl Aria2Downloader {
         #[cfg(target_os = "linux")]
         {
             // 检查进程限制
-            if let Ok(output) = tokio::process::Command::new("ulimit").args(["-n"]).output().await {
+            if let Ok(output) = crate::utils::process::tokio_command("ulimit").args(["-n"]).output().await {
                 if output.status.success() {
                     let limit = String::from_utf8_lossy(&output.stdout);
                     info!("✓ 文件描述符限制: {}", limit.trim());
@@ -1896,7 +1896,7 @@ impl Aria2Downloader {
             }
 
             // 检查内存使用
-            if let Ok(output) = tokio::process::Command::new("free").args(["-h"]).output().await {
+            if let Ok(output) = crate::utils::process::tokio_command("free").args(["-h"]).output().await {
                 if output.status.success() {
                     let memory_info = String::from_utf8_lossy(&output.stdout);
                     info!("✓ 内存状态:\n{}", memory_info);

@@ -3,7 +3,8 @@ pub mod entities;
 pub use entities::*;
 
 pub use entities::video_source::{
-    is_episode_source_type, is_pugv_source_type, VIDEO_SOURCE_TYPE_BANGUMI, VIDEO_SOURCE_TYPE_PUGV,
+    is_episode_source_type, is_manga_source_type, is_pugv_source_type, VIDEO_SOURCE_TYPE_BANGUMI,
+    VIDEO_SOURCE_TYPE_MANGA, VIDEO_SOURCE_TYPE_PUGV,
 };
 
 use chrono::{DateTime, Utc};

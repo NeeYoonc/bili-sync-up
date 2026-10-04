@@ -15,7 +15,7 @@ use crate::http::headers::{create_api_headers, create_image_headers};
 use crate::utils::time_format::{now_standard_string, to_standard_string};
 use bili_sync_entity::{
     collection, favorite, page, submission, video, video_source, watch_later, youtube_source, youtube_video,
-    VIDEO_SOURCE_TYPE_PUGV,
+    VIDEO_SOURCE_TYPE_MANGA, VIDEO_SOURCE_TYPE_PUGV,
 };
 use bili_sync_migration::Expr;
 use reqwest;
@@ -129,6 +129,7 @@ struct SourceChargeVisibilityFilters {
     watch_later: Option<i32>,
     bangumi: Option<i32>,
     pugv: Option<i32>,
+    manga: Option<i32>,
 }
 
 impl From<&VideosRequest> for SourceChargeVisibilityFilters {
@@ -140,6 +141,7 @@ impl From<&VideosRequest> for SourceChargeVisibilityFilters {
             watch_later: params.watch_later,
             bangumi: params.bangumi,
             pugv: params.pugv,
+            manga: params.manga,
         }
     }
 }
@@ -153,6 +155,7 @@ impl From<&ResetSpecificTasksRequest> for SourceChargeVisibilityFilters {
             watch_later: params.watch_later,
             bangumi: params.bangumi,
             pugv: params.pugv,
+            manga: params.manga,
         }
     }
 }
@@ -165,6 +168,7 @@ impl SourceChargeVisibilityFilters {
             || self.watch_later.is_some()
             || self.bangumi.is_some()
             || self.pugv.is_some()
+            || self.manga.is_some()
     }
 }
 
@@ -206,7 +210,7 @@ async fn source_download_charge_videos_enabled(
                 .one(db)
                 .await?
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             video_source::Entity::find_by_id(source_id)
                 .select_only()
                 .column(video_source::Column::DownloadChargeVideos)
@@ -230,6 +234,10 @@ async fn should_hide_charge_videos_for_source_filters(
 
     if let Some(id) = filters.pugv {
         return Ok(!source_download_charge_videos_enabled(db, "pugv", id).await?);
+    }
+
+    if let Some(id) = filters.manga {
+        return Ok(!source_download_charge_videos_enabled(db, "manga", id).await?);
     }
 
     for (source_type, id) in [
@@ -2297,6 +2305,7 @@ mod queue_sse_tests {
                 watch_later: None,
                 bangumi: None,
                 pugv: None,
+                manga: None,
                 query: None,
                 page: Some(0),
                 page_size: Some(10),
@@ -2627,7 +2636,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, get_pugv_up_courses, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_downloads_progress, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, get_video_local_image, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, retry_charge_videos_for_source, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, preview_filename_templates, get_bangumi_seasons, get_pugv_up_courses, get_manga_comic, get_manga_search, get_manga_chapter, get_manga_page, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_downloads_progress, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, test_credential_refresh, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -3007,9 +3016,10 @@ pub async fn get_video_sources(
 
     // 确保bangumi_sources是一个数组，即使为空
     // 由于tuple最多支持12个元素，使用全模型查询方式
-    // 番剧（type=1）与课程（type=2）共用 video_source 表，一起取出后按类型分组
-    let (bangumi_sources, pugv_sources): (Vec<VideoSource>, Vec<VideoSource>) = video_source::Entity::find()
-        .filter(video_source::Column::Type.is_in([1, 2]))
+    // 番剧（type=1）、课程（type=2）与漫画（type=3）共用 video_source 表，一起取出后按类型分组
+    let (bangumi_sources, pugv_sources, manga_sources): (Vec<VideoSource>, Vec<VideoSource>, Vec<VideoSource>) =
+        video_source::Entity::find()
+        .filter(video_source::Column::Type.is_in([1, 2, 3]))
         .all(db.as_ref())
         .await?
         .into_iter()
@@ -3096,14 +3106,18 @@ pub async fn get_video_sources(
         .collect::<Vec<(VideoSource, i32)>>()
         .into_iter()
         .fold(
-            (Vec::<VideoSource>::new(), Vec::<VideoSource>::new()),
-            |(mut bangumi, mut pugv), (source, source_type)| {
-                if source_type == 2 {
-                    pugv.push(source);
-                } else {
-                    bangumi.push(source);
+            (
+                Vec::<VideoSource>::new(),
+                Vec::<VideoSource>::new(),
+                Vec::<VideoSource>::new(),
+            ),
+            |(mut bangumi, mut pugv, mut manga), (source, source_type)| {
+                match source_type {
+                    2 => pugv.push(source),
+                    3 => manga.push(source),
+                    _ => bangumi.push(source),
                 }
-                (bangumi, pugv)
+                (bangumi, pugv, manga)
             },
         );
 
@@ -3115,6 +3129,7 @@ pub async fn get_video_sources(
         watch_later: watch_later_sources,
         bangumi: bangumi_sources,
         pugv: pugv_sources,
+        manga: manga_sources,
     }))
 }
 
@@ -3231,6 +3246,12 @@ pub async fn get_videos(
             video::Column::SourceId
                 .eq(id)
                 .and(video::Column::SourceType.eq(VIDEO_SOURCE_TYPE_PUGV)),
+        );
+    } else if let Some(id) = params.manga {
+        query = query.filter(
+            video::Column::SourceId
+                .eq(id)
+                .and(video::Column::SourceType.eq(VIDEO_SOURCE_TYPE_MANGA)),
         );
     } else {
         // 处理其他常规类型
@@ -3770,6 +3791,34 @@ fn build_video_source_tag(
 }
 
 async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model) -> Result<Option<VideoSourceTag>> {
+    // 漫画：一话 = 一个 video，前端靠这个标签走「网页阅读器」而不是播放器
+    if bili_sync_entity::is_manga_source_type(video.source_type) {
+        if let Some(source_id) = video.source_id {
+            let source = video_source::Entity::find_by_id(source_id).one(db).await?;
+            let (source_name, split_chapters_after_download, audio_only, audio_only_m4a_only, flat_folder) = source
+                .map(|source| {
+                    (
+                        source.name,
+                        source.split_chapters_after_download,
+                        source.audio_only,
+                        source.audio_only_m4a_only,
+                        source.flat_folder,
+                    )
+                })
+                .unwrap_or_else(|| (format!("已删除漫画源 #{}", source_id), false, false, false, false));
+            return Ok(Some(build_video_source_tag(
+                source_id,
+                "manga",
+                "漫画",
+                source_name,
+                split_chapters_after_download,
+                audio_only,
+                audio_only_m4a_only,
+                flat_folder,
+            )));
+        }
+    }
+
     if bili_sync_entity::is_episode_source_type(video.source_type) {
         if let Some(source_id) = video.source_id {
             let source = video_source::Entity::find_by_id(source_id).one(db).await?;
@@ -4308,6 +4357,12 @@ pub async fn reset_all_videos(
             video::Column::SourceId
                 .eq(id)
                 .and(video::Column::SourceType.eq(VIDEO_SOURCE_TYPE_PUGV)),
+        );
+    } else if let Some(id) = params.manga {
+        video_query = video_query.filter(
+            video::Column::SourceId
+                .eq(id)
+                .and(video::Column::SourceType.eq(VIDEO_SOURCE_TYPE_MANGA)),
         );
     } else {
         // 处理其他常规类型
@@ -6052,6 +6107,82 @@ pub async fn add_video_source_internal(
                 message: "课程添加成功".to_string(),
             }
         }
+        "manga" => {
+            // 哔哩哔哩漫画以 comic_id 唯一标识，
+            // 链接形如 https://manga.bilibili.com/detail/mc25969（25969 即 comic_id）
+            if params.source_id.is_empty() {
+                return Err(anyhow!("漫画标识不能为空，请提供漫画链接（mc 后面的数字）或直接填写 comic_id").into());
+            }
+
+            let existing = video_source::Entity::find()
+                .filter(video_source::Column::Type.eq(3))
+                .filter(video_source::Column::MediaId.eq(&params.source_id))
+                .one(&txn)
+                .await?;
+
+            if let Some(existing) = existing {
+                return Ok(AddVideoSourceResponse {
+                    success: false,
+                    source_id: existing.id,
+                    source_type: "manga".to_string(),
+                    message: format!("该漫画已存在：{}", existing.name),
+                });
+            }
+
+            let keyword_filters_json = params
+                .keyword_filters
+                .as_ref()
+                .filter(|kf| !kf.is_empty())
+                .map(|kf| serde_json::to_string(kf).unwrap_or_default());
+            let keyword_filter_mode = params.keyword_filter_mode.clone();
+            let now = crate::utils::time_format::now_standard_string();
+
+            let manga = video_source::ActiveModel {
+                id: sea_orm::ActiveValue::NotSet,
+                name: sea_orm::Set(params.name.clone()),
+                path: sea_orm::Set(params.path.clone()),
+                r#type: sea_orm::Set(3), // 3 表示漫画类型
+                latest_row_at: sea_orm::Set(now.clone()),
+                created_at: sea_orm::Set(now),
+                // 复用 media_id 存 comic_id（不新增漫画专属列）
+                media_id: sea_orm::Set(Some(params.source_id.clone())),
+                scan_deleted_videos: sea_orm::Set(false),
+                scan_deleted_videos_once: sea_orm::Set(false),
+                filter_option: sea_orm::Set(source_filter_option.clone()),
+                keyword_filters: sea_orm::Set(keyword_filters_json),
+                keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
+                audio_only: sea_orm::Set(false),
+                split_chapters_after_download: sea_orm::Set(false),
+                // 漫画没有充电 / 弹幕 / 字幕概念，强制关闭避免走通用链路
+                download_charge_videos: sea_orm::Set(false),
+                download_danmaku: sea_orm::Set(false),
+                download_subtitle: sea_orm::Set(false),
+                download_ai_subtitle: sea_orm::Set(false),
+                ai_subtitle_language: sea_orm::Set(ai_subtitle_language.clone()),
+                ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
+                ai_rename_video_prompt: sea_orm::Set(params.ai_rename_video_prompt.clone().unwrap_or_default()),
+                ai_rename_audio_prompt: sea_orm::Set(params.ai_rename_audio_prompt.clone().unwrap_or_default()),
+                ai_rename_enable_multi_page: sea_orm::Set(params.ai_rename_enable_multi_page.unwrap_or(false)),
+                ai_rename_enable_collection: sea_orm::Set(params.ai_rename_enable_collection.unwrap_or(false)),
+                ai_rename_enable_bangumi: sea_orm::Set(params.ai_rename_enable_bangumi.unwrap_or(false)),
+                ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
+                ..Default::default()
+            };
+
+            let insert_result = video_source::Entity::insert(manga).exec(&txn).await?;
+            std::fs::create_dir_all(&params.path).map_err(|e| anyhow!("创建目录失败: {}", e))?;
+            info!(
+                "新漫画添加完成: {} (comic_id={})",
+                params.name, params.source_id
+            );
+
+            AddVideoSourceResponse {
+                success: true,
+                source_id: insert_result.last_insert_id,
+                source_type: "manga".to_string(),
+                message: "漫画添加成功".to_string(),
+            }
+        }
         "watch_later" => {
             // 稍后观看只能有一个，检查是否已存在
             let existing = watch_later::Entity::find().count(&txn).await?;
@@ -6343,7 +6474,7 @@ pub async fn update_video_source_enabled_internal(
                 message: format!("稍后观看已{}", if enabled { "启用" } else { "禁用" }),
             }
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             let bangumi = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -7501,8 +7632,37 @@ async fn delete_orphaned_videos_from_db(
 fn is_supported_delete_video_source_type(source_type: &str) -> bool {
     matches!(
         source_type,
-        "collection" | "favorite" | "submission" | "watch_later" | "bangumi" | "pugv" | "youtube" | "douyin" | "tiktok"
+        "collection"
+            | "favorite"
+            | "submission"
+            | "watch_later"
+            | "bangumi"
+            | "pugv"
+            | "manga"
+            | "youtube"
+            | "douyin"
+            | "tiktok"
     )
+}
+
+/// 视频源类型字符串 → 面向用户的中文名（B 站原生源）。
+fn bili_source_type_label(source_type: &str) -> &'static str {
+    match source_type {
+        "bangumi" => "番剧",
+        "pugv" => "课程",
+        "manga" => "漫画",
+        _ => "视频源",
+    }
+}
+
+/// 视频源类型字符串 → `video.source_type` 数值（B 站原生源）。
+fn bili_source_type_code(source_type: &str) -> Option<i32> {
+    match source_type {
+        "bangumi" => Some(1),
+        "pugv" => Some(2),
+        "manga" => Some(3),
+        _ => None,
+    }
 }
 
 fn delete_video_source_missing_message(source_type: &str) -> String {
@@ -7513,6 +7673,7 @@ fn delete_video_source_missing_message(source_type: &str) -> String {
         "watch_later" => "未找到指定的稍后再看".to_string(),
         "bangumi" => "未找到指定的番剧".to_string(),
         "pugv" => "未找到指定的课程".to_string(),
+        "manga" => "未找到指定的漫画".to_string(),
         "youtube" => "未找到指定的 YouTube 视频源".to_string(),
         "douyin" => "未找到指定的抖音视频源".to_string(),
         "tiktok" => "未找到指定的 TikTok 视频源".to_string(),
@@ -7526,7 +7687,7 @@ async fn delete_video_source_record_exists(db: &impl ConnectionTrait, source_typ
         "favorite" => Ok(favorite::Entity::find_by_id(id).one(db).await?.is_some()),
         "submission" => Ok(submission::Entity::find_by_id(id).one(db).await?.is_some()),
         "watch_later" => Ok(watch_later::Entity::find_by_id(id).one(db).await?.is_some()),
-        "bangumi" | "pugv" => Ok(video_source::Entity::find_by_id(id).one(db).await?.is_some()),
+        "bangumi" | "pugv" | "manga" => Ok(video_source::Entity::find_by_id(id).one(db).await?.is_some()),
         "youtube" | "douyin" | "tiktok" => {
             let Some(source) = youtube_source::Entity::find_by_id(id).one(db).await? else {
                 return Ok(false);
@@ -7554,12 +7715,9 @@ async fn find_videos_by_source_relation(
         "favorite" => video::Entity::find().filter(video::Column::FavoriteId.eq(id)),
         "submission" => video::Entity::find().filter(video::Column::SubmissionId.eq(id)),
         "watch_later" => video::Entity::find().filter(video::Column::WatchLaterId.eq(id)),
-        "bangumi" => video::Entity::find()
+        "bangumi" | "pugv" | "manga" => video::Entity::find()
             .filter(video::Column::SourceId.eq(id))
-            .filter(video::Column::SourceType.eq(1)),
-        "pugv" => video::Entity::find()
-            .filter(video::Column::SourceId.eq(id))
-            .filter(video::Column::SourceType.eq(2)),
+            .filter(video::Column::SourceType.eq(bili_source_type_code(&source_type).unwrap_or(1))),
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type)),
     };
 
@@ -7608,7 +7766,7 @@ async fn clear_video_source_relation(conn: &impl ConnectionTrait, source_type: &
                 .exec(conn)
                 .await?;
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             video::Entity::update_many()
                 .col_expr(
                     video::Column::SourceId,
@@ -7619,7 +7777,7 @@ async fn clear_video_source_relation(conn: &impl ConnectionTrait, source_type: &
                     sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
                 )
                 .filter(video::Column::SourceId.eq(id))
-                .filter(video::Column::SourceType.eq(1))
+                .filter(video::Column::SourceType.eq(bili_source_type_code(&source_type).unwrap_or(1)))
                 .exec(conn)
                 .await?;
         }
@@ -8012,7 +8170,7 @@ pub async fn delete_video_source_internal(
                 message: "稍后再看已成功删除".to_string(),
             }
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             // 查找要删除的番剧
             let bangumi = video_source::Entity::find_by_id(id)
                 .one(&txn)
@@ -8022,7 +8180,7 @@ pub async fn delete_video_source_internal(
             // 获取属于该番剧的视频
             let videos = video::Entity::find()
                 .filter(video::Column::SourceId.eq(id))
-                .filter(video::Column::SourceType.eq(1)) // 番剧类型
+                .filter(video::Column::SourceType.eq(bili_source_type_code(&source_type).unwrap_or(1)))
                 .all(&txn)
                 .await?;
 
@@ -8037,7 +8195,7 @@ pub async fn delete_video_source_internal(
                     sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
                 )
                 .filter(video::Column::SourceId.eq(id))
-                .filter(video::Column::SourceType.eq(1))
+                .filter(video::Column::SourceType.eq(bili_source_type_code(&source_type).unwrap_or(1)))
                 .exec(&txn)
                 .await?;
 
@@ -8313,6 +8471,7 @@ pub async fn retry_charge_videos_for_source_internal(
         }
         "bangumi" => return Err(anyhow!("番剧源不支持重试充电视频").into()),
         "pugv" => return Err(anyhow!("课程源不支持重试充电视频").into()),
+        "manga" => return Err(anyhow!("漫画源不支持重试充电视频").into()),
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type).into()),
     };
 
@@ -8609,7 +8768,7 @@ pub async fn update_video_source_scan_deleted_internal(
                 ),
             }
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             let video_source = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -9158,7 +9317,7 @@ pub async fn update_video_source_download_options_internal(
                 message: "稍后观看的下载选项已更新".to_string(),
             }
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             let video_source = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -10306,7 +10465,7 @@ pub async fn reset_video_source_path_internal(
                 message: "稍后再看路径重设完成".to_string(),
             }
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             let bangumi = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -10317,7 +10476,7 @@ pub async fn reset_video_source_path_internal(
                 // 获取所有相关视频，按新路径规则移动文件
                 let videos = video::Entity::find()
                     .filter(video::Column::SourceId.eq(id))
-                    .filter(video::Column::SourceType.eq(1)) // 番剧类型
+                    .filter(video::Column::SourceType.eq(bili_source_type_code(&source_type).unwrap_or(1)))
                     .all(&txn)
                     .await?;
 
@@ -10373,7 +10532,7 @@ pub async fn reset_video_source_path_internal(
                 moved_files_count,
                 updated_videos_count,
                 cleaned_folders_count,
-                message: format!("番剧 {} 路径重设完成", bangumi.name),
+                message: format!("{} {} 路径重设完成", bili_source_type_label(&source_type), bangumi.name),
             }
         }
         // 外部平台（YouTube/抖音/TikTok）复用同一套路径重设流程与响应格式
@@ -11024,6 +11183,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         submission_quick_subscribe_path: config.submission_quick_subscribe_path.to_string(),
         bangumi_quick_subscribe_path: config.bangumi_quick_subscribe_path.to_string(),
         pugv_quick_subscribe_path: config.pugv_quick_subscribe_path.to_string(),
+        manga_quick_subscribe_path: config.manga_quick_subscribe_path.to_string(),
         // ffmpeg 路径
         ffmpeg_path: config.ffmpeg_path.clone(),
         split_chapters_after_download: config.split_chapters_after_download,
@@ -11628,6 +11788,7 @@ pub async fn update_config(
             submission_quick_subscribe_path: params.submission_quick_subscribe_path.clone(),
             bangumi_quick_subscribe_path: params.bangumi_quick_subscribe_path.clone(),
             pugv_quick_subscribe_path: params.pugv_quick_subscribe_path.clone(),
+            manga_quick_subscribe_path: params.manga_quick_subscribe_path.clone(),
             // ffmpeg 路径
             ffmpeg_path: params.ffmpeg_path.clone(),
             split_chapters_after_download: params.split_chapters_after_download,
@@ -11750,6 +11911,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "submission_quick_subscribe_path" => Some("UP主投稿快捷订阅路径模板"),
         "bangumi_quick_subscribe_path" => Some("番剧快捷订阅路径模板"),
         "pugv_quick_subscribe_path" => Some("课程快捷订阅路径模板"),
+        "manga_quick_subscribe_path" => Some("漫画快捷订阅路径模板"),
         "ffmpeg_path" => Some("ffmpeg路径"),
         "split_chapters_after_download" => Some("下载后按章节切分"),
         "youtube_proxy" => Some("YouTube专用代理"),
@@ -11939,6 +12101,7 @@ pub async fn update_config_internal(
     let original_submission_quick_subscribe_path = config.submission_quick_subscribe_path.clone();
     let original_bangumi_quick_subscribe_path = config.bangumi_quick_subscribe_path.clone();
     let original_pugv_quick_subscribe_path = config.pugv_quick_subscribe_path.clone();
+    let original_manga_quick_subscribe_path = config.manga_quick_subscribe_path.clone();
     let original_danmaku_update_enabled = config.danmaku_update_policy.enabled;
 
     // 更新配置字段
@@ -12080,6 +12243,14 @@ pub async fn update_config_internal(
         if trimmed != original_pugv_quick_subscribe_path.as_ref() {
             config.pugv_quick_subscribe_path = Cow::Owned(trimmed.to_string());
             updated_fields.push("pugv_quick_subscribe_path");
+        }
+    }
+
+    if let Some(manga_quick_subscribe_path) = params.manga_quick_subscribe_path {
+        let trimmed = manga_quick_subscribe_path.trim();
+        if trimmed != original_manga_quick_subscribe_path.as_ref() {
+            config.manga_quick_subscribe_path = Cow::Owned(trimmed.to_string());
+            updated_fields.push("manga_quick_subscribe_path");
         }
     }
 
@@ -13192,6 +13363,14 @@ pub async fn update_config_internal(
                         .update_config_item(
                             "pugv_quick_subscribe_path",
                             serde_json::to_value(&config.pugv_quick_subscribe_path)?,
+                        )
+                        .await
+                }
+                "manga_quick_subscribe_path" => {
+                    manager
+                        .update_config_item(
+                            "manga_quick_subscribe_path",
+                            serde_json::to_value(&config.manga_quick_subscribe_path)?,
                         )
                         .await
                 }
@@ -14711,6 +14890,202 @@ pub async fn get_pugv_up_courses(
         success: true,
         up_id,
         data,
+    }))
+}
+
+/// 获取哔哩哔哩漫画的作品信息（添加漫画源时自动填名）
+#[utoipa::path(
+    get,
+    path = "/api/manga/comic",
+    params(
+        ("comic_id" = String, Query, description = "B 漫 comic_id，可传 mc25969 或完整链接")
+    ),
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::MangaComicResponse>),
+    )
+)]
+pub async fn get_manga_comic(
+    Query(params): Query<crate::api::request::MangaComicRequest>,
+) -> Result<ApiResponse<crate::api::response::MangaComicResponse>, ApiError> {
+    let comic_id = crate::bilibili::manga::normalize_comic_id(&params.comic_id);
+    if comic_id.is_empty() {
+        return Err(anyhow!("漫画 ID 不能为空，请填写漫画链接（mc 后面的数字）或直接填写 comic_id").into());
+    }
+
+    let comic = crate::bilibili::manga::fetch_comic_detail(&comic_id)
+        .await
+        .map_err(|e| {
+            error!("获取漫画 mc{} 信息失败: {:#}", comic_id, e);
+            e
+        })?;
+
+    Ok(ApiResponse::ok(crate::api::response::MangaComicResponse {
+        success: true,
+        comic_id,
+        title: comic.title,
+        author: comic.author,
+        cover: comic.cover,
+        intro: comic.intro,
+        episode_count: comic.episodes.len() as u64,
+        is_finish: comic.is_finish,
+    }))
+}
+
+/// 取漫画一话的页面清单（详情页的网页阅读器用）
+#[utoipa::path(
+    get,
+    path = "/api/manga/chapter/{video_id}",
+    params(
+        ("video_id" = i32, Path, description = "漫画话（video）id")
+    ),
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::MangaChapterResponse>),
+    )
+)]
+pub async fn get_manga_chapter(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path(video_id): Path<i32>,
+) -> Result<ApiResponse<crate::api::response::MangaChapterResponse>, ApiError> {
+    let video = video::Entity::find_by_id(video_id)
+        .one(db.as_ref())
+        .await?
+        .ok_or(InnerApiError::NotFound(video_id))?;
+    if !bili_sync_entity::is_manga_source_type(video.source_type) {
+        return Err(InnerApiError::BadRequest(format!("视频 #{} 不是漫画话，没有可阅读的 CBZ", video_id)).into());
+    }
+    let path = video.path.clone();
+    if path.trim().is_empty() {
+        return Err(InnerApiError::BadRequest(format!("漫画话「{}」还没有落盘文件", video.name)).into());
+    }
+
+    let manifest_path = path.clone();
+    let manifest = tokio::task::spawn_blocking(move || {
+        crate::manga_reader::read_chapter_manifest(std::path::Path::new(&manifest_path))
+    })
+    .await
+    .map_err(|error| anyhow!("读取漫画话失败: {}", error))?
+    .map_err(|error| {
+        error!("读取漫画话「{}」失败: {:#}", video.name, error);
+        error
+    })?;
+
+    Ok(ApiResponse::ok(crate::api::response::MangaChapterResponse {
+        success: true,
+        video_id,
+        title: video.name,
+        path: manifest.path,
+        size_bytes: manifest.size_bytes,
+        page_count: manifest.pages.len() as u64,
+        pages: manifest
+            .pages
+            .into_iter()
+            .map(|page| crate::api::response::MangaChapterPageResponse {
+                index: page.index,
+                name: page.name,
+                size: page.size,
+            })
+            .collect(),
+    }))
+}
+
+/// 取漫画一话里的某一页图片（详情页的网页阅读器用）
+#[utoipa::path(
+    get,
+    path = "/api/manga/page/{video_id}/{index}",
+    params(
+        ("video_id" = i32, Path, description = "漫画话（video）id"),
+        ("index" = usize, Path, description = "页号，从 0 起")
+    ),
+    responses(
+        (status = 200, description = "图片数据", content_type = "image/*"),
+    )
+)]
+pub async fn get_manga_page(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path((video_id, index)): Path<(i32, usize)>,
+) -> Result<axum::response::Response, ApiError> {
+    let video = video::Entity::find_by_id(video_id)
+        .one(db.as_ref())
+        .await?
+        .ok_or(InnerApiError::NotFound(video_id))?;
+    if !bili_sync_entity::is_manga_source_type(video.source_type) {
+        return Err(InnerApiError::BadRequest(format!("视频 #{} 不是漫画话", video_id)).into());
+    }
+    let path = video.path.clone();
+    if path.trim().is_empty() {
+        return Err(InnerApiError::BadRequest(format!("漫画话「{}」还没有落盘文件", video.name)).into());
+    }
+
+    let page_path = path.clone();
+    let (bytes, content_type) = tokio::task::spawn_blocking(move || {
+        crate::manga_reader::read_chapter_page(std::path::Path::new(&page_path), index)
+    })
+    .await
+    .map_err(|error| anyhow!("读取漫画分页失败: {}", error))?
+    .map_err(|error| {
+        if let Some(out_of_range) = error.downcast_ref::<crate::manga_reader::PageOutOfRange>() {
+            return ApiError::bad_request(format!("漫画「{}」{}", video.name, out_of_range));
+        }
+        debug!("读取漫画「{}」第 {} 页失败: {:#}", video.name, index + 1, error);
+        ApiError::from(error)
+    })?;
+
+    Ok(axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", content_type)
+        .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+        .header("X-Image-Cache", "LOCAL")
+        .body(axum::body::Body::from(bytes))
+        .unwrap())
+}
+
+/// 关键词搜索哔哩哔哩漫画（添加漫画源时按名字挑作品）
+#[utoipa::path(
+    get,
+    path = "/api/manga/search",
+    params(
+        ("keyword" = String, Query, description = "搜索关键词（漫画名 / 作者名）"),
+        ("page" = Option<u32>, Query, description = "页码，默认 1"),
+        ("page_size" = Option<u32>, Query, description = "每页数量，默认 20，最大 50")
+    ),
+    responses(
+        (status = 200, body = ApiResponse<crate::api::response::MangaSearchResponse>),
+    )
+)]
+pub async fn get_manga_search(
+    Query(params): Query<crate::api::request::MangaSearchRequest>,
+) -> Result<ApiResponse<crate::api::response::MangaSearchResponse>, ApiError> {
+    let keyword = params.keyword.trim().to_string();
+    if keyword.is_empty() {
+        return Err(anyhow!("请输入搜索关键词").into());
+    }
+    let page = params.page.max(1);
+    let page_size = params.page_size.clamp(1, 50);
+
+    let (items, has_more) = crate::bilibili::manga::search_comics(&keyword, page, page_size)
+        .await
+        .map_err(|e| {
+            error!("搜索漫画「{}」失败: {:#}", keyword, e);
+            e
+        })?;
+
+    Ok(ApiResponse::ok(crate::api::response::MangaSearchResponse {
+        success: true,
+        keyword,
+        page,
+        has_more,
+        results: items
+            .into_iter()
+            .map(|item| crate::api::response::MangaSearchItemResponse {
+                comic_id: item.comic_id,
+                title: item.title,
+                author: item.author,
+                cover: item.cover,
+                styles: item.styles,
+                is_finish: item.is_finish,
+                url: item.url,
+            })
+            .collect(),
     }))
 }
 
@@ -18772,7 +19147,7 @@ pub async fn proxy_video_stream(
             anyhow::bail!("B站视频流返回错误状态: {}", status);
         }
 
-        let mut cmd = tokio::process::Command::new(crate::downloader::resolve_media_tool_path("ffmpeg"));
+        let mut cmd = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"));
         cmd.args([
             "-hide_banner",
             "-loglevel",
@@ -20326,7 +20701,8 @@ pub async fn get_dashboard_data(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<crate::api::response::DashBoardResponse>, ApiError> {
     let (enabled_favorites, enabled_collections, enabled_submissions, enabled_watch_later, enabled_bangumi, enabled_pugv,
-         total_favorites, total_collections, total_submissions, total_watch_later, total_bangumi, total_pugv,
+         enabled_manga, total_favorites, total_collections, total_submissions, total_watch_later, total_bangumi,
+         total_pugv, total_manga,
          youtube_sources, videos_by_day, external_day_rows) = tokio::try_join!(
         favorite::Entity::find()
             .filter(favorite::Column::Enabled.eq(true))
@@ -20348,6 +20724,10 @@ pub async fn get_dashboard_data(
             .filter(video_source::Column::Type.eq(2))
             .filter(video_source::Column::Enabled.eq(true))
             .count(db.as_ref()),
+        video_source::Entity::find()
+            .filter(video_source::Column::Type.eq(3))
+            .filter(video_source::Column::Enabled.eq(true))
+            .count(db.as_ref()),
         // 统计所有视频源（包括禁用的）
         favorite::Entity::find()
             .count(db.as_ref()),
@@ -20362,6 +20742,9 @@ pub async fn get_dashboard_data(
             .count(db.as_ref()),
         video_source::Entity::find()
             .filter(video_source::Column::Type.eq(2))
+            .count(db.as_ref()),
+        video_source::Entity::find()
+            .filter(video_source::Column::Type.eq(3))
             .count(db.as_ref()),
         youtube_source::Entity::find()
             .all(db.as_ref()),
@@ -20487,6 +20870,7 @@ ORDER BY
         + enabled_submissions
         + enabled_bangumi
         + enabled_pugv
+        + enabled_manga
         + if enabled_watch_later > 0 { 1 } else { 0 }
         + enabled_external_sources;
     let total_all_sources = total_favorites
@@ -20494,6 +20878,7 @@ ORDER BY
         + total_submissions
         + total_bangumi
         + total_pugv
+        + total_manga
         + if total_watch_later > 0 { 1 } else { 0 }
         + total_external_sources;
     let inactive_sources = total_all_sources - active_sources;
@@ -20520,12 +20905,14 @@ ORDER BY
         enabled_submissions,
         enabled_bangumi,
         enabled_pugv,
+        enabled_manga,
         enable_watch_later: enabled_watch_later > 0,
         total_favorites,
         total_collections,
         total_submissions,
         total_bangumi,
         total_pugv,
+        total_manga,
         total_watch_later,
         enabled_youtube_sources,
         total_youtube_sources,
@@ -21814,7 +22201,7 @@ pub async fn update_video_source_keyword_filters(
                 ),
             }
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             let record = video_source::Entity::find_by_id(id)
                 .one(&txn)
                 .await?
@@ -21843,7 +22230,8 @@ pub async fn update_video_source_keyword_filters(
                 blacklist_count,
                 whitelist_count,
                 message: format!(
-                    "番剧 {} 的关键词过滤器已更新，黑名单 {} 个，白名单 {} 个",
+                    "{} {} 的关键词过滤器已更新，黑名单 {} 个，白名单 {} 个",
+                    bili_source_type_label(&source_type),
                     record.name, blacklist_count, whitelist_count
                 ),
             }
@@ -22066,7 +22454,7 @@ pub async fn get_video_source_keyword_filters(
                 legacy_mode: record.keyword_filter_mode,
             }
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             let record = video_source::Entity::find_by_id(id)
                 .one(db.as_ref())
                 .await?
@@ -22362,7 +22750,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_rename_parent_dir,
             )
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             let source = video_source::Entity::find_by_id(id)
                 .one(db.as_ref())
                 .await?
@@ -22436,6 +22824,8 @@ pub async fn ai_rename_history(
 
     // 根据源类型计算目录结构提示（帮助 AI 按单P/多P/番剧/多P结构生成与文件一一对应的文件名）
     let structure_hint = match source_type.as_str() {
+        // 漫画按「系列目录 + 每话一个 CBZ」落盘，不参与 S/E 结构
+        "manga" => "",
         "bangumi" | "pugv" => {
             if config.bangumi_use_season_structure {
                 "番剧Season结构"
@@ -22533,7 +22923,7 @@ async fn get_videos_with_pages_for_source(
                 .all(db)
                 .await?
         }
-        "bangumi" | "pugv" => {
+        "bangumi" | "pugv" | "manga" => {
             video::Entity::find()
                 .filter(video::Column::SourceId.eq(source_id))
                 .order_by_asc(video::Column::Pubtime)
