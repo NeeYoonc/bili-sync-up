@@ -306,9 +306,9 @@ use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
     check_favorite_multipage_videos_for_new_parts, check_favorite_videos_for_new_parts,
-    collect_favorite_page_counts, create_pages, create_videos, filter_unfilled_videos,
-    filter_unhandled_video_pages, get_failed_videos_in_current_cycle, update_pages_model,
-    update_videos_model,
+    check_submission_videos_for_new_parts, collect_favorite_page_counts, create_pages, create_videos,
+    filter_unfilled_videos, filter_unhandled_video_pages, get_failed_videos_in_current_cycle,
+    update_pages_model, update_videos_model,
 };
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
@@ -1812,6 +1812,23 @@ pub async fn refresh_video_source<'a>(
                     }
                 }
                 Err(err) => warn!("收藏夹多P视频分P巡检失败（不影响本轮扫描）: {:#}", err),
+            }
+        }
+    }
+
+    // 投稿源：巡检已入库视频是否新增了分P。
+    // 投稿扫描的增量窗口按视频发布时间截断，而分P是发布后才补上的，
+    // 已入库视频新增分P不会进入增量窗口（全量扫描也会按 bvid 去重跳过），
+    // 因此这里每轮对存量内容做限量巡检，发现新增分P即重置并重新拉取详情下载。
+    if let VideoSourceEnum::Submission(_) = video_source {
+        if !(token.is_cancelled() || crate::task::TASK_CONTROLLER.is_paused()) {
+            match check_submission_videos_for_new_parts(bili_client, video_source, connection).await {
+                Ok(checked_count) => {
+                    if checked_count > 0 {
+                        debug!("投稿视频分P巡检：本轮重置 {} 个视频以拉取新分P", checked_count);
+                    }
+                }
+                Err(err) => warn!("投稿视频分P巡检失败（不影响本轮扫描）: {:#}", err),
             }
         }
     }

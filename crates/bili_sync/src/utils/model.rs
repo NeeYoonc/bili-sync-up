@@ -1084,15 +1084,15 @@ async fn reset_video_if_parts_increased(
     video_model: &video::Model,
     local_page_count: i32,
     current_page_count: i32,
-    favorite_name: &str,
+    source_name: &str,
     connection: &DatabaseConnection,
 ) -> Result<bool> {
     if current_page_count <= local_page_count {
         return Ok(false);
     }
     info!(
-        "收藏夹「{}」视频 {} ({}) 检测到新增分P（本地 {} -> B站 {}），重新拉取详情并下载新分P",
-        favorite_name,
+        "「{}」视频 {} ({}) 检测到新增分P（本地 {} -> B站 {}），重新拉取详情并下载新分P",
+        source_name,
         video_model.name,
         video_model.bvid,
         local_page_count,
@@ -1193,8 +1193,115 @@ pub async fn check_favorite_multipage_videos_for_new_parts(
     Ok(updated)
 }
 
+/// 投稿源：每轮限量巡检已入库视频是否新增了分P。
+///
+/// 投稿扫描的增量窗口按「视频发布时间」截断，而分P是发布之后才陆续补上的
+/// （视频发布时间不会变），因此已入库视频新增分P既进不了增量窗口，全量扫描
+/// 也会因为 bvid 已存在而直接跳过——结果就是本地永远停在第一次解析到的分P数
+/// （典型表现：站内 7 个分P，本地只有 1 个）。
+/// 这里直接查库，每轮轮转抽查一部分已填充详情的视频，用 view 接口对比当前
+/// 分P数与本地记录，发现变多就重置视频以重新拉取详情并下载新分P。
+/// 近几天发布的视频优先巡检（分P通常在这段时间补齐），更早的按顺序轮转。
+/// 返回本轮重置的视频数量。
+pub async fn check_submission_videos_for_new_parts(
+    bili_client: &BiliClient,
+    video_source: &VideoSourceEnum,
+    connection: &DatabaseConnection,
+) -> Result<usize> {
+    let VideoSourceEnum::Submission(submission_source) = video_source else {
+        return Ok(0);
+    };
+
+    // 更早的视频每轮最多巡检的数量，控制对 B站 的请求量
+    const BATCH: usize = 10;
+    // 近 N 天发布的视频每轮都巡检，数量再多也只取前 RECENT_BATCH 个
+    const RECENT_DAYS: i64 = 7;
+    const RECENT_BATCH: usize = 20;
+
+    let videos = video::Entity::find()
+        .filter(video_source.filter_expr())
+        .filter(video::Column::SinglePage.is_not_null())
+        .filter(video::Column::Valid.eq(true))
+        .filter(video::Column::Deleted.eq(0))
+        .filter(video::Column::AutoDownload.eq(true))
+        .order_by_desc(video::Column::Pubtime)
+        .order_by_desc(video::Column::Id)
+        .all(connection)
+        .await
+        .context("查询投稿视频失败")?;
+
+    if videos.is_empty() {
+        return Ok(0);
+    }
+
+    let recent_cutoff = crate::utils::time_format::beijing_now().naive_local() - chrono::Duration::days(RECENT_DAYS);
+    let (recent, mut older): (Vec<_>, Vec<_>) = videos.into_iter().partition(|v| v.pubtime >= recent_cutoff);
+
+    let mut candidates: Vec<video::Model> = recent.into_iter().take(RECENT_BATCH).collect();
+
+    if !older.is_empty() {
+        // 每个投稿源各自记录上次巡检位置，每轮从不同位置取一批，循环覆盖全部视频
+        let offset = {
+            let mut offsets = SUBMISSION_MULTIPAGE_CHECK_OFFSETS.lock().await;
+            let entry = offsets.entry(submission_source.id).or_insert(0);
+            let current = *entry;
+            *entry = (current + BATCH) % older.len();
+            current
+        };
+        older.rotate_left(offset);
+        candidates.extend(older.into_iter().take(BATCH));
+    }
+
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let mut updated = 0usize;
+    for video_model in candidates {
+        let local_page_count = page::Entity::find()
+            .filter(page::Column::VideoId.eq(video_model.id))
+            .count(connection)
+            .await
+            .context("查询视频分P数失败")? as i32;
+
+        let current_page_count = match Video::new(bili_client, video_model.bvid.clone()).get_view_info().await {
+            Ok(VideoInfo::Detail { pages, .. }) => pages.len() as i32,
+            // 特殊状态视频（数据异常/已失效）会解析为其他变体，跳过即可
+            Ok(_) => continue,
+            Err(err) => {
+                debug!(
+                    "投稿「{}」视频 {} 分P巡检失败（跳过）: {:#}",
+                    submission_source.upper_name, video_model.bvid, err
+                );
+                continue;
+            }
+        };
+
+        if reset_video_if_parts_increased(
+            &video_model,
+            local_page_count,
+            current_page_count,
+            &submission_source.upper_name,
+            connection,
+        )
+        .await?
+        {
+            updated += 1;
+        }
+    }
+
+    if updated > 0 {
+        notify_videos_changed();
+    }
+    Ok(updated)
+}
+
 /// 收藏夹多P视频分P巡检的轮转偏移（source_id -> 已巡检到的位置）
 static FAVORITE_MULTIPAGE_CHECK_OFFSETS: Lazy<AsyncMutex<HashMap<i32, usize>>> =
+    Lazy::new(|| AsyncMutex::new(HashMap::new()));
+
+/// 投稿源分P巡检的轮转偏移（source_id -> 已巡检到的位置）
+static SUBMISSION_MULTIPAGE_CHECK_OFFSETS: Lazy<AsyncMutex<HashMap<i32, usize>>> =
     Lazy::new(|| AsyncMutex::new(HashMap::new()));
 
 /// 尝试创建 Page Model，基于 cid 判断是否已存在
@@ -1882,6 +1989,182 @@ mod tests {
             .await
             .expect("非收藏夹源应直接返回 0");
         assert_eq!(count, 0);
+    }
+
+    async fn insert_test_submission_source(db: &DatabaseConnection, id: i32) -> submission::Model {
+        submission::ActiveModel {
+            id: Set(id),
+            upper_id: Set(1000 + i64::from(id)),
+            upper_name: Set(format!("测试UP{id}")),
+            path: Set(format!("/tmp/submission-{id}")),
+            created_at: Set("2026-09-01 00:00:00".to_string()),
+            latest_row_at: Set("2026-09-01 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            scan_deleted_videos_once: Set(false),
+            filter_option: Set(None),
+            selected_videos: Set(None),
+            keyword_filters: Set(None),
+            keyword_filter_mode: Set(None),
+            blacklist_keywords: Set(None),
+            whitelist_keywords: Set(None),
+            keyword_case_sensitive: Set(false),
+            min_duration_seconds: Set(None),
+            max_duration_seconds: Set(None),
+            published_after: Set(None),
+            published_before: Set(None),
+            audio_only: Set(false),
+            audio_only_m4a_only: Set(false),
+            flat_folder: Set(false),
+            split_chapters_after_download: Set(false),
+            download_charge_videos: Set(true),
+            download_danmaku: Set(true),
+            download_subtitle: Set(true),
+            download_ai_subtitle: Set(true),
+            ai_subtitle_language: Set("zh-CN".to_string()),
+            ai_rename: Set(false),
+            ai_rename_video_prompt: Set(String::new()),
+            ai_rename_audio_prompt: Set(String::new()),
+            ai_rename_enable_multi_page: Set(false),
+            ai_rename_enable_collection: Set(false),
+            ai_rename_enable_bangumi: Set(false),
+            ai_rename_rename_parent_dir: Set(false),
+            use_dynamic_api: Set(false),
+            dynamic_api_full_synced: Set(false),
+            last_scan_at: Set(None),
+            next_scan_at: Set(None),
+            no_update_streak: Set(0),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试投稿源")
+    }
+
+    async fn insert_test_submission_video(
+        db: &DatabaseConnection,
+        id: i32,
+        submission_id: i32,
+        single_page: Option<bool>,
+        auto_download: bool,
+    ) {
+        let ts = chrono::DateTime::from_timestamp(1_789_551_231, 0).unwrap().naive_utc();
+        video::ActiveModel {
+            id: Set(id),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(Some(submission_id)),
+            source_id: Set(None),
+            source_type: Set(Some(4)),
+            upper_id: Set(1000 + i64::from(submission_id)),
+            upper_name: Set("测试UP".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(Some(submission_id)),
+            name: Set(format!("测试投稿视频{id}")),
+            path: Set(String::new()),
+            category: Set(2),
+            bvid: Set(format!("BV1TEST{id:06}")),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(ts),
+            pubtime: Set(ts),
+            favtime: Set(ts),
+            download_status: Set(0),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(single_page),
+            created_at: Set("2026-09-16 17:33:51".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(auto_download),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
+            skip_reason: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试投稿视频");
+    }
+
+    /// 分P巡检对非投稿源直接返回 0，不发起任何请求。
+    #[tokio::test]
+    async fn check_submission_videos_skips_non_submission_sources() {
+        let db = create_test_db("submission-multipage-guard").await;
+        let source = VideoSourceEnum::WatchLater(
+            watch_later::Model {
+                id: 1,
+                path: "/tmp/wl".to_string(),
+                created_at: "2026-08-01 00:00:00".to_string(),
+                latest_row_at: "1970-01-01 00:00:00".to_string(),
+                enabled: true,
+                scan_deleted_videos: false,
+                scan_deleted_videos_once: false,
+                filter_option: None,
+                keyword_filters: None,
+                keyword_filter_mode: None,
+                blacklist_keywords: None,
+                whitelist_keywords: None,
+                keyword_case_sensitive: false,
+                min_duration_seconds: None,
+                max_duration_seconds: None,
+                published_after: None,
+                published_before: None,
+                audio_only: false,
+                audio_only_m4a_only: false,
+                flat_folder: false,
+                split_chapters_after_download: false,
+                download_charge_videos: true,
+                download_danmaku: true,
+                download_subtitle: true,
+                download_ai_subtitle: true,
+                ai_subtitle_language: "zh-CN".to_string(),
+                ai_rename: false,
+                ai_rename_video_prompt: String::new(),
+                ai_rename_audio_prompt: String::new(),
+                ai_rename_enable_multi_page: false,
+                ai_rename_enable_collection: false,
+                ai_rename_enable_bangumi: false,
+                ai_rename_rename_parent_dir: false,
+            },
+        );
+        let client = crate::bilibili::BiliClient::new(String::new());
+        let count = check_submission_videos_for_new_parts(&client, &source, &db)
+            .await
+            .expect("非投稿源应直接返回 0");
+        assert_eq!(count, 0);
+    }
+
+    /// 分P巡检只挑「已经填充过详情」的视频（single_page 非空），
+    /// 避免和详情填充阶段重复请求。
+    #[tokio::test]
+    async fn check_submission_videos_skips_videos_pending_detail() {
+        let db = create_test_db("submission-multipage-pending").await;
+        let source_model = insert_test_submission_source(&db, 7).await;
+        // single_page 为空 = 还没拉过详情，不应被分P巡检挑中
+        insert_test_submission_video(&db, 7001, 7, None, true).await;
+        // auto_download = false（历史投稿未勾选）也不应被巡检
+        insert_test_submission_video(&db, 7002, 7, Some(true), false).await;
+
+        let client = crate::bilibili::BiliClient::new(String::new());
+        let count = check_submission_videos_for_new_parts(
+            &client,
+            &VideoSourceEnum::Submission(source_model),
+            &db,
+        )
+        .await
+        .expect("没有可巡检视频时应直接返回 0");
+        assert_eq!(count, 0, "待填充详情 / 未自动下载的视频不应触发巡检请求");
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
