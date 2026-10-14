@@ -47,13 +47,18 @@ impl MigrationTrait for Migration {
             .await?;
 
         // 为 page 表的状态查询添加复合索引
+        // 注意：这里的列名必须是 download_status，历史上曾误写成 status，导致索引被建成了
+        // 常量表达式索引（PRAGMA index_info 里该列 cid = -2，对状态查询完全无效）；并且在
+        // DQS=0 / 较新版本的 SQLite 上，VACUUM / VACUUM INTO 会直接报错
+        // "no such column: \"status\" - should this be a string literal in single-quotes?"，
+        // 打断后台备份与自动 VACUUM。详见 m20261014_000001_fix_page_status_index。
         manager
             .create_index(
                 Index::create()
                     .name("idx_page_status_query")
                     .table(Page::Table)
                     .col(Page::VideoId)
-                    .col(Page::Status)
+                    .col(Page::DownloadStatus)
                     .to_owned(),
             )
             .await?;
@@ -92,5 +97,5 @@ enum Video {
 enum Page {
     Table,
     VideoId,
-    Status,
+    DownloadStatus,
 }
