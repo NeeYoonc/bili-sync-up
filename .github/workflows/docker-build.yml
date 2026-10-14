@@ -11,6 +11,8 @@ run-name: >-
       || format('镜像构建 / {0}', github.ref_name) }}
 
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       custom_tags:
@@ -328,6 +330,15 @@ jobs:
           if [[ -z "$dockerhub_tags" && -z "$cnb_tags" ]]; then
             echo "No image tags were generated" >&2
             exit 1
+          fi
+
+          # 由 v* tag 触发时，额外打上与 Release 同名的版本号标签（如 v3.1.4.1），
+          # 便于 NAS 用户把容器固定到某个版本、新版本出问题时直接回滚。
+          # 注意：metadata-action 的 type=semver 不认四段版本号（3.1.4.1），
+          # 所以这里直接用 GITHUB_REF_NAME。
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            dockerhub_tags="${dockerhub_tags:+$dockerhub_tags,}${{ env.IMAGE_NAME }}:${GITHUB_REF_NAME}"
+            cnb_tags="${cnb_tags:+$cnb_tags,}docker.cnb.cool/${{ env.CNB_IMAGE_NAME }}:${GITHUB_REF_NAME}"
           fi
 
           echo "dockerhub_tags=$dockerhub_tags" >> "$GITHUB_OUTPUT"
