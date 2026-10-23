@@ -35,6 +35,7 @@ const DOUYIN_POST_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/post/";
 /// 图集作品里图片段的固定展示时长（秒）。
 const SLIDESHOW_SECONDS_PER_IMAGE: u64 = 3;
 const DOUYIN_DETAIL_API: &str = "https://www.douyin.com/aweme/v1/web/aweme/detail/";
+const DOUYIN_PLAY_API: &str = "https://www.douyin.com/aweme/v1/play/";
 const DOUYIN_DANMAKU_API: &str = "https://www.douyin.com/aweme/v1/web/danmaku/get_v2/";
 // `/search/<keyword>?type=user` 当前实际请求这个用户搜索接口。
 // `general/search/single` 是“综合”标签接口，用 `aweme_user_web` 强行请求会被
@@ -3576,9 +3577,17 @@ async fn extract_metadata_native(
                 vbr: None,
                 abr: Some(128.0),
                 dynamic_range: Some("SDR".to_string()),
+                is_original: false,
                 decryption_key: None,
                 fallback_urls,
             });
+        }
+    }
+    if slides.is_empty() {
+        if let Some(video) = video {
+            if let Some(original) = probe_douyin_original_format_candidate(video, &formats).await {
+                formats.push(original);
+            }
         }
     }
     if formats.is_empty() && slides.is_empty() {
@@ -3652,6 +3661,309 @@ async fn extract_metadata_native(
     })
 }
 
+/// 构造抖音原始片源候选地址。`play_addr.uri` 不是公开作品 ID，
+/// 但可以直接作为播放接口的 `video_id` 使用。
+fn douyin_original_url(video: &serde_json::Value) -> Option<String> {
+    let uri = video
+        .get("play_addr")
+        .and_then(|value| value.get("uri"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if uri.starts_with("http") {
+        return Some(uri.to_string());
+    }
+    reqwest::Url::parse_with_params(
+        DOUYIN_PLAY_API,
+        &[
+            ("video_id", uri),
+            ("ratio", "default"),
+            ("line", "0"),
+            ("improve_bitrate", "1"),
+            ("watermark", "0"),
+        ],
+    )
+    .ok()
+    .map(Into::into)
+}
+
+/// 详情里的 `bit_rate` 档位都带 `data_size`；用它作为“当前最高档”的
+/// 文件大小基准，避免把明显更小的默认播放流误当成原画。
+fn douyin_current_max_data_size(video: &serde_json::Value) -> u64 {
+    let mut max_size = video
+        .get("bit_rate")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .pointer("/play_addr/data_size")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .max()
+        .unwrap_or(0);
+    for key in ["play_addr", "play_addr_h264", "play_addr_265"] {
+        if let Some(size) = video
+            .get(key)
+            .and_then(|value| value.get("data_size"))
+            .and_then(serde_json::Value::as_u64)
+        {
+            max_size = max_size.max(size);
+        }
+    }
+    max_size
+}
+
+fn format_pixel_area(format: &ExternalMediaFormat) -> i64 {
+    match (format.width, format.height) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => i64::from(width) * i64::from(height),
+        _ => 0,
+    }
+}
+
+fn parse_content_range_total(value: &str) -> Option<u64> {
+    value
+        .rsplit_once('/')
+        .and_then(|(_, total)| total.parse::<u64>().ok())
+        .filter(|total| *total > 0)
+}
+
+fn parse_ffprobe_fps(value: Option<&str>) -> Option<f64> {
+    let value = value?;
+    if let Some((numerator, denominator)) = value.split_once('/') {
+        let numerator = numerator.parse::<f64>().ok()?;
+        let denominator = denominator.parse::<f64>().ok()?;
+        return (denominator > 0.0).then_some(numerator / denominator);
+    }
+    value.parse::<f64>().ok().filter(|fps| *fps > 0.0)
+}
+
+fn parse_ffprobe_bitrate(value: Option<&str>) -> Option<f64> {
+    value?
+        .parse::<u64>()
+        .ok()
+        .filter(|bitrate| *bitrate > 0)
+        .map(|bitrate| bitrate as f64 / 1000.0)
+}
+
+fn douyin_original_candidate_worth_probing(
+    file_size: u64,
+    current_max_size: u64,
+    source_area: i64,
+    current_max_area: i64,
+) -> bool {
+    file_size > current_max_size || source_area > current_max_area
+}
+
+#[derive(Debug, Deserialize)]
+struct DouyinOriginalProbe {
+    #[serde(default)]
+    streams: Vec<DouyinOriginalStream>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DouyinOriginalStream {
+    codec_type: Option<String>,
+    codec_name: Option<String>,
+    color_transfer: Option<String>,
+    width: Option<i32>,
+    height: Option<i32>,
+    bit_rate: Option<String>,
+    avg_frame_rate: Option<String>,
+}
+
+/// 对 `ratio=default` 候选做 1 字节 Range 探测，读取重定向后的真实文件大小。
+async fn probe_douyin_original_size(url: &str) -> Result<u64> {
+    let client = reqwest::Client::builder()
+        .user_agent(crate::http::headers::CHROME_USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let mut request = client
+        .get(url)
+        .header(reqwest::header::REFERER, "https://www.douyin.com/")
+        .header(reqwest::header::ACCEPT, "*/*")
+        .header(reqwest::header::RANGE, "bytes=0-0");
+    if let Some(cookie) = optional_cookie_header() {
+        request = request.header(reqwest::header::COOKIE, cookie);
+    }
+    let response = request.send().await.context("探测抖音原画候选失败")?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("抖音原画候选返回 HTTP {status}");
+    }
+    if let Some(total) = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_content_range_total)
+    {
+        return Ok(total);
+    }
+    response
+        .content_length()
+        .filter(|size| *size > 0)
+        .context("抖音原画候选没有返回文件大小")
+}
+
+/// 用远程 ffprobe 校验候选的实际分辨率、帧率和编码；只有候选比现有
+/// `bit_rate[]` 最高档更大，或详情标称原始尺寸更大时才调用。
+async fn probe_douyin_original_format(
+    url: &str,
+    file_size: u64,
+    duration_seconds: Option<f64>,
+) -> Result<ExternalMediaFormat> {
+    let headers = format!(
+        "Referer: https://www.douyin.com/\r\nUser-Agent: {}\r\nAccept: */*\r\n",
+        crate::http::headers::CHROME_USER_AGENT
+    );
+    let mut command =
+        crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffprobe"));
+    command.kill_on_drop(true);
+    command.args([
+        "-v",
+        "error",
+        "-rw_timeout",
+        "15000000",
+        "-headers",
+        &headers,
+        "-show_entries",
+        "stream=codec_type,codec_name,color_transfer,width,height,bit_rate,avg_frame_rate",
+        "-of",
+        "json",
+        url,
+    ]);
+    let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .context("探测抖音原画候选超时")?
+        .context("启动 ffprobe 探测抖音原画候选失败")?;
+    if !output.status.success() {
+        bail!(
+            "ffprobe 探测抖音原画候选失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let probe: DouyinOriginalProbe =
+        serde_json::from_slice(&output.stdout).context("解析抖音原画候选 ffprobe 输出失败")?;
+    let video = probe
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type.as_deref() == Some("video"))
+        .context("抖音原画候选没有视频流")?;
+    let audio = probe
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type.as_deref() == Some("audio"));
+    let width = video.width.filter(|value| *value > 0);
+    let height = video.height.filter(|value| *value > 0);
+    let vcodec = video
+        .codec_name
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .context("抖音原画候选缺少视频编码信息")?;
+    let fps = parse_ffprobe_fps(video.avg_frame_rate.as_deref());
+    let bitrate = parse_ffprobe_bitrate(video.bit_rate.as_deref()).or_else(|| {
+        duration_seconds
+            .filter(|duration| *duration > 0.0)
+            .map(|duration| file_size as f64 * 8.0 / duration / 1000.0)
+    });
+    let abr = audio
+        .and_then(|stream| parse_ffprobe_bitrate(stream.bit_rate.as_deref()))
+        .or(Some(128.0));
+    let dynamic_range = video
+        .color_transfer
+        .as_deref()
+        .filter(|value| matches!(*value, "smpte2084" | "arib-std-b67"))
+        .map(|_| "HDR".to_string())
+        .unwrap_or_else(|| "SDR".to_string());
+    Ok(ExternalMediaFormat {
+        format_id: Some("douyin-original".to_string()),
+        url: Some(url.to_string()),
+        protocol: Some("https".to_string()),
+        ext: Some("mp4".to_string()),
+        vcodec: Some(vcodec),
+        acodec: Some(
+            audio
+                .and_then(|stream| stream.codec_name.clone())
+                .unwrap_or_else(|| "none".to_string()),
+        ),
+        width,
+        height,
+        fps,
+        tbr: bitrate,
+        vbr: bitrate,
+        abr,
+        dynamic_range: Some(dynamic_range),
+        is_original: true,
+        decryption_key: None,
+        fallback_urls: Vec::new(),
+    })
+}
+
+async fn probe_douyin_original_format_candidate(
+    video: &serde_json::Value,
+    formats: &[ExternalMediaFormat],
+) -> Option<ExternalMediaFormat> {
+    if formats.iter().any(|format| format.decryption_key.is_some()) {
+        return None;
+    }
+    let url = douyin_original_url(video)?;
+    let file_size = match probe_douyin_original_size(&url).await {
+        Ok(size) => size,
+        Err(error) => {
+            debug!(error = %error, "跳过抖音原画候选：无法探测文件大小");
+            return None;
+        }
+    };
+    let current_max_size = douyin_current_max_data_size(video);
+    let current_max_area = formats.iter().map(format_pixel_area).max().unwrap_or(0);
+    let source_area = match (
+        video.get("width").and_then(serde_json::Value::as_i64),
+        video.get("height").and_then(serde_json::Value::as_i64),
+    ) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => width * height,
+        _ => 0,
+    };
+    if !douyin_original_candidate_worth_probing(
+        file_size,
+        current_max_size,
+        source_area,
+        current_max_area,
+    ) {
+        debug!(
+            file_size,
+            current_max_size,
+            source_area,
+            current_max_area,
+            "跳过抖音原画候选：体积和标称分辨率均不高于现有最高档"
+        );
+        return None;
+    }
+    let duration = video
+        .get("duration")
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value / 1000.0)
+        .filter(|value| *value > 0.0);
+    match probe_douyin_original_format(&url, file_size, duration).await {
+        Ok(format) => {
+            info!(
+                file_size,
+                width = format.width.unwrap_or_default(),
+                height = format.height.unwrap_or_default(),
+                fps = format.fps.unwrap_or_default(),
+                vcodec = format.vcodec.as_deref().unwrap_or("-"),
+                bitrate = format.tbr.unwrap_or_default(),
+                "已探测到抖音高码率原画候选，交由统一选流判断"
+            );
+            Some(format)
+        }
+        Err(error) => {
+            debug!(error = %error, "跳过抖音原画候选：ffprobe 校验失败");
+            None
+        }
+    }
+}
+
 fn native_format(value: &serde_json::Value) -> Option<ExternalMediaFormat> {
     let play_addr = value.get("play_addr")?;
     let (url, fallback_urls) = media_urls(Some(play_addr))?;
@@ -3681,6 +3993,7 @@ fn native_format(value: &serde_json::Value) -> Option<ExternalMediaFormat> {
         vbr: bitrate,
         abr: Some(128.0),
         dynamic_range: Some(dynamic_range),
+        is_original: false,
         decryption_key: None,
         fallback_urls,
     })
@@ -3738,6 +4051,7 @@ fn encrypted_dash_formats(value: &serde_json::Value) -> Result<Vec<ExternalMedia
             vbr: bitrate,
             abr: None,
             dynamic_range: Some("SDR".to_string()),
+            is_original: false,
             decryption_key: dash_decryption_key(item)?,
             fallback_urls,
         });
@@ -3762,6 +4076,7 @@ fn encrypted_dash_formats(value: &serde_json::Value) -> Result<Vec<ExternalMedia
             vbr: None,
             abr: bitrate,
             dynamic_range: None,
+            is_original: false,
             decryption_key: dash_decryption_key(item)?,
             fallback_urls,
         });
@@ -4858,6 +5173,100 @@ mod tests {
         assert!(is_douyin_risk_error(&risk_5xx));
         let unrelated = anyhow::anyhow!("网络连接失败");
         assert!(!is_douyin_risk_error(&unrelated));
+    }
+
+    #[test]
+    fn builds_douyin_original_play_url_from_uri() {
+        let url = douyin_original_url(&serde_json::json!({
+            "play_addr": {"uri": "v2700fgi0000dbafjefog65itefi9evg"}
+        }))
+        .expect("应生成原画候选地址");
+        let parsed = reqwest::Url::parse(&url).expect("候选地址应合法");
+        assert_eq!(parsed.host_str(), Some("www.douyin.com"));
+        assert_eq!(parsed.path(), "/aweme/v1/play/");
+        let params = parsed.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(
+            params.get("video_id").map(|value| value.as_ref()),
+            Some("v2700fgi0000dbafjefog65itefi9evg")
+        );
+        assert_eq!(params.get("ratio").map(|value| value.as_ref()), Some("default"));
+    }
+
+    #[test]
+    fn parses_douyin_original_probe_values() {
+        assert_eq!(parse_content_range_total("bytes 0-0/40087514"), Some(40_087_514));
+        assert_eq!(parse_content_range_total("bytes 0-0/*"), None);
+        assert!(
+            (parse_ffprobe_fps(Some("186000000/9249743")).unwrap_or_default() - 20.108_666_802_958_74).abs()
+                < 1e-9
+        );
+        assert_eq!(parse_ffprobe_fps(Some("60/1")), Some(60.0));
+        assert_eq!(parse_ffprobe_fps(Some("0/0")), None);
+        assert_eq!(parse_ffprobe_bitrate(Some("6830357")), Some(6830.357));
+    }
+
+    #[test]
+    fn only_probes_original_when_it_can_beat_current_stream() {
+        // 7698054262056552561：40MB 原画明显大于 3.98MB 转码，应探测。
+        assert!(douyin_original_candidate_worth_probing(
+            40_087_514,
+            3_977_493,
+            1080 * 1920,
+            1080 * 1920,
+        ));
+        // 4K 作品的默认候选只有 720p、体积更小，不应探测后降级。
+        assert!(!douyin_original_candidate_worth_probing(
+            3_579_826,
+            9_004_000,
+            2160 * 3840,
+            2160 * 3840,
+        ));
+        // 候选体积未变但详情标称原始分辨率更高，仍值得校验。
+        assert!(douyin_original_candidate_worth_probing(
+            9_000_000,
+            9_000_000,
+            4320 * 7680,
+            2160 * 3840,
+        ));
+    }
+
+    /// 实际网络探测回归（需要能访问抖音 CDN）：
+    /// `cargo test -p bili_sync probes_real_douyin_original_candidate -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn probes_real_douyin_original_candidate() {
+        let video = serde_json::json!({
+            "width": 1080,
+            "height": 1920,
+            "duration": 46234,
+            "play_addr": {"uri": "v2700fgi0000dbafjefog65itefi9evg"},
+            "bit_rate": [{
+                "gear_name": "normal_1080_0",
+                "bit_rate": 688236,
+                "FPS": 20,
+                "play_addr": {
+                    "width": 1080,
+                    "height": 1920,
+                    "data_size": 3977493,
+                    "url_list": ["https://example.com/current.mp4"]
+                }
+            }]
+        });
+        let formats = video
+            .get("bit_rate")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(native_format)
+            .collect::<Vec<_>>();
+        let original = probe_douyin_original_format_candidate(&video, &formats)
+            .await
+            .expect("应探测到高码率原画候选");
+        assert!(original.is_original);
+        assert_eq!(original.width, Some(1080));
+        assert_eq!(original.height, Some(1920));
+        assert!(original.tbr.unwrap_or_default() > 6000.0, "原画码率应显著高于 688kbps");
+        assert_eq!(original.acodec.as_deref(), Some("aac"));
     }
 
     #[test]

@@ -5001,6 +5001,9 @@ fn select_best_youtube_video_stream(
                 i32::from(in_range),
                 i32::from(under_max),
                 if under_max { height } else { -height },
+                // 原画候选在同分辨率下优先于编码偏好：抖音原片常见 HEVC，
+                // 但它可能比当前 H.264 转码高一个数量级码率。
+                i32::from(format.is_original),
                 -(youtube_codec_rank(format.vcodec.as_deref(), &filter.codecs) as i32),
                 format.fps.unwrap_or_default() as i32,
                 format.tbr.unwrap_or_default() as i32,
@@ -5045,6 +5048,8 @@ fn select_best_youtube_mixed_stream(
                 i32::from(audio_in_range),
                 i32::from(under_max),
                 if under_max { height } else { -height },
+                // 同上：原画候选优先于同分辨率的编码偏好。
+                i32::from(format.is_original),
                 -(youtube_codec_rank(format.vcodec.as_deref(), &filter.codecs) as i32),
                 format.tbr.unwrap_or_default() as i32,
             )
@@ -5269,7 +5274,7 @@ fn log_selected_youtube_streams(
     let platform = source_platform_label(source);
     let describe = |format: &ExternalMediaFormat| {
         format!(
-            "id={} {}x{} fps={} vcodec={} acodec={} tbr={} vbr={} abr={}",
+            "id={} {}x{} fps={} vcodec={} acodec={} tbr={} vbr={} abr={} original={}",
             format.format_id.as_deref().unwrap_or("-"),
             format.width.unwrap_or_default(),
             format.height.unwrap_or_default(),
@@ -5279,6 +5284,7 @@ fn log_selected_youtube_streams(
             format.tbr.unwrap_or_default(),
             format.vbr.unwrap_or_default(),
             format.abr.unwrap_or_default(),
+            format.is_original,
         )
     };
     info!(
@@ -8181,6 +8187,7 @@ mod tests {
             vbr: Some(4000.0),
             abr: None,
             dynamic_range: Some("SDR".to_string()),
+            is_original: false,
             decryption_key: None,
             fallback_urls: Vec::new(),
         };
@@ -8198,6 +8205,7 @@ mod tests {
             vbr: None,
             abr: Some(abr as f64),
             dynamic_range: Some("SDR".to_string()),
+            is_original: false,
             decryption_key: None,
             fallback_urls: Vec::new(),
         };
@@ -8245,6 +8253,7 @@ mod tests {
             vbr: Some(4000.0),
             abr: None,
             dynamic_range: Some("SDR".to_string()),
+            is_original: false,
             decryption_key: None,
             fallback_urls: Vec::new(),
         };
@@ -8262,6 +8271,7 @@ mod tests {
             vbr: None,
             abr: Some(128.0),
             dynamic_range: Some("SDR".to_string()),
+            is_original: false,
             decryption_key: None,
             fallback_urls: Vec::new(),
         };
@@ -8284,6 +8294,61 @@ mod tests {
     }
 
     #[test]
+    fn douyin_original_stream_wins_same_resolution_over_codec_preference() {
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
+        use super::ExternalMediaFormat;
+
+        let filter = FilterOption {
+            video_max_quality: VideoQuality::Quality8k,
+            video_min_quality: VideoQuality::Quality360p,
+            audio_max_quality: AudioQuality::QualityHiRES,
+            audio_min_quality: AudioQuality::Quality64k,
+            codecs: vec![VideoCodecs::AVC, VideoCodecs::HEV, VideoCodecs::AV1],
+            ..Default::default()
+        };
+        let current = ExternalMediaFormat {
+            format_id: Some("normal_1080_0".to_string()),
+            url: Some("https://example.com/current.mp4".to_string()),
+            protocol: Some("https".to_string()),
+            ext: Some("mp4".to_string()),
+            vcodec: Some("h264".to_string()),
+            acodec: Some("aac".to_string()),
+            width: Some(1080),
+            height: Some(1920),
+            fps: Some(20.0),
+            tbr: Some(688.0),
+            vbr: Some(688.0),
+            abr: Some(128.0),
+            dynamic_range: Some("SDR".to_string()),
+            is_original: false,
+            decryption_key: None,
+            fallback_urls: Vec::new(),
+        };
+        let original = ExternalMediaFormat {
+            format_id: Some("douyin-original".to_string()),
+            vcodec: Some("h265".to_string()),
+            url: Some("https://example.com/original.mp4".to_string()),
+            tbr: Some(6830.0),
+            vbr: Some(6830.0),
+            is_original: true,
+            ..current.clone()
+        };
+        let selected = super::select_youtube_streams(
+            &[current, original],
+            &filter,
+            false,
+            "抖音",
+        )
+        .expect("应选出原画候选");
+        let mixed = selected.mixed.expect("应选择混合流");
+        assert_eq!(
+            mixed.format_id.as_deref(),
+            Some("douyin-original"),
+            "同分辨率下应优先选择高码率原画，而不是仅按编码偏好选择 H.264"
+        );
+    }
+
+    #[test]
     fn youtube_stream_selection_vp9_fallback_respects_no_hdr_and_max_height() {
         use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
         use super::ExternalMediaFormat;
@@ -8302,6 +8367,7 @@ mod tests {
             vbr: Some(4000.0),
             abr: None,
             dynamic_range: Some(dr.to_string()),
+            is_original: false,
             decryption_key: None,
             fallback_urls: Vec::new(),
         };
@@ -8319,6 +8385,7 @@ mod tests {
             vbr: None,
             abr: Some(128.0),
             dynamic_range: Some("SDR".to_string()),
+            is_original: false,
             decryption_key: None,
             fallback_urls: Vec::new(),
         };

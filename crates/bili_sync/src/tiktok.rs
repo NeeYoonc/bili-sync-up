@@ -3649,6 +3649,7 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
         vbr: None,
         abr: None,
         dynamic_range: None,
+        is_original: false,
         decryption_key: None,
         fallback_urls: url_list[1..].to_vec(),
     };
@@ -4242,6 +4243,7 @@ fn tiktok_embed_video_metadata(video_data: &serde_json::Value, fallback_id: &str
         vbr: None,
         abr: None,
         dynamic_range: None,
+        is_original: false,
         decryption_key: None,
         fallback_urls: url_iter.cloned().collect(),
     };
