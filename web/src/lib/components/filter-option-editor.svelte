@@ -42,7 +42,10 @@
 		dispatch('change', { ...value, [key]: nextValue });
 	}
 
-	function updateBoolean(key: 'no_dolby_video' | 'no_dolby_audio' | 'no_hdr' | 'no_hires', checked: boolean) {
+	function updateBoolean(
+		key: 'no_dolby_video' | 'no_dolby_audio' | 'no_hdr' | 'no_hires' | 'prefer_douyin_original',
+		checked: boolean
+	) {
 		updateField(key, checked);
 	}
 
@@ -221,5 +224,25 @@
 			/>
 			禁用Hi-Res音频
 		</label>
+	</div>
+
+	<div class="rounded-lg border bg-gray-50 p-3 dark:bg-gray-900">
+		<label class="flex items-center gap-2 text-sm font-medium">
+			<input
+				type="checkbox"
+				checked={value.prefer_douyin_original}
+				{disabled}
+				onchange={(event) =>
+					updateBoolean(
+						'prefer_douyin_original',
+						(event.currentTarget as HTMLInputElement).checked
+					)}
+				class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+			/>
+			优先使用抖音高码率原画
+		</label>
+		<p class="text-muted-foreground mt-1 pl-6 text-xs">
+			仅对抖音视频生效。原画通常保留更多细节，但文件体积可能明显增大；关闭后直接使用普通最高档。
+		</p>
 	</div>
 </div>

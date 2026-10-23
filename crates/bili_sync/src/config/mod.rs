@@ -675,6 +675,7 @@ impl Clone for Config {
                 no_dolby_audio: self.filter_option.no_dolby_audio,
                 no_hdr: self.filter_option.no_hdr,
                 no_hires: self.filter_option.no_hires,
+                prefer_douyin_original: self.filter_option.prefer_douyin_original,
             },
             danmaku_option: DanmakuOption {
                 duration: self.danmaku_option.duration,

@@ -101,7 +101,8 @@
 		no_dolby_video: false,
 		no_dolby_audio: false,
 		no_hdr: false,
-		no_hires: false
+		no_hires: false,
+		prefer_douyin_original: true
 	};
 
 	let sourceType: VideoCategory = 'collection';
@@ -690,7 +691,9 @@
 			no_dolby_video: config.no_dolby_video ?? DEFAULT_FILTER_OPTION.no_dolby_video,
 			no_dolby_audio: config.no_dolby_audio ?? DEFAULT_FILTER_OPTION.no_dolby_audio,
 			no_hdr: config.no_hdr ?? DEFAULT_FILTER_OPTION.no_hdr,
-			no_hires: config.no_hires ?? DEFAULT_FILTER_OPTION.no_hires
+			no_hires: config.no_hires ?? DEFAULT_FILTER_OPTION.no_hires,
+			prefer_douyin_original:
+				config.prefer_douyin_original ?? DEFAULT_FILTER_OPTION.prefer_douyin_original
 		};
 	}
 

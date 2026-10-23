@@ -254,6 +254,7 @@ export interface FilterOption {
 	no_dolby_audio: boolean;
 	no_hdr: boolean;
 	no_hires: boolean;
+	prefer_douyin_original: boolean;
 }
 
 // 视频来源类型
@@ -575,6 +576,7 @@ export interface ConfigResponse {
 	no_dolby_audio?: boolean;
 	no_hdr?: boolean;
 	no_hires?: boolean;
+	prefer_douyin_original?: boolean;
 	// 新增弹幕设置
 	danmaku_duration?: number;
 	danmaku_font?: string;
@@ -762,6 +764,7 @@ export interface UpdateConfigRequest {
 	no_dolby_audio?: boolean;
 	no_hdr?: boolean;
 	no_hires?: boolean;
+	prefer_douyin_original?: boolean;
 	// 新增弹幕设置
 	danmaku_duration?: number;
 	danmaku_font?: string;
