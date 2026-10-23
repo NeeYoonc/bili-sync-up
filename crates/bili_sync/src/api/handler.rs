@@ -11106,6 +11106,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         no_dolby_audio: config.filter_option.no_dolby_audio,
         no_hdr: config.filter_option.no_hdr,
         no_hires: config.filter_option.no_hires,
+        prefer_douyin_original: config.filter_option.prefer_douyin_original,
         // 弹幕设置
         danmaku_duration: config.danmaku_option.duration,
         danmaku_font: config.danmaku_option.font.clone(),
@@ -11718,6 +11719,7 @@ pub async fn update_config(
             no_dolby_audio: params.no_dolby_audio,
             no_hdr: params.no_hdr,
             no_hires: params.no_hires,
+            prefer_douyin_original: params.prefer_douyin_original,
             // 弹幕设置
             danmaku_duration: params.danmaku_duration,
             danmaku_font: params.danmaku_font.clone(),
@@ -11844,6 +11846,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "no_dolby_audio" => Some("禁用杜比全景声"),
         "no_hdr" => Some("禁用HDR"),
         "no_hires" => Some("禁用Hi-Res"),
+        "prefer_douyin_original" => Some("优先使用抖音高码率原画"),
         "danmaku_duration" => Some("弹幕持续时间"),
         "danmaku_font" => Some("弹幕字体"),
         "danmaku_font_size" => Some("弹幕字号"),
@@ -12442,6 +12445,13 @@ pub async fn update_config_internal(
         if no_hires != config.filter_option.no_hires {
             config.filter_option.no_hires = no_hires;
             updated_fields.push("no_hires");
+        }
+    }
+
+    if let Some(prefer_douyin_original) = params.prefer_douyin_original {
+        if prefer_douyin_original != config.filter_option.prefer_douyin_original {
+            config.filter_option.prefer_douyin_original = prefer_douyin_original;
+            updated_fields.push("prefer_douyin_original");
         }
     }
 
@@ -13533,7 +13543,7 @@ pub async fn update_config_internal(
                 }
                 // 处理视频质量相关字段
                 "video_max_quality" | "video_min_quality" | "audio_max_quality" | "audio_min_quality" | "codecs"
-                | "no_dolby_video" | "no_dolby_audio" | "no_hdr" | "no_hires" => {
+                | "no_dolby_video" | "no_dolby_audio" | "no_hdr" | "no_hires" | "prefer_douyin_original" => {
                     manager
                         .update_config_item("filter_option", serde_json::to_value(&config.filter_option)?)
                         .await

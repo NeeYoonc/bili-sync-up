@@ -3512,6 +3512,7 @@ async fn extract_metadata_native(
     aweme_id: &str,
     source: Option<&youtube_source::Model>,
 ) -> Result<ExternalMediaMetadata> {
+    let prefer_original = douyin_original_preference(source);
     let detail = if let Some(source) = source.filter(|source| source.source_type.starts_with("douyin")) {
         fetch_aweme_detail_for_source(&source.source_type, &source.url, aweme_id).await?
     } else {
@@ -3585,7 +3586,9 @@ async fn extract_metadata_native(
     }
     if slides.is_empty() {
         if let Some(video) = video {
-            if let Some(original) = probe_douyin_original_format_candidate(video, &formats).await {
+            if let Some(original) =
+                probe_douyin_original_format_candidate_if_enabled(video, &formats, prefer_original).await
+            {
                 formats.push(original);
             }
         }
@@ -3659,6 +3662,24 @@ async fn extract_metadata_native(
         music_urls,
         creators: None,
     })
+}
+
+/// 读取当前抖音源实际生效的“优先原画”设置：源级配置优先，否则使用全局配置。
+fn douyin_original_preference(source: Option<&youtube_source::Model>) -> bool {
+    let source_preference = source
+        .and_then(|source| source.filter_option.as_ref())
+        .and_then(|value| match serde_json::from_value::<FilterOption>(value.clone()) {
+            Ok(filter) => Some(filter.prefer_douyin_original),
+            Err(error) => {
+                warn!(
+                    target: "bili_sync_rs::douyin",
+                    error = %error,
+                    "解析抖音源级流过滤设置失败，原画开关回退到全局配置"
+                );
+                None
+            }
+        });
+    source_preference.unwrap_or_else(|| crate::config::reload_config().filter_option.prefer_douyin_original)
 }
 
 /// 构造抖音原始片源候选地址。`play_addr.uri` 不是公开作品 ID，
@@ -3962,6 +3983,18 @@ async fn probe_douyin_original_format_candidate(
             None
         }
     }
+}
+
+async fn probe_douyin_original_format_candidate_if_enabled(
+    video: &serde_json::Value,
+    formats: &[ExternalMediaFormat],
+    enabled: bool,
+) -> Option<ExternalMediaFormat> {
+    if !enabled {
+        debug!("已关闭“优先使用抖音高码率原画”，跳过原画候选探测");
+        return None;
+    }
+    probe_douyin_original_format_candidate(video, formats).await
 }
 
 fn native_format(value: &serde_json::Value) -> Option<ExternalMediaFormat> {
@@ -5203,6 +5236,50 @@ mod tests {
         assert_eq!(parse_ffprobe_fps(Some("60/1")), Some(60.0));
         assert_eq!(parse_ffprobe_fps(Some("0/0")), None);
         assert_eq!(parse_ffprobe_bitrate(Some("6830357")), Some(6830.357));
+    }
+
+    #[test]
+    fn old_filter_config_defaults_to_prefer_douyin_original() {
+        let filter: FilterOption = serde_json::from_value(serde_json::json!({
+            "video_max_quality": "Quality8k",
+            "video_min_quality": "Quality360p",
+            "audio_max_quality": "QualityHiRES",
+            "audio_min_quality": "Quality64k",
+            "codecs": ["AVC", "HEV", "AV1"],
+            "no_dolby_video": false,
+            "no_dolby_audio": false,
+            "no_hdr": false,
+            "no_hires": false
+        }))
+        .expect("旧配置应可反序列化");
+        assert!(filter.prefer_douyin_original, "旧配置缺字段时应保持原有原画探测行为");
+    }
+
+    #[test]
+    fn douyin_source_can_disable_original_probe() {
+        let mut source = sample_douyin_source();
+        source.filter_option = Some(serde_json::json!({
+            "video_max_quality": "Quality8k",
+            "video_min_quality": "Quality360p",
+            "audio_max_quality": "QualityHiRES",
+            "audio_min_quality": "Quality64k",
+            "codecs": ["AVC", "HEV", "AV1"],
+            "no_dolby_video": false,
+            "no_dolby_audio": false,
+            "no_hdr": false,
+            "no_hires": false,
+            "prefer_douyin_original": false
+        }));
+        assert!(!douyin_original_preference(Some(&source)));
+    }
+
+    #[tokio::test]
+    async fn disabled_douyin_original_switch_skips_probe_without_network() {
+        let video = serde_json::json!({
+            "play_addr": {"uri": "should-not-be-requested"}
+        });
+        let original = probe_douyin_original_format_candidate_if_enabled(&video, &[], false).await;
+        assert!(original.is_none());
     }
 
     #[test]
