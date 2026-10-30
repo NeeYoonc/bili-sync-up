@@ -377,6 +377,11 @@
 	];
 	const douyinSourceTypeOptions = [
 		{ value: 'douyin', label: '作者投稿', description: '同步指定抖音作者的视频和图文作品' },
+		{
+			value: 'douyin_mix',
+			label: '合集',
+			description: '搜索作者后从右侧选择其合集，按合集的集号顺序同步'
+		},
 		{ value: 'douyin_liked', label: '我的喜欢', description: '同步当前登录账号点赞的视频和图文' },
 		{ value: 'douyin_collection', label: '收藏夹', description: '从右侧选择当前账号的抖音收藏夹' },
 		{ value: 'douyin_watch_later', label: '稍后再看', description: '同步当前登录账号的稍后再看列表' },
@@ -499,7 +504,7 @@
 	}
 
 	function douyinSourceNeedsSelection(): boolean {
-		return ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series'].includes(
+		return ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series', 'douyin_mix'].includes(
 			youtubeSourceType
 		);
 	}
@@ -540,6 +545,7 @@
 			case 'douyin_collection':
 			case 'douyin_theater':
 			case 'douyin_series':
+			case 'douyin_mix':
 				return 'collection';
 			case 'liked':
 			case 'watch_later':
@@ -913,8 +919,9 @@
 			);
 			if (!response) return;
 			searchResults = response.data.results;
-			// 收藏夹类型：每次搜索都清空右侧面板（历史选择 / 已加载的 UP 收藏夹），避免叠加显示
-			if (youtubeSourceType === 'douyin_collection') {
+			// 收藏夹/合集类型：每次搜索都清空右侧面板（历史选择 / 已加载的 UP 收藏夹或合集），
+			// 避免上一次选中的 UP 的列表和本次搜索结果叠在一起。
+			if (youtubeSourceType === 'douyin_collection' || youtubeSourceType === 'douyin_mix') {
 				showSubmissionSelection = false;
 				douyinCatalog = [];
 				douyinCatalogOwnerName = '';
@@ -1156,6 +1163,26 @@
 				});
 				return;
 			}
+			// 抖音合集：与 B 站「合集」一致，先选 UP 主，再从右侧挑该作者的合集
+			if (
+				sourcePlatform === 'douyin' &&
+				youtubeSourceType === 'douyin_mix' &&
+				result.result_type === 'douyin_user' &&
+				result.youtube_url
+			) {
+				douyinCatalogOwnerName = cleanTitle(result.title);
+				clearSearchPanel({ clearKeyword: true });
+				showSubmissionSelection = false;
+				void loadDouyinCatalog(result.youtube_url).then((has) => {
+					if (!has) {
+						douyinCatalogOwnerName = '';
+						toast.warning('该 UP 没有公开合集');
+					} else {
+						toast.success('已选择 UP 主', { description: `找到 ${douyinCatalog.length} 个合集` });
+					}
+				});
+				return;
+			}
 			if (!result.youtube_url) {
 				toast.error('搜索结果缺少来源链接');
 				return;
@@ -1186,6 +1213,8 @@
 							? '抖音短剧'
 							: youtubeSourceType === 'douyin_collection'
 								? '抖音收藏夹'
+								: youtubeSourceType === 'douyin_mix'
+									? '抖音合集'
 								: '抖音作者';
 			toast.success(`已选择${sourceLabel}`, {
 				description: shouldSelectHistory ? '正在加载历史视频…' : '已填充来源信息'
@@ -1492,7 +1521,7 @@
 				toast.error(isDouyin ? '请先选择抖音来源' : '请输入 YouTube 链接', {
 					description:
 						isDouyin
-							? '作者、收藏夹、放映厅或短剧需要从右侧选择，也可填写对应详情链接'
+							? '作者、合集、收藏夹、放映厅或短剧需要从右侧选择，也可填写对应详情链接'
 							: youtubeSourceType === 'channel'
 							? '频道投稿需要提供频道链接'
 								: '播放列表来源需要提供播放列表链接'
@@ -2383,6 +2412,8 @@
 				return `douyin:theater:${last}`;
 			case 'douyin_series':
 				return `douyin:series:${last}`;
+			case 'douyin_mix':
+				return `douyin:mix:${last}`;
 			case 'douyin_liked':
 				return 'douyin:liked';
 			case 'douyin_watch_later':
@@ -2438,6 +2469,8 @@
 				return isExternalSourceAdded('douyin_theater', url);
 			case 'douyin_series':
 				return isExternalSourceAdded('douyin_series', url);
+			case 'douyin_mix':
+				return isExternalSourceAdded('douyin_mix', url);
 			case 'tiktok_user':
 				return isExternalSourceAdded('tiktok', url);
 			case 'tiktok_playlist':
@@ -2447,9 +2480,15 @@
 		}
 	}
 
-	/** 抖音右侧列表（收藏夹 / 放映厅 / 短剧）条目是否已经添加过 */
+	/**
+	 * 抖音右侧列表（合集 / 收藏夹 / 放映厅 / 短剧）条目是否已经添加过。
+	 *
+	 * 合集和收藏夹都用 `/collection/{id}` 链接，只看链接分不出类型，
+	 * 因此按 `result_type` 判断，不能用 URL 猜。
+	 */
 	function isDouyinCatalogItemAdded(item: SearchResultItem): boolean {
 		const url = item.youtube_url ?? '';
+		if (item.result_type === 'douyin_mix') return isExternalSourceAdded('douyin_mix', url);
 		if (url.includes('/lvdetail/')) return isExternalSourceAdded('douyin_theater', url);
 		if (url.includes('/series/')) return isExternalSourceAdded('douyin_series', url);
 		return isExternalSourceAdded('douyin_collection', url);
@@ -2968,7 +3007,9 @@
 	function isYouTubeHistorySource(): boolean {
 		if (
 			sourcePlatform === 'douyin' &&
-			(youtubeSourceType === 'douyin_theater' || youtubeSourceType === 'douyin_series')
+			(youtubeSourceType === 'douyin_theater' ||
+				youtubeSourceType === 'douyin_series' ||
+				youtubeSourceType === 'douyin_mix')
 		) {
 			return false;
 		}
@@ -3037,7 +3078,7 @@
 			.split(/[/?#]/)
 			.reverse()
 			.find((part) => /^\d+$/.test(part));
-		if (!id || !['douyin_theater', 'douyin_series'].includes(sourceType)) return;
+		if (!id || !['douyin_theater', 'douyin_series', 'douyin_mix'].includes(sourceType)) return;
 		try {
 			const response = await api.getDouyinCatalog(sourceType, id);
 			if (youtubeUrl.trim() !== url || youtubeSourceType !== sourceType) return;
@@ -3061,7 +3102,7 @@
 		youtubePreviewTimeout = setTimeout(() => {
 			if (
 				sourcePlatform === 'douyin' &&
-				['douyin_theater', 'douyin_series'].includes(currentType)
+				['douyin_theater', 'douyin_series', 'douyin_mix'].includes(currentType)
 			) {
 				void resolveDouyinCatalogLinkName(currentUrl, currentType);
 				return;
@@ -3981,8 +4022,8 @@
 									</div>
 								</div>
 							{/if}
-							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && (youtubeSourceType === 'tiktok' || youtubeSourceType === 'tiktok_collection'))}
-{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok')}
+							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series', 'douyin_mix'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && (youtubeSourceType === 'tiktok' || youtubeSourceType === 'tiktok_collection'))}
+{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series', 'douyin_mix'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok')}
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
 								>
@@ -3997,7 +4038,9 @@
 														? '搜索抖音短剧'
 														: youtubeSourceType === 'douyin_collection'
 															? '搜索抖音 UP 的收藏夹'
-															: '搜索抖音作者'
+															: youtubeSourceType === 'douyin_mix'
+																? '搜索抖音 UP 的合集'
+																: '搜索抖音作者'
 												: youtubeSourceType === 'channel'
 												? '搜索 YouTube 频道'
 												: '搜索 YouTube 播放列表'}
@@ -4015,7 +4058,9 @@
 																? '输入短剧名称或作者...'
 																: youtubeSourceType === 'douyin_collection'
 																	? '输入 UP 昵称或抖音号，获取其公开收藏夹...'
-																	: '输入抖音作者昵称或抖音号...'
+																	: youtubeSourceType === 'douyin_mix'
+																		? '输入 UP 昵称或抖音号，获取其合集...'
+																		: '输入抖音作者昵称或抖音号...'
 														: youtubeSourceType === 'channel'
 														? '输入频道名称或 @用户名...'
 														: '输入播放列表名称...'}
@@ -4073,6 +4118,8 @@
 														? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
 														: youtubeSourceType === 'douyin_collection'
 															? '先搜索 UP 主，选择后加载其公开收藏夹，再选收藏夹自动填充名称和链接。'
+															: youtubeSourceType === 'douyin_mix'
+																? '先搜索 UP 主，选择后加载其合集，再选合集自动填充名称和链接；也可直接粘贴合集链接。'
 															: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
 													: '搜索并选择结果后，将自动填充名称、链接和当前来源类型的快捷路径模板。'}
 										</p>
@@ -4088,7 +4135,11 @@
 												? '放映厅详情链接'
 												: youtubeSourceType === 'douyin_series'
 													? '短剧详情链接'
-													: youtubeSourceType === 'douyin_collection' ? '抖音收藏夹链接' : '抖音作者主页链接'
+													: youtubeSourceType === 'douyin_collection'
+														? '抖音收藏夹链接'
+														: youtubeSourceType === 'douyin_mix'
+															? '抖音合集链接（可选，也可从右侧选择）'
+															: '抖音作者主页链接'
 											: sourcePlatform === 'tiktok' ? (youtubeSourceType === 'tiktok_favorite' ? '无需填写链接' : youtubeSourceType === 'tiktok_collection' ? 'TikTok 主页链接（可选，仅读取他人收藏夹时填写）' : 'TikTok 作者链接，如 https://www.tiktok.com/@user') : youtubeSourceType === 'playlist' ? 'YouTube 播放列表链接' : 'YouTube 频道链接'}
 									</Label>
 									{#if !(sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_favorite')}
@@ -4105,7 +4156,11 @@
 													? 'https://www.douyin.com/lvdetail/...'
 													: youtubeSourceType === 'douyin_series'
 														? 'https://www.douyin.com/series/...'
-														: youtubeSourceType === 'douyin_collection' ? 'https://www.douyin.com/collection/...' : 'https://www.douyin.com/user/...'
+														: youtubeSourceType === 'douyin_collection'
+															? 'https://www.douyin.com/collection/...'
+															: youtubeSourceType === 'douyin_mix'
+																? 'https://www.douyin.com/collection/...'
+																: 'https://www.douyin.com/user/...'
 												: youtubeSourceType === 'channel'
 												? 'https://www.youtube.com/@channel/videos'
 												: 'https://www.youtube.com/playlist?list=...'}
@@ -4139,7 +4194,9 @@
 											? '抖音收藏夹链接'
 											: youtubeSourceType === 'douyin_theater'
 												? '放映厅详情链接'
-												: '短剧详情链接'}
+												: youtubeSourceType === 'douyin_mix'
+													? '抖音合集链接'
+													: '短剧详情链接'}
 									</Label>
 									<Input id="youtube-url" bind:value={youtubeUrl} oninput={scheduleYouTubeHistorySelection} />
 									<p class="text-muted-foreground text-xs">
@@ -5794,6 +5851,8 @@
 																				? '抖音短剧'
 																			: result.result_type === 'douyin_collection'
 																				? '抖音收藏夹'
+																			: result.result_type === 'douyin_mix'
+																				? '抖音合集'
 																			: result.result_type === 'tiktok_playlist'
 																				? 'TikTok 收藏夹'
 																			: result.result_type === 'youtube_playlist'
@@ -5880,13 +5939,15 @@
 					</div>
 				{/if}
 
-				<!-- 抖音收藏夹/放映厅/短剧：沿用 B 站收藏夹和合集的右侧选择方式 -->
+				<!-- 抖音合集/收藏夹/放映厅/短剧：沿用 B 站收藏夹和合集的右侧选择方式 -->
 				{#if sourcePlatform === 'douyin' && (douyinCatalog.length > 0 || loadingDouyinCatalog) && !(youtubeSourceType === 'douyin_collection' && douyinCollectionSearchMode) && !(youtubeSourceType === 'douyin_collection' && showSubmissionSelection)}
 					<div class={isCompactLayout ? 'w-full' : 'flex-1'}>
 						<SidePanel
 							isMobile={isCompactLayout}
 							title={youtubeSourceType === 'douyin_collection'
 								? (douyinCatalogOwnerName ? `${douyinCatalogOwnerName} 的收藏夹` : '我的抖音收藏夹')
+								: youtubeSourceType === 'douyin_mix'
+									? (douyinCatalogOwnerName ? `${douyinCatalogOwnerName} 的合集` : '抖音合集')
 								: youtubeSourceType === 'douyin_theater'
 									? '抖音放映厅'
 									: '抖音短剧'}

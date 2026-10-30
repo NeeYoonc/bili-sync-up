@@ -1231,6 +1231,24 @@ pub async fn create_youtube_source(
         // 同一个作者才不会因为链接写法不同被当成两个源重复添加。
         let sec_uid = crate::douyin::resolve_sec_user_id(&url).await?;
         url = format!("https://www.douyin.com/user/{sec_uid}");
+    } else if source_type == "douyin_mix" {
+        // 合集统一归一成网页合集页链接（`/collection/{mix_id}`），
+        // 并确认该 id 确实是合集：抖音的收藏夹与合集共用 `/collection/` 路由，
+        // 只看链接分不出来，选错类型建出来的源会永远扫不到作品。
+        let mix_id = crate::douyin::resolve_mix_id(&url).await?;
+        let detail = crate::douyin::fetch_mix_detail(&mix_id).await?;
+        let Some(detail) = detail else {
+            return Err(ApiError::bad_request(format!(
+                "这个链接不是抖音合集（ID {mix_id}）：合集请先搜索作者再从右侧选择；若要同步收藏夹请改用「收藏夹」来源类型"
+            )));
+        };
+        debug!(
+            mix_id = %detail.id,
+            mix_name = %detail.name,
+            episode_count = ?detail.episode_count,
+            "抖音合集来源已确认"
+        );
+        url = format!("https://www.douyin.com/collection/{mix_id}");
     } else if source_type == "tiktok" {
         if !crate::tiktok::is_tiktok_url(&url) {
             return Err(ApiError::from(anyhow!("TikTok 来源必须是有效的 tiktok.com 链接")));
@@ -1795,6 +1813,7 @@ fn youtube_source_type_label(source_type: &str) -> &'static str {
         "douyin_watch_later" => "抖音稍后再看",
         "douyin_theater" => "抖音放映厅",
         "douyin_series" => "抖音短剧",
+        "douyin_mix" => "抖音合集",
         _ => "YouTube",
     }
 }
@@ -5342,7 +5361,7 @@ fn youtube_output_path(
     // 文件名带三位集号保证文件系统排序稳定；无集号时回退到普通单 P 命名。
     let episodic_source = matches!(
         source.source_type.as_str(),
-        "douyin_theater" | "douyin_series" | "douyin_collection"
+        "douyin_theater" | "douyin_series" | "douyin_collection" | "douyin_mix"
     );
     let (video_folder, page_name) = if episodic_source {
         if let Some(episode) = video.episode_number.filter(|value| *value >= 1) {
@@ -5355,7 +5374,26 @@ fn youtube_output_path(
                 series_folder
             };
             let video_folder = format!("{series_folder}/Season 01");
-            (video_folder, format!("S01E{:02}", episode))
+            // 抖音合集按 B 站合集默认模板命名：`S01E01 - 集标题`（标题只做目录名清洗，
+            // NFO/媒体库标题仍是原始标题）。短剧/放映厅保持原有的纯集号写法，
+            // 避免已有剧集目录成批改名。
+            let page_name = if source.source_type == "douyin_mix" {
+                let episode_title = crate::utils::title_clean::clean_title_for_path(title);
+                if episode_title.is_empty() || episode_title == "无标题" {
+                    format!("S01E{:02}", episode)
+                } else {
+                    // filenamify 会把单个路径段截到 200 字节并处理非法字符，
+                    // 加上前缀与扩展名仍远低于文件系统 255 字节上限。
+                    format!(
+                        "S01E{:02} - {}",
+                        episode,
+                        crate::utils::filenamify::filenamify(episode_title)
+                    )
+                }
+            } else {
+                format!("S01E{:02}", episode)
+            };
+            (video_folder, page_name)
         } else {
             crate::config::with_config(|bundle| {
                 Ok::<_, anyhow::Error>((
@@ -5498,7 +5536,7 @@ async fn ensure_youtube_sidecars(
 fn is_episodic_douyin_source(source: &youtube_source::Model) -> bool {
     matches!(
         source.source_type.as_str(),
-        "douyin_theater" | "douyin_series" | "douyin_collection"
+        "douyin_theater" | "douyin_series" | "douyin_collection" | "douyin_mix"
     )
 }
 
@@ -6684,6 +6722,7 @@ pub(crate) fn normalize_source_type(value: &str) -> Result<&'static str> {
         "douyin_watch_later" => Ok("douyin_watch_later"),
         "douyin_theater" => Ok("douyin_theater"),
         "douyin_series" => Ok("douyin_series"),
+        "douyin_mix" => Ok("douyin_mix"),
         _ => bail!("来源类型必须是 subscriptions、channel、playlist、liked、watch_later 或有效的抖音来源类型"),
     }
 }
@@ -6692,7 +6731,8 @@ fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
         "subscriptions" => Ok(SUBSCRIPTIONS_URL.to_string()),
         "liked" => Ok(LIKED_URL.to_string()),
         "watch_later" => Ok(WATCH_LATER_URL.to_string()),
-        "douyin" | "douyin_collection" | "douyin_theater" | "douyin_series" | "tiktok" | "tiktok_collection" => supplied
+        "douyin" | "douyin_collection" | "douyin_theater" | "douyin_series" | "douyin_mix" | "tiktok"
+        | "tiktok_collection" => supplied
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
@@ -6740,6 +6780,7 @@ fn external_source_identity(source_type: &str, url: &str) -> String {
         "douyin_collection" => format!("douyin:collection:{last_segment}"),
         "douyin_theater" => format!("douyin:theater:{last_segment}"),
         "douyin_series" => format!("douyin:series:{last_segment}"),
+        "douyin_mix" => format!("douyin:mix:{last_segment}"),
         "douyin_liked" => "douyin:liked".to_string(),
         "douyin_watch_later" => "douyin:watch_later".to_string(),
         "tiktok" => format!("tiktok:user:{last_segment}"),
@@ -8150,6 +8191,7 @@ mod tests {
         assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_theater")));
         assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_series")));
         assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_collection")));
+        assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_mix")));
         assert!(!super::is_episodic_douyin_source(&sample_external_source("douyin")));
     }
     #[test]
@@ -8873,6 +8915,60 @@ mod tests {
         assert_eq!(path, expected, "短剧应输出 下载根/剧集名/Season 01/S01E03.mp4");
     }
 
+    /// 抖音合集按 B 站合集默认模板命名：`合集名/Season 01/S01E01 - 集标题.mp4`。
+    #[test]
+    fn builds_douyin_mix_output_path_with_episode_title() {
+        use bili_sync_entity::{youtube_source, youtube_video};
+        use crate::external_media::ExternalMediaMetadata;
+        use std::collections::HashMap;
+
+        let mut source = youtube_source::Model::default();
+        source.id = 9;
+        source.source_type = "douyin_mix".to_string();
+        source.name = "传奇剧场（剧情）".to_string();
+        source.path = "F:/Downloads/测试".to_string();
+
+        let mut video = youtube_video::Model::default();
+        video.episode_number = Some(12);
+
+        let metadata = ExternalMediaMetadata {
+            id: "7604472777650785551".to_string(),
+            title: None,
+            uploader: Some("我是战魂".to_string()),
+            uploader_url: None,
+            channel: None,
+            channel_id: None,
+            channel_url: None,
+            thumbnail: None,
+            description: None,
+            language: None,
+            upload_date: Some("20260208".to_string()),
+            duration: None,
+            formats: Vec::new(),
+            subtitles: HashMap::new(),
+            automatic_captions: HashMap::new(),
+            images: Vec::new(),
+            music_urls: Vec::new(),
+            creators: None,
+            slides: Vec::new(),
+        };
+
+        // 标题里的 #话题 只影响落盘名，不进NFO
+        let title = "寂寞的蜈蚣洞的冲突开始了 #热血传奇 #传奇复古 #176传奇";
+        let path = super::youtube_output_path(&source, &video, &metadata, title, "我是战魂").unwrap();
+        // 目录名与 B 站一致走 filenamify（全角括号会转半角），文件名的标题再按目录名规则清洗
+        let mix_folder = crate::utils::filenamify::filenamify(&source.name);
+        let expected = Path::new("F:/Downloads/测试")
+            .join(&mix_folder)
+            .join("Season 01")
+            .join("S01E12 - 寂寞的蜈蚣洞的冲突开始了.mp4");
+        assert_eq!(path, expected, "合集应输出 下载根/合集名/Season 01/S01E01 - 集标题.mp4");
+
+        // 图文作品没有文案时只保留集号，不出现「无标题」
+        let untitled = super::youtube_output_path(&source, &video, &metadata, "无标题", "我是战魂").unwrap();
+        assert_eq!(untitled.file_name().and_then(|name| name.to_str()), Some("S01E12.mp4"));
+    }
+
     #[test]
     fn external_output_path_cleans_title_for_folder_name() {
         use crate::external_media::ExternalMediaMetadata;
@@ -9001,7 +9097,7 @@ mod tests {
             identity("douyin", "https://www.douyin.com/user/MS4wLjABAAAAtest"),
             identity("douyin", "https://www.douyin.com/user/MS4wLjABAAAAtest/"),
         );
-        // 抖音合集 / 放映厅 / 短剧：按末段 id
+        // 抖音收藏夹 / 放映厅 / 短剧 / 合集：按末段 id
         assert_eq!(
             identity("douyin_collection", "https://www.douyin.com/collection/7672884606911354673?from=web"),
             "douyin:collection:7672884606911354673",
@@ -9013,6 +9109,11 @@ mod tests {
         assert_eq!(
             identity("douyin_series", "https://www.douyin.com/series/7663823934580033574"),
             "douyin:series:7663823934580033574",
+        );
+        // 合集与收藏夹共用 /collection/ 路由，但类型不同就是不同的源
+        assert_eq!(
+            identity("douyin_mix", "https://www.douyin.com/collection/7600294985053702190"),
+            "douyin:mix:7600294985053702190",
         );
         // TikTok handle 大小写不敏感
         assert_eq!(

@@ -19,7 +19,8 @@ export type YouTubeSourceType =
 	| 'douyin_collection'
 	| 'douyin_watch_later'
 	| 'douyin_theater'
-	| 'douyin_series';
+	| 'douyin_series'
+	| 'douyin_mix';
 
 export interface YouTubeSource {
 	id: number;
@@ -1448,6 +1449,8 @@ export interface DashBoardResponse {
 	total_douyin_theaters: number;
 	enabled_douyin_series: number;
 	total_douyin_series: number;
+	enabled_douyin_mixes: number;
+	total_douyin_mixes: number;
 	enabled_tiktok_sources: number;
 	total_tiktok_sources: number;
 	enabled_tiktok_authors: number;
