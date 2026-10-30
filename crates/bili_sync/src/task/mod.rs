@@ -88,6 +88,7 @@ pub struct UpdateConfigTask {
     pub no_dolby_audio: Option<bool>,
     pub no_hdr: Option<bool>,
     pub no_hires: Option<bool>,
+    pub prefer_douyin_original: Option<bool>,
     // 弹幕设置
     pub danmaku_duration: Option<f64>,
     pub danmaku_font: Option<String>,
@@ -2371,6 +2372,7 @@ impl ConfigTaskQueue {
                 no_dolby_audio: task.no_dolby_audio,
                 no_hdr: task.no_hdr,
                 no_hires: task.no_hires,
+                prefer_douyin_original: task.prefer_douyin_original,
                 // 弹幕设置
                 danmaku_duration: task.danmaku_duration,
                 danmaku_font: task.danmaku_font.clone(),

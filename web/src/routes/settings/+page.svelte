@@ -295,6 +295,7 @@
 	let noDolbyAudio = false;
 	let noHdr = false;
 	let noHires = false;
+	let preferDouyinOriginal = true;
 
 	// 弹幕设置
 	let danmakuDuration = 15.0;
@@ -719,6 +720,7 @@
 		noDolbyAudio = config.no_dolby_audio || false;
 		noHdr = config.no_hdr || false;
 		noHires = config.no_hires || false;
+		preferDouyinOriginal = config.prefer_douyin_original ?? true;
 
 		// 弹幕设置
 		danmakuDuration = config.danmaku_duration || 15.0;
@@ -1282,6 +1284,7 @@
 			no_dolby_audio: noDolbyAudio,
 			no_hdr: noHdr,
 			no_hires: noHires,
+			prefer_douyin_original: preferDouyinOriginal,
 			// 弹幕设置
 			danmaku_duration: normalizeNumberInput(
 				danmakuDuration,
@@ -2546,6 +2549,23 @@
 					/>
 					<Label for="no-hires" class="text-sm">禁用Hi-Res音频</Label>
 				</div>
+			</div>
+
+			<div class="rounded-lg border bg-gray-50 p-4 dark:bg-gray-900">
+				<div class="flex items-center space-x-2">
+					<input
+						type="checkbox"
+						id="prefer-douyin-original"
+						bind:checked={preferDouyinOriginal}
+						class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+					/>
+					<Label for="prefer-douyin-original" class="text-sm font-medium">
+						优先使用抖音高码率原画
+					</Label>
+				</div>
+				<p class="text-muted-foreground mt-2 pl-6 text-xs">
+					仅对抖音视频生效。原画通常保留更多细节，但文件体积可能明显增大；关闭后直接使用普通最高档。
+				</p>
 			</div>
 		</div>
 		<SheetFooter class={isMobile ? 'pb-safe border-t px-4 pt-3' : 'pb-safe border-t pt-4'}>

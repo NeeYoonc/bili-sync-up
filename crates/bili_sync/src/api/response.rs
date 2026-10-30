@@ -524,6 +524,7 @@ pub struct ConfigResponse {
     pub no_dolby_audio: bool,
     pub no_hdr: bool,
     pub no_hires: bool,
+    pub prefer_douyin_original: bool,
     // 弹幕设置
     pub danmaku_duration: f64,
     pub danmaku_font: String,

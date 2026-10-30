@@ -241,6 +241,7 @@ pub struct UpdateConfigRequest {
     pub no_dolby_audio: Option<bool>,
     pub no_hdr: Option<bool>,
     pub no_hires: Option<bool>,
+    pub prefer_douyin_original: Option<bool>,
     // 弹幕设置
     pub danmaku_duration: Option<f64>,
     pub danmaku_font: Option<String>,
