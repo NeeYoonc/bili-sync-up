@@ -65,6 +65,15 @@ const DOUYIN_THEATER_FEED_API: &str = "https://www.douyin.com/aweme/v1/web/lvide
 const DOUYIN_THEATER_ITEMS_API: &str = "https://www.douyin.com/aweme/v1/web/lvideo/ent/aweme_list/";
 const DOUYIN_SERIES_FEED_API: &str = "https://www.douyin.com/aweme/v1/web/series/card/feed/";
 const DOUYIN_SERIES_ITEMS_API: &str = "https://www.douyin.com/aweme/v1/web/series/aweme/";
+// 合集（mix）三件套：UP 的合集列表 → 合集详情 → 合集作品列表。
+// 网页端缓存（secsdk 的 web_secsdk_runtime_cache）里也能看到 `mix/list`，
+// 说明这正是作者主页「合集」标签实际调用的接口。
+const DOUYIN_MIX_LIST_API: &str = "https://www.douyin.com/aweme/v1/web/mix/list/";
+const DOUYIN_MIX_COLLECTION_API: &str = "https://www.douyin.com/aweme/v1/web/mix/listcollection/";
+const DOUYIN_MIX_DETAIL_API: &str = "https://www.douyin.com/aweme/v1/web/mix/detail/";
+const DOUYIN_MIX_AWEME_API: &str = "https://www.douyin.com/aweme/v1/web/mix/aweme/";
+/// 合集作品接口每页固定 15 条（传 count=50 也只返回 15），用于估算翻页次数。
+const DOUYIN_MIX_PAGE_SIZE: i64 = 15;
 const DOUYIN_PUBLIC_SEARCH_API: &str = "https://www.sogou.com/web";
 const DOUYIN_MSTOKEN_API: &str = "https://mssdk.bytedance.com/web/r/token?ms_appid=6383&msToken=T4bNG9W2rKF7hBNwaYssDErnJEobDAk641DFaOn4hcsfAM8slpbZeKPM4Ml4rhDQq18iY8nQ0JR3J87SLZtDiDqtZdZawfBjCWAgtolQsoEtG6MLETvo4fwr7F28zGJUFDdJgKEZHibNR0QshVBv28ygsQsJDzerKAtsgj9Pn5WsxyS1vfkiX3I%3D";
 const DOUYIN_MSTOKEN_STR_DATA: &str = include_str!("douyin_mstoken_strdata.txt");
@@ -197,6 +206,30 @@ fn theater_items_cache() -> &'static RwLock<HashMap<String, DouyinItemsCacheEntr
     CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// 合集作品缓存的单条记录：`aweme` 是原始作品，`episode` 是平台给出的集号。
+///
+/// 集号既可能出现在作品的 `mix_info.statis.current_episode`，也可能只在
+/// 页级 `item_id_to_episode` 映射里，因此抓取时就把两者合并固化下来，
+/// 避免缓存后丢失集号来源。
+#[derive(Clone)]
+struct DouyinMixItem {
+    aweme: serde_json::Value,
+    episode: Option<i32>,
+}
+
+#[derive(Clone)]
+struct DouyinMixItemsCacheEntry {
+    fetched_at: Instant,
+    /// 是否已枚举到合集末尾（false 表示因 limit 提前停止）。
+    complete: bool,
+    items: Vec<DouyinMixItem>,
+}
+
+fn mix_items_cache() -> &'static RwLock<HashMap<String, DouyinMixItemsCacheEntry>> {
+    static CACHE: OnceLock<RwLock<HashMap<String, DouyinMixItemsCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
 /// 短时缓存写入前清理过期条目，避免内存无限增长。
 async fn store_fresh_items_cache(
     cache: &RwLock<HashMap<String, DouyinItemsCacheEntry>>,
@@ -209,6 +242,20 @@ async fn store_fresh_items_cache(
         key,
         DouyinItemsCacheEntry {
             fetched_at: Instant::now(),
+            items,
+        },
+    );
+}
+
+/// 合集作品缓存的写入（与 [`store_fresh_items_cache`] 同样的过期清理策略）。
+async fn store_fresh_mix_items_cache(key: String, complete: bool, items: Vec<DouyinMixItem>) {
+    let mut guard = mix_items_cache().write().await;
+    guard.retain(|_, entry| entry.fetched_at.elapsed() < CATALOG_CACHE_TTL);
+    guard.insert(
+        key,
+        DouyinMixItemsCacheEntry {
+            fetched_at: Instant::now(),
+            complete,
             items,
         },
     );
@@ -687,15 +734,20 @@ pub async fn get_douyin_catalog(
     let mut results: Vec<YouTubeSearchResult> = match (source_type.as_str(), direct_id) {
         ("douyin_theater", Some(id)) => fetch_theater_catalog_item(id).await?.into_iter().collect(),
         ("douyin_series", Some(id)) => fetch_series_catalog_item(id).await?.into_iter().collect(),
+        ("douyin_mix", Some(id)) => fetch_mix_catalog_item(id).await?.into_iter().collect(),
         ("douyin_collection", _) => match keyword {
             Some(keyword) => fetch_user_collection_catalog(keyword).await?,
             None => fetch_collection_catalog().await?,
         },
         ("douyin_theater", _) if keyword.is_some() => fetch_catalog_from_general_search(keyword.unwrap(), true).await?,
         ("douyin_series", _) if keyword.is_some() => fetch_catalog_from_general_search(keyword.unwrap(), false).await?,
+        ("douyin_mix", _) if keyword.is_some() => fetch_user_mix_catalog(keyword.unwrap()).await?,
         ("douyin_theater", _) => fetch_theater_catalog().await?,
         ("douyin_series", _) => fetch_series_catalog().await?,
-        _ => return Err(ApiError::bad_request("右侧列表仅支持收藏夹、放映厅或短剧")),
+        // 无关键词时读取当前账号「收藏的合集」，对应 B 站「关注的合集」入口；
+        // 输入作者后仍可改查该作者创建的合集。
+        ("douyin_mix", _) => fetch_favorite_mix_catalog().await?,
+        _ => return Err(ApiError::bad_request("右侧列表仅支持合集、收藏夹、放映厅或短剧")),
     };
     // 综合搜索接口已经按作品标题/演员/描述做相关性检索，系列名本身不一定
     // 包含关键词；再做本地 contains 会把真实命中的结果误删。
@@ -1539,6 +1591,14 @@ pub async fn fetch_source_posts(
             let id = numeric_id(source_url).context("无法从短剧链接识别短剧 ID")?;
             fetch_series_posts(id, limit).await
         }
+        "douyin_mix" => {
+            let id = resolve_mix_id(source_url).await?;
+            // 合集按集号升序返回（新集追加在尾部），不能用「整页都已收录就停止」的
+            // 增量策略 —— 那样第一页就会退出，永远扫不到新集。这里与 B 站合集
+            // 保持一致：每轮全量枚举（合集通常几十到几百集，接口固定 15 条/页）。
+            let _ = stop_when_known;
+            fetch_mix_posts(&id, limit).await
+        }
         value => bail!("不支持的抖音来源类型: {value}"),
     }
 }
@@ -1598,6 +1658,70 @@ fn query_collection_id(value: &str) -> Option<&str> {
         let key = parts.next()?;
         let value = parts.next()?;
         (key == "collection_id"
+            && !value.is_empty()
+            && value.chars().all(|character| character.is_ascii_digit()))
+        .then_some(value)
+    })
+}
+
+/// 从抖音合集链接识别合集 ID。
+///
+/// 支持的形态（都是抖音实际会给出的）：
+///   - `https://www.douyin.com/collection/{mix_id}`（网页合集页，可带 `?modal_id=...`）
+///   - `https://www.iesdouyin.com/share/mix/detail/{mix_id}/?...`（App「分享」复制出来的链接）
+///   - `https://www.douyin.com/mix/{mix_id}`
+///   - query 里的 `mix_id` / `collection_id`
+///   - `https://v.douyin.com/xxxxx/`（短链，跟随跳转后再解析）
+///   - 纯数字 ID
+///
+/// 注意：抖音的 `收藏夹` 与 `合集` 共用 `/collection/{id}` 这一段路由，
+/// 单看链接无法区分，类型由添加源时选择的来源类型决定。
+pub(crate) async fn resolve_mix_id(source_url: &str) -> Result<String> {
+    let trimmed = source_url.trim();
+    if let Some(id) = mix_id_from_url(trimmed) {
+        return Ok(id.to_string());
+    }
+    if trimmed.contains("v.douyin.com") {
+        ensure_session()?;
+        let client = client()?;
+        let response = client
+            .get(trimmed)
+            .send()
+            .await
+            .context("打开抖音合集分享链接失败")?;
+        let final_url = response.url().clone();
+        if let Some(id) = mix_id_from_url(final_url.as_str()) {
+            return Ok(id.to_string());
+        }
+    }
+    numeric_id(trimmed)
+        .map(str::to_string)
+        .context("无法从抖音合集链接识别合集 ID，请使用合集链接或作者主页链接")
+}
+
+/// 精确匹配 path 段里的合集 id（`/collection/{id}`、`/mix/detail/{id}`），
+/// 不受 `?modal_id=` 等 query 参数干扰；再兜底 query 里的 `mix_id` / `collection_id`。
+fn mix_id_from_url(value: &str) -> Option<&str> {
+    let path = value.split(['?', '#']).next().unwrap_or(value);
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    for keyword in ["collection", "mix"] {
+        if let Some(index) = parts.iter().position(|part| *part == keyword) {
+            // `/mix/detail/{id}` 中间夹着 `detail` 之类的非数字段，逐个向后找数字段。
+            if let Some(id) = parts
+                .iter()
+                .skip(index + 1)
+                .find(|part| !part.is_empty() && part.chars().all(|character| character.is_ascii_digit()))
+            {
+                return Some(id);
+            }
+        }
+    }
+    let query = value.split('?').nth(1)?;
+    query.split('&').find_map(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next()?;
+        let value = parts.next()?;
+        (matches!(key, "mix_id" | "collection_id")
             && !value.is_empty()
             && value.chars().all(|character| character.is_ascii_digit()))
         .then_some(value)
@@ -2058,6 +2182,313 @@ async fn fetch_series_items(series_id: &str) -> Result<Vec<serde_json::Value>> {
     Ok(items)
 }
 
+// ---------- 抖音合集（mix） ----------
+//
+// 抖音「合集」是作者把本人多个作品编成的一条有序列表（作者主页的「合集」标签），
+// 与「收藏夹」(collects) 完全是两套东西：收藏夹收集别人的作品，合集是本人作品。
+// 这里按 B 站合集模板实现：一个合集 = 一个源，集号用平台给的序号，
+// 落盘为 `根目录/合集名/Season 01/S01E01 - 集标题.mp4`。
+
+/// 合集元信息（对应 B 站 `CollectionInfo`）。
+#[derive(Debug, Clone)]
+pub struct DouyinMixInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub author: String,
+    pub cover: Option<String>,
+    /// 平台给出的「已更新到第几集」，等价于合集作品总数。
+    pub episode_count: Option<i64>,
+}
+
+fn mix_info_from_value(value: &serde_json::Value) -> Option<DouyinMixInfo> {
+    let id = text(value, &["mix_id"])?;
+    let stats = value.get("statis").unwrap_or(&serde_json::Value::Null);
+    Some(DouyinMixInfo {
+        name: text(value, &["mix_name"])
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| format!("合集 {id}")),
+        description: text(value, &["desc"]).unwrap_or_default(),
+        author: value
+            .get("author")
+            .and_then(|author| text(author, &["nickname", "unique_id"]))
+            .unwrap_or_default(),
+        cover: image_url(value.get("cover_url")),
+        episode_count: integer(stats, &["updated_to_episode"]).filter(|count| *count > 0),
+        id,
+    })
+}
+
+fn mix_to_search_result(info: &DouyinMixInfo, fallback_author: &str) -> YouTubeSearchResult {
+    let author = if info.author.trim().is_empty() {
+        fallback_author.to_string()
+    } else {
+        info.author.clone()
+    };
+    YouTubeSearchResult {
+        result_type: "douyin_mix".to_string(),
+        title: info.name.clone(),
+        author,
+        youtube_url: format!("https://www.douyin.com/collection/{}", info.id),
+        channel_id: Some(info.id.clone()),
+        cover: info.cover.clone().unwrap_or_default(),
+        description: match info.episode_count {
+            Some(count) => format!("共 {count} 集"),
+            None => info.description.clone(),
+        },
+        follower: info.episode_count,
+    }
+}
+
+/// 合集详情。
+///
+/// 实测：传入不是合集的 id（例如收藏夹 id）时接口仍返回 `status_code=0`，
+/// 只是没有 `mix_info`，因此以 `mix_info` 是否存在作为判定依据。
+pub(crate) async fn fetch_mix_detail(mix_id: &str) -> Result<Option<DouyinMixInfo>> {
+    let mut pairs = common_query_pairs();
+    pairs.push(("mix_id", mix_id.to_string()));
+    let response = signed_get(DOUYIN_MIX_DETAIL_API, pairs).await?;
+    Ok(response.get("mix_info").and_then(mix_info_from_value))
+}
+
+/// 按 id 取合集条目（粘贴合集链接、建源校验时用）。
+async fn fetch_mix_catalog_item(id: &str) -> Result<Option<YouTubeSearchResult>> {
+    let Some(info) = fetch_mix_detail(id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(mix_to_search_result(&info, "")))
+}
+
+/// 拉取某个作者的全部合集（作者主页「合集」标签的数据源）。
+async fn fetch_user_mixes(sec_uid: &str, fallback_nickname: &str) -> Result<Vec<YouTubeSearchResult>> {
+    let mut cursor = 0i64;
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..20 {
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("sec_user_id", sec_uid.to_string()),
+            ("count", "20".to_string()),
+            ("cursor", cursor.to_string()),
+        ]);
+        let response = signed_get(DOUYIN_MIX_LIST_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音合集列表")?;
+        for item in response
+            .get("mix_infos")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(info) = mix_info_from_value(item) else {
+                continue;
+            };
+            if !seen.insert(info.id.clone()) {
+                continue;
+            }
+            results.push(mix_to_search_result(&info, fallback_nickname));
+        }
+        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+        tokio::time::sleep(douyin_page_delay().await).await;
+    }
+    Ok(results)
+}
+
+/// 当前登录账号收藏的合集（B 站「关注的合集」对应入口）。
+async fn fetch_favorite_mix_catalog() -> Result<Vec<YouTubeSearchResult>> {
+    ensure_session()?;
+    let mut cursor = 0i64;
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..50 {
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("count", "20".to_string()),
+            ("cursor", cursor.to_string()),
+        ]);
+        let response = signed_get(DOUYIN_MIX_COLLECTION_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取收藏的合集")?;
+        for item in response
+            .get("mix_infos")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(info) = mix_info_from_value(item) else {
+                continue;
+            };
+            if !seen.insert(info.id.clone()) {
+                continue;
+            }
+            results.push(mix_to_search_result(&info, ""));
+        }
+        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+        tokio::time::sleep(douyin_page_delay().await).await;
+    }
+    Ok(results)
+}
+
+/// 按 UP 列出其全部合集。keyword 支持：作者主页链接、抖音号、昵称关键词。
+/// 输入作者后列出该作者创建的合集；无关键词时由收藏合集接口提供默认列表。
+async fn fetch_user_mix_catalog(keyword: &str) -> Result<Vec<YouTubeSearchResult>> {
+    let trimmed = keyword.trim();
+    let mut users: Vec<(String, String)> = Vec::new();
+    if trimmed.contains('/') {
+        let sec_uid = resolve_sec_user_id(trimmed).await?;
+        users.push((sec_uid, String::new()));
+    } else {
+        let response = fetch_douyin_user_search(trimmed, false).await?;
+        let mut raw_users = Vec::new();
+        collect_user_infos(&response, &mut raw_users);
+        for user in raw_users {
+            if let Some(sec_uid) = text(user, &["sec_uid", "sec_user_id"]) {
+                let nickname = text(user, &["nickname"]).unwrap_or_default();
+                users.push((sec_uid, nickname));
+            }
+        }
+        if users.is_empty() {
+            bail!("未找到匹配的抖音作者：{trimmed}");
+        }
+    }
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    for (sec_uid, nickname) in users {
+        for item in fetch_user_mixes(&sec_uid, &nickname).await? {
+            if seen.insert(item.youtube_url.clone()) {
+                results.push(item);
+            }
+        }
+        if results.len() >= 60 {
+            break;
+        }
+    }
+    Ok(results)
+}
+
+/// 页级 `item_id_to_episode` 映射（接口以 JSON 字符串形式返回）。
+fn mix_page_episode_map(response: &serde_json::Value) -> HashMap<String, i32> {
+    let Some(raw) = response.get("item_id_to_episode") else {
+        return HashMap::new();
+    };
+    let parsed = match raw {
+        serde_json::Value::String(encoded) => serde_json::from_str::<serde_json::Value>(encoded).ok(),
+        other => Some(other.clone()),
+    };
+    let mut map = HashMap::new();
+    if let Some(serde_json::Value::Object(entries)) = parsed {
+        for (id, value) in entries {
+            if let Some(episode) = value_as_i64(&value).and_then(|episode| i32::try_from(episode).ok()) {
+                if episode >= 1 {
+                    map.insert(id, episode);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// 拉取合集作品（原始 aweme + 集号），结果写入短时缓存供扫描与逐集详情复用。
+///
+/// 合集作品接口每页固定 15 条、按集号升序返回，`count` 参数不生效，
+/// 因此 `limit` 只用于提前停止，不影响单页容量。
+async fn fetch_mix_items(mix_id: &str, limit: usize) -> Result<Vec<DouyinMixItem>> {
+    if let Some(cached) = mix_items_cache().read().await.get(mix_id).cloned() {
+        if cached.fetched_at.elapsed() < CATALOG_CACHE_TTL && (cached.complete || cached.items.len() >= limit) {
+            return Ok(cached.items);
+        }
+    }
+    let mut cursor = 0i64;
+    let mut items: Vec<DouyinMixItem> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut complete = true;
+    for _ in 0..1000 {
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("mix_id", mix_id.to_string()),
+            ("cursor", cursor.to_string()),
+            ("count", DOUYIN_MIX_PAGE_SIZE.to_string()),
+        ]);
+        let response = signed_get(DOUYIN_MIX_AWEME_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取抖音合集作品")?;
+        let page_episodes = mix_page_episode_map(&response);
+        for aweme in response
+            .get("aweme_list")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = text(aweme, &["aweme_id", "group_id"]) else {
+                continue;
+            };
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            // 集号优先取作品自带的 mix_info.statis.current_episode，
+            // 缺失时回退页级 item_id_to_episode 映射。
+            let episode = aweme
+                .get("mix_info")
+                .and_then(|mix| mix.get("statis"))
+                .and_then(|stats| integer(stats, &["current_episode"]))
+                .and_then(|episode| i32::try_from(episode).ok())
+                .filter(|episode| *episode >= 1)
+                .or_else(|| page_episodes.get(&id).copied());
+            items.push(DouyinMixItem {
+                aweme: aweme.clone(),
+                episode,
+            });
+        }
+        if items.len() >= limit {
+            complete = false;
+            break;
+        }
+        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            complete = false;
+            break;
+        }
+        cursor = next;
+        tokio::time::sleep(douyin_page_delay().await).await;
+    }
+    store_fresh_mix_items_cache(mix_id.to_string(), complete, items.clone()).await;
+    Ok(items)
+}
+
+async fn fetch_mix_posts(id: &str, limit: usize) -> Result<Vec<DouyinPost>> {
+    let items = fetch_mix_items(id, limit).await?;
+    let mut posts = Vec::new();
+    let mut seen = HashSet::new();
+    for item in &items {
+        let Some(mut post) = parse_post(&item.aweme) else {
+            continue;
+        };
+        if !seen.insert(post.id.clone()) {
+            continue;
+        }
+        post.episode_number = item.episode;
+        posts.push(post);
+        if posts.len() >= limit {
+            break;
+        }
+    }
+    Ok(posts)
+}
+
 fn page_size_for(limit: usize, loaded: usize) -> i32 {
     i32::try_from(limit.saturating_sub(loaded).min(50)).unwrap_or(50).max(1)
 }
@@ -2158,6 +2589,10 @@ pub(crate) async fn fetch_aweme_detail_for_source(
             let series_id = numeric_id(source_url).context("无法从短剧链接识别短剧 ID")?;
             fetch_series_aweme_detail(series_id, aweme_id).await
         }
+        "douyin_mix" => {
+            let mix_id = resolve_mix_id(source_url).await?;
+            fetch_mix_aweme_detail(&mix_id, aweme_id).await
+        }
         _ => {
             if source_type == "douyin" {
                 return fetch_douyin_author_detail(source_url, aweme_id).await;
@@ -2220,6 +2655,16 @@ async fn fetch_theater_aweme_detail(album_id: &str, aweme_id: &str) -> Result<Op
 async fn fetch_series_aweme_detail(series_id: &str, aweme_id: &str) -> Result<Option<serde_json::Value>> {
     let items = fetch_series_items(series_id).await?;
     Ok(find_aweme_in_items(&items, aweme_id))
+}
+
+/// 合集作品的详情：直接用合集作品接口返回的完整 aweme（含播放地址），
+/// 避免再走一次普通 `aweme/detail`（该接口对临时 challenge Cookie 更敏感）。
+async fn fetch_mix_aweme_detail(mix_id: &str, aweme_id: &str) -> Result<Option<serde_json::Value>> {
+    let items = fetch_mix_items(mix_id, usize::MAX).await?;
+    Ok(items
+        .into_iter()
+        .find(|item| text(&item.aweme, &["aweme_id", "group_id"]).as_deref() == Some(aweme_id))
+        .map(|item| item.aweme))
 }
 
 /// 获取抖音点播作品的时间轴弹幕。Web 端按 32 秒窗口返回弹幕，因此这里
@@ -2510,6 +2955,14 @@ fn endpoint_display_name(base_url: &str) -> &'static str {
         "收藏夹列表"
     } else if base_url.starts_with(DOUYIN_COLLECTION_VIDEOS_API) {
         "收藏夹作品"
+    } else if base_url.starts_with(DOUYIN_MIX_LIST_API) {
+        "合集列表"
+    } else if base_url.starts_with(DOUYIN_MIX_COLLECTION_API) {
+        "收藏的合集"
+    } else if base_url.starts_with(DOUYIN_MIX_DETAIL_API) {
+        "合集详情"
+    } else if base_url.starts_with(DOUYIN_MIX_AWEME_API) {
+        "合集作品"
     } else if base_url.starts_with(DOUYIN_POST_API) {
         "抖音作者作品接口"
     } else if base_url.starts_with(DOUYIN_DETAIL_API) {
@@ -2537,6 +2990,10 @@ fn endpoint_needs_sdk_signature(base_url: &str) -> bool {
     base_url.starts_with(DOUYIN_FAVORITE_API)
         || base_url.starts_with(DOUYIN_COLLECTIONS_API)
         || base_url.starts_with(DOUYIN_COLLECTION_VIDEOS_API)
+        || base_url.starts_with(DOUYIN_MIX_LIST_API)
+        || base_url.starts_with(DOUYIN_MIX_COLLECTION_API)
+        || base_url.starts_with(DOUYIN_MIX_DETAIL_API)
+        || base_url.starts_with(DOUYIN_MIX_AWEME_API)
         || base_url.starts_with(DOUYIN_POST_API)
         || base_url.starts_with(DOUYIN_DETAIL_API)
 }
@@ -5003,8 +5460,8 @@ pub(crate) async fn create_paid_placeholder(path: &Path) -> Result<()> {
 
 /// 下载抖音弹幕并写入 JSON/ASS；图文或无弹幕作品只写检查标记。
 pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_path: &Path, title: &str) -> Result<()> {
-    let ass_path = output_path.with_extension("ass");
-    let json_path = output_path.with_extension("danmaku.json");
+    migrate_douyin_sidecar_names(output_path).await?;
+    let ass_path = douyin_ass_path(output_path);
     let checked_path = output_path.with_extension("danmaku.checked");
     if tokio::fs::metadata(&ass_path)
         .await
@@ -5027,11 +5484,6 @@ pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_pa
         info!(aweme_id = %metadata.id, "抖音视频没有可下载的弹幕，已记录检查结果");
         return Ok(());
     }
-    let json_temporary = output_path.with_extension("danmaku.json.download");
-    tokio::fs::write(&json_temporary, serde_json::to_vec_pretty(&danmaku)?)
-        .await
-        .with_context(|| format!("写入抖音弹幕 JSON 失败: {}", json_temporary.display()))?;
-    replace_file(&json_temporary, &json_path).await?;
     let count = danmaku.len();
     let elems = danmaku
         .into_iter()
@@ -5053,7 +5505,34 @@ pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_pa
         .collect();
     write_danmaku_ass(output_path, title, duration, elems).await?;
     let _ = remove_file_if_exists(&checked_path).await;
-    info!(aweme_id = %metadata.id, count, path = %ass_path.display(), "抖音视频「{}」弹幕 JSON 和 ASS 生成完成", title);
+    info!(aweme_id = %metadata.id, count, path = %ass_path.display(), "抖音视频「{}」弹幕 ASS 生成完成", title);
+    Ok(())
+}
+
+fn douyin_ass_path(output_path: &Path) -> PathBuf {
+    output_path.with_extension("zh-CN.default.ass")
+}
+
+/// 兼容旧版本：把 `视频.ass` 改为媒体库可识别的默认语言后缀，并清理
+/// 已经无用途的 `.danmaku.json` 中间文件。
+pub(crate) async fn migrate_douyin_sidecar_names(output_path: &Path) -> Result<()> {
+    let legacy_ass = output_path.with_extension("ass");
+    let target_ass = douyin_ass_path(output_path);
+    if tokio::fs::metadata(&legacy_ass).await.is_ok() {
+        if tokio::fs::metadata(&target_ass).await.is_err() {
+            tokio::fs::rename(&legacy_ass, &target_ass)
+                .await
+                .with_context(|| format!("迁移抖音 ASS 文件名失败: {}", legacy_ass.display()))?;
+        } else {
+            remove_file_if_exists(&legacy_ass).await?;
+        }
+    }
+    for suffix in ["danmaku.json", "danmaku.json.download"] {
+        let path = output_path.with_extension(suffix);
+        if let Err(error) = remove_file_if_exists(&path).await {
+            warn!(path = %path.display(), error = %error, "清理抖音弹幕 JSON 失败");
+        }
+    }
     Ok(())
 }
 
@@ -5081,7 +5560,7 @@ async fn write_danmaku_ass(
     duration_seconds: i32,
     danmaku: Vec<DanmakuElem>,
 ) -> Result<()> {
-    let ass_path = output_path.with_extension("ass");
+    let ass_path = douyin_ass_path(output_path);
     let temporary = output_path.with_extension("ass.download");
     let page = BiliPageInfo {
         cid: 0,
@@ -5163,6 +5642,161 @@ fn integer(value: &serde_json::Value, keys: &[&str]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 合集链接的多种形态都要能取到 mix_id；作者主页链接不能被误判。
+    #[test]
+    fn parses_douyin_mix_id_from_supported_links() {
+        assert_eq!(
+            mix_id_from_url("https://www.douyin.com/collection/7600294985053702190?modal_id=7604472777650785551"),
+            Some("7600294985053702190")
+        );
+        assert_eq!(
+            mix_id_from_url(
+                "https://www.iesdouyin.com/share/mix/detail/7601109847681009715/?schema_type=24&object_id=7601109847681009715&from_ssr=1"
+            ),
+            Some("7601109847681009715")
+        );
+        assert_eq!(
+            mix_id_from_url("https://www.douyin.com/mix/7600294985053702190"),
+            Some("7600294985053702190")
+        );
+        assert_eq!(mix_id_from_url("https://example.com/anything?mix_id=789"), Some("789"));
+        assert_eq!(
+            mix_id_from_url("https://www.douyin.com/collection/123?collection_id=456"),
+            Some("123")
+        );
+        assert_eq!(mix_id_from_url("https://www.douyin.com/user/MS4wLjABAAAAtest"), None);
+    }
+
+    /// 合集元信息：名字、作者、封面、总集数都要解析出来；非合集响应返回 None。
+    #[test]
+    fn parses_douyin_mix_info() {
+        let info = mix_info_from_value(&serde_json::json!({
+            "mix_id": "7600294985053702190",
+            "mix_name": "传奇剧场（剧情）",
+            "desc": "一个男战士，一个女法师和一个女道士的故事",
+            "author": {"nickname": "我是战魂"},
+            "cover_url": {"url_list": ["https://example.com/cover.jpg"]},
+            "statis": {"current_episode": 0, "updated_to_episode": 127}
+        }))
+        .expect("合集元信息应能解析");
+        assert_eq!(info.id, "7600294985053702190");
+        assert_eq!(info.name, "传奇剧场（剧情）");
+        assert_eq!(info.author, "我是战魂");
+        assert_eq!(info.cover.as_deref(), Some("https://example.com/cover.jpg"));
+        assert_eq!(info.episode_count, Some(127));
+
+        assert!(mix_info_from_value(&serde_json::json!({"status_code": 0})).is_none());
+    }
+
+    /// 页级集号映射既可能是 JSON 字符串，也可能已经是对象。
+    #[test]
+    fn parses_douyin_mix_page_episode_map() {
+        let from_string = serde_json::json!({
+            "item_id_to_episode": "{\"7604472777650785551\":1,\"7604854055151635731\":2}"
+        });
+        let map = mix_page_episode_map(&from_string);
+        assert_eq!(map.get("7604472777650785551"), Some(&1));
+        assert_eq!(map.get("7604854055151635731"), Some(&2));
+
+        let from_object = serde_json::json!({"item_id_to_episode": {"7604472777650785551": 3}});
+        assert_eq!(
+            mix_page_episode_map(&from_object).get("7604472777650785551"),
+            Some(&3)
+        );
+
+        assert!(mix_page_episode_map(&serde_json::json!({})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_danmaku_ass_and_removes_json() {
+        let root = std::env::temp_dir().join(format!("bili-sync-douyin-ass-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let output = root.join("S01E01 - 测试.mp4");
+        tokio::fs::write(&output, b"video").await.unwrap();
+        tokio::fs::write(output.with_extension("ass"), b"legacy-ass").await.unwrap();
+        tokio::fs::write(output.with_extension("danmaku.json"), b"{}").await.unwrap();
+
+        super::migrate_douyin_sidecar_names(&output).await.unwrap();
+
+        assert!(output.with_extension("zh-CN.default.ass").exists());
+        assert!(!output.with_extension("ass").exists());
+        assert!(!output.with_extension("danmaku.json").exists());
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// 实网验证（需要真实抖音登录状态，默认不跑）：
+    /// `BILI_SYNC_TEST_DOUYIN_MIX_URL=<合集链接>`
+    /// `cargo test -p bili_sync --bin bili-sync-rs douyin::tests::fetches_live_douyin_mix -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn fetches_live_douyin_mix() {
+        let db = crate::database::setup_database().await;
+        crate::config::init_config_with_database(db.clone())
+            .await
+            .expect("初始化配置失败");
+        crate::credential_store::init(&db)
+            .await
+            .expect("加载外部凭证失败");
+
+        let url = std::env::var("BILI_SYNC_TEST_DOUYIN_MIX_URL").expect("需要设置 BILI_SYNC_TEST_DOUYIN_MIX_URL");
+        let id = resolve_mix_id(&url).await.expect("合集链接应能解析出 id");
+        let info = fetch_mix_detail(&id)
+            .await
+            .expect("合集详情接口应可用")
+            .expect("应返回合集信息");
+        println!(
+            "合集：{}（{} 集）作者：{}",
+            info.name,
+            info.episode_count.unwrap_or(-1),
+            info.author
+        );
+
+        let posts = fetch_source_posts("douyin_mix", &url, usize::MAX, None)
+            .await
+            .expect("合集作品应能拉取");
+        println!(
+            "拉到 {} 条，首条集号 {:?}，末条集号 {:?}",
+            posts.len(),
+            posts.first().and_then(|post| post.episode_number),
+            posts.last().and_then(|post| post.episode_number)
+        );
+        // 「搜 UP → 选合集」这条入口：按昵称搜索作者再列其合集
+        let catalog = fetch_user_mix_catalog("我是战魂")
+            .await
+            .expect("按 UP 昵称列合集应可用");
+        println!("按昵称「我是战魂」搜到 {} 个合集", catalog.len());
+        assert!(
+            catalog
+                .iter()
+                .any(|item| item.channel_id.as_deref() == Some("7600294985053702190")),
+            "搜索结果里应包含目标合集"
+        );
+
+        assert!(!posts.is_empty(), "合集作品不应为空");
+        assert_eq!(
+            posts.first().and_then(|post| post.episode_number),
+            Some(1),
+            "合集应按集号升序返回，首条为第 1 集"
+        );
+        // 平台给出的「已更新到第几集」是计数口径，不是作品条数：
+        // 作者删过集数时会出现编号空洞（实测 127 集口径、实际 126 条）。
+        assert!(
+            posts
+                .windows(2)
+                .all(|pair| pair[0].episode_number < pair[1].episode_number),
+            "合集集号必须严格递增"
+        );
+        if let Some(count) = info.episode_count {
+            println!("平台口径 {count} 集，实际枚举 {} 条（允许编号空洞）", posts.len());
+        }
+
+        let detail = fetch_aweme_detail_for_source("douyin_mix", &url, &posts[0].id)
+            .await
+            .expect("合集作品详情应能解析");
+        assert!(detail.get("video").is_some(), "详情应包含 video 节点（下载直链来源）");
+    }
 
     #[tokio::test]
     #[ignore]

@@ -53,6 +53,7 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import BellIcon from '@lucide/svelte/icons/bell';
 	import ListVideoIcon from '@lucide/svelte/icons/list-video';
+	import LayersIcon from '@lucide/svelte/icons/layers';
 	import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
 
 	// 认证状态
@@ -755,6 +756,13 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 												<Badge variant="outline">
 													{dashboardData.enabled_douyin_authors} / {dashboardData.total_douyin_authors}
 												</Badge>
+											</div>
+											<div class="flex items-center justify-between">
+												<div class="flex items-center gap-2">
+													<LayersIcon class="text-muted-foreground h-4 w-4" />
+													<span class="text-sm">合集</span>
+												</div>
+												<Badge variant="outline">{dashboardData.enabled_douyin_mixes} / {dashboardData.total_douyin_mixes}</Badge>
 											</div>
 											<div class="flex items-center justify-between">
 												<div class="flex items-center gap-2">

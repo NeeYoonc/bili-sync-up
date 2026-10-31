@@ -273,6 +273,11 @@ class ApiClient {
 		return this.get<YouTubeSearchResponse>('/youtube/channel-playlists', { url });
 	}
 
+	/** 列出当前登录账号自己的 YouTube 播放列表。 */
+	async getYouTubeMyPlaylists(): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/youtube/my-playlists');
+	}
+
 	/** 接收电脑端登录助手或手动选择的 Netscape cookies.txt。 */
 	async importYouTubeCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
 		return this.post<YouTubeLoginResponse>('/youtube/cookies', { cookies });
@@ -1592,6 +1597,7 @@ export const api = {
 	searchYouTube: (params: YouTubeSearchRequest) => apiClient.searchYouTube(params),
 	getYouTubeSourceVideos: (params: YouTubeSourceVideosRequest) =>
 		apiClient.getYouTubeSourceVideos(params),
+	getYouTubeMyPlaylists: () => apiClient.getYouTubeMyPlaylists(),
 	searchDouyin: (keyword: string) => apiClient.searchDouyin(keyword),
 	getTikTokStatus: () => apiClient.getTikTokStatus(),
 	getTikTokSecUid: () => apiClient.getTikTokSecUid(),

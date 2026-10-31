@@ -20853,6 +20853,7 @@ ORDER BY
     let (enabled_douyin_watch_later, total_douyin_watch_later) = youtube_type_count("douyin_watch_later");
     let (enabled_douyin_theaters, total_douyin_theaters) = youtube_type_count("douyin_theater");
     let (enabled_douyin_series, total_douyin_series) = youtube_type_count("douyin_series");
+    let (enabled_douyin_mixes, total_douyin_mixes) = youtube_type_count("douyin_mix");
     let (enabled_tiktok_authors, total_tiktok_authors) = youtube_type_count("tiktok");
     let (enabled_tiktok_liked, total_tiktok_liked) = youtube_type_count("tiktok_favorite");
     let (enabled_tiktok_collections, total_tiktok_collections) = youtube_type_count("tiktok_collection");
@@ -20940,6 +20941,8 @@ ORDER BY
         total_douyin_theaters,
         enabled_douyin_series,
         total_douyin_series,
+        enabled_douyin_mixes,
+        total_douyin_mixes,
         enabled_tiktok_sources,
         total_tiktok_sources,
         enabled_tiktok_authors,
