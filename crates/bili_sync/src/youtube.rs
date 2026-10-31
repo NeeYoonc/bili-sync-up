@@ -58,8 +58,11 @@ const MAX_DOWNLOAD_RETRIES: i32 = 4;
 const TIKTOK_MEDIA_MISSING_PLACEHOLDER_RETRY: i32 = 2;
 const SUBSCRIPTIONS_URL: &str = "https://www.youtube.com/feed/subscriptions";
 const SUBSCRIPTION_CHANNELS_URL: &str = "https://www.youtube.com/feed/channels";
+const MY_PLAYLISTS_URL: &str = "https://www.youtube.com/feed/playlists";
 const LIKED_URL: &str = "https://www.youtube.com/playlist?list=LL";
 const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
+const PLAYLIST_CATALOG_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const SOURCE_VIDEO_PREVIEW_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
 /// 扫描失败告警静默期：同一来源失败后 6 小时内不重复打 WARN，避免私有源
 /// （稍后再看/喜欢/订阅）登录失效时每轮（约 20 分钟）刷屏告警。
@@ -482,28 +485,64 @@ pub async fn get_youtube_channel_playlists(
     }
     let channel_url = canonical_channel_url(channel_url);
     let playlists_url = format!("{channel_url}/playlists");
+    let results = fetch_youtube_playlist_catalog(&playlists_url, "加载 YouTube 频道播放列表")
+        .await
+        .map_err(ApiError::from)?;
+    let total = results.len();
+    Ok(ApiResponse::ok(YouTubeSearchResponse {
+        success: true,
+        results,
+        total,
+    }))
+}
+
+/// 列出当前登录账号自己的全部播放列表。对应 B 站「我的收藏夹」入口，
+/// 使用 cookies 访问 YouTube 的 `/feed/playlists`。
+pub async fn get_youtube_my_playlists() -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
+    ensure_ytdlp_available().await?;
+    if !youtube_has_session() {
+        return Err(ApiError::from(anyhow!(
+            "读取自己的 YouTube 播放列表需要有效登录状态，请先在设置页导入 YouTube cookies"
+        )));
+    }
+    let results = fetch_youtube_playlist_catalog(MY_PLAYLISTS_URL, "加载我的 YouTube 播放列表")
+        .await
+        .map_err(ApiError::from)?;
+    let total = results.len();
+    Ok(ApiResponse::ok(YouTubeSearchResponse {
+        success: true,
+        results,
+        total,
+    }))
+}
+
+async fn fetch_youtube_playlist_catalog(
+    playlists_url: &str,
+    operation: &str,
+) -> Result<Vec<YouTubeSearchResult>> {
     let mut command = ytdlp_command();
     command.args([
         "--flat-playlist",
         "--dump-json",
         "--playlist-end",
-        "100",
+        "200",
         "--ignore-errors",
         "--no-warnings",
+        "--socket-timeout",
+        "20",
+        "--retries",
+        "3",
     ]);
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
     append_ytdlp_tab_args(&mut command);
-    command.arg(playlists_url.as_str());
-    let output = tokio::time::timeout(Duration::from_secs(5 * 60), command.output())
+    command.arg(playlists_url);
+    let output = tokio::time::timeout(PLAYLIST_CATALOG_TIMEOUT, command.output())
         .await
-        .map_err(|_| anyhow!("加载 YouTube 频道播放列表超时"))??;
+        .map_err(|_| anyhow!("{operation}超时"))??;
     if !output.status.success() {
-        return Err(ApiError::from(anyhow!(
-            "加载 YouTube 频道播放列表失败：{}",
-            command_error(&output)
-        )));
+        bail!("{operation}失败：{}", command_error(&output));
     }
 
     let mut seen_urls = HashSet::new();
@@ -512,15 +551,7 @@ pub async fn get_youtube_channel_playlists(
         let Ok(item) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let Some(playlist_url) = item
-            .get("webpage_url")
-            .or_else(|| item.get("url"))
-            .and_then(|value| value.as_str())
-            .filter(|value| {
-                value.contains("playlist?list=") || value.contains("/playlist/")
-            })
-            .map(str::to_string)
-        else {
+        let Some(playlist_url) = youtube_playlist_url_from_item(&item) else {
             continue;
         };
         if !seen_urls.insert(playlist_url.clone()) {
@@ -583,12 +614,31 @@ pub async fn get_youtube_channel_playlists(
             follower: item.get("playlist_count").and_then(|value| value.as_i64()),
         });
     }
-    let total = results.len();
-    Ok(ApiResponse::ok(YouTubeSearchResponse {
-        success: true,
-        results,
-        total,
-    }))
+    Ok(results)
+}
+
+fn youtube_playlist_url_from_item(item: &serde_json::Value) -> Option<String> {
+    let explicit = item
+        .get("webpage_url")
+        .or_else(|| item.get("url"))
+        .and_then(|value| value.as_str());
+    if let Some(value) = explicit {
+        if value.starts_with("http") {
+            if value.contains("playlist?list=") || value.contains("/playlist/") {
+                return Some(value.to_string());
+            }
+        }
+    }
+    let id = item
+        .get("id")
+        .or_else(|| item.get("playlist_id"))
+        .and_then(|value| value.as_str())
+        .filter(|value| {
+            ["PL", "UU", "OL", "LL", "WL", "FL"]
+                .iter()
+                .any(|prefix| value.starts_with(prefix))
+        })?;
+    Some(format!("https://www.youtube.com/playlist?list={id}"))
 }
 
 /// 枚举频道、播放列表、喜欢视频、稍后再看或已订阅频道。响应直接复用 B 站投稿
@@ -629,15 +679,17 @@ pub async fn get_youtube_source_videos(
     let source_url = match source_type.as_str() {
         "liked" => LIKED_URL.to_string(),
         "watch_later" => WATCH_LATER_URL.to_string(),
-        "channel" | "playlist" => {
+        "channel" => {
             if raw_url.is_empty() || !is_youtube_url(raw_url) {
                 return Err(ApiError::from(anyhow!("请输入有效的 YouTube 频道或播放列表链接")));
             }
-            if source_type == "channel" {
-                canonical_channel_url(raw_url)
-            } else {
-                raw_url.to_string()
+            canonical_channel_url(raw_url)
+        }
+        "playlist" => {
+            if raw_url.is_empty() || !is_youtube_url(raw_url) {
+                return Err(ApiError::from(anyhow!("请输入有效的 YouTube 播放列表链接")));
             }
+            normalize_youtube_playlist_url(raw_url).map_err(ApiError::from)?
         }
         "subscriptions" => unreachable!(),
         _ => unreachable!(),
@@ -657,13 +709,18 @@ pub async fn get_youtube_source_videos(
         &start.to_string(),
         "--playlist-end",
         &end_with_probe.to_string(),
+        "--yes-playlist",
+        "--socket-timeout",
+        "20",
+        "--retries",
+        "3",
     ]);
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
     append_ytdlp_tab_args(&mut command);
     command.arg(&source_url);
-    let output = tokio::time::timeout(Duration::from_secs(10 * 60), command.output())
+    let output = tokio::time::timeout(SOURCE_VIDEO_PREVIEW_TIMEOUT, command.output())
         .await
         .map_err(|_| anyhow!("加载 YouTube 历史视频超时"))??;
     if !output.status.success() {
@@ -2571,7 +2628,14 @@ async fn regenerate_youtube_artifacts(
                     let tvshow = series_dir.join("tvshow.nfo");
                     remove_file_if_exists(&tvshow).await?;
                     if let Err(error) =
-                        ensure_youtube_series_sidecars(downloader, metadata, &output_path, &source).await
+                        ensure_youtube_series_sidecars(
+                            downloader,
+                            metadata,
+                            &output_path,
+                            &source,
+                            avatar_url.as_deref(),
+                        )
+                        .await
                     {
                         warn!(platform, %error, "{platform}剧集 tvshow.nfo 重建失败（单集 NFO 已更新）");
                     }
@@ -3204,6 +3268,22 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
 }
 
 async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
+    if let Err(error) = migrate_douyin_sidecars_for_source(db, source).await {
+        warn!(
+            source_id = source.id,
+            error = %error,
+            "抖音旧弹幕附属文件迁移失败，继续扫描"
+        );
+    }
+    if is_episodic_douyin_source(source) {
+        if let Err(error) = backfill_episodic_sidecars_from_first_video(db, source).await {
+            warn!(
+                source_id = source.id,
+                error = %error,
+                "抖音剧集根目录封面/演员信息补全失败，继续扫描"
+            );
+        }
+    }
     if source.source_type == "douyin_collection" {
         if let Err(error) = cleanup_legacy_collection_sidecars_for_source(db, source).await {
             warn!(
@@ -3357,6 +3437,121 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
         notify_queue_status_changed();
     }
     Ok(added)
+}
+
+async fn migrate_douyin_sidecars_for_source(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    if !is_douyin_source(source) {
+        return Ok(());
+    }
+    let videos = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(source.id))
+        .filter(youtube_video::Column::OutputPath.is_not_null())
+        .filter(youtube_video::Column::EpisodeNumber.is_not_null())
+        .all(db)
+        .await?;
+    for video in videos {
+        let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        crate::douyin::migrate_douyin_sidecar_names(Path::new(output_path)).await?;
+    }
+    Ok(())
+}
+
+async fn backfill_episodic_sidecars_from_first_video(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    if !is_episodic_douyin_source(source) {
+        return Ok(());
+    }
+    let Some(video) = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(source.id))
+        .filter(youtube_video::Column::OutputPath.is_not_null())
+        .order_by_asc(youtube_video::Column::EpisodeNumber)
+        .order_by_asc(youtube_video::Column::Id)
+        .one(db)
+        .await?
+    else {
+        return Ok(());
+    };
+    let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let output_path = PathBuf::from(output_path);
+    let Some(season_dir) = output_path.parent() else {
+        return Ok(());
+    };
+    let Some(series_dir) = season_dir.parent() else {
+        return Ok(());
+    };
+    let thumb = youtube_sidecar_path(&output_path, "-thumb.jpg")?;
+    let fanart = youtube_sidecar_path(&output_path, "-fanart.jpg")?;
+    for (name, source_path) in [
+        ("folder.jpg", &thumb),
+        ("poster.jpg", &thumb),
+        ("landscape.jpg", &thumb),
+        ("fanart.jpg", &fanart),
+    ] {
+        let target = series_dir.join(name);
+        if tokio::fs::metadata(&target)
+            .await
+            .is_ok_and(|metadata| metadata.len() >= 1024)
+            || !tokio::fs::metadata(source_path)
+                .await
+                .is_ok_and(|metadata| metadata.len() >= 1024)
+        {
+            continue;
+        }
+        tokio::fs::copy(source_path, &target)
+            .await
+            .with_context(|| format!("补全剧集根目录封面失败: {}", target.display()))?;
+    }
+
+    let tvshow_path = series_dir.join("tvshow.nfo");
+    let Ok(tvshow) = tokio::fs::read_to_string(&tvshow_path).await else {
+        return Ok(());
+    };
+    if tvshow.contains("<actor>") || video.uploader.trim().is_empty() {
+        return Ok(());
+    }
+    let avatar = tokio::fs::read_to_string(output_path.with_extension("nfo"))
+        .await
+        .ok()
+        .and_then(|nfo| extract_xml_tag_text(&nfo, "thumb"));
+    let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
+    let thumb = avatar
+        .map(|value| format!("<thumb>{}</thumb>", escape(&value)))
+        .unwrap_or_default();
+    let actor = format!(
+        "    <actor><name>{}</name><role>UP主</role>{thumb}</actor>\n",
+        escape(video.uploader.trim())
+    );
+    let Some(season_tag) = tvshow.find("    <season>") else {
+        return Ok(());
+    };
+    let refreshed = format!("{}{}{}", &tvshow[..season_tag], actor, &tvshow[season_tag..]);
+    let temporary = unique_download_path(&tvshow_path);
+    tokio::fs::write(&temporary, refreshed).await?;
+    replace_file(&temporary, &tvshow_path).await?;
+    info!(
+        source_id = source.id,
+        path = %tvshow_path.display(),
+        "已为抖音剧集 tvshow.nfo 补全 UP 主演员信息"
+    );
+    Ok(())
+}
+
+fn extract_xml_tag_text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    let value = quick_xml::escape::unescape(xml[start..end].trim()).ok()?.into_owned();
+    (!value.is_empty()).then_some(value)
 }
 
 async fn cleanup_legacy_collection_sidecars_for_source(
@@ -5586,7 +5781,9 @@ async fn ensure_youtube_sidecars(
     // 短剧/放映厅/合集确有集号、按番剧结构补充剧集级附属文件
     //（tvshow.nfo、season.nfo、folder.jpg、poster.jpg）。
     if uses_episodic_layout(source, episode_number) {
-        if let Err(error) = ensure_youtube_series_sidecars(downloader, metadata, output_path, source).await {
+        if let Err(error) =
+            ensure_youtube_series_sidecars(downloader, metadata, output_path, source, avatar_url.as_deref()).await
+        {
             warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」媒体已下载，但剧集附属文件子任务失败", platform, source.name);
             warnings.push(format!("剧集附属文件生成失败：{error:#}"));
         }
@@ -5660,6 +5857,7 @@ async fn ensure_youtube_series_sidecars(
     metadata: &ExternalMediaMetadata,
     output_path: &Path,
     source: &youtube_source::Model,
+    avatar_url: Option<&str>,
 ) -> Result<()> {
     let platform = source_platform_label(source);
     let Some(season_dir) = output_path.parent() else {
@@ -5675,7 +5873,16 @@ async fn ensure_youtube_series_sidecars(
     let thumb_exists = tokio::fs::metadata(&thumb_path)
         .await
         .is_ok_and(|metadata| metadata.len() >= 1024);
-    for name in ["folder.jpg", "poster.jpg"] {
+    let fanart_path = youtube_sidecar_path(output_path, "-fanart.jpg")?;
+    let fanart_exists = tokio::fs::metadata(&fanart_path)
+        .await
+        .is_ok_and(|metadata| metadata.len() >= 1024);
+    for (name, source_path, source_exists) in [
+        ("folder.jpg", &thumb_path, thumb_exists),
+        ("poster.jpg", &thumb_path, thumb_exists),
+        ("landscape.jpg", &thumb_path, thumb_exists),
+        ("fanart.jpg", &fanart_path, fanart_exists),
+    ] {
         let target = series_dir.join(name);
         if tokio::fs::metadata(&target)
             .await
@@ -5683,8 +5890,8 @@ async fn ensure_youtube_series_sidecars(
         {
             continue;
         }
-        if thumb_exists {
-            tokio::fs::copy(&thumb_path, &target)
+        if source_exists {
+            tokio::fs::copy(source_path, &target)
                 .await
                 .with_context(|| format!("生成{platform}剧集封面失败: {}", target.display()))?;
         } else if let Some(url) = metadata.thumbnail.as_deref() {
@@ -5707,11 +5914,12 @@ async fn ensure_youtube_series_sidecars(
         return Ok(());
     }
     let tvshow_path = series_dir.join("tvshow.nfo");
-    if !tokio::fs::metadata(&tvshow_path)
-        .await
-        .is_ok_and(|metadata| metadata.len() > 0)
-    {
-        let xml = generate_youtube_tvshow_nfo(source, metadata);
+    let needs_tvshow_refresh = match tokio::fs::read_to_string(&tvshow_path).await {
+        Ok(contents) => !contents.contains("<actor>"),
+        Err(_) => true,
+    };
+    if needs_tvshow_refresh {
+        let xml = generate_youtube_tvshow_nfo(source, metadata, avatar_url);
         let temporary = unique_download_path(&series_dir.join("tvshow.nfo"));
         tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
             format!("写入{platform}剧集 NFO 失败: {}", temporary.display())
@@ -5736,11 +5944,34 @@ async fn ensure_youtube_series_sidecars(
     Ok(())
 }
 
-fn generate_youtube_tvshow_nfo(source: &youtube_source::Model, metadata: &ExternalMediaMetadata) -> String {
+fn generate_youtube_tvshow_nfo(
+    source: &youtube_source::Model,
+    metadata: &ExternalMediaMetadata,
+    avatar_url: Option<&str>,
+) -> String {
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     let platform = source_platform(source);
     let studio = source_platform_label(source);
     let description = metadata.description.as_deref().unwrap_or_default();
+    let uploader = metadata
+        .uploader
+        .as_deref()
+        .or(metadata.channel.as_deref())
+        .unwrap_or_default()
+        .trim();
+    let actor = if uploader.is_empty() {
+        String::new()
+    } else {
+        let thumb = avatar_url
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("<thumb>{}</thumb>", escape(value)))
+            .unwrap_or_default();
+        format!(
+            "    <actor><name>{}</name><role>UP主</role>{thumb}</actor>\n",
+            escape(uploader)
+        )
+    };
+    let thumbnail = metadata.thumbnail.as_deref().unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <tvshow>
@@ -5750,6 +5981,8 @@ fn generate_youtube_tvshow_nfo(source: &youtube_source::Model, metadata: &Extern
     <plot>{}</plot>
     <studio>{}</studio>
     <uniqueid type="{}" default="true">{}</uniqueid>
+{}    <thumb aspect="poster">{}</thumb>
+    <fanart><thumb>{}</thumb></fanart>
     <season>-1</season>
     <episode>-1</episode>
 </tvshow>
@@ -5761,6 +5994,9 @@ fn generate_youtube_tvshow_nfo(source: &youtube_source::Model, metadata: &Extern
         escape(studio),
         escape(platform),
         escape(&source.url),
+        actor,
+        escape(thumbnail),
+        escape(thumbnail),
     )
 }
 
@@ -6184,6 +6420,7 @@ fn build_youtube_movie_nfo_xml(
 ) -> String {
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     let avatar = avatar_url.filter(|url| !url.trim().is_empty());
+    let actor_role = if platform == "douyin" { "UP主" } else { "频道" };
     let mut actors = Vec::new();
     for (index, name) in std::iter::once(uploader)
         .chain(co_creators.iter().map(String::as_str))
@@ -6199,12 +6436,17 @@ fn build_youtube_movie_nfo_xml(
             String::new()
         };
         actors.push(format!(
-            "    <actor><name>{}</name><role>频道</role>{}</actor>",
+            "    <actor><name>{}</name><role>{actor_role}</role>{}</actor>",
             escape(name),
             thumb
         ));
     }
     let actor_lines = actors.join("\n");
+    let director_block = if platform == "douyin" {
+        String::new()
+    } else {
+        format!("    <director>{}</director>\n", escape(uploader))
+    };
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n\
 <movie>\n\
@@ -6217,7 +6459,7 @@ fn build_youtube_movie_nfo_xml(
     <premiered>{}</premiered>\n\
     <aired>{}</aired>\n\
     <studio>{}</studio>\n\
-    <director>{}</director>\n\
+{}\
 {actor_lines}\n\
     <thumb aspect=\"poster\">{}</thumb>\n\
     <fanart><thumb>{}</thumb></fanart>\n\
@@ -6233,7 +6475,7 @@ fn build_youtube_movie_nfo_xml(
         aired.format("%Y-%m-%d"),
         aired.format("%Y-%m-%d"),
         escape(studio),
-        escape(uploader),
+        director_block,
         escape(thumbnail),
         escape(thumbnail),
         escape(video_url),
@@ -6363,8 +6605,8 @@ async fn write_external_danmaku_ass(
     duration_seconds: i32,
     danmaku: Vec<DanmakuElem>,
 ) -> Result<()> {
-    let ass_path = output_path.with_extension("ass");
-    let temporary = output_path.with_extension("ass.download");
+    let ass_path = external_ass_path(output_path);
+    let temporary = output_path.with_extension("zh-CN.default.ass.download");
     let page = BiliPageInfo {
         cid: 0,
         page: 1,
@@ -6379,6 +6621,10 @@ async fn write_external_danmaku_ass(
         return Err(error).context("生成媒体 ASS 弹幕失败");
     }
     replace_file(&temporary, &ass_path).await
+}
+
+fn external_ass_path(output_path: &Path) -> PathBuf {
+    output_path.with_extension("zh-CN.default.ass")
 }
 
 fn youtube_runs_text(value: Option<&serde_json::Value>) -> String {
@@ -6512,7 +6758,7 @@ async fn download_youtube_live_chat(
     title: &str,
 ) -> Result<()> {
     let live_chat_path = output_path.with_extension("live_chat.json");
-    let live_chat_ass_path = output_path.with_extension("ass");
+    let live_chat_ass_path = external_ass_path(output_path);
     let checked_path = output_path.with_extension("live_chat.checked");
     if tokio::fs::metadata(&live_chat_path)
         .await
@@ -6843,6 +7089,13 @@ fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
         "subscriptions" => Ok(SUBSCRIPTIONS_URL.to_string()),
         "liked" => Ok(LIKED_URL.to_string()),
         "watch_later" => Ok(WATCH_LATER_URL.to_string()),
+        "playlist" => {
+            let url = supplied
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .context("播放列表来源必须填写链接")?;
+            normalize_youtube_playlist_url(url)
+        }
         "douyin" | "douyin_collection" | "douyin_theater" | "douyin_series" | "douyin_mix" | "tiktok"
         | "tiktok_collection" => supplied
             .map(str::trim)
@@ -6865,6 +7118,17 @@ fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
             })
         }
     }
+}
+
+/// 从 `watch?v=...&list=...`、`playlist?list=...` 等链接中只保留播放列表 ID，
+/// 统一转成 `playlist?list=`，避免 yt-dlp 把“视频 + 列表”误当成单个视频。
+fn normalize_youtube_playlist_url(value: &str) -> Result<String> {
+    let url = reqwest::Url::parse(value.trim()).context("YouTube 播放列表链接格式无效")?;
+    let list_id = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "list" && !value.trim().is_empty()).then(|| value.into_owned()))
+        .context("YouTube 播放列表链接缺少 list= 参数")?;
+    Ok(format!("https://www.youtube.com/playlist?list={list_id}"))
 }
 
 /// 外源「同一个源」的判定键。
@@ -7785,6 +8049,7 @@ fn append_ytdlp_tab_args(command: &mut Command) {
 /// 本地化错误文本（如“远程主机强迫关闭了一个现有的连接”）不乱码。
 pub(crate) fn ytdlp_command() -> Command {
     let mut command = crate::utils::process::tokio_command(ytdlp_executable());
+    command.kill_on_drop(true);
     command.env("PYTHONUTF8", "1");
     command.env("PYTHONIOENCODING", "utf-8");
     command
@@ -8059,7 +8324,8 @@ mod tests {
         canonical_channel_url, checksum_for_release_asset, collect_external_scan_result,
         collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
-        normalize_source_type, parse_youtube_live_chat, resolve_source_url, should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
+        normalize_source_type, normalize_youtube_playlist_url, parse_youtube_live_chat, resolve_source_url,
+        should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
         youtube_page_is_logged_out, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
         ytdlp_runtime_target_env, SUBSCRIPTIONS_URL, WATCH_LATER_URL,
     };
@@ -8325,11 +8591,44 @@ mod tests {
         assert_eq!(normalize_source_type("playlist").unwrap(), "playlist");
         assert_eq!(resolve_source_url("subscriptions", None).unwrap(), SUBSCRIPTIONS_URL);
         assert_eq!(resolve_source_url("watch_later", None).unwrap(), WATCH_LATER_URL);
+        assert_eq!(
+            normalize_youtube_playlist_url("https://www.youtube.com/watch?v=abc&list=PL123&pp=xyz").unwrap(),
+            "https://www.youtube.com/playlist?list=PL123"
+        );
         assert!(super::youtube_source_video_selection_supported("watch_later"));
         assert!(super::youtube_source_video_selection_supported("playlist"));
         assert!(!super::youtube_source_video_selection_supported("douyin"));
         assert!(is_youtube_url("https://www.youtube.com/watch?v=abc"));
         assert!(!is_youtube_url("https://youtube.example.com"));
+    }
+
+    #[test]
+    fn playlist_catalog_accepts_bare_ytdlp_playlist_ids() {
+        let item = serde_json::json!({"id": "PLabc123", "title": "测试列表"});
+        assert_eq!(
+            super::youtube_playlist_url_from_item(&item).as_deref(),
+            Some("https://www.youtube.com/playlist?list=PLabc123")
+        );
+    }
+
+    #[test]
+    fn douyin_tvshow_nfo_includes_uploader_actor_and_avatar() {
+        let source = sample_external_source("douyin_mix");
+        let metadata: crate::external_media::ExternalMediaMetadata = serde_json::from_str(
+            r#"{"id":"mix-episode","uploader":"测试作者","description":"合集简介"}"#,
+        )
+        .expect("metadata 应可构造");
+        let xml = super::generate_youtube_tvshow_nfo(
+            &source,
+            &metadata,
+            Some("https://example.com/avatar.jpg"),
+        );
+        assert!(
+            xml.contains(
+                "<actor><name>测试作者</name><role>UP主</role><thumb>https://example.com/avatar.jpg</thumb></actor>"
+            ),
+            "{xml}"
+        );
     }
 
     #[test]
@@ -8679,14 +8978,15 @@ mod tests {
             Some("https://p3.douyinpic.com/avatar.jpeg"),
         );
         assert!(
-            xml.contains("<actor><name>古德末泥(高智版)</name><role>频道</role><thumb>https://p3.douyinpic.com/avatar.jpeg</thumb></actor>"),
+            xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role><thumb>https://p3.douyinpic.com/avatar.jpeg</thumb></actor>"),
             "主频道 actor 应带 <thumb> 头像: {xml}"
         );
         assert_eq!(
-            xml.matches("<role>频道</role><thumb>").count(),
+            xml.matches("<role>UP主</role><thumb>").count(),
             1,
             "只有主频道 actor 写头像 <thumb>: {xml}"
         );
+        assert!(!xml.contains("<director>"), "抖音 UGC 不应把同一 UP 重复写成导演: {xml}");
         assert!(xml.contains("<fanart><thumb>https://example.com/cover.jpg</thumb></fanart>"), "{xml}");
 
         // 空白头像地址不写 <thumb>，避免生成空标签
@@ -8703,9 +9003,9 @@ mod tests {
             "https://www.douyin.com/video/7515762262805777727",
             Some("   "),
         );
-        assert!(xml.contains("<actor><name>古德末泥(高智版)</name><role>频道</role></actor>"), "{xml}");
+        assert!(xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role></actor>"), "{xml}");
         assert_eq!(
-            xml.matches("<role>频道</role><thumb>").count(),
+            xml.matches("<role>UP主</role><thumb>").count(),
             0,
             "空白头像地址不应写 <thumb>: {xml}"
         );
@@ -8785,7 +9085,7 @@ mod tests {
         let source = sample_external_source("tiktok_collection");
         let metadata: crate::external_media::ExternalMediaMetadata =
             serde_json::from_str(r#"{"id":"vid1"}"#).expect("metadata 应可构造");
-        let xml = super::generate_youtube_tvshow_nfo(&source, &metadata);
+        let xml = super::generate_youtube_tvshow_nfo(&source, &metadata, None);
         assert!(xml.contains("<studio>TikTok</studio>"), "TikTok tvshow studio 应为 TikTok: {xml}");
         assert!(xml.contains(r#"<uniqueid type="tiktok""#), "TikTok tvshow uniqueid type 应为 tiktok: {xml}");
         assert!(!xml.contains("<studio>YouTube</studio>"), "TikTok tvshow studio 不应是 YouTube: {xml}");

@@ -227,6 +227,7 @@
 	// YouTube “播放列表/收藏”：搜索 UP 主后展示其全部播放列表
 	let youtubeChannelPlaylists: SearchResultItem[] = [];
 	let loadingYoutubeChannelPlaylists = false;
+	let youtubePlaylistPanelTitle = '我的播放列表';
 
 	// 番剧季度相关
 	let bangumiSeasons: BangumiSeasonInfo[] = [];
@@ -502,6 +503,14 @@
 		if (sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection') {
 			void loadDouyinCatalog();
 		}
+		if (sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_mix') {
+			void loadDouyinCatalog();
+		}
+		if (sourcePlatform === 'youtube' && youtubeSourceType === 'playlist') {
+			if (youtubeStatus?.logged_in) {
+				void loadYoutubeOwnPlaylists();
+			}
+		}
 	}
 
 	function douyinSourceNeedsSelection(): boolean {
@@ -524,6 +533,7 @@
 
 	async function loadYoutubeChannelPlaylists(channelUrl: string) {
 		youtubeChannelPlaylists = [];
+		youtubePlaylistPanelTitle = '该 UP 的播放列表';
 		await runRequest(
 			async () => {
 				const response = await api.getYouTubeChannelPlaylists(channelUrl);
@@ -533,6 +543,25 @@
 			{
 				setLoading: (value) => (loadingYoutubeChannelPlaylists = value),
 				context: '获取 UP 主播放列表失败',
+				onError: () => {
+					youtubeChannelPlaylists = [];
+				}
+			}
+		);
+	}
+
+	async function loadYoutubeOwnPlaylists() {
+		youtubeChannelPlaylists = [];
+		youtubePlaylistPanelTitle = '我的播放列表';
+		await runRequest(
+			async () => {
+				const response = await api.getYouTubeMyPlaylists();
+				youtubeChannelPlaylists = response.data.results;
+				return true;
+			},
+			{
+				setLoading: (value) => (loadingYoutubeChannelPlaylists = value),
+				context: '获取我的 YouTube 播放列表失败',
 				onError: () => {
 					youtubeChannelPlaylists = [];
 				}
@@ -974,6 +1003,7 @@
 				toast.error('当前 YouTube 来源类型不需要搜索');
 				return;
 			}
+			youtubeChannelPlaylists = [];
 			const youtubeSearchSourceType: 'channel' | 'playlist' = youtubeSourceType;
 			const response = await runRequest(
 				() =>
@@ -4094,6 +4124,30 @@
 													搜索
 												{/if}
 											</Button>
+											{#if sourcePlatform === 'youtube' && youtubeSourceType === 'playlist'}
+												<Button
+													type="button"
+													onclick={loadYoutubeOwnPlaylists}
+													disabled={loadingYoutubeChannelPlaylists}
+													size="sm"
+													variant="outline"
+													class={isMobile ? 'w-full' : ''}
+												>
+													{loadingYoutubeChannelPlaylists ? '获取中...' : '获取自己的列表'}
+												</Button>
+											{/if}
+											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_mix'}
+												<Button
+													type="button"
+													onclick={() => loadDouyinCatalog()}
+													disabled={loadingDouyinCatalog}
+													size="sm"
+													variant="outline"
+													class={isMobile ? 'w-full' : ''}
+												>
+													{loadingDouyinCatalog ? '获取中...' : '获取收藏的合集'}
+												</Button>
+											{/if}
 											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin'}
 												<Button
 													type="button"
@@ -4128,9 +4182,9 @@
 														: youtubeSourceType === 'douyin_collection'
 															? '先搜索 UP 主，选择后加载其公开收藏夹，再选收藏夹自动填充名称和链接。'
 															: youtubeSourceType === 'douyin_mix'
-																? '先搜索 UP 主，选择后加载其合集，再选合集自动填充名称和链接；也可直接粘贴合集链接。'
+																? '默认展示当前账号收藏的合集；也可搜索 UP 主后选择该作者创建的合集，或直接粘贴合集链接。'
 															: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
-													: '搜索并选择结果后，将自动填充名称、链接和当前来源类型的快捷路径模板。'}
+													: '默认展示自己的播放列表；也可按名称搜索公开播放列表，选择后自动填充名称、链接和快捷路径模板。'}
 										</p>
 									</div>
 								</div>
@@ -6002,7 +6056,7 @@
 					<div class={isCompactLayout ? 'w-full' : 'flex-1'}>
 						<SidePanel
 							isMobile={isCompactLayout}
-							title="该 UP 的播放列表"
+							title={youtubePlaylistPanelTitle}
 							subtitle={loadingYoutubeChannelPlaylists ? '正在获取…' : `共 ${youtubeChannelPlaylists.length} 个，点击选择`}
 							maxHeightClass="max-h-126"
 							headerClass="bg-green-50 dark:bg-green-950"

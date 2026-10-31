@@ -69,6 +69,7 @@ const DOUYIN_SERIES_ITEMS_API: &str = "https://www.douyin.com/aweme/v1/web/serie
 // 网页端缓存（secsdk 的 web_secsdk_runtime_cache）里也能看到 `mix/list`，
 // 说明这正是作者主页「合集」标签实际调用的接口。
 const DOUYIN_MIX_LIST_API: &str = "https://www.douyin.com/aweme/v1/web/mix/list/";
+const DOUYIN_MIX_COLLECTION_API: &str = "https://www.douyin.com/aweme/v1/web/mix/listcollection/";
 const DOUYIN_MIX_DETAIL_API: &str = "https://www.douyin.com/aweme/v1/web/mix/detail/";
 const DOUYIN_MIX_AWEME_API: &str = "https://www.douyin.com/aweme/v1/web/mix/aweme/";
 /// 合集作品接口每页固定 15 条（传 count=50 也只返回 15），用于估算翻页次数。
@@ -743,12 +744,9 @@ pub async fn get_douyin_catalog(
         ("douyin_mix", _) if keyword.is_some() => fetch_user_mix_catalog(keyword.unwrap()).await?,
         ("douyin_theater", _) => fetch_theater_catalog().await?,
         ("douyin_series", _) => fetch_series_catalog().await?,
-        // 合集与 B 站一致：必须先选作者，再列该作者的合集，没有「我的合集」入口。
-        ("douyin_mix", _) => {
-            return Err(ApiError::bad_request(
-                "抖音合集需要先搜索并选择作者，再从右侧选择具体合集",
-            ))
-        }
+        // 无关键词时读取当前账号「收藏的合集」，对应 B 站「关注的合集」入口；
+        // 输入作者后仍可改查该作者创建的合集。
+        ("douyin_mix", _) => fetch_favorite_mix_catalog().await?,
         _ => return Err(ApiError::bad_request("右侧列表仅支持合集、收藏夹、放映厅或短剧")),
     };
     // 综合搜索接口已经按作品标题/演员/描述做相关性检索，系列名本身不一定
@@ -2302,8 +2300,49 @@ async fn fetch_user_mixes(sec_uid: &str, fallback_nickname: &str) -> Result<Vec<
     Ok(results)
 }
 
+/// 当前登录账号收藏的合集（B 站「关注的合集」对应入口）。
+async fn fetch_favorite_mix_catalog() -> Result<Vec<YouTubeSearchResult>> {
+    ensure_session()?;
+    let mut cursor = 0i64;
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..50 {
+        let mut pairs = common_query_pairs();
+        pairs.extend([
+            ("count", "20".to_string()),
+            ("cursor", cursor.to_string()),
+        ]);
+        let response = signed_get(DOUYIN_MIX_COLLECTION_API, pairs).await?;
+        ensure_douyin_status_ok(&response, "获取收藏的合集")?;
+        for item in response
+            .get("mix_infos")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(info) = mix_info_from_value(item) else {
+                continue;
+            };
+            if !seen.insert(info.id.clone()) {
+                continue;
+            }
+            results.push(mix_to_search_result(&info, ""));
+        }
+        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+            break;
+        }
+        let next = response.get("cursor").and_then(value_as_i64).unwrap_or(cursor);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+        tokio::time::sleep(douyin_page_delay().await).await;
+    }
+    Ok(results)
+}
+
 /// 按 UP 列出其全部合集。keyword 支持：作者主页链接、抖音号、昵称关键词。
-/// 与 B 站「合集」一致：必须先确定作者，再选其合集（没有「我的合集」入口）。
+/// 输入作者后列出该作者创建的合集；无关键词时由收藏合集接口提供默认列表。
 async fn fetch_user_mix_catalog(keyword: &str) -> Result<Vec<YouTubeSearchResult>> {
     let trimmed = keyword.trim();
     let mut users: Vec<(String, String)> = Vec::new();
@@ -2918,6 +2957,8 @@ fn endpoint_display_name(base_url: &str) -> &'static str {
         "收藏夹作品"
     } else if base_url.starts_with(DOUYIN_MIX_LIST_API) {
         "合集列表"
+    } else if base_url.starts_with(DOUYIN_MIX_COLLECTION_API) {
+        "收藏的合集"
     } else if base_url.starts_with(DOUYIN_MIX_DETAIL_API) {
         "合集详情"
     } else if base_url.starts_with(DOUYIN_MIX_AWEME_API) {
@@ -2950,6 +2991,7 @@ fn endpoint_needs_sdk_signature(base_url: &str) -> bool {
         || base_url.starts_with(DOUYIN_COLLECTIONS_API)
         || base_url.starts_with(DOUYIN_COLLECTION_VIDEOS_API)
         || base_url.starts_with(DOUYIN_MIX_LIST_API)
+        || base_url.starts_with(DOUYIN_MIX_COLLECTION_API)
         || base_url.starts_with(DOUYIN_MIX_DETAIL_API)
         || base_url.starts_with(DOUYIN_MIX_AWEME_API)
         || base_url.starts_with(DOUYIN_POST_API)
@@ -5418,8 +5460,8 @@ pub(crate) async fn create_paid_placeholder(path: &Path) -> Result<()> {
 
 /// 下载抖音弹幕并写入 JSON/ASS；图文或无弹幕作品只写检查标记。
 pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_path: &Path, title: &str) -> Result<()> {
-    let ass_path = output_path.with_extension("ass");
-    let json_path = output_path.with_extension("danmaku.json");
+    migrate_douyin_sidecar_names(output_path).await?;
+    let ass_path = douyin_ass_path(output_path);
     let checked_path = output_path.with_extension("danmaku.checked");
     if tokio::fs::metadata(&ass_path)
         .await
@@ -5442,11 +5484,6 @@ pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_pa
         info!(aweme_id = %metadata.id, "抖音视频没有可下载的弹幕，已记录检查结果");
         return Ok(());
     }
-    let json_temporary = output_path.with_extension("danmaku.json.download");
-    tokio::fs::write(&json_temporary, serde_json::to_vec_pretty(&danmaku)?)
-        .await
-        .with_context(|| format!("写入抖音弹幕 JSON 失败: {}", json_temporary.display()))?;
-    replace_file(&json_temporary, &json_path).await?;
     let count = danmaku.len();
     let elems = danmaku
         .into_iter()
@@ -5468,7 +5505,34 @@ pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_pa
         .collect();
     write_danmaku_ass(output_path, title, duration, elems).await?;
     let _ = remove_file_if_exists(&checked_path).await;
-    info!(aweme_id = %metadata.id, count, path = %ass_path.display(), "抖音视频「{}」弹幕 JSON 和 ASS 生成完成", title);
+    info!(aweme_id = %metadata.id, count, path = %ass_path.display(), "抖音视频「{}」弹幕 ASS 生成完成", title);
+    Ok(())
+}
+
+fn douyin_ass_path(output_path: &Path) -> PathBuf {
+    output_path.with_extension("zh-CN.default.ass")
+}
+
+/// 兼容旧版本：把 `视频.ass` 改为媒体库可识别的默认语言后缀，并清理
+/// 已经无用途的 `.danmaku.json` 中间文件。
+pub(crate) async fn migrate_douyin_sidecar_names(output_path: &Path) -> Result<()> {
+    let legacy_ass = output_path.with_extension("ass");
+    let target_ass = douyin_ass_path(output_path);
+    if tokio::fs::metadata(&legacy_ass).await.is_ok() {
+        if tokio::fs::metadata(&target_ass).await.is_err() {
+            tokio::fs::rename(&legacy_ass, &target_ass)
+                .await
+                .with_context(|| format!("迁移抖音 ASS 文件名失败: {}", legacy_ass.display()))?;
+        } else {
+            remove_file_if_exists(&legacy_ass).await?;
+        }
+    }
+    for suffix in ["danmaku.json", "danmaku.json.download"] {
+        let path = output_path.with_extension(suffix);
+        if let Err(error) = remove_file_if_exists(&path).await {
+            warn!(path = %path.display(), error = %error, "清理抖音弹幕 JSON 失败");
+        }
+    }
     Ok(())
 }
 
@@ -5496,7 +5560,7 @@ async fn write_danmaku_ass(
     duration_seconds: i32,
     danmaku: Vec<DanmakuElem>,
 ) -> Result<()> {
-    let ass_path = output_path.with_extension("ass");
+    let ass_path = douyin_ass_path(output_path);
     let temporary = output_path.with_extension("ass.download");
     let page = BiliPageInfo {
         cid: 0,
@@ -5642,6 +5706,24 @@ mod tests {
         );
 
         assert!(mix_page_episode_map(&serde_json::json!({})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_danmaku_ass_and_removes_json() {
+        let root = std::env::temp_dir().join(format!("bili-sync-douyin-ass-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let output = root.join("S01E01 - 测试.mp4");
+        tokio::fs::write(&output, b"video").await.unwrap();
+        tokio::fs::write(output.with_extension("ass"), b"legacy-ass").await.unwrap();
+        tokio::fs::write(output.with_extension("danmaku.json"), b"{}").await.unwrap();
+
+        super::migrate_douyin_sidecar_names(&output).await.unwrap();
+
+        assert!(output.with_extension("zh-CN.default.ass").exists());
+        assert!(!output.with_extension("ass").exists());
+        assert!(!output.with_extension("danmaku.json").exists());
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     /// 实网验证（需要真实抖音登录状态，默认不跑）：
