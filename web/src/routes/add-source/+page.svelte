@@ -495,6 +495,7 @@
 		showSubmissionSelection =
 			youtubeSourceType === 'subscriptions' ||
 			youtubeSourceType === 'liked' ||
+			youtubeSourceType === 'watch_later' ||
 			youtubeSourceType === 'douyin_liked' ||
 			youtubeSourceType === 'douyin_watch_later' ||
 			youtubeSourceType === 'tiktok_favorite';
@@ -3021,7 +3022,8 @@
 				(youtubeSourceType === 'subscriptions' ||
 					youtubeSourceType === 'channel' ||
 					youtubeSourceType === 'playlist' ||
-					youtubeSourceType === 'liked'))
+					youtubeSourceType === 'liked' ||
+					youtubeSourceType === 'watch_later'))
 		);
 	}
 
@@ -3048,6 +3050,8 @@
 				: '选择历史视频'
 		: youtubeSourceType === 'liked'
 			? '选择喜欢的视频'
+			: youtubeSourceType === 'watch_later'
+				? '选择稍后再看视频'
 			: '选择历史视频';
 	$: youtubeSelectionDescriptionText = youtubeChannelSelection
 		? '仅同步勾选频道以后发布的视频。'
@@ -3059,6 +3063,8 @@
 				: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。'
 		: youtubeSourceType === 'liked'
 			? '首次仅下载勾选的历史视频，之后新加入“喜欢”的视频会自动同步。'
+			: youtubeSourceType === 'watch_later'
+				? '首次仅下载勾选的历史视频，之后新加入“稍后再看”的视频会自动同步。'
 			: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。';
 
 	function openYouTubeHistorySelection() {
@@ -3167,7 +3173,8 @@
 								| 'subscriptions'
 								| 'channel'
 								| 'playlist'
-								| 'liked',
+								| 'liked'
+								| 'watch_later',
 							page: 1,
 							page_size: 100,
 							keyword: submissionSearchQuery.trim()
@@ -3284,7 +3291,8 @@
 							| 'subscriptions'
 							| 'channel'
 							| 'playlist'
-							| 'liked',
+							| 'liked'
+							| 'watch_later',
 						page,
 						page_size: pageSize
 					})
@@ -3448,6 +3456,7 @@
 			(isYouTubeHistorySource() &&
 				(youtubeSourceType === 'subscriptions' ||
 					youtubeSourceType === 'liked' ||
+					youtubeSourceType === 'watch_later' ||
 					youtubeSourceType === 'tiktok_favorite' ||
 					(sourcePlatform === 'douyin' && !douyinSourceNeedsSelection()) ||
 					youtubeUrl.trim())))
@@ -6969,6 +6978,8 @@
 											? '搜索已订阅频道...'
 											: youtubeSourceType === 'liked'
 												? '搜索喜欢的视频...'
+												: youtubeSourceType === 'watch_later'
+													? '搜索稍后再看视频...'
 												: `搜索当前${isDouyin ? '抖音' : 'YouTube'}来源的视频标题...`
 										: '搜索视频标题（支持关键词搜索UP主所有视频）...'}
 									{isSearching}

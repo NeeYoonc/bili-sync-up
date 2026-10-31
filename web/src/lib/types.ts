@@ -144,7 +144,7 @@ export interface YouTubeSearchResponse {
 
 export interface YouTubeSourceVideosRequest {
 	url?: string;
-	source_type: 'subscriptions' | 'channel' | 'playlist' | 'liked';
+	source_type: 'subscriptions' | 'channel' | 'playlist' | 'liked' | 'watch_later';
 	page?: number;
 	page_size?: number;
 	keyword?: string;

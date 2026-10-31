@@ -345,16 +345,8 @@ pub async fn search_youtube(
         return Err(ApiError::from(anyhow!("YouTube 搜索仅支持频道或播放列表")));
     }
 
-    // “播放列表/收藏”来源先搜索 UP 主频道，选择频道后再加载其全部播放列表。
-    let channel_mode = matches!(source_type.as_str(), "channel" | "playlist");
-    let search_url = youtube_search_url(
-        keyword,
-        if channel_mode {
-            "channel"
-        } else {
-            &source_type
-        },
-    )?;
+    let channel_mode = source_type == "channel";
+    let search_url = youtube_search_url(keyword, &source_type)?;
     let mut command = ytdlp_command();
     command.args([
         "--flat-playlist",
@@ -599,15 +591,15 @@ pub async fn get_youtube_channel_playlists(
     }))
 }
 
-/// 枚举频道、播放列表、喜欢视频或已订阅频道。响应直接复用 B 站投稿
+/// 枚举频道、播放列表、喜欢视频、稍后再看或已订阅频道。响应直接复用 B 站投稿
 /// 选择面板的数据结构，让添加 YouTube 来源继续共用项目原有选择 UI。
 pub async fn get_youtube_source_videos(
     Query(request): Query<YouTubeSourceVideosRequest>,
 ) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
     let source_type = request.source_type.trim().to_ascii_lowercase();
-    if !matches!(source_type.as_str(), "subscriptions" | "channel" | "playlist" | "liked") {
+    if !youtube_source_video_selection_supported(&source_type) {
         return Err(ApiError::from(anyhow!(
-            "仅订阅动态、频道、播放列表和喜欢的视频支持内容选择"
+            "仅订阅动态、频道、播放列表、喜欢的视频和稍后再看支持内容选择"
         )));
     }
     let raw_url = request.url.as_deref().unwrap_or("").trim();
@@ -622,10 +614,21 @@ pub async fn get_youtube_source_videos(
     if source_type == "subscriptions" {
         return get_youtube_subscription_channels(page, page_size, keyword.as_deref()).await;
     }
+    if matches!(source_type.as_str(), "liked" | "watch_later") && !youtube_has_session() {
+        let label = if source_type == "watch_later" {
+            "稍后再看"
+        } else {
+            "喜欢的视频"
+        };
+        return Err(ApiError::from(anyhow!(
+            "「{label}」需要有效的 YouTube 登录状态，请先在设置页重新导入 YouTube cookies"
+        )));
+    }
 
     ensure_ytdlp_available().await?;
     let source_url = match source_type.as_str() {
         "liked" => LIKED_URL.to_string(),
+        "watch_later" => WATCH_LATER_URL.to_string(),
         "channel" | "playlist" => {
             if raw_url.is_empty() || !is_youtube_url(raw_url) {
                 return Err(ApiError::from(anyhow!("请输入有效的 YouTube 频道或播放列表链接")));
@@ -664,10 +667,21 @@ pub async fn get_youtube_source_videos(
         .await
         .map_err(|_| anyhow!("加载 YouTube 历史视频超时"))??;
     if !output.status.success() {
-        return Err(ApiError::from(anyhow!(
-            "加载 YouTube 历史视频失败：{}",
-            command_error(&output)
-        )));
+        let raw_error = command_error(&output);
+        let command_failure = anyhow!("加载 YouTube 历史视频失败：{raw_error}");
+        if matches!(source_type.as_str(), "liked" | "watch_later")
+            && is_youtube_auth_required_error(&command_failure)
+        {
+            let label = if source_type == "watch_later" {
+                "稍后再看"
+            } else {
+                "喜欢的视频"
+            };
+            return Err(ApiError::from(anyhow!(
+                "「{label}」读取失败：YouTube 登录状态已失效或不完整，请在设置页重新导入 YouTube cookies"
+            )));
+        }
+        return Err(ApiError::from(command_failure));
     }
 
     let mut videos = Vec::new();
@@ -759,6 +773,13 @@ pub async fn get_youtube_source_videos(
         page,
         page_size,
     }))
+}
+
+fn youtube_source_video_selection_supported(source_type: &str) -> bool {
+    matches!(
+        source_type,
+        "subscriptions" | "channel" | "playlist" | "liked" | "watch_later"
+    )
 }
 
 async fn get_youtube_subscription_channels(
@@ -2138,6 +2159,9 @@ async fn remove_youtube_task_artifact(
     }
     if let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) {
         let output_path = PathBuf::from(output_path);
+        if (cover || nfo) && source.source_type == "douyin_collection" {
+            cleanup_legacy_collection_series_sidecars(source, &output_path).await?;
+        }
         if cover {
             if let Ok(thumb) = youtube_sidecar_path(&output_path, "-thumb.jpg") {
                 remove_file_if_exists(&thumb).await?;
@@ -2149,8 +2173,9 @@ async fn remove_youtube_task_artifact(
         if nfo {
             let nfo_path = output_path.with_extension("nfo");
             remove_file_if_exists(&nfo_path).await?;
-            // 抖音短剧/放映厅/合集是番剧结构，剧集根目录还有 tvshow.nfo。
-            if is_episodic_douyin_source(source) {
+            // 抖音短剧/放映厅/合集确有集号、实际使用 Season 结构时，
+            // 剧集根目录还会有 tvshow.nfo。
+            if uses_episodic_layout(source, video.episode_number) {
                 if let Some(series_dir) = output_path.parent().and_then(|dir| dir.parent()) {
                     let tvshow = series_dir.join("tvshow.nfo");
                     remove_file_if_exists(&tvshow).await?;
@@ -2496,6 +2521,9 @@ async fn regenerate_youtube_artifacts(
                 parent.display()
             );
         }
+        if source.source_type == "douyin_collection" {
+            cleanup_legacy_collection_series_sidecars(&source, &output_path).await?;
+        }
     }
     let downloader = TASK_CONTROLLER.get_downloader().await;
     if regen.cover {
@@ -2535,8 +2563,9 @@ async fn regenerate_youtube_artifacts(
         )
         .await
         .with_context(|| format!("重新生成{platform}视频信息/NFO失败"))?;
-        // 抖音短剧/放映厅/合集是番剧结构：单集 NFO 之外还要刷新剧集 tvshow.nfo。
-        if is_episodic_douyin_source(&source) {
+        // 抖音短剧/放映厅/合集确有集号、实际使用 Season 结构时，
+        // 单集 NFO 之外还要刷新剧集 tvshow.nfo。
+        if uses_episodic_layout(&source, video.episode_number) {
             if let (Some(season_dir), Some(downloader)) = (output_path.parent(), downloader.as_deref()) {
                 if let Some(series_dir) = season_dir.parent() {
                     let tvshow = series_dir.join("tvshow.nfo");
@@ -3175,6 +3204,15 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
 }
 
 async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
+    if source.source_type == "douyin_collection" {
+        if let Err(error) = cleanup_legacy_collection_sidecars_for_source(db, source).await {
+            warn!(
+                source_id = source.id,
+                error = %error,
+                "抖音收藏夹旧剧集附属文件批量清理失败，继续扫描"
+            );
+        }
+    }
     let selected_history = source
         .selected_videos
         .as_deref()
@@ -3319,6 +3357,27 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
         notify_queue_status_changed();
     }
     Ok(added)
+}
+
+async fn cleanup_legacy_collection_sidecars_for_source(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    if source.source_type != "douyin_collection" {
+        return Ok(());
+    }
+    let videos = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(source.id))
+        .filter(youtube_video::Column::OutputPath.is_not_null())
+        .all(db)
+        .await?;
+    for video in videos {
+        let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        cleanup_legacy_collection_series_sidecars(source, Path::new(output_path)).await?;
+    }
+    Ok(())
 }
 
 fn youtube_item_is_newer_than_source(item: &serde_json::Value, created_at: &str) -> bool {
@@ -4604,6 +4663,11 @@ async fn download_youtube_media(
         }
     }
 
+    if source.source_type == "douyin_collection" {
+        if let Err(error) = cleanup_legacy_collection_series_sidecars(source, &output_path).await {
+            warn!(platform, %error, "抖音收藏夹旧剧集附属文件清理失败");
+        }
+    }
     let sidecars = if source.audio_only && source.audio_only_m4a_only && !metadata.is_slideshow() {
         YoutubeSidecarOutcome::default()
     } else {
@@ -4615,6 +4679,7 @@ async fn download_youtube_media(
             &title,
             &uploader,
             source,
+            video.episode_number,
         )
         .await
     };
@@ -5359,10 +5424,7 @@ fn youtube_output_path(
     // 抖音短剧/放映厅/合集与 B 站合集 up_seasonal 模式保持一致：
     // 下载根目录/剧集名/S01E001 - 每集标题.mp4。一个剧集一个目录，
     // 文件名带三位集号保证文件系统排序稳定；无集号时回退到普通单 P 命名。
-    let episodic_source = matches!(
-        source.source_type.as_str(),
-        "douyin_theater" | "douyin_series" | "douyin_collection" | "douyin_mix"
-    );
+    let episodic_source = uses_episodic_layout(source, video.episode_number);
     let (video_folder, page_name) = if episodic_source {
         if let Some(episode) = video.episode_number.filter(|value| *value >= 1) {
             // 与 B 站番剧标准结构保持一致：
@@ -5450,6 +5512,7 @@ async fn ensure_youtube_sidecars(
     title: &str,
     uploader: &str,
     source: &youtube_source::Model,
+    episode_number: Option<i32>,
 ) -> YoutubeSidecarOutcome {
     let mut warnings = Vec::new();
     let platform = source_platform_label(source);
@@ -5520,8 +5583,9 @@ async fn ensure_youtube_sidecars(
             info!(platform, youtube_id = %metadata.id, "{}视频源「{}」视频「{}」{} 子任务完成", platform, source.name, title, task);
         }
     }
-    // 短剧/放映厅/合集按番剧结构补充剧集级附属文件（tvshow.nfo、season.nfo、folder.jpg、poster.jpg）。
-    if is_episodic_douyin_source(source) {
+    // 短剧/放映厅/合集确有集号、按番剧结构补充剧集级附属文件
+    //（tvshow.nfo、season.nfo、folder.jpg、poster.jpg）。
+    if uses_episodic_layout(source, episode_number) {
         if let Err(error) = ensure_youtube_series_sidecars(downloader, metadata, output_path, source).await {
             warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」媒体已下载，但剧集附属文件子任务失败", platform, source.name);
             warnings.push(format!("剧集附属文件生成失败：{error:#}"));
@@ -5536,8 +5600,56 @@ async fn ensure_youtube_sidecars(
 fn is_episodic_douyin_source(source: &youtube_source::Model) -> bool {
     matches!(
         source.source_type.as_str(),
-        "douyin_theater" | "douyin_series" | "douyin_collection" | "douyin_mix"
+        "douyin_theater" | "douyin_series" | "douyin_mix"
     )
+}
+
+/// 只有来源本身是剧集类型且当前作品确实有集号时，才使用
+/// `剧集名/Season 01/S01E01...` 文件树。否则一律回退普通单视频模板，
+/// 避免出现“普通目录里硬塞 season.nfo”的半套剧集结构。
+fn uses_episodic_layout(source: &youtube_source::Model, episode_number: Option<i32>) -> bool {
+    is_episodic_douyin_source(source) && episode_number.is_some_and(|episode| episode >= 1)
+}
+
+/// 清理旧版本把抖音收藏夹误当剧集时留下的附属文件。
+///
+/// 仅当根目录 `tvshow.nfo` 确实是本收藏夹源生成的内容时才一并删除同组封面，
+/// 避免误删同一目录下用户自己的图片。收藏夹的视频目录内 `season.nfo`
+/// 也是旧版本硬塞进去的固定模板文件，可安全删除。
+async fn cleanup_legacy_collection_series_sidecars(
+    source: &youtube_source::Model,
+    output_path: &Path,
+) -> Result<()> {
+    if source.source_type != "douyin_collection" {
+        return Ok(());
+    }
+    let Some(media_dir) = output_path.parent() else {
+        return Ok(());
+    };
+
+    let season_path = media_dir.join("season.nfo");
+    if let Ok(contents) = tokio::fs::read_to_string(&season_path).await {
+        if contents.contains("<season>") && contents.contains("<seasonnumber>1</seasonnumber>") {
+            remove_file_if_exists(&season_path).await?;
+        }
+    }
+
+    let Some(shared_dir) = media_dir.parent() else {
+        return Ok(());
+    };
+    let tvshow_path = shared_dir.join("tvshow.nfo");
+    let Ok(tvshow) = tokio::fs::read_to_string(&tvshow_path).await else {
+        return Ok(());
+    };
+    let escaped_source_url = quick_xml::escape::escape(&source.url).into_owned();
+    if !tvshow.contains(r#"<uniqueid type="douyin""#) || !tvshow.contains(&escaped_source_url) {
+        return Ok(());
+    }
+    remove_file_if_exists(&tvshow_path).await?;
+    for name in ["folder.jpg", "poster.jpg"] {
+        remove_file_if_exists(&shared_dir.join(name)).await?;
+    }
+    Ok(())
 }
 
 /// 抖音短剧/放映厅/合集按番剧结构生成剧集级附属文件：
@@ -7949,7 +8061,7 @@ mod tests {
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
         normalize_source_type, parse_youtube_live_chat, resolve_source_url, should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
         youtube_page_is_logged_out, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
-        ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
+        ytdlp_runtime_target_env, SUBSCRIPTIONS_URL, WATCH_LATER_URL,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -8190,14 +8302,32 @@ mod tests {
     fn episodic_douyin_source_is_detected() {
         assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_theater")));
         assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_series")));
-        assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_collection")));
         assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_mix")));
+        assert!(!super::is_episodic_douyin_source(&sample_external_source("douyin_collection")));
         assert!(!super::is_episodic_douyin_source(&sample_external_source("douyin")));
+    }
+
+    #[test]
+    fn episodic_layout_requires_a_real_episode_number() {
+        let series = sample_external_source("douyin_series");
+        assert!(super::uses_episodic_layout(&series, Some(1)));
+        assert!(!super::uses_episodic_layout(&series, None));
+        assert!(!super::uses_episodic_layout(&series, Some(0)));
+
+        let collection = sample_external_source("douyin_collection");
+        assert!(
+            !super::uses_episodic_layout(&collection, Some(3)),
+            "抖音收藏夹即使标题里碰巧带集号，也必须保持普通单视频目录"
+        );
     }
     #[test]
     fn validates_types_and_urls() {
         assert_eq!(normalize_source_type("playlist").unwrap(), "playlist");
         assert_eq!(resolve_source_url("subscriptions", None).unwrap(), SUBSCRIPTIONS_URL);
+        assert_eq!(resolve_source_url("watch_later", None).unwrap(), WATCH_LATER_URL);
+        assert!(super::youtube_source_video_selection_supported("watch_later"));
+        assert!(super::youtube_source_video_selection_supported("playlist"));
+        assert!(!super::youtube_source_video_selection_supported("douyin"));
         assert!(is_youtube_url("https://www.youtube.com/watch?v=abc"));
         assert!(!is_youtube_url("https://youtube.example.com"));
     }
@@ -8970,6 +9100,46 @@ mod tests {
     }
 
     #[test]
+    fn builds_douyin_collection_output_path_as_regular_video() {
+        use crate::external_media::ExternalMediaMetadata;
+        use bili_sync_entity::{youtube_source, youtube_video};
+
+        let mut collection_source = youtube_source::Model::default();
+        collection_source.id = 6;
+        collection_source.source_type = "douyin_collection".to_string();
+        collection_source.name = "收藏夹".to_string();
+        collection_source.path = "F:/Downloads/收藏夹douyin".to_string();
+
+        let mut regular_source = collection_source.clone();
+        regular_source.source_type = "douyin".to_string();
+
+        let video = youtube_video::Model {
+            episode_number: Some(3),
+            ..Default::default()
+        };
+        let metadata: ExternalMediaMetadata = serde_json::from_str(
+            r#"{"id":"7666885554109183667","title":"测试收藏视频","uploader":"测试作者","upload_date":"20260727"}"#,
+        )
+        .expect("metadata 应可构造");
+
+        let collection_path =
+            super::youtube_output_path(&collection_source, &video, &metadata, "测试收藏视频", "测试作者").unwrap();
+        let regular_path =
+            super::youtube_output_path(&regular_source, &video, &metadata, "测试收藏视频", "测试作者").unwrap();
+        assert_eq!(
+            collection_path, regular_path,
+            "抖音收藏夹应和普通单视频使用同一套目录模板，不能生成 Season 01"
+        );
+        assert!(
+            !collection_path
+                .components()
+                .any(|component| component.as_os_str() == "Season 01"),
+            "收藏夹路径不应包含 Season 01: {}",
+            collection_path.display()
+        );
+    }
+
+    #[test]
     fn external_output_path_cleans_title_for_folder_name() {
         use crate::external_media::ExternalMediaMetadata;
         use bili_sync_entity::{youtube_source, youtube_video};
@@ -9083,6 +9253,52 @@ mod tests {
             .await
             .unwrap();
         assert!(!media.exists(), "重置分P下载后应删除本地媒体文件");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn collection_cleanup_removes_legacy_series_sidecars_only_for_matching_source() {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-collection-sidecars-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let uploader_dir = root.join("测试作者");
+        let video_dir = uploader_dir.join("测试视频");
+        tokio::fs::create_dir_all(&video_dir).await.unwrap();
+
+        let mut source = sample_external_source("douyin_collection");
+        source.url = "https://www.douyin.com/collection/7672884606911354673".to_string();
+        let output_path = video_dir.join("测试视频.mp4");
+        tokio::fs::write(&output_path, b"video").await.unwrap();
+        tokio::fs::write(
+            uploader_dir.join("tvshow.nfo"),
+            format!(
+                r#"<tvshow><uniqueid type="douyin" default="true">{}</uniqueid></tvshow>"#,
+                source.url
+            ),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            video_dir.join("season.nfo"),
+            "<season><seasonnumber>1</seasonnumber></season>",
+        )
+        .await
+        .unwrap();
+        for name in ["folder.jpg", "poster.jpg"] {
+            tokio::fs::write(uploader_dir.join(name), vec![1u8; 2048]).await.unwrap();
+        }
+
+        super::cleanup_legacy_collection_series_sidecars(&source, &output_path)
+            .await
+            .unwrap();
+
+        assert!(!uploader_dir.join("tvshow.nfo").exists());
+        assert!(!uploader_dir.join("folder.jpg").exists());
+        assert!(!uploader_dir.join("poster.jpg").exists());
+        assert!(!video_dir.join("season.nfo").exists());
+        assert!(output_path.exists(), "清理剧集附属文件不能删除视频本体");
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
