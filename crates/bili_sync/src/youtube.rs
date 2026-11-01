@@ -298,10 +298,20 @@ pub struct YouTubeVideoResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct YouTubeSessionCheckResponse {
+    pub valid: bool,
+    pub message: String,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct YouTubeStatusResponse {
     pub ytdlp_available: bool,
     pub ytdlp_version: Option<String>,
     pub logged_in: bool,
+    /// 最近一次联网登录探测的结论（由守护任务刷新）。`logged_in` 只表示「导入过
+    /// 凭证」，联网结论单独展示，避免设置页把代理/风控导致的误判当成「Cookie 丢了」。
+    pub session_check: Option<YouTubeSessionCheckResponse>,
     pub default_output_path: String,
     pub container_runtime: bool,
     pub cookie_path: String,
@@ -321,14 +331,22 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         warn!(%error, "yt-dlp 自动安装失败");
     }
     let version = ytdlp_version().await;
-    let logged_in = youtube_has_session()
-        && tokio::time::timeout(Duration::from_secs(15), load_youtube_subscription_channels())
-            .await
-            .is_ok_and(|result| result.is_ok());
+    // 状态接口只读本地凭证，不做联网探测：
+    // 1) 每打开一次设置页/添加源页就发一次 /feed/channels，还会把该响应的 Set-Cookie
+    //    写回 cookies.txt，等于让「看一眼状态」变成一次静默的凭证写入；
+    // 2) 代理慢的时候 15s 超时会让状态显示成「未导入」，看起来就像 Cookie 掉了。
+    // 真实联网结论由守护任务刷新后从 `session_check` 返回。
+    let logged_in = youtube_has_session();
+    let session_check = last_youtube_session_check().map(|check| YouTubeSessionCheckResponse {
+        valid: check.valid,
+        message: check.message,
+        checked_at: check.checked_at,
+    });
     Ok(ApiResponse::ok(YouTubeStatusResponse {
         ytdlp_available: version.is_some(),
         ytdlp_version: version,
         logged_in,
+        session_check,
         default_output_path: default_output_path().display().to_string(),
         container_runtime: is_container_runtime(),
         cookie_path: youtube_cookie_file().map(|path| path.display().to_string()).unwrap_or_default(),
@@ -913,9 +931,45 @@ async fn get_youtube_subscription_channels(
 }
 
 async fn load_youtube_subscription_channels() -> Result<serde_json::Value> {
-    let contents = youtube_cookie_text()
-        .context("读取 YouTube Cookie 失败：请先在设置页导入 cookies.txt 或传输登录状态")?;
-    let cookie_jar = youtube_cookie_jar_from_text(&contents)?;
+    probe_youtube_subscription_channels()
+        .await
+        .map_err(YoutubeSessionError::into_anyhow)
+}
+
+/// YouTube 登录探测的失败分类。
+///
+/// 只有 `Expired` 表示「有明确证据说明会话已经失效」，调用方在这种情况之外一律
+/// 保留现有凭证。之前只要探测报错就带着「Cookie 已失效」的字样删除会话，一次
+/// 代理抖动或风控页命中的误判就会把用户还能用的登录状态清掉，表现为「下载正常，
+/// 过一会 Cookie 突然掉了」。
+enum YoutubeSessionError {
+    Expired(anyhow::Error),
+    Unclear(anyhow::Error),
+}
+
+impl YoutubeSessionError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Expired(error) | Self::Unclear(error) => error,
+        }
+    }
+}
+
+fn youtube_cookie_expired_error() -> anyhow::Error {
+    anyhow!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态")
+}
+
+async fn probe_youtube_subscription_channels() -> std::result::Result<serde_json::Value, YoutubeSessionError> {
+    let contents = youtube_cookie_text().ok_or_else(|| {
+        YoutubeSessionError::Unclear(anyhow!(
+            "读取 YouTube Cookie 失败：请先在设置页导入 cookies.txt 或传输登录状态"
+        ))
+    })?;
+    if !has_youtube_session_value(&contents) {
+        return Err(YoutubeSessionError::Expired(youtube_cookie_expired_error()));
+    }
+    let cookie_jar =
+        youtube_cookie_jar_from_text(&contents).map_err(YoutubeSessionError::Unclear)?;
     let mut client_builder = reqwest::Client::builder()
         // Netscape 文件同时包含 YouTube 和 Google 账号域 Cookie。必须让
         // Cookie Jar 按域名分别发送：直接拼成一个 Cookie 请求头会把
@@ -925,9 +979,14 @@ async fn load_youtube_subscription_channels() -> Result<serde_json::Value> {
         .timeout(Duration::from_secs(30));
     let proxy = configured_external_proxy();
     if !proxy.is_empty() {
-        client_builder = client_builder.no_proxy().proxy(reqwest::Proxy::all(&proxy)?);
+        let proxy = reqwest::Proxy::all(&proxy).map_err(|error| {
+            YoutubeSessionError::Unclear(anyhow::Error::new(error).context("外源代理地址无效"))
+        })?;
+        client_builder = client_builder.no_proxy().proxy(proxy);
     }
-    let client = client_builder.build()?;
+    let client = client_builder
+        .build()
+        .map_err(|error| YoutubeSessionError::Unclear(anyhow::Error::new(error).context("构建 YouTube 请求客户端失败")))?;
     let response = client
         .get(SUBSCRIPTION_CHANNELS_URL)
         .header(
@@ -937,34 +996,60 @@ async fn load_youtube_subscription_channels() -> Result<serde_json::Value> {
         .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
         .send()
         .await
-        .context("访问 YouTube 已订阅频道页面失败")?;
-    // 浏览器式被动续约：把页面响应里的 Set-Cookie 合并写回 cookies.txt。
+        .map_err(|error| {
+            YoutubeSessionError::Unclear(anyhow::Error::new(error).context("访问 YouTube 已订阅频道页面失败"))
+        })?;
+    let status = response.status();
+    let final_url = response.url().to_string();
     let fallback_domain = response.url().host_str().unwrap_or("www.youtube.com").to_string();
-    if let Some(merged) = crate::utils::netscape_cookies::renew_cookie_text(
+    // 浏览器式被动续约：先把响应里的 Set-Cookie 合并好，但**确认本次确实处于登录
+    // 态之后**才写回 cookies.txt。否则登录墙/风控页/同意条款页返回的 Set-Cookie 也
+    // 会盖掉本来能用的会话。
+    let renewed = crate::utils::netscape_cookies::renew_cookie_text(
         &contents,
         response.headers(),
         &fallback_domain,
         is_youtube_auth_cookie_domain,
-    ) {
-        if let Err(error) = set_youtube_cookies(&merged).await {
-            warn!(error = %error, "写回 YouTube 续约后的 Cookie 失败");
+    );
+    let html = response.text().await.map_err(|error| {
+        YoutubeSessionError::Unclear(anyhow::Error::new(error).context("读取 YouTube 已订阅频道页面失败"))
+    })?;
+
+    let verdict = youtube_login_verdict(&final_url, status, &html);
+    debug!(
+        final_url = %final_url,
+        status = status.as_u16(),
+        verdict = ?verdict,
+        "YouTube 登录状态探测结果"
+    );
+    match verdict {
+        YoutubeLoginVerdict::LoggedIn => {}
+        YoutubeLoginVerdict::LoggedOut => {
+            return Err(YoutubeSessionError::Expired(youtube_cookie_expired_error()));
+        }
+        YoutubeLoginVerdict::Unclear(reason) => {
+            return Err(YoutubeSessionError::Unclear(anyhow!(
+                "YouTube 登录状态探测不确定：{reason}（HTTP {}，最终地址 {}）",
+                status.as_u16(),
+                final_url
+            )));
         }
     }
-
-    let final_url = response.url().to_string();
-    if final_url.contains("accounts.google.com") || final_url.contains("ServiceLogin") {
-        bail!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态");
+    let initial_data = extract_youtube_initial_data(&html).ok_or_else(|| {
+        YoutubeSessionError::Unclear(anyhow!("YouTube 已订阅频道页面缺少频道数据，请重新传输登录状态后重试"))
+    })?;
+    if let Some(merged) = renewed {
+        // 续约只允许「补齐/替换」Cookie，绝不允许把会话字段弄没：一旦合并结果里
+        // 已经没有 SID/SAPISID 之类的会话 Cookie，就说明这次合并有问题，宁可不写回。
+        if !has_youtube_session_value(&merged) {
+            warn!("续约后的 YouTube Cookie 丢失了会话字段，已放弃写回，保留原凭证");
+        } else if let Err(error) = set_youtube_cookies(&merged).await {
+            warn!(error = %error, "写回 YouTube 续约后的 Cookie 失败");
+        } else {
+            debug!("YouTube 会话已按响应 Set-Cookie 续约");
+        }
     }
-    if !response.status().is_success() {
-        bail!("YouTube 已订阅频道页面返回 HTTP {}", response.status());
-    }
-
-    let html = response.text().await.context("读取 YouTube 已订阅频道页面失败")?;
-    if youtube_page_is_logged_out(&html) {
-        bail!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态");
-    }
-    extract_youtube_initial_data(&html)
-        .ok_or_else(|| anyhow!("YouTube 已订阅频道页面缺少频道数据，请重新传输登录状态后重试"))
+    Ok(initial_data)
 }
 
 fn youtube_cookie_jar(path: &Path) -> Result<Arc<reqwest::cookie::Jar>> {
@@ -1010,10 +1095,68 @@ fn youtube_cookie_jar_from_text(contents: &str) -> Result<Arc<reqwest::cookie::J
     Ok(jar)
 }
 
-fn youtube_page_is_logged_out(html: &str) -> bool {
-    html.contains("\"LOGGED_IN\":false")
-        || html.contains("\"loggedIn\":false")
-        || (html.contains("accounts.google.com/ServiceLogin") && !html.contains("\"LOGGED_IN\":true"))
+/// `/feed/channels` 响应的登录判定结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum YoutubeLoginVerdict {
+    /// 明确处于登录态。
+    LoggedIn,
+    /// 明确已退出登录（有正面证据）。
+    LoggedOut,
+    /// 无法判断：同意条款页、风控/验证页、HTTP 错误、非预期页面等。
+    Unclear(&'static str),
+}
+
+/// 判断 `/feed/channels` 的响应是否处于登录态。
+///
+/// 只在拿到**正面证据**时才判定退出：被重定向到 Google 登录页，或页面里明确写着
+/// `"LOGGED_IN":false`。其余情况（同意条款页、人机验证页、非 2xx、页面结构变化）
+/// 一律判为不确定，由调用方保留现有凭证 —— 判错成「已退出」的代价是删掉用户还能
+/// 用的登录状态，比漏判一次严重得多。
+fn youtube_login_verdict(
+    final_url: &str,
+    status: reqwest::StatusCode,
+    html: &str,
+) -> YoutubeLoginVerdict {
+    if final_url.contains("accounts.google.com") || final_url.contains("ServiceLogin") {
+        return YoutubeLoginVerdict::LoggedOut;
+    }
+    if html.contains("\"LOGGED_IN\":true") || html.contains("\"loggedIn\":true") {
+        return YoutubeLoginVerdict::LoggedIn;
+    }
+    if youtube_page_is_consent_wall(final_url, html) {
+        return YoutubeLoginVerdict::Unclear("命中 YouTube 同意条款/前置确认页");
+    }
+    if youtube_page_is_challenge(final_url, html) {
+        return YoutubeLoginVerdict::Unclear("命中 YouTube 风控/人机验证页");
+    }
+    if !status.is_success() {
+        return YoutubeLoginVerdict::Unclear("页面返回非 2xx");
+    }
+    if html.contains("accounts.google.com/ServiceLogin") {
+        return YoutubeLoginVerdict::LoggedOut;
+    }
+    if html.contains("\"LOGGED_IN\":false") || html.contains("\"loggedIn\":false") {
+        return YoutubeLoginVerdict::LoggedOut;
+    }
+    YoutubeLoginVerdict::Unclear("页面既没有登录标记也没有退出标记")
+}
+
+/// 代理出口在部分区域会先弹「同意条款 / before you continue」，这类页面同样带着
+/// 未登录标记，但会话本身是好的。
+fn youtube_page_is_consent_wall(final_url: &str, html: &str) -> bool {
+    final_url.contains("consent.youtube.com")
+        || final_url.contains("consent.google.com")
+        || html.contains("consent.youtube.com")
+        || html.contains("Before you continue to YouTube")
+        || html.contains("before-you-continue")
+}
+
+/// 风控/「异常流量」验证页。
+fn youtube_page_is_challenge(final_url: &str, html: &str) -> bool {
+    final_url.contains("/sorry/")
+        || html.contains("/sorry/index")
+        || html.contains("unusual traffic")
+        || html.contains("unusual-traffic")
 }
 
 fn is_youtube_auth_cookie_domain(domain: &str) -> bool {
@@ -1214,11 +1357,22 @@ pub async fn import_youtube_cookie_file(
             "文件不是包含 YouTube 会话的 Netscape cookies.txt；请在已登录 YouTube 的浏览器中导出 cookies.txt",
         ));
     }
+    // 记下导入前的凭证：一次失败的导入不能把原本还能用的登录状态一起删掉。
+    let previous = youtube_cookie_text();
     // 先清理旧会话（数据库 + 历史文件），再将新会话写入数据库。
     clear_youtube_login_state().await;
     set_youtube_cookies(&request.cookies).await?;
     if let Err(error) = validate_youtube_login_cookie().await {
-        clear_youtube_login_state().await;
+        match previous {
+            Some(previous) => {
+                if let Err(restore) = set_youtube_cookies(&previous).await {
+                    warn!(error = %restore, "恢复导入前的 YouTube 登录凭证失败");
+                } else {
+                    info!("新导入的 YouTube 凭证验证失败，已回滚到导入前的登录状态");
+                }
+            }
+            None => clear_youtube_login_state().await,
+        }
         return Err(ApiError::bad_request(format!(
             "YouTube cookies.txt 验证失败：{}（{}）",
             error,
@@ -7845,6 +7999,20 @@ async fn set_youtube_cookies(contents: &str) -> Result<()> {
     crate::credential_store::set(crate::credential_store::keys::YOUTUBE_COOKIES, contents).await
 }
 
+/// 清理登录状态前把当前 Cookie 另存一份，方便用户在修好代理/网络后确认是不是真的
+/// 失效，也留一条手工恢复的路。文件名不匹配 `youtube-cookies.txt*`，不会被
+/// [`clear_youtube_login_state_files_except`] 顺带删掉，也不会被当成登录凭证读取。
+async fn preserve_youtube_cookie_backup() {
+    let Some(contents) = youtube_cookie_text() else {
+        return;
+    };
+    let path = CONFIG_DIR.join("youtube-cookies-expired-backup.txt");
+    match tokio::fs::write(&path, contents.as_bytes()).await {
+        Ok(()) => info!(path = %path.display(), "已把被判定失效的 YouTube Cookie 备份到本地"),
+        Err(error) => warn!(path = %path.display(), error = %error, "备份 YouTube Cookie 失败"),
+    }
+}
+
 /// 清理 YouTube 登录状态：数据库凭证 + 旧版/历史残留文件。
 async fn clear_youtube_login_state() {
     if crate::credential_store::has(crate::credential_store::keys::YOUTUBE_COOKIES) {
@@ -7908,6 +8076,42 @@ async fn clear_youtube_login_state_files_except(exclude: Option<&Path>) {
 const EXTERNAL_LOGIN_GUARD_STARTUP_DELAY: Duration = Duration::from_secs(5 * 60);
 const EXTERNAL_LOGIN_GUARD_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// 一次探测判定「已退出」后，等多久再复查一次。
+///
+/// 只有连续两次都拿到明确失效的证据才清理会话。单次判定的误报来源太多（代理节点
+/// 切到需要同意条款的地区、碰到人机验证页、上游抖动），而这些误报一旦直接删凭证
+/// 就是不可逆的。
+const YOUTUBE_SESSION_RECHECK_DELAY: Duration = Duration::from_secs(30);
+
+/// 最近一次 YouTube 登录探测的结论，只用于设置页展示，不作为是否保留凭证的依据。
+#[derive(Debug, Clone)]
+struct YoutubeSessionCheck {
+    valid: bool,
+    message: String,
+    checked_at: String,
+}
+
+static YOUTUBE_SESSION_CHECK: LazyLock<StdMutex<Option<YoutubeSessionCheck>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+fn record_youtube_session_check(valid: bool, message: impl Into<String>) {
+    let mut guard = YOUTUBE_SESSION_CHECK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *guard = Some(YoutubeSessionCheck {
+        valid,
+        message: message.into(),
+        checked_at: now_standard_string(),
+    });
+}
+
+fn last_youtube_session_check() -> Option<YoutubeSessionCheck> {
+    YOUTUBE_SESSION_CHECK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
 /// 外源登录状态守护调度器。
 ///
 /// 定期探测 YouTube/抖音登录状态：有效则顺带完成一次浏览器式会话续约；明确
@@ -7956,23 +8160,48 @@ async fn guard_external_login_states() -> Result<()> {
 
     // YouTube：订阅频道页面探测即续约。
     if youtube_has_session() {
-        match load_youtube_subscription_channels().await {
-            Ok(_) => info!("YouTube 登录状态有效，已完成会话续约"),
-            Err(error) if format!("{:#}", error).contains("Cookie 已失效") => {
-                clear_youtube_login_state().await;
-                record_external_login_expired(
-                    "YouTube",
-                    "YouTube 登录状态已过期或未登录，已清理残留会话；请重新在设置页导入 cookies.txt",
-                )
-                .await;
+        match probe_youtube_subscription_channels().await {
+            Ok(_) => {
+                record_youtube_session_check(true, "登录状态有效，已完成会话续约");
+                info!("YouTube 登录状态有效，已完成会话续约");
             }
-            Err(error) => {
-                // 代理未开/上游抖动等网络原因：会话无法续约但保留现状。从 debug
+            Err(YoutubeSessionError::Expired(error)) => {
+                warn!(
+                    error = %error,
+                    delay_secs = YOUTUBE_SESSION_RECHECK_DELAY.as_secs(),
+                    "YouTube 登录状态疑似失效，稍后复查确认；本次不清理凭证"
+                );
+                tokio::time::sleep(YOUTUBE_SESSION_RECHECK_DELAY).await;
+                match probe_youtube_subscription_channels().await {
+                    Ok(_) => {
+                        record_youtube_session_check(true, "复查通过（首次探测疑似误判），已保留会话");
+                        info!("YouTube 登录状态复查通过，保留现有会话");
+                    }
+                    Err(YoutubeSessionError::Expired(error)) => {
+                        warn!(error = %error, "YouTube 登录状态连续两次确认失效，清理残留会话");
+                        preserve_youtube_cookie_backup().await;
+                        clear_youtube_login_state().await;
+                        record_external_login_expired(
+                            "YouTube",
+                            "YouTube 登录状态已过期或未登录，已清理残留会话；请重新在设置页导入 cookies.txt",
+                        )
+                        .await;
+                    }
+                    Err(YoutubeSessionError::Unclear(error)) => {
+                        warn!(
+                            error = %error,
+                            "YouTube 登录状态复查结果不确定，保留现有会话"
+                        );
+                    }
+                }
+            }
+            Err(YoutubeSessionError::Unclear(error)) => {
+                // 代理未开/上游抖动/风控页等：会话无法续约但保留现状。从 debug
                 // 提升为 warn，避免用户看到“会话一直失效”却不知道是代理/网络导致
                 // 续约根本没发生。
                 warn!(
                     error = %error,
-                    "YouTube 登录状态检查失败（代理/网络不可用），本次未能续约会话，保留现有会话。请确认外源代理（proxy/youtube_proxy）可用"
+                    "YouTube 登录状态检查结果不确定（代理/网络/风控），本次未续约也未清理会话，保留现有凭证。请确认外源代理（proxy/youtube_proxy）可用"
                 );
             }
         }
@@ -8464,8 +8693,8 @@ mod tests {
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
         normalize_source_type, normalize_youtube_playlist_url, parse_youtube_live_chat, resolve_source_url,
         should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
-        youtube_page_is_logged_out, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
-        ytdlp_runtime_target_env, SUBSCRIPTIONS_URL, WATCH_LATER_URL,
+        youtube_login_verdict, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
+        ytdlp_runtime_target_env, YoutubeLoginVerdict, SUBSCRIPTIONS_URL, WATCH_LATER_URL,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -9360,10 +9589,74 @@ mod tests {
 
     #[test]
     fn detects_logged_out_youtube_page() {
-        assert!(youtube_page_is_logged_out(
-            r#"{"LOGGED_IN":false,"signInUrl":"https://accounts.google.com/ServiceLogin"}"#
+        assert_eq!(
+            youtube_login_verdict(
+                "https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                r#"{"LOGGED_IN":false,"signInUrl":"https://accounts.google.com/ServiceLogin"}"#
+            ),
+            YoutubeLoginVerdict::LoggedOut
+        );
+        assert_eq!(
+            youtube_login_verdict(
+                "https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                r#"{"LOGGED_IN":true}"#
+            ),
+            YoutubeLoginVerdict::LoggedIn
+        );
+    }
+
+    #[test]
+    fn youtube_login_verdict_treats_interstitials_as_unclear() {
+        // 代理出口需要先同意条款：页面同样带未登录标记，但会话没坏。
+        assert!(matches!(
+            youtube_login_verdict(
+                "https://consent.youtube.com/m?continue=https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                r#"{"LOGGED_IN":false}"#
+            ),
+            YoutubeLoginVerdict::Unclear(_)
         ));
-        assert!(!youtube_page_is_logged_out(r#"{"LOGGED_IN":true}"#));
+        // 风控/异常流量验证页。
+        assert!(matches!(
+            youtube_login_verdict(
+                "https://www.youtube.com/sorry/index?continue=/feed/channels",
+                reqwest::StatusCode::OK,
+                "<html>Our systems have detected unusual traffic</html>"
+            ),
+            YoutubeLoginVerdict::Unclear(_)
+        ));
+        // 上游 5xx：不能据此判断 Cookie 失效。
+        assert!(matches!(
+            youtube_login_verdict(
+                "https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::BAD_GATEWAY,
+                "<html>502</html>"
+            ),
+            YoutubeLoginVerdict::Unclear(_)
+        ));
+        // 页面结构变了（既没有登录标记也没有退出标记）：保持不确定。
+        assert!(matches!(
+            youtube_login_verdict(
+                "https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                "<html>something unexpected</html>"
+            ),
+            YoutubeLoginVerdict::Unclear(_)
+        ));
+    }
+
+    #[test]
+    fn youtube_login_verdict_detects_login_redirect() {
+        assert_eq!(
+            youtube_login_verdict(
+                "https://accounts.google.com/ServiceLogin?continue=https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                "<html></html>"
+            ),
+            YoutubeLoginVerdict::LoggedOut
+        );
     }
 
     #[test]

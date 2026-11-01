@@ -157,7 +157,10 @@ pub fn merge_set_cookie(
             } else {
                 domain
             },
-            include_subdomains: true,
+            // 无 Domain 属性的是主机 Cookie（如 `www.youtube.com`），不能写成
+            // 域 Cookie，否则会变成 `.www.youtube.com` 与原有的 `.youtube.com`
+            // 同名 Cookie 并存，请求头里出现重复身份 Cookie。
+            include_subdomains: cookie.domain().is_some(),
             path,
             secure: cookie.secure().unwrap_or(false),
             expires,
@@ -320,5 +323,32 @@ mod tests {
             |domain: &str| domain.ends_with("douyin.com"),
         );
         assert!(!changed);
+    }
+
+    #[test]
+    fn host_only_set_cookie_stays_host_only() {
+        let mut rows = Vec::new();
+        let changed = merge_set_cookie(
+            &mut rows,
+            "YSC=abc; Path=/; Secure; HttpOnly",
+            "www.youtube.com",
+            |domain: &str| domain.ends_with("youtube.com"),
+        );
+        assert!(changed);
+        assert_eq!(rows.len(), 1);
+        // 没有 Domain 属性：主机 Cookie，不能升级成域 Cookie。
+        assert_eq!(rows[0].domain, "www.youtube.com");
+        assert!(!rows[0].include_subdomains);
+
+        let changed = merge_set_cookie(
+            &mut rows,
+            "PREF=hl=en; Domain=.youtube.com; Path=/",
+            "www.youtube.com",
+            |domain: &str| domain.ends_with("youtube.com"),
+        );
+        assert!(changed);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].domain, ".youtube.com");
+        assert!(rows[1].include_subdomains);
     }
 }

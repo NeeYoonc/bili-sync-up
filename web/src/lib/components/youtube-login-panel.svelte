@@ -86,6 +86,26 @@
 						</Badge>
 					{/if}
 
+					{#if status?.logged_in}
+						{#if status.session_check}
+							<Badge
+								variant={status.session_check.valid ? 'secondary' : 'destructive'}
+								class="gap-1"
+								title={`${status.session_check.checked_at} ${status.session_check.message}`}
+							>
+								{#if status.session_check.valid}
+									<CheckCircle2 class="h-3.5 w-3.5" />最近检查：有效
+								{:else}
+									<CircleAlert class="h-3.5 w-3.5" />最近检查：失效
+								{/if}
+							</Badge>
+						{:else}
+							<Badge variant="secondary" class="gap-1" title="后台守护任务启动 5 分钟后做首次联网检查">
+								<CircleAlert class="h-3.5 w-3.5" />尚未联网检查
+							</Badge>
+						{/if}
+					{/if}
+
 					<a
 						class="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-9 items-center rounded-md px-3 text-sm font-medium"
 						href="/youtube-login-helper.zip"

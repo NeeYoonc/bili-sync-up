@@ -110,10 +110,19 @@ export interface YouTubeVideo {
 export interface YouTubeStatusResponse {
 	ytdlp_available: boolean;
 	ytdlp_version?: string | null;
+	/** 是否导入过凭证（只读本地，不做联网探测） */
 	logged_in: boolean;
+	/** 最近一次联网登录探测的结论，由后台守护任务刷新；从未检查过时为 null */
+	session_check?: YouTubeSessionCheck | null;
 	default_output_path: string;
 	container_runtime: boolean;
 	cookie_path: string;
+}
+
+export interface YouTubeSessionCheck {
+	valid: boolean;
+	message: string;
+	checked_at: string;
 }
 
 export interface DouyinStatusResponse {
