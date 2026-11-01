@@ -3878,6 +3878,9 @@ async fn backfill_episodic_sidecars_from_first_video(
         tokio::fs::copy(source_path, &target)
             .await
             .with_context(|| format!("补全剧集根目录封面失败: {}", target.display()))?;
+        if let Err(error) = ensure_jpeg_image(&target).await {
+            warn!(path = %target.display(), %error, "剧集根目录封面转 JPEG 失败（文件仍是原始格式）");
+        }
     }
 
     let tvshow_path = series_dir.join("tvshow.nfo");
@@ -6288,6 +6291,10 @@ async fn ensure_youtube_series_sidecars(
             .await
             .is_ok_and(|metadata| metadata.len() >= 1024)
         {
+            // 已存在的封面也顺手校正：老版本可能把 WebP 存成了 .jpg。
+            if let Err(error) = ensure_jpeg_image(&target).await {
+                warn!(platform, path = %target.display(), %error, "{}剧集封面转 JPEG 失败（文件仍是原始格式）", platform);
+            }
             continue;
         }
         if source_exists {
@@ -6315,6 +6322,10 @@ async fn ensure_youtube_series_sidecars(
                 return Err(error);
             }
             replace_file(&temporary, &target).await?;
+        }
+        // 封面可能是 WebP（抖音常见），落盘名是 .jpg，统一转成真 JPEG。
+        if let Err(error) = ensure_jpeg_image(&target).await {
+            warn!(platform, path = %target.display(), %error, "{}剧集封面转 JPEG 失败（文件仍是原始格式）", platform);
         }
         info!(platform, path = %target.display(), "{}视频源「{}」剧集封面生成完成", platform, source.name);
     }
@@ -6696,6 +6707,73 @@ fn youtube_sidecar_path(output_path: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(parent.join(format!("{stem}{suffix}")))
 }
 
+fn is_jpeg_header(head: &[u8]) -> bool {
+    head.len() >= 3 && head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF
+}
+
+/// 是否需要把图片转成 JPEG（WebP / PNG / GIF）。
+fn needs_jpeg_conversion(head: &[u8]) -> bool {
+    if head.len() < 12 {
+        return false;
+    }
+    (head.starts_with(b"RIFF") && &head[8..12] == b"WEBP")
+        || head.starts_with(&[0x89, b'P', b'N', b'G'])
+        || head.starts_with(b"GIF8")
+}
+
+/// 确保图片文件真的是 JPEG：按文件头判断，不是就调用项目自带的 ffmpeg 转一遍。
+///
+/// 抖音封面接口会随机返回 `image/jpeg` 或 `image/webp`，而 URL 上完全看不出来，
+/// 我们却统一按 `.jpg` / `poster.jpg` 落盘。WebP 顶着 `.jpg` 的名字时，部分媒体库
+/// 和播放器会直接显示不出来，所以这里统一转成真正的 JPEG。
+async fn ensure_jpeg_image(path: &Path) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut head = [0u8; 16];
+    let read = match tokio::fs::File::open(path).await {
+        Ok(mut file) => file.read(&mut head).await.unwrap_or(0),
+        Err(_) => return Ok(()),
+    };
+    if read == 0 || is_jpeg_header(&head[..read]) || !needs_jpeg_conversion(&head[..read]) {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("cover.jpg");
+    let temporary = path.with_file_name(format!("{file_name}.convert.jpg"));
+    let output = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            // mjpeg 需要偶数宽高，顺手抹平，避免 1 像素奇数的封面直接转失败。
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-pix_fmt",
+            "yuvj420p",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+        ])
+        .arg(&temporary)
+        .output()
+        .await
+        .with_context(|| format!("封面转 JPEG 失败（启动 ffmpeg 出错）: {}", path.display()))?;
+    if !output.status.success() {
+        let _ = remove_file_if_exists(&temporary).await;
+        bail!(
+            "封面转 JPEG 失败: {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    replace_file(&temporary, path).await?;
+    debug!(path = %path.display(), "封面不是 JPEG，已转换为 JPEG");
+    Ok(())
+}
+
 async fn download_youtube_cover(
     downloader: &UnifiedDownloader,
     metadata: &ExternalMediaMetadata,
@@ -6757,6 +6835,21 @@ async fn download_youtube_cover(
                 .with_context(|| format!("生成{platform} fanart 失败: {}", fanart_path.display()))?;
         }
         info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %fanart_path.display(), "{}视频源「{}」视频「{}」 fanart 生成完成", source_platform_label(source), source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
+    }
+    // 抖音封面会随机给 JPEG / WebP，统一转成真 JPEG，避免媒体库认不出 .jpg 里的 WebP。
+    for (label, cover) in [("thumb", &thumb_path), ("fanart", &fanart_path)] {
+        if let Err(error) = ensure_jpeg_image(cover).await {
+            warn!(
+                platform = source_platform_label(source),
+                youtube_id = %metadata.id,
+                path = %cover.display(),
+                %error,
+                "{}视频「{}」{} 封面转 JPEG 失败（文件仍是原始格式）",
+                platform,
+                metadata.title.as_deref().unwrap_or(&metadata.id),
+                label
+            );
+        }
     }
     Ok(())
 }
@@ -8910,6 +9003,18 @@ mod tests {
     }
 
     #[test]
+    fn detects_non_jpeg_cover_payloads() {
+        // 抖音封面会随机返回 JPEG / WebP，只能靠文件头判断，不能看后缀。
+        assert!(is_jpeg_header(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0]));
+        assert!(!is_jpeg_header(b"RIFF\x00\x00\x00\x00WEBP"));
+        assert!(needs_jpeg_conversion(b"RIFF\x24\x00\x00\x00WEBPVP8 "));
+        assert!(needs_jpeg_conversion(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]));
+        assert!(needs_jpeg_conversion(b"GIF89a......"));
+        // 已经是 JPEG 的不再转（避免每轮扫描都空跑 ffmpeg）
+        assert!(!needs_jpeg_conversion(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+    }
+
+    #[test]
     fn partial_artifact_detection_covers_downloader_temp_names() {
         for name in [
             "S01E01 - 标题.download.mp4",
@@ -8973,6 +9078,7 @@ mod tests {
         collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
         has_youtube_session_value,
+        is_jpeg_header, needs_jpeg_conversion,
         is_partial_download_artifact, remove_partial_download_artifacts,
         normalize_source_type, normalize_youtube_playlist_url, parse_youtube_live_chat, resolve_source_url,
         should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
