@@ -5458,30 +5458,24 @@ pub(crate) async fn create_paid_placeholder(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 下载抖音弹幕并写入 JSON/ASS；图文或无弹幕作品只写检查标记。
+/// 下载抖音弹幕并写入 ASS；图文或无弹幕作品直接跳过，不落检查标记。
 pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_path: &Path, title: &str) -> Result<()> {
     migrate_douyin_sidecar_names(output_path).await?;
     let ass_path = douyin_ass_path(output_path);
-    let checked_path = output_path.with_extension("danmaku.checked");
     if tokio::fs::metadata(&ass_path)
         .await
         .is_ok_and(|metadata| metadata.len() > 0)
-        || tokio::fs::metadata(&checked_path).await.is_ok()
     {
         return Ok(());
     }
     if metadata.is_slideshow() {
-        tokio::fs::write(&checked_path, b"image post has no video danmaku\n").await?;
-        debug!(aweme_id = %metadata.id, "抖音图文作品没有视频弹幕，已记录检查结果");
+        debug!(aweme_id = %metadata.id, "抖音图文作品没有视频弹幕，跳过");
         return Ok(());
     }
     let duration = metadata.duration.map(|value| value.ceil() as i32).unwrap_or(1).max(1);
     let danmaku = fetch_aweme_danmaku(&metadata.id, duration).await?;
     if danmaku.is_empty() {
-        tokio::fs::write(&checked_path, b"no douyin danmaku\n")
-            .await
-            .with_context(|| format!("写入抖音弹幕检查标记失败: {}", checked_path.display()))?;
-        info!(aweme_id = %metadata.id, "抖音视频没有可下载的弹幕，已记录检查结果");
+        info!(aweme_id = %metadata.id, "抖音视频没有可下载的弹幕，跳过");
         return Ok(());
     }
     let count = danmaku.len();
@@ -5504,7 +5498,6 @@ pub(crate) async fn download_danmaku(metadata: &ExternalMediaMetadata, output_pa
         })
         .collect();
     write_danmaku_ass(output_path, title, duration, elems).await?;
-    let _ = remove_file_if_exists(&checked_path).await;
     info!(aweme_id = %metadata.id, count, path = %ass_path.display(), "抖音视频「{}」弹幕 ASS 生成完成", title);
     Ok(())
 }
@@ -5527,7 +5520,7 @@ pub(crate) async fn migrate_douyin_sidecar_names(output_path: &Path) -> Result<(
             remove_file_if_exists(&legacy_ass).await?;
         }
     }
-    for suffix in ["danmaku.json", "danmaku.json.download"] {
+    for suffix in ["danmaku.json", "danmaku.json.download", "danmaku.checked"] {
         let path = output_path.with_extension(suffix);
         if let Err(error) = remove_file_if_exists(&path).await {
             warn!(path = %path.display(), error = %error, "清理抖音弹幕 JSON 失败");

@@ -754,6 +754,10 @@ pub async fn get_youtube_source_videos(
         else {
             continue;
         };
+        if ytdlp_flat_item_is_unavailable(&item) {
+            debug!(youtube_id = id, "跳过 YouTube 列表中的失效/私有视频");
+            continue;
+        }
         if !seen.insert(id.to_string()) {
             continue;
         }
@@ -836,6 +840,45 @@ fn youtube_source_video_selection_supported(source_type: &str) -> bool {
     matches!(
         source_type,
         "subscriptions" | "channel" | "playlist" | "liked" | "watch_later"
+    )
+}
+
+fn ytdlp_flat_item_is_unavailable(item: &serde_json::Value) -> bool {
+    if item
+        .get("is_unavailable")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let availability = item
+        .get("availability")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        availability.as_str(),
+        "private" | "premium_only" | "subscriber_only" | "needs_auth" | "unavailable"
+    ) {
+        return true;
+    }
+    let title = item
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        title.as_str(),
+        "[private video]"
+            | "private video"
+            | "[deleted video]"
+            | "deleted video"
+            | "[unavailable video]"
+            | "unavailable video"
+            | "[视频不可用]"
+            | "[私有视频]"
+            | "[已删除视频]"
     )
 }
 
@@ -2196,6 +2239,8 @@ async fn remove_youtube_task_artifact(
     let mut upper_face = false;
     let mut upper_info = false;
     let mut media = false;
+    let mut danmaku = false;
+    let mut subtitle = false;
     for &index in video_indexes {
         match index {
             0 => cover = true,
@@ -2211,6 +2256,8 @@ async fn remove_youtube_task_artifact(
             0 => cover = true,
             1 => media = true,
             2 => nfo = true,
+            3 => danmaku = true,
+            4 => subtitle = true,
             _ => {}
         }
     }
@@ -2245,6 +2292,19 @@ async fn remove_youtube_task_artifact(
                 remove_file_if_exists(&page).await?;
             }
         }
+        if danmaku {
+            remove_file_if_exists(&external_ass_path(&output_path)).await?;
+            remove_file_if_exists(&output_path.with_extension("ass")).await?;
+            for suffix in ["danmaku.json", "danmaku.json.download", "danmaku.checked", "live_chat.json"] {
+                remove_file_if_exists(&output_path.with_extension(suffix)).await?;
+            }
+        }
+        if subtitle {
+            remove_external_subtitle_files(&output_path).await?;
+        }
+        for suffix in ["subtitle.checked", "danmaku.checked", "live_chat.checked"] {
+            remove_file_if_exists(&output_path.with_extension(suffix)).await?;
+        }
     }
     if upper_face || upper_info {
         let (face_path, person_nfo_path) = youtube_upper_paths(&video.uploader);
@@ -2255,7 +2315,61 @@ async fn remove_youtube_task_artifact(
             remove_file_if_exists(&person_nfo_path).await?;
         }
     }
+    if let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) {
+        prune_empty_external_dirs(source, Path::new(output_path)).await;
+    }
     Ok(())
+}
+
+async fn remove_external_subtitle_files(output_path: &Path) -> Result<()> {
+    let Some(parent) = output_path.parent() else {
+        return Ok(());
+    };
+    let stem = output_path.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+    if stem.is_empty() {
+        return Ok(());
+    }
+    let prefix = format!("{stem}.");
+    let danmaku_ass = format!("{stem}.zh-CN.default.ass");
+    let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
+        return Ok(());
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+        if name.starts_with(&prefix)
+            && matches!(extension, "vtt" | "srt" | "ass" | "ssa")
+            && name != danmaku_ass
+        {
+            remove_file_if_exists(&path).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn prune_empty_external_dirs(source: &youtube_source::Model, output_path: &Path) {
+    let root = PathBuf::from(source.path.trim());
+    let mut current = output_path.parent().map(Path::to_path_buf);
+    while let Some(dir) = current {
+        if dir == root || !dir.starts_with(&root) {
+            break;
+        }
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            break;
+        };
+        if entries.next_entry().await.ok().flatten().is_some() {
+            break;
+        }
+        if let Err(error) = tokio::fs::remove_dir(&dir).await {
+            debug!(path = %dir.display(), %error, "清理空外源目录失败");
+            break;
+        }
+        debug!(path = %dir.display(), "已清理空外源目录");
+        current = dir.parent().map(Path::to_path_buf);
+    }
 }
 
 /// 按 B 站语义整体重置一条外源视频的任务状态位并落库。
@@ -3032,6 +3146,9 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     if is_douyin_source(source) {
         return scan_douyin_source(db, source).await;
     }
+    if let Err(error) = cleanup_external_checked_markers_for_source(db, source).await {
+        warn!(source_id = source.id, error = %error, "清理外部平台检查标记失败，继续扫描");
+    }
     if source.source_type == "tiktok_favorite" {
         crate::tiktok::ensure_tiktok_session()?;
         return crate::tiktok::scan_tiktok_favorite_source(db, source).await;
@@ -3115,6 +3232,10 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         let Some(youtube_id) = item.get("id").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) else {
             continue;
         };
+        if ytdlp_flat_item_is_unavailable(&item) {
+            debug!(youtube_id, "跳过 YouTube 列表中的失效/私有视频");
+            continue;
+        }
         scanned_video_ids.insert(youtube_id.to_string());
         if source.source_type == "subscriptions"
             && !selected_channels.is_empty()
@@ -3265,6 +3386,30 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         notify_queue_status_changed();
     }
     Ok(added)
+}
+
+async fn cleanup_external_checked_markers_for_source(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    let videos = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(source.id))
+        .filter(youtube_video::Column::OutputPath.is_not_null())
+        .all(db)
+        .await?;
+    for video in videos {
+        let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        let output_path = Path::new(output_path);
+        for suffix in ["subtitle.checked", "danmaku.checked", "live_chat.checked"] {
+            let path = output_path.with_extension(suffix);
+            if let Err(error) = remove_file_if_exists(&path).await {
+                warn!(path = %path.display(), error = %error, "清理外部平台检查标记失败");
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
@@ -5620,6 +5765,7 @@ fn youtube_output_path(
     // 下载根目录/剧集名/S01E001 - 每集标题.mp4。一个剧集一个目录，
     // 文件名带三位集号保证文件系统排序稳定；无集号时回退到普通单 P 命名。
     let episodic_source = uses_episodic_layout(source, video.episode_number);
+    let root = PathBuf::from(&source.path);
     let (video_folder, page_name) = if episodic_source {
         if let Some(episode) = video.episode_number.filter(|value| *value >= 1) {
             // 与 B 站番剧标准结构保持一致：
@@ -5630,7 +5776,13 @@ fn youtube_output_path(
             } else {
                 series_folder
             };
-            let video_folder = format!("{series_folder}/Season 01");
+            // 快捷路径模板可能已经把合集名带入 source.path。此时直接以该目录
+            // 作为合集根目录，避免生成 `合集名/合集名/Season 01`。
+            let video_folder = if path_leaf_matches(&root, &series_folder) {
+                "Season 01".to_string()
+            } else {
+                format!("{series_folder}/Season 01")
+            };
             // 抖音合集按 B 站合集默认模板命名：`S01E01 - 集标题`（标题只做目录名清洗，
             // NFO/媒体库标题仍是原始标题）。短剧/放映厅保持原有的纯集号写法，
             // 避免已有剧集目录成批改名。
@@ -5675,12 +5827,17 @@ fn youtube_output_path(
     } else {
         "mp4"
     };
-    let root = PathBuf::from(&source.path);
     if source.flat_folder {
         Ok(root.join(format!("{page_name}.{extension}")))
     } else {
         Ok(root.join(video_folder).join(format!("{page_name}.{extension}")))
     }
+}
+
+fn path_leaf_matches(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
 }
 
 /// 附属文件子任务的结果：告警文案 + 本次解析到的头像地址。
@@ -6548,7 +6705,6 @@ async fn download_youtube_subtitle(
     if youtube_subtitle_exists(output_path).await? {
         return Ok(());
     }
-    let checked_path = output_path.with_extension("subtitle.checked");
     let mut requested_order = youtube_subtitle_language_candidates(preferred_language);
     requested_order.extend(["zh-Hans", "zh-CN", "zh", "en", "ja"].map(str::to_string));
     requested_order.dedup();
@@ -6568,9 +6724,6 @@ async fn download_youtube_subtitle(
     });
     let selected = manual.or(automatic);
     let Some((language, subtitle, url)) = selected else {
-        tokio::fs::write(&checked_path, b"no matching subtitle\n")
-            .await
-            .with_context(|| format!("写入字幕检查标记失败: {}", checked_path.display()))?;
         info!(youtube_id = %metadata.id, "{}视频源「{}」视频「{}」没有匹配的字幕，跳过字幕子任务", platform, source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
         return Ok(());
     };
@@ -6583,7 +6736,6 @@ async fn download_youtube_subtitle(
         let _ = remove_file_if_exists(&subtitle_path).await;
         return Err(error);
     }
-    let _ = remove_file_if_exists(&checked_path).await;
     info!(platform, youtube_id = %metadata.id, path = %subtitle_path.display(), "{}视频源「{}」视频「{}」字幕下载完成", platform, source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
     Ok(())
 }
@@ -6759,7 +6911,7 @@ async fn download_youtube_live_chat(
 ) -> Result<()> {
     let live_chat_path = output_path.with_extension("live_chat.json");
     let live_chat_ass_path = external_ass_path(output_path);
-    let checked_path = output_path.with_extension("live_chat.checked");
+    let _ = remove_file_if_exists(&output_path.with_extension("live_chat.checked")).await;
     if tokio::fs::metadata(&live_chat_path)
         .await
         .is_ok_and(|metadata| metadata.len() > 0)
@@ -6767,9 +6919,6 @@ async fn download_youtube_live_chat(
             .await
             .is_ok_and(|metadata| metadata.len() > 0)
     {
-        return Ok(());
-    }
-    if tokio::fs::metadata(&checked_path).await.is_ok() {
         return Ok(());
     }
     if tokio::fs::metadata(&live_chat_path)
@@ -6786,12 +6935,7 @@ async fn download_youtube_live_chat(
         .or_else(|| metadata.automatic_captions.get("live_chat"))
         .and_then(|items| items.iter().find(|item| item.url.as_deref().is_some()));
     let Some(url) = live_chat.and_then(|item| item.url.as_deref()) else {
-        // 直播聊天回放在视频结束后是静态资源。为“没有直播聊天”的视频写入
-        // 持久标记，确保每个视频只检查一次，后续扫描/重启不再反复解析。
-        tokio::fs::write(&checked_path, b"no live chat replay\n")
-            .await
-            .with_context(|| format!("写入 YouTube 直播聊天检查标记失败: {}", checked_path.display()))?;
-        debug!(youtube_id = %metadata.id, "YouTube 视频没有直播聊天，已记录检查结果");
+        debug!(youtube_id = %metadata.id, "YouTube 视频没有直播聊天，跳过");
         return Ok(());
     };
     let _ = url;
@@ -6826,7 +6970,6 @@ async fn download_youtube_live_chat(
         bail!("yt-dlp 未生成 YouTube 直播聊天文件");
     }
     let count = convert_youtube_live_chat_to_ass(metadata, output_path, title).await?;
-    let _ = remove_file_if_exists(&checked_path).await;
     info!(youtube_id = %metadata.id, count, json = %live_chat_path.display(), ass = %live_chat_ass_path.display(), "YouTube 直播聊天 JSON 和 ASS 下载完成");
     Ok(())
 }
@@ -6856,12 +6999,7 @@ fn select_subtitle_item<'a>(
 }
 
 async fn youtube_subtitle_exists(output_path: &Path) -> Result<bool> {
-    if tokio::fs::metadata(output_path.with_extension("subtitle.checked"))
-        .await
-        .is_ok_and(|metadata| metadata.len() > 0)
-    {
-        return Ok(true);
-    }
+    let _ = remove_file_if_exists(&output_path.with_extension("subtitle.checked")).await;
     let Some(parent) = output_path.parent() else {
         return Ok(false);
     };
@@ -8612,6 +8750,19 @@ mod tests {
     }
 
     #[test]
+    fn filters_unavailable_videos_from_youtube_lists() {
+        assert!(super::ytdlp_flat_item_is_unavailable(
+            &serde_json::json!({"id": "deleted", "title": "[Deleted video]"})
+        ));
+        assert!(super::ytdlp_flat_item_is_unavailable(
+            &serde_json::json!({"id": "private", "availability": "private"})
+        ));
+        assert!(!super::ytdlp_flat_item_is_unavailable(
+            &serde_json::json!({"id": "public", "title": "正常视频", "availability": "public"})
+        ));
+    }
+
+    #[test]
     fn douyin_tvshow_nfo_includes_uploader_actor_and_avatar() {
         let source = sample_external_source("douyin_mix");
         let metadata: crate::external_media::ExternalMediaMetadata = serde_json::from_str(
@@ -9400,6 +9551,30 @@ mod tests {
     }
 
     #[test]
+    fn douyin_mix_path_does_not_repeat_collection_folder() {
+        use crate::external_media::ExternalMediaMetadata;
+        use bili_sync_entity::{youtube_source, youtube_video};
+
+        let mut source = youtube_source::Model::default();
+        source.id = 9;
+        source.source_type = "douyin_mix".to_string();
+        source.name = "外卖小哥修仙记".to_string();
+        source.path = "J:/EMBY/DY收藏夹合集/外卖小哥修仙记".to_string();
+        let video = youtube_video::Model {
+            episode_number: Some(1),
+            ..Default::default()
+        };
+        let metadata: ExternalMediaMetadata =
+            serde_json::from_str(r#"{"id":"mix1","title":"第一集","uploader":"作者"}"#).unwrap();
+
+        let path = super::youtube_output_path(&source, &video, &metadata, "第一集", "作者").unwrap();
+        let expected = Path::new("J:/EMBY/DY收藏夹合集/外卖小哥修仙记")
+            .join("Season 01")
+            .join("S01E01 - 第一集.mp4");
+        assert_eq!(path, expected, "source.path 已包含合集名时不能重复追加");
+    }
+
+    #[test]
     fn builds_douyin_collection_output_path_as_regular_video() {
         use crate::external_media::ExternalMediaMetadata;
         use bili_sync_entity::{youtube_source, youtube_video};
@@ -9553,6 +9728,48 @@ mod tests {
             .await
             .unwrap();
         assert!(!media.exists(), "重置分P下载后应删除本地媒体文件");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn clearing_subtitle_and_danmaku_tasks_removes_markers_and_empty_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-reset-sidecars-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let series_dir = root.join("测试合集");
+        let season_dir = series_dir.join("Season 01");
+        tokio::fs::create_dir_all(&season_dir).await.unwrap();
+        let output = season_dir.join("S01E01 - 测试.mp4");
+        tokio::fs::write(output.with_extension("zh-CN.default.ass"), b"danmaku")
+            .await
+            .unwrap();
+        tokio::fs::write(output.with_extension("zh-CN.vtt"), b"subtitle")
+            .await
+            .unwrap();
+        for suffix in ["subtitle.checked", "danmaku.checked"] {
+            tokio::fs::write(output.with_extension(suffix), b"checked")
+                .await
+                .unwrap();
+        }
+        let mut video = super::youtube_video::Model::default();
+        video.output_path = Some(output.display().to_string());
+        video.episode_number = Some(1);
+        let mut source = sample_external_source("douyin_mix");
+        source.path = root.display().to_string();
+
+        super::remove_youtube_task_artifact(&video, &source, &[], &[3, 4])
+            .await
+            .unwrap();
+
+        assert!(!output.with_extension("zh-CN.default.ass").exists());
+        assert!(!output.with_extension("zh-CN.vtt").exists());
+        assert!(!output.with_extension("subtitle.checked").exists());
+        assert!(!output.with_extension("danmaku.checked").exists());
+        assert!(!season_dir.exists(), "空 Season 目录应被清理");
+        assert!(!series_dir.exists(), "空合集目录应被清理");
+        assert!(root.exists(), "视频源根目录不应被清理");
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
 

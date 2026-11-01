@@ -637,6 +637,28 @@
 		return template.replace(/\{\{\s*name\s*\}\}/g, safeName);
 	}
 
+	function buildDownloadFilePathPreview(): string {
+		const root = path.trim().replace(/[\\/]+$/, '');
+		if (!root) return '';
+		const separator = root.includes('\\') ? '\\' : '/';
+		if (
+			sourcePlatform === 'douyin' &&
+			['douyin_mix', 'douyin_theater', 'douyin_series'].includes(youtubeSourceType)
+		) {
+			const safeName = sanitizeQuickSubscriptionName(name.trim() || '示例合集');
+			const leaf = root.split(/[\\/]/).pop() || '';
+			const seriesRoot =
+				leaf.toLowerCase() === safeName.toLowerCase() ? root : `${root}${separator}${safeName}`;
+			return `${seriesRoot}${separator}Season 01${separator}S01E01 - 示例标题.mp4`;
+		}
+		if (sourcePlatform === 'bilibili' && sourceType === 'collection') {
+			return `${root}${separator}Season 01${separator}S01E01 - 示例标题.mp4`;
+		}
+		return '';
+	}
+
+	$: downloadFilePathPreview = buildDownloadFilePathPreview();
+
 	function applyQuickSubscriptionPath(
 		type: VideoCategory,
 		sourceName: string,
@@ -4780,6 +4802,11 @@
 							{:else}
 								<div class="space-y-1">
 									<p class="text-muted-foreground text-sm">请输入绝对路径</p>
+									{#if downloadFilePathPreview}
+										<p class="text-xs break-all text-emerald-600">
+											示例完整路径：{downloadFilePathPreview}
+										</p>
+									{/if}
 									{#if currentQuickSubscriptionTemplate && !batchMode}
 										<p class="text-muted-foreground text-xs">
 											已配置快捷路径模板，支持 <code>{'{{name}}'}</code> 变量。选择源后会自动带入，也可继续手动修改。
