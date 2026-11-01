@@ -52,6 +52,13 @@ const YTDLP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const YTDLP_RELEASE_BASE_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(90);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+/// 单次外源视频下载尝试的硬上限。
+///
+/// 下载器本身有首字节/空闲超时，但「取平台元数据 → 签名直链 → 下载 → 解密/合并」
+/// 是一条长链路，任一环节偶发卡住都会让任务永远停在「下载中」：首页进度不会消失、
+/// 队列被堵死、重启后数据库里还留着 `downloading` 状态，只能手动强制重置。
+/// 到点直接放弃本次尝试，走正常的失败/重试逻辑。
+const EXTERNAL_MEDIA_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 const MAX_DOWNLOAD_RETRIES: i32 = 4;
 /// TikTok「只回元数据、媒体字段全空」这类失败连续重试到此轮数后，才落「无法下载视频」
 /// 占位并停止自动重试。保留前几轮正常重试，是为了给用户换出口节点留出恢复机会。
@@ -1898,6 +1905,14 @@ pub(crate) async fn reset_external_source_path_shared(
     let mut active: youtube_source::ActiveModel = source.into();
     active.path = Set(new_path.to_string());
     active.update(txn).await?;
+    // 旧目录里没下完的半成品（`.download.mp4` / `.merging.mp4` / `.resume` 等）
+    // 不属于任何已记录视频，上面按 output_path 搬迁时根本不会碰到，会在旧目录里
+    // 越堆越多。换目录时按下载器自己的命名规则扫一遍删掉。
+    let cleaned_partial_files_count = if old_base != new_base {
+        remove_partial_download_artifacts(&old_base).await
+    } else {
+        0
+    };
     Ok(ResetVideoSourcePathResponse {
         success: true,
         source_id: id,
@@ -1908,10 +1923,11 @@ pub(crate) async fn reset_external_source_path_shared(
         updated_videos_count: videos.len(),
         cleaned_folders_count,
         message: format!(
-            "{}视频源路径重设完成，移动 {} 个文件，清理 {} 个空文件夹",
+            "{}视频源路径重设完成，移动 {} 个文件，清理 {} 个空文件夹、{} 个未完成的临时文件",
             external_platform_label(source_type),
             moved_files_count,
-            cleaned_folders_count
+            cleaned_folders_count,
+            cleaned_partial_files_count
         ),
     })
 }
@@ -3141,11 +3157,11 @@ pub async fn process_scheduled_sources(
     if sources.is_empty() {
         return Ok(results);
     }
+    recover_interrupted_downloads(db).await?;
     if let Err(error) = ensure_ytdlp_available().await {
         warn!(error = %error, "已配置 YouTube/抖音视频源，但 yt-dlp 自动安装失败；跳过本轮扫描");
         return Ok(results);
     }
-    recover_interrupted_downloads(db).await?;
     let startup_round = EXTERNAL_STARTUP_SCAN_PENDING.swap(false, Ordering::SeqCst);
     if startup_round && STARTUP_EXTERNAL_SCAN_GRACE_SECONDS > 0 {
         info!(
@@ -4147,7 +4163,20 @@ async fn download_video(
 
         // 每次重试都重新让 yt-dlp 解析签名直链，避免复用已经限速或失效的
         // GoogleVideo URL；媒体仍由 UnifiedDownloader 和原 ffmpeg 链路处理。
-        let result = download_youtube_media(downloader, &source, &video).await;
+        // 整次尝试套一层硬超时：任何环节卡死都不能让任务永久停在「下载中」。
+        let result = match tokio::time::timeout(
+            EXTERNAL_MEDIA_ATTEMPT_TIMEOUT,
+            download_youtube_media(downloader, &source, &video),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!(
+                "{}视频下载超时：{} 分钟内没有任何结果，已中止本次尝试（请检查网络/代理，或稍后重试）",
+                platform_label,
+                EXTERNAL_MEDIA_ATTEMPT_TIMEOUT.as_secs() / 60
+            )),
+        };
         let mut active: youtube_video::ActiveModel = video.clone().into();
         active.updated_at = Set(now_standard_string());
         match result {
@@ -4286,12 +4315,15 @@ async fn download_video(
                 video = active.update(db).await?;
                 // 前两次重试失败只记 debug，第三次起才报 WARN，避免每轮重试都刷屏。
                 if retry_count >= 3 {
+                    // `{:#}` 才会带出完整错误链（外层「统一下载器下载失败」→ 内层
+                    // HTTP 状态/网络错误），否则日志里只剩一句没有信息量的包装文案。
+                    let chained = format!("{:#}", error);
                     warn!(
                         platform = platform_label,
                         source_id = source.id,
                         retry_count,
                         max_retries = MAX_DOWNLOAD_RETRIES,
-                        error = %error,
+                        error = %chained,
                         "{}视频源「{}」视频「{}」下载失败，真实错误已持久化",
                         platform_label,
                         source.name,
@@ -8387,6 +8419,63 @@ async fn recorded_output_files(output: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// 文件名是否符合下载器自己生成「半成品」的命名规则。
+///
+/// 只认本项目写出来的临时名（`.download.*`、`.merging.*`、`.decrypted.*`、
+/// `.audio-source*`、`.resume` 断点状态等），不会误删用户的普通文件。
+fn is_partial_download_artifact(name: &str) -> bool {
+    name.ends_with(".resume")
+        || name.ends_with(".download")
+        || name.contains(".download.")
+        || name.contains(".merging.")
+        || name.contains(".decrypted.")
+        || name.contains(".audio-source")
+        || name.contains(".tmp_video")
+        || name.contains(".tmp_audio")
+}
+
+/// 递归清理源目录里残留的半成品文件，返回删除个数（用于重设路径后的旧目录）。
+async fn remove_partial_download_artifacts(root: &Path) -> usize {
+    /// 媒体目录就是 `源根/UP/季` 这几层，留一点余量防止异常深层目录扫描。
+    const MAX_DEPTH: usize = 6;
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut removed = 0usize;
+    while let Some((directory, depth)) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&directory).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if depth < MAX_DEPTH {
+                    stack.push((entry.path(), depth + 1));
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !is_partial_download_artifact(&name) {
+                continue;
+            }
+            if tokio::fs::remove_file(entry.path()).await.is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        info!(
+            path = %root.display(),
+            removed,
+            "已清理旧目录中未完成的下载临时文件"
+        );
+    }
+    removed
+}
+
 async fn move_file_cross_volume(source: &Path, target: &Path) -> Result<()> {
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -8771,6 +8860,54 @@ mod tests {
     }
 
     #[test]
+    fn partial_artifact_detection_covers_downloader_temp_names() {
+        for name in [
+            "S01E01 - 标题.download.mp4",
+            "S01E01 - 标题.merging.mp4",
+            "S01E01 - 标题.decrypted.mp4",
+            "S01E01 - 标题.audio-source.mp4",
+            "S01E01 - 标题.download.mp4.resume",
+            "S01E01 - 标题.nfo.download",
+            "folder.jpg.0198a2bc.download",
+        ] {
+            assert!(is_partial_download_artifact(name), "{name} 应判为半成品");
+        }
+        for name in [
+            "S01E01 - 标题.mp4",
+            "S01E01 - 标题.nfo",
+            "S01E01 - 标题.zh-CN.default.ass",
+            "S01E01 - 标题-thumb.jpg",
+        ] {
+            assert!(!is_partial_download_artifact(name), "{name} 不应被判为半成品");
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_partial_artifacts_keeps_finished_media() {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-partial-{}-{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let season = root.join("合集").join("Season 01");
+        tokio::fs::create_dir_all(&season).await.unwrap();
+        let keep = season.join("S01E01 - 标题.mp4");
+        let keep_nfo = season.join("S01E01 - 标题.nfo");
+        let partial = season.join("S01E02 - 标题.download.mp4");
+        let resume = season.join("S01E02 - 标题.download.mp4.resume");
+        for path in [&keep, &keep_nfo, &partial, &resume] {
+            tokio::fs::write(path, b"x").await.unwrap();
+        }
+        let removed = remove_partial_download_artifacts(&root).await;
+        assert_eq!(removed, 2);
+        assert!(keep.exists());
+        assert!(keep_nfo.exists());
+        assert!(!partial.exists());
+        assert!(!resume.exists());
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[test]
     fn startup_skips_recently_scanned_sources() {
         let now = chrono::Local::now().naive_local();
         let recent = now.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -8786,6 +8923,7 @@ mod tests {
         collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
         has_youtube_session_value,
+        is_partial_download_artifact, remove_partial_download_artifacts,
         normalize_source_type, normalize_youtube_playlist_url, parse_youtube_live_chat, resolve_source_url,
         should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
         youtube_login_verdict, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
