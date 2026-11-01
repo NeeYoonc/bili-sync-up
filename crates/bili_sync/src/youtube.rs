@@ -4352,9 +4352,11 @@ async fn download_video(
                 // 其它平台维持原有 5 秒/次退避。YouTube 命中验证墙（Sign in to
                 // confirm you're not a bot）时拉长到 5 分钟级，让出口 IP 冷却，
                 // 避免每 5 秒空转把风控越打越重。
-                let retry_delay = if crate::tiktok::is_tiktok_source(&source) {
+                // 抖音/TikTok 的失败大多是 CDN 限速，窗口是按时间恢复的：5 秒一次的
+                // 重试只会继续挨打，改成 30s 起的阶梯退避。
+                let retry_delay = if is_douyin_source(&source) || crate::tiktok::is_tiktok_source(&source) {
                     Duration::from_secs((retry_count.max(1) as u64) * 30)
-                } else if !crate::tiktok::is_tiktok_source(&source) && !is_douyin_source(&source) && is_youtube_bot_wall_error(&error) {
+                } else if is_youtube_bot_wall_error(&error) {
                     Duration::from_secs(300 * (retry_count.max(1) as u64))
                 } else {
                     Duration::from_secs((retry_count.max(1) as u64) * 5)
