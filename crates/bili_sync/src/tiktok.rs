@@ -3669,6 +3669,7 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
             .and_then(|v| v.get("cover"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        fanart: None,
         description: None,
         language: None,
         upload_date: None,
@@ -3745,6 +3746,7 @@ fn tiktok_photo_metadata(
             .or_else(|| item.get("imagePost").and_then(|image_post| image_post.get("cover")))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        fanart: None,
         description: None,
         language: None,
         upload_date: None,
@@ -3988,6 +3990,7 @@ pub(crate) async fn fetch_tiktok_photo_via_tikwm(
         channel_id: None,
         channel_url: None,
         thumbnail,
+        fanart: None,
         description: None,
         language: None,
         upload_date: None,
@@ -4185,6 +4188,7 @@ fn tiktok_embed_photo_metadata(
         channel_id: None,
         channel_url: None,
         thumbnail: tiktok_embed_thumbnail(video_data),
+        fanart: None,
         description: None,
         language: None,
         upload_date: None,
@@ -4260,6 +4264,7 @@ fn tiktok_embed_video_metadata(video_data: &serde_json::Value, fallback_id: &str
         channel_id: None,
         channel_url: None,
         thumbnail: tiktok_embed_thumbnail(video_data),
+        fanart: None,
         description: None,
         language: None,
         upload_date: None,

@@ -4078,6 +4078,11 @@ async fn extract_metadata_native(
                 )
             })
         });
+    // 横版封面单独留一份：抖音 `cover` 是竖图（媒体库 poster 需要竖版），
+    // `dynamic_cover` 才是横图。分开取，fanart/landscape 就不用拿竖图硬拉。
+    let fanart = video
+        .and_then(|video| video.get("dynamic_cover").or_else(|| video.get("origin_cover")))
+        .and_then(|value| image_url(Some(value)));
     let music_urls = urls_from_value(detail.pointer("/music/play_url"));
     let timestamp = detail.get("create_time").and_then(serde_json::Value::as_i64);
     Ok(ExternalMediaMetadata {
@@ -4095,6 +4100,7 @@ async fn extract_metadata_native(
         channel_id: channel_id.clone(),
         channel_url: channel_id.map(|id| format!("https://www.douyin.com/user/{id}")),
         thumbnail,
+        fanart,
         description: text(&detail, &["desc"]),
         language: Some("zh-CN".to_string()),
         upload_date: timestamp

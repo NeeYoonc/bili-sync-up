@@ -1881,23 +1881,26 @@ pub(crate) async fn reset_external_source_path_shared(
                 continue;
             };
             let target = new_base.join(relative);
-            if old_file == target || !old_file.is_file() {
-                continue;
+            if old_file != target && old_file.is_file() {
+                for companion in recorded_output_files(&old_file).await? {
+                    let Ok(companion_relative) = companion.strip_prefix(&old_base) else {
+                        continue;
+                    };
+                    let companion_target = new_base.join(companion_relative);
+                    move_file_cross_volume(&companion, &companion_target).await?;
+                    moved_files_count += 1;
+                }
+                if request.clean_empty_folders {
+                    cleaned_folders_count +=
+                        remove_empty_parent_directories(old_file.parent(), &old_base).await;
+                }
             }
-            for companion in recorded_output_files(&old_file).await? {
-                let Ok(companion_relative) = companion.strip_prefix(&old_base) else {
-                    continue;
-                };
-                let companion_target = new_base.join(companion_relative);
-                move_file_cross_volume(&companion, &companion_target).await?;
-                moved_files_count += 1;
-            }
-            if request.clean_empty_folders {
-                cleaned_folders_count += remove_empty_parent_directories(old_file.parent(), &old_base).await;
-            }
-            // 仅在实际移动文件时同步更新各视频 output_path（保持相对目录结构）
+            // 无论媒体文件是否还在磁盘上，都要同步数据库里的 output_path：
+            // 否则「媒体已被删除 / 还没下完」的分集仍指向旧目录，之后每轮扫描回填
+            // 封面时都会按旧路径计算，旧目录被反复重建（用户看到的
+            // 「重设路径后旧目录还在不停生成 fanart/poster」）。
             let mut active: youtube_video::ActiveModel = video.clone().into();
-            active.output_path = Set(Some(new_base.join(relative).display().to_string()));
+            active.output_path = Set(Some(target.display().to_string()));
             active.updated_at = Set(now_standard_string());
             active.update(txn).await?;
         }
@@ -3825,14 +3828,22 @@ async fn backfill_episodic_sidecars_from_first_video(
     if !is_episodic_douyin_source(source) {
         return Ok(());
     }
-    let Some(video) = youtube_video::Entity::find()
+    let videos = youtube_video::Entity::find()
         .filter(youtube_video::Column::SourceId.eq(source.id))
         .filter(youtube_video::Column::OutputPath.is_not_null())
         .order_by_asc(youtube_video::Column::EpisodeNumber)
         .order_by_asc(youtube_video::Column::Id)
-        .one(db)
-        .await?
-    else {
+        .all(db)
+        .await?;
+    // 只按「媒体确实还在磁盘上」的分集回填：媒体已删除 / 未下完的分集如果仍留着
+    // 旧的 output_path，就会把封面写到已经不用的目录里 —— 重设路径后旧目录被
+    // 反复重建、每轮扫描都冒出 fanart/poster 就是这么来的。
+    let Some(video) = videos.into_iter().find(|video| {
+        video
+            .output_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty() && Path::new(path).is_file())
+    }) else {
         return Ok(());
     };
     let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) else {
@@ -3850,7 +3861,8 @@ async fn backfill_episodic_sidecars_from_first_video(
     for (name, source_path) in [
         ("folder.jpg", &thumb),
         ("poster.jpg", &thumb),
-        ("landscape.jpg", &thumb),
+        // 竖图给 poster/folder，横图给 landscape/fanart，避免把竖版封面拉成背景墙
+        ("landscape.jpg", &fanart),
         ("fanart.jpg", &fanart),
     ] {
         let target = series_dir.join(name);
@@ -4886,6 +4898,7 @@ async fn download_youtube_media(
                 channel_id: None,
                 channel_url: None,
                 thumbnail: video.thumbnail.clone(),
+                fanart: None,
                 description: None,
                 language: None,
                 upload_date: video.published_at.clone(),
@@ -6267,7 +6280,7 @@ async fn ensure_youtube_series_sidecars(
     for (name, source_path, source_exists) in [
         ("folder.jpg", &thumb_path, thumb_exists),
         ("poster.jpg", &thumb_path, thumb_exists),
-        ("landscape.jpg", &thumb_path, thumb_exists),
+        ("landscape.jpg", &fanart_path, fanart_exists),
         ("fanart.jpg", &fanart_path, fanart_exists),
     ] {
         let target = series_dir.join(name);
@@ -6281,7 +6294,17 @@ async fn ensure_youtube_series_sidecars(
             tokio::fs::copy(source_path, &target)
                 .await
                 .with_context(|| format!("生成{platform}剧集封面失败: {}", target.display()))?;
-        } else if let Some(url) = metadata.thumbnail.as_deref() {
+        } else {
+            // 竖图（folder/poster）用竖版封面；横图（landscape/fanart）优先平台给出的
+            // 横版封面（抖音 dynamic_cover），没有再退回竖版，避免背景墙被拉伸。
+            let url = if matches!(name, "landscape.jpg" | "fanart.jpg") {
+                metadata.fanart.as_deref().or(metadata.thumbnail.as_deref())
+            } else {
+                metadata.thumbnail.as_deref()
+            };
+            let Some(url) = url else {
+                continue;
+            };
             // 剧集封面同样按剧集共享，多个分集并发下载时会争用同一临时文件
             let temporary = unique_download_path(&target);
             if let Err(error) = fetch_platform_asset(downloader, source, &[url], &temporary)
@@ -6705,9 +6728,34 @@ async fn download_youtube_cover(
         .await
         .is_ok_and(|metadata| metadata.len() >= 1024)
     {
-        tokio::fs::copy(&thumb_path, &fanart_path)
-            .await
-            .with_context(|| format!("生成{platform} fanart 失败: {}", fanart_path.display()))?;
+        // 优先用平台单独提供的横版封面（抖音 `video.dynamic_cover`）：竖版封面
+        // 直接当背景墙会被拉伸/裁切。拿不到横图时才退回竖版封面。
+        let mut downloaded = false;
+        if let Some(url) = metadata.fanart.as_deref().filter(|value| !value.trim().is_empty()) {
+            let temporary = youtube_sidecar_path(output_path, "-fanart.download")?;
+            match fetch_platform_asset(downloader, source, &[url], &temporary).await {
+                Ok(()) => {
+                    replace_file(&temporary, &fanart_path).await?;
+                    downloaded = true;
+                }
+                Err(error) => {
+                    let _ = remove_file_if_exists(&temporary).await;
+                    warn!(
+                        platform,
+                        youtube_id = %metadata.id,
+                        %error,
+                        "{}视频源「{}」横版封面下载失败，回退到竖版封面",
+                        platform,
+                        source.name
+                    );
+                }
+            }
+        }
+        if !downloaded {
+            tokio::fs::copy(&thumb_path, &fanart_path)
+                .await
+                .with_context(|| format!("生成{platform} fanart 失败: {}", fanart_path.display()))?;
+        }
         info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %fanart_path.display(), "{}视频源「{}」视频「{}」 fanart 生成完成", source_platform_label(source), source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
     }
     Ok(())
@@ -10021,6 +10069,7 @@ mod tests {
             channel_id: None,
             channel_url: None,
             thumbnail: None,
+            fanart: None,
             description: None,
             language: None,
             upload_date: None,
@@ -10066,6 +10115,7 @@ mod tests {
             channel_id: None,
             channel_url: None,
             thumbnail: None,
+            fanart: None,
             description: None,
             language: None,
             upload_date: Some("20260208".to_string()),
@@ -10181,6 +10231,7 @@ mod tests {
             channel_id: None,
             channel_url: None,
             thumbnail: None,
+            fanart: None,
             description: None,
             language: None,
             upload_date: Some("20260822".to_string()),
@@ -10226,6 +10277,7 @@ mod tests {
             channel_id: None,
             channel_url: None,
             thumbnail: None,
+            fanart: None,
             description: None,
             language: None,
             upload_date: None,
