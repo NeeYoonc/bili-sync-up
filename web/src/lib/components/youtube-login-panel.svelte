@@ -21,6 +21,7 @@
 	let status: YouTubeStatusResponse | null = null;
 	let loading = true;
 	let importing = false;
+	let verifying = false;
 	let loginCollapsed = false;
 
 	async function refresh() {
@@ -51,6 +52,27 @@
 		} finally {
 			input.value = '';
 			importing = false;
+		}
+	}
+
+	async function verifySession() {
+		verifying = true;
+		try {
+			const result = (await api.checkYouTubeSession()).data;
+			if (result.state === 'valid') {
+				toast.success('YouTube 登录状态有效', { description: result.message });
+			} else if (result.state === 'expired') {
+				toast.error('YouTube 返回未登录', { description: `${result.message}（凭证已保留）` });
+			} else {
+				toast.warning('无法判断 YouTube 登录状态', { description: `${result.message}（凭证已保留）` });
+			}
+			await refresh();
+		} catch (error) {
+			toast.error('联网验证失败', {
+				description: error instanceof Error ? error.message : String(error)
+			});
+		} finally {
+			verifying = false;
 		}
 	}
 
@@ -89,14 +111,16 @@
 					{#if status?.logged_in}
 						{#if status.session_check}
 							<Badge
-								variant={status.session_check.valid ? 'secondary' : 'destructive'}
+								variant={status.session_check.state === 'expired' ? 'destructive' : 'secondary'}
 								class="gap-1"
 								title={`${status.session_check.checked_at} ${status.session_check.message}`}
 							>
-								{#if status.session_check.valid}
+								{#if status.session_check.state === 'valid'}
 									<CheckCircle2 class="h-3.5 w-3.5" />最近检查：有效
+								{:else if status.session_check.state === 'expired'}
+									<CircleAlert class="h-3.5 w-3.5" />最近检查：未登录
 								{:else}
-									<CircleAlert class="h-3.5 w-3.5" />最近检查：失效
+									<CircleAlert class="h-3.5 w-3.5" />最近检查：不确定
 								{/if}
 							</Badge>
 						{:else}
@@ -138,7 +162,22 @@
 						</span>
 					</label>
 
-					<Button variant="ghost" size="sm" class="ml-auto" onclick={refresh}>
+					<Button
+						variant="outline"
+						size="sm"
+						class="ml-auto"
+						onclick={verifySession}
+						disabled={verifying || !status?.logged_in}
+						title="联网访问 /feed/channels 确认登录是否真的可用；不会删除已保存的凭证"
+					>
+						{#if verifying}
+							<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />验证中
+						{:else}
+							<CircleAlert class="mr-1 h-4 w-4" />联网验证
+						{/if}
+					</Button>
+
+					<Button variant="ghost" size="sm" onclick={refresh}>
 						<RefreshCw class="mr-1 h-4 w-4" />刷新状态
 					</Button>
 				</div>

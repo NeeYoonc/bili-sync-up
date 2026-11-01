@@ -299,7 +299,8 @@ pub struct YouTubeVideoResponse {
 
 #[derive(Debug, Serialize)]
 pub struct YouTubeSessionCheckResponse {
-    pub valid: bool,
+    /// `valid` / `expired` / `unclear`
+    pub state: String,
     pub message: String,
     pub checked_at: String,
 }
@@ -338,7 +339,7 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
     // 真实联网结论由守护任务刷新后从 `session_check` 返回。
     let logged_in = youtube_has_session();
     let session_check = last_youtube_session_check().map(|check| YouTubeSessionCheckResponse {
-        valid: check.valid,
+        state: check.state.as_str().to_string(),
         message: check.message,
         checked_at: check.checked_at,
     });
@@ -350,6 +351,47 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         default_output_path: default_output_path().display().to_string(),
         container_runtime: is_container_runtime(),
         cookie_path: youtube_cookie_file().map(|path| path.display().to_string()).unwrap_or_default(),
+    }))
+}
+
+/// 手动触发一次 YouTube 登录联网验证。
+///
+/// 只做探测：有效时顺带按响应续约，失效/不确定时**不会**删除任何凭证，结果回给
+/// 前端展示，方便确认「到底是被 YouTube 挡了还是会话真过期」。
+pub async fn check_youtube_session() -> Result<ApiResponse<YouTubeSessionCheckResponse>, ApiError> {
+    if !youtube_has_session() {
+        return Err(ApiError::bad_request(
+            "尚未导入 YouTube 登录凭证，请先在设置页导入 cookies.txt 或传输登录状态",
+        ));
+    }
+    let (state, message) = match tokio::time::timeout(
+        Duration::from_secs(60),
+        probe_youtube_subscription_channels(),
+    )
+    .await
+    {
+        Ok(Ok(_)) => (
+            YoutubeSessionState::Valid,
+            "登录状态有效（已顺带完成一次会话续约）".to_string(),
+        ),
+        Ok(Err(YoutubeSessionError::Expired(error))) => {
+            (YoutubeSessionState::Expired, format!("探测返回未登录：{error:#}"))
+        }
+        Ok(Err(YoutubeSessionError::Unclear(error))) => {
+            (YoutubeSessionState::Unclear, format!("无法判断：{error:#}"))
+        }
+        Err(_) => (
+            YoutubeSessionState::Unclear,
+            "联网验证超时（代理过慢或不可用），凭证已保留".to_string(),
+        ),
+    };
+    record_youtube_session_check(state, message.clone());
+    Ok(ApiResponse::ok(YouTubeSessionCheckResponse {
+        state: state.as_str().to_string(),
+        message,
+        checked_at: last_youtube_session_check()
+            .map(|check| check.checked_at)
+            .unwrap_or_default(),
     }))
 }
 
@@ -1360,7 +1402,7 @@ pub async fn import_youtube_cookie_file(
     // 记下导入前的凭证：一次失败的导入不能把原本还能用的登录状态一起删掉。
     let previous = youtube_cookie_text();
     // 先清理旧会话（数据库 + 历史文件），再将新会话写入数据库。
-    clear_youtube_login_state().await;
+    clear_youtube_login_state("导入新凭证前清理旧会话").await;
     set_youtube_cookies(&request.cookies).await?;
     if let Err(error) = validate_youtube_login_cookie().await {
         match previous {
@@ -1371,7 +1413,7 @@ pub async fn import_youtube_cookie_file(
                     info!("新导入的 YouTube 凭证验证失败，已回滚到导入前的登录状态");
                 }
             }
-            None => clear_youtube_login_state().await,
+            None => clear_youtube_login_state("新导入的凭证验证失败，且没有可回滚的旧凭证").await,
         }
         return Err(ApiError::bad_request(format!(
             "YouTube cookies.txt 验证失败：{}（{}）",
@@ -7999,22 +8041,13 @@ async fn set_youtube_cookies(contents: &str) -> Result<()> {
     crate::credential_store::set(crate::credential_store::keys::YOUTUBE_COOKIES, contents).await
 }
 
-/// 清理登录状态前把当前 Cookie 另存一份，方便用户在修好代理/网络后确认是不是真的
-/// 失效，也留一条手工恢复的路。文件名不匹配 `youtube-cookies.txt*`，不会被
-/// [`clear_youtube_login_state_files_except`] 顺带删掉，也不会被当成登录凭证读取。
-async fn preserve_youtube_cookie_backup() {
-    let Some(contents) = youtube_cookie_text() else {
-        return;
-    };
-    let path = CONFIG_DIR.join("youtube-cookies-expired-backup.txt");
-    match tokio::fs::write(&path, contents.as_bytes()).await {
-        Ok(()) => info!(path = %path.display(), "已把被判定失效的 YouTube Cookie 备份到本地"),
-        Err(error) => warn!(path = %path.display(), error = %error, "备份 YouTube Cookie 失败"),
-    }
-}
-
 /// 清理 YouTube 登录状态：数据库凭证 + 旧版/历史残留文件。
-async fn clear_youtube_login_state() {
+///
+/// 只有两个调用方：导入新凭证前清场、导入失败且无可回滚的旧凭证。守护任务不再
+/// 调用它 —— 自动删凭证正是「Cookie 过一会就掉了」的来源。`reason` 会打进日志，
+/// 以后再出现「掉了」可以直接看是谁删的。
+async fn clear_youtube_login_state(reason: &str) {
+    warn!(reason, "清理 YouTube 登录凭证");
     if crate::credential_store::has(crate::credential_store::keys::YOUTUBE_COOKIES) {
         if let Err(error) = crate::credential_store::delete(crate::credential_store::keys::YOUTUBE_COOKIES).await {
             warn!(error = %error, "清理数据库中的 YouTube 登录凭证失败");
@@ -8028,8 +8061,19 @@ fn youtube_has_session() -> bool {
     youtube_cookie_text().is_some_and(|contents| has_youtube_session_value(&contents))
 }
 
+/// 去掉 Netscape 文件的 `#HttpOnly_` 前缀。
+///
+/// 浏览器扩展导出的 cookies.txt 会把 HttpOnly Cookie 写成 `#HttpOnly_.youtube.com…`，
+/// 而 `SID` / `SAPISID` / `__Secure-1PSID` 这些会话 Cookie **全都是 HttpOnly**。
+/// 之前这里直接按「以 # 开头就是注释」跳过，等于把整台机器的会话字段当注释丢掉：
+/// 凭证明明在库里、下载也能用，界面却显示「未导入」，守护任务还会判成失效。
+fn strip_httponly_prefix(line: &str) -> &str {
+    line.strip_prefix("#HttpOnly_").unwrap_or(line)
+}
+
 fn has_youtube_session_value(contents: &str) -> bool {
-    contents.lines().any(|line| {
+    contents.lines().any(|raw_line| {
+        let line = strip_httponly_prefix(raw_line);
         if line.trim_start().starts_with('#') {
             return false;
         }
@@ -8083,10 +8127,32 @@ const EXTERNAL_LOGIN_GUARD_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60)
 /// 就是不可逆的。
 const YOUTUBE_SESSION_RECHECK_DELAY: Duration = Duration::from_secs(30);
 
+/// 最近一次联网登录探测的结论。
+///
+/// `Unclear` 是独立的一档：代理抖动、风控页、同意条款页都落在这里，既不能当成
+/// 「有效」也不能当成「失效」——把它和 `Expired` 合并正是「Cookie 过一会就掉了」
+/// 的根源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum YoutubeSessionState {
+    Valid,
+    Expired,
+    Unclear,
+}
+
+impl YoutubeSessionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Expired => "expired",
+            Self::Unclear => "unclear",
+        }
+    }
+}
+
 /// 最近一次 YouTube 登录探测的结论，只用于设置页展示，不作为是否保留凭证的依据。
 #[derive(Debug, Clone)]
 struct YoutubeSessionCheck {
-    valid: bool,
+    state: YoutubeSessionState,
     message: String,
     checked_at: String,
 }
@@ -8094,12 +8160,12 @@ struct YoutubeSessionCheck {
 static YOUTUBE_SESSION_CHECK: LazyLock<StdMutex<Option<YoutubeSessionCheck>>> =
     LazyLock::new(|| StdMutex::new(None));
 
-fn record_youtube_session_check(valid: bool, message: impl Into<String>) {
+fn record_youtube_session_check(state: YoutubeSessionState, message: impl Into<String>) {
     let mut guard = YOUTUBE_SESSION_CHECK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     *guard = Some(YoutubeSessionCheck {
-        valid,
+        state,
         message: message.into(),
         checked_at: now_standard_string(),
     });
@@ -8162,7 +8228,7 @@ async fn guard_external_login_states() -> Result<()> {
     if youtube_has_session() {
         match probe_youtube_subscription_channels().await {
             Ok(_) => {
-                record_youtube_session_check(true, "登录状态有效，已完成会话续约");
+                record_youtube_session_check(YoutubeSessionState::Valid, "登录状态有效，已完成会话续约");
                 info!("YouTube 登录状态有效，已完成会话续约");
             }
             Err(YoutubeSessionError::Expired(error)) => {
@@ -8174,16 +8240,34 @@ async fn guard_external_login_states() -> Result<()> {
                 tokio::time::sleep(YOUTUBE_SESSION_RECHECK_DELAY).await;
                 match probe_youtube_subscription_channels().await {
                     Ok(_) => {
-                        record_youtube_session_check(true, "复查通过（首次探测疑似误判），已保留会话");
+                        record_youtube_session_check(
+                            YoutubeSessionState::Valid,
+                            "复查通过（首次探测疑似误判），已保留会话",
+                        );
                         info!("YouTube 登录状态复查通过，保留现有会话");
                     }
                     Err(YoutubeSessionError::Expired(error)) => {
-                        warn!(error = %error, "YouTube 登录状态连续两次确认失效，清理残留会话");
-                        preserve_youtube_cookie_backup().await;
-                        clear_youtube_login_state().await;
+                        // 连续两次都拿不到登录态：只提示，**绝不自动删凭证**。
+                        // 代理出口被 YouTube 判定为可疑时同样会返回登录墙，这类误判
+                        // 与服务端真过期在协议层面无法区分；删掉用户仍可用的凭证
+                        // （表现为「Cookie 过一会就掉了」）代价远大于留着过期凭证。
+                        warn!(
+                            error = %error,
+                            "YouTube 登录状态连续两次探测为未登录，保留凭证不做清理；请到设置页确认后重新导入 cookies.txt"
+                        );
+                        if let Some(contents) = youtube_cookie_text() {
+                            warn!(
+                                diagnostic = %youtube_cookie_diagnostic(&contents),
+                                "YouTube 已保存的登录凭证现状"
+                            );
+                        }
+                        record_youtube_session_check(
+                            YoutubeSessionState::Expired,
+                            "最近探测返回未登录（代理/风控也可能是同样表现），凭证已保留，可重新导入",
+                        );
                         record_external_login_expired(
                             "YouTube",
-                            "YouTube 登录状态已过期或未登录，已清理残留会话；请重新在设置页导入 cookies.txt",
+                            "YouTube 登录状态疑似失效（凭证已保留，未清理）。若订阅、稍后再看等读取失败，请在设置页重新导入 cookies.txt",
                         )
                         .await;
                     }
@@ -8191,6 +8275,10 @@ async fn guard_external_login_states() -> Result<()> {
                         warn!(
                             error = %error,
                             "YouTube 登录状态复查结果不确定，保留现有会话"
+                        );
+                        record_youtube_session_check(
+                            YoutubeSessionState::Unclear,
+                            "复查结果不确定（代理/网络/风控），凭证已保留",
                         );
                     }
                 }
@@ -8203,6 +8291,10 @@ async fn guard_external_login_states() -> Result<()> {
                     error = %error,
                     "YouTube 登录状态检查结果不确定（代理/网络/风控），本次未续约也未清理会话，保留现有凭证。请确认外源代理（proxy/youtube_proxy）可用"
                 );
+                record_youtube_session_check(
+                    YoutubeSessionState::Unclear,
+                    "检查结果不确定（代理/网络/风控），凭证已保留",
+                );
             }
         }
     }
@@ -8210,7 +8302,7 @@ async fn guard_external_login_states() -> Result<()> {
 }
 
 async fn record_external_login_expired(platform: &str, message: &str) {
-    info!(platform, "{}登录状态过期，已清理残留会话并提示重新导入", platform);
+    info!(platform, "{}登录状态过期，已发送重新导入提示", platform);
     if let Err(error) = crate::utils::notification::send_error_notification(
         &format!("{platform}登录状态过期"),
         message,
@@ -8538,7 +8630,9 @@ fn is_netscape_youtube_cookie_file(contents: &str) -> bool {
         .take(4)
         .any(|line| line.contains("HTTP Cookie File") || line.contains("Netscape"));
     has_header
-        && contents.lines().any(|line| {
+        && contents.lines().any(|raw_line| {
+            // 浏览器扩展导出的会话 Cookie 带 `#HttpOnly_` 前缀，不能当成注释跳过。
+            let line = strip_httponly_prefix(raw_line);
             if line.trim_start().starts_with('#') {
                 return false;
             }
@@ -8691,6 +8785,7 @@ mod tests {
         canonical_channel_url, checksum_for_release_asset, collect_external_scan_result,
         collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
+        has_youtube_session_value,
         normalize_source_type, normalize_youtube_playlist_url, parse_youtube_live_chat, resolve_source_url,
         should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
         youtube_login_verdict, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
@@ -9513,6 +9608,23 @@ mod tests {
         let youtube_session = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tvalue\n";
         assert!(is_netscape_youtube_cookie_file(google_only));
         assert!(is_netscape_youtube_cookie_file(youtube_session));
+    }
+
+    #[test]
+    fn login_cookie_accepts_httponly_prefixed_session_cookies() {
+        // 浏览器扩展（Get cookies.txt LOCALLY 等）导出的会话 Cookie 带 #HttpOnly_ 前缀，
+        // 而 SID/SAPISID/__Secure-1PSID 全都是 HttpOnly。
+        let exported = concat!(
+            "# Netscape HTTP Cookie File\n",
+            "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1800000000\t__Secure-1PSID\tvalue1\n",
+            "#HttpOnly_.google.com\tTRUE\t/\tTRUE\t1800000000\tSID\tvalue2\n",
+        );
+        assert!(is_netscape_youtube_cookie_file(exported));
+        assert!(has_youtube_session_value(exported));
+        // 只有普通 Cookie（没有会话字段）时仍然判定为未登录。
+        let visitor_only = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tYSC\tvalue\n";
+        assert!(!is_netscape_youtube_cookie_file(visitor_only));
+        assert!(!has_youtube_session_value(visitor_only));
     }
 
     #[test]

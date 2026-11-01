@@ -120,7 +120,8 @@ export interface YouTubeStatusResponse {
 }
 
 export interface YouTubeSessionCheck {
-	valid: boolean;
+	/** valid：探测确实登录成功；expired：确实返回未登录；unclear：代理/风控/超时等无法判断 */
+	state: 'valid' | 'expired' | 'unclear';
 	message: string;
 	checked_at: string;
 }

@@ -57,6 +57,7 @@ import type {
 	BetaImageUpdateStatusResponse,
 	YouTubeLoginResponse,
 	YouTubeStatusResponse,
+	YouTubeSessionCheck,
 	DouyinStatusResponse,
 	TikTokSecUidStatusResponse,
 	TikTokStatusResponse,
@@ -256,6 +257,11 @@ class ApiClient {
 	/** 获取本地 yt-dlp、YouTube 登录和下载任务状态。 */
 	async getYouTubeStatus(): Promise<ApiResponse<YouTubeStatusResponse>> {
 		return this.get<YouTubeStatusResponse>('/youtube/status');
+	}
+
+	/** 联网验证一次 YouTube 登录状态（不会删除已保存的凭证）。 */
+	async checkYouTubeSession(): Promise<ApiResponse<YouTubeSessionCheck>> {
+		return this.post<YouTubeSessionCheck>('/youtube/session-check', {});
 	}
 
 	async searchYouTube(params: YouTubeSearchRequest): Promise<ApiResponse<YouTubeSearchResponse>> {
@@ -1476,6 +1482,9 @@ export const api = {
 
 	/** 从电脑端登录助手或 cookies.txt 导入 YouTube 登录状态。 */
 	importYouTubeCookies: (cookies: string) => apiClient.importYouTubeCookies(cookies),
+
+	/** 联网验证一次 YouTube 登录状态（不会删除已保存的凭证）。 */
+	checkYouTubeSession: () => apiClient.checkYouTubeSession(),
 
 	getYouTubeSources: () => apiClient.getYouTubeSources(),
 	createYouTubeSource: (request: CreateYouTubeSourceRequest) =>
