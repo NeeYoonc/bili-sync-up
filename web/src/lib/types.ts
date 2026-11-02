@@ -34,6 +34,7 @@ export interface YouTubeSource {
 	audio_only: boolean;
 	audio_only_m4a_only: boolean;
 	flat_folder: boolean;
+	generate_image_post_video: boolean; // 图文作品是否额外合成幻灯片 MP4
 	download_danmaku: boolean;
 	download_subtitle: boolean;
 	ai_subtitle_language: string;
@@ -69,6 +70,7 @@ export interface CreateYouTubeSourceRequest {
 	audio_only: boolean;
 	audio_only_m4a_only?: boolean;
 	flat_folder?: boolean;
+	generate_image_post_video?: boolean;
 	download_danmaku?: boolean;
 	download_subtitle: boolean;
 	ai_subtitle_language?: string;
@@ -171,6 +173,7 @@ export interface UpdateYouTubeSourceRequest {
 	audio_only?: boolean;
 	audio_only_m4a_only?: boolean;
 	flat_folder?: boolean;
+	generate_image_post_video?: boolean;
 	download_danmaku?: boolean;
 	download_subtitle?: boolean;
 	ai_subtitle_language?: string;
@@ -312,6 +315,7 @@ export interface VideoSource {
 	audio_only: boolean; // 仅下载音频（输出m4a格式）
 	audio_only_m4a_only: boolean; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
 	flat_folder: boolean; // 平铺目录模式（不为每个视频创建子文件夹）
+	generate_image_post_video?: boolean; // 图文作品是否额外合成幻灯片 MP4
 	split_chapters_after_download: boolean; // 下载后按播放器章节切分为独立视频
 	download_charge_videos: boolean; // 是否下载充电视频
 	download_danmaku: boolean; // 是否下载弹幕
@@ -393,6 +397,7 @@ export interface VideoSourceTag {
 	audio_only: boolean;
 	audio_only_m4a_only: boolean;
 	flat_folder: boolean;
+	generate_image_post_video: boolean;
 }
 
 // 漫画一话（一个 CBZ 压缩包）里的单页

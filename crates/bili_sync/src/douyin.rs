@@ -5004,6 +5004,18 @@ pub(crate) async fn download_image_post(
             }
             true
         };
+        if !source.generate_image_post_video {
+            // 关闭图文视频合成时只保留原图（以及可选配乐），避免为静态图片启动
+            // 高分辨率 H.264 编码。旧版本留下的幻灯片 MP4 一并清理。
+            remove_file_if_exists(output_path).await?;
+            info!(
+                aweme_id = %metadata.id,
+                images = image_paths.len(),
+                path = %output_path.display(),
+                "{platform}图集原图已保存，已按视频源设置跳过幻灯片 MP4 合成"
+            );
+            return Ok(output_path.to_path_buf());
+        }
         compose_image_slideshow(
             platform,
             &image_paths,
@@ -6332,6 +6344,7 @@ mod tests {
             audio_only: false,
             audio_only_m4a_only: false,
             flat_folder: false,
+            generate_image_post_video: true,
             download_danmaku: false,
             download_subtitle: false,
             ai_subtitle_language: String::new(),

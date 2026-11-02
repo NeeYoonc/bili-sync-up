@@ -623,6 +623,7 @@ class ApiClient {
 			audio_only?: boolean;
 			audio_only_m4a_only?: boolean;
 			flat_folder?: boolean;
+			generate_image_post_video?: boolean;
 			split_chapters_after_download?: boolean;
 			download_charge_videos?: boolean;
 			download_danmaku?: boolean;
@@ -648,6 +649,7 @@ class ApiClient {
 			audio_only: boolean;
 			audio_only_m4a_only: boolean;
 			flat_folder: boolean;
+			generate_image_post_video?: boolean;
 			split_chapters_after_download: boolean;
 			download_charge_videos: boolean;
 			download_danmaku: boolean;
@@ -679,6 +681,7 @@ class ApiClient {
 				audio_only: options.audio_only,
 				audio_only_m4a_only: options.audio_only_m4a_only,
 				flat_folder: options.flat_folder,
+				generate_image_post_video: options.generate_image_post_video,
 				download_danmaku: options.download_danmaku,
 				download_subtitle: options.download_subtitle,
 				ai_subtitle_language: options.ai_subtitle_language,
@@ -695,6 +698,7 @@ class ApiClient {
 					audio_only: source.audio_only,
 					audio_only_m4a_only: source.audio_only_m4a_only,
 					flat_folder: source.flat_folder,
+					generate_image_post_video: source.generate_image_post_video,
 					split_chapters_after_download: false,
 					download_charge_videos: false,
 					download_danmaku: source.download_danmaku,
@@ -722,6 +726,7 @@ class ApiClient {
 			audio_only: boolean;
 			audio_only_m4a_only: boolean;
 			flat_folder: boolean;
+			generate_image_post_video?: boolean;
 			split_chapters_after_download: boolean;
 			download_charge_videos: boolean;
 			download_danmaku: boolean;
@@ -1741,6 +1746,7 @@ export const api = {
 			audio_only?: boolean;
 			audio_only_m4a_only?: boolean;
 			flat_folder?: boolean;
+			generate_image_post_video?: boolean;
 			split_chapters_after_download?: boolean;
 			download_charge_videos?: boolean;
 			download_danmaku?: boolean;

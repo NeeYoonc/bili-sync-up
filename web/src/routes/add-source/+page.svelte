@@ -134,6 +134,7 @@
 	let audioOnly = false; // 仅下载音频
 	let audioOnlyM4aOnly = false; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
 	let flatFolder = false; // 平铺目录模式
+	let generateImagePostVideo = true; // 图文作品是否额外合成幻灯片 MP4
 	let splitChaptersAfterDownload = false; // 下载后按播放器章节切分为独立视频
 	let downloadChargeVideos = true; // 下载充电视频（默认开启）
 	let downloadDanmaku = true; // 下载弹幕（默认开启）
@@ -1652,6 +1653,7 @@
 						audio_only: audioOnly,
 						audio_only_m4a_only: audioOnlyM4aOnly,
 						flat_folder: flatFolder,
+						generate_image_post_video: generateImagePostVideo,
 						download_danmaku: downloadDanmaku,
 						download_subtitle: downloadSubtitle,
 						ai_subtitle_language:
@@ -1993,6 +1995,7 @@
 			audioOnly = false;
 			audioOnlyM4aOnly = false;
 			flatFolder = false;
+			generateImagePostVideo = true;
 			splitChaptersAfterDownload = false;
 			downloadChargeVideos = true;
 			downloadDanmaku = true;
@@ -4909,6 +4912,47 @@
 											<input type="checkbox" bind:checked={audioOnlyM4aOnly} class="peer sr-only" />
 											<div
 												class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-amber-600 peer-focus:ring-2 peer-focus:ring-amber-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-amber-500"
+											></div>
+										</label>
+									</div>
+								{/if}
+
+								{#if sourcePlatform === 'douyin' || sourcePlatform === 'tiktok'}
+									<!-- 图文作品合成视频 -->
+									<div
+										class="flex items-center justify-between rounded-md border border-sky-200 bg-sky-50 px-3 py-2 dark:border-sky-700 dark:bg-sky-950/30"
+									>
+										<div class="flex items-center gap-2">
+											<svg
+												class="h-4 w-4 text-sky-600 dark:text-sky-400"
+												fill="none"
+												stroke="currentColor"
+												viewBox="0 0 24 24"
+											>
+												<path
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													stroke-width="2"
+													d="M4 5a2 2 0 012-2h8l6 6v10a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm10-2v6h6M8 14l2 2 4-4"
+												/>
+											</svg>
+											<div>
+												<span class="text-xs font-medium text-sky-700 dark:text-sky-300"
+													>图文作品合成视频</span
+												>
+												<p class="text-[10px] text-sky-600 dark:text-sky-400">
+													开启后会为纯图片作品额外生成 MP4；关闭后仅保留原图和配乐，显著降低 CPU 与内存占用
+												</p>
+											</div>
+										</div>
+										<label class="relative inline-flex cursor-pointer items-center">
+											<input
+												type="checkbox"
+												bind:checked={generateImagePostVideo}
+												class="peer sr-only"
+											/>
+											<div
+												class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-sky-600 peer-focus:ring-2 peer-focus:ring-sky-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-sky-500"
 											></div>
 										</label>
 									</div>

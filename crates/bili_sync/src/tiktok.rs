@@ -4489,6 +4489,7 @@ mod tests {
             audio_only: false,
             audio_only_m4a_only: false,
             flat_folder: false,
+            generate_image_post_video: true,
             download_danmaku: false,
             download_subtitle: false,
             ai_subtitle_language: String::new(),
