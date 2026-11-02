@@ -22,6 +22,7 @@
 	import HeartIcon from '@lucide/svelte/icons/heart';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import ListVideoIcon from '@lucide/svelte/icons/list-video';
+	import LayersIcon from '@lucide/svelte/icons/layers';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import { toast } from 'svelte-sonner';
@@ -77,6 +78,7 @@
 		],
 		douyin: [
 			{ sourceType: 'douyin', title: '作者投稿', icon: UserIcon },
+			{ sourceType: 'douyin_mix', title: '合集', icon: LayersIcon },
 			{ sourceType: 'douyin_liked', title: '我的喜欢', icon: HeartIcon },
 			{ sourceType: 'douyin_collection', title: '收藏夹', icon: ListTreeIcon },
 			{ sourceType: 'douyin_watch_later', title: '稍后再看', icon: HistoryIcon },

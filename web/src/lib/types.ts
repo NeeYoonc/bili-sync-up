@@ -19,7 +19,8 @@ export type YouTubeSourceType =
 	| 'douyin_collection'
 	| 'douyin_watch_later'
 	| 'douyin_theater'
-	| 'douyin_series';
+	| 'douyin_series'
+	| 'douyin_mix';
 
 export interface YouTubeSource {
 	id: number;
@@ -109,10 +110,20 @@ export interface YouTubeVideo {
 export interface YouTubeStatusResponse {
 	ytdlp_available: boolean;
 	ytdlp_version?: string | null;
+	/** 是否导入过凭证（只读本地，不做联网探测） */
 	logged_in: boolean;
+	/** 最近一次联网登录探测的结论，由后台守护任务刷新；从未检查过时为 null */
+	session_check?: YouTubeSessionCheck | null;
 	default_output_path: string;
 	container_runtime: boolean;
 	cookie_path: string;
+}
+
+export interface YouTubeSessionCheck {
+	/** valid：探测确实登录成功；expired：确实返回未登录；unclear：代理/风控/超时等无法判断 */
+	state: 'valid' | 'expired' | 'unclear';
+	message: string;
+	checked_at: string;
 }
 
 export interface DouyinStatusResponse {
@@ -143,7 +154,7 @@ export interface YouTubeSearchResponse {
 
 export interface YouTubeSourceVideosRequest {
 	url?: string;
-	source_type: 'subscriptions' | 'channel' | 'playlist' | 'liked';
+	source_type: 'subscriptions' | 'channel' | 'playlist' | 'liked' | 'watch_later';
 	page?: number;
 	page_size?: number;
 	keyword?: string;
@@ -1448,6 +1459,8 @@ export interface DashBoardResponse {
 	total_douyin_theaters: number;
 	enabled_douyin_series: number;
 	total_douyin_series: number;
+	enabled_douyin_mixes: number;
+	total_douyin_mixes: number;
 	enabled_tiktok_sources: number;
 	total_tiktok_sources: number;
 	enabled_tiktok_authors: number;

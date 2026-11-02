@@ -5470,10 +5470,9 @@ async fn download_video_pages(
         None
     };
 
-    let allow_collection_asset_video_cover_fallback = !(is_collection
-        && collection_use_season_structure
-        && season_folder.is_some()
-        && matches!(video_source, VideoSourceEnum::Collection(_)));
+    // 合集接口不一定返回独立封面；没有时回退到当前视频封面，避免 Emby/Jellyfin
+    // 因为根目录缺少 poster/folder 显示成黑框。现在统一允许这个回退。
+    let allow_collection_asset_video_cover_fallback = true;
 
     // 根目录 folder.jpg / poster.jpg 的头像规则：
     // - 投稿源“同UP合集分季”使用 UP 头像
@@ -5967,6 +5966,41 @@ async fn download_video_pages(
     let inline_chapters_split = *inline_chapters_split.lock().await;
     let inline_skip_reason = inline_skip_reason.lock().await.take();
     let inline_skip_reason_touched = *inline_skip_reason_touched.lock().await;
+
+    // Season 结构的合集/多P根目录补 Emby 常用图片别名。主封面已按
+    // collection.cover -> 当前视频封面回退生成，这里同步出背景图条目，
+    // 避免媒体库详情页只有文字没有图片。
+    if !is_bangumi && season_folder.is_some() {
+        let root_dir = base_path.parent().unwrap_or(&base_path);
+        let folder_cover = root_dir.join("folder.jpg");
+        let poster_cover = root_dir.join("poster.jpg");
+        let is_non_empty_file = |path: &Path| {
+            std::fs::metadata(path)
+                .map(|metadata| metadata.is_file() && metadata.len() > 0)
+                .unwrap_or(false)
+        };
+        let cover = if is_non_empty_file(&folder_cover) {
+            Some(folder_cover)
+        } else if is_non_empty_file(&poster_cover) {
+            Some(poster_cover)
+        } else {
+            None
+        };
+        if let Some(cover) = cover {
+            for name in ["fanart.jpg", "landscape.jpg"] {
+                let target = root_dir.join(name);
+                let exists = tokio::fs::metadata(&target)
+                    .await
+                    .map(|metadata| metadata.is_file() && metadata.len() > 0)
+                    .unwrap_or(false);
+                if !exists {
+                    if let Err(error) = tokio::fs::copy(&cover, &target).await {
+                        debug!(path = %target.display(), %error, "合集根目录图片别名生成失败");
+                    }
+                }
+            }
+        }
+    }
 
     // 兼容命名：根目录补充“根目录名-thumb/fanart”，例如：
     // - 投稿源同UP合集分季：浅影阿_合集-thumb.jpg / 浅影阿_合集-fanart.jpg（使用 UP 头像）

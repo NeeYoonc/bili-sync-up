@@ -57,6 +57,7 @@ import type {
 	BetaImageUpdateStatusResponse,
 	YouTubeLoginResponse,
 	YouTubeStatusResponse,
+	YouTubeSessionCheck,
 	DouyinStatusResponse,
 	TikTokSecUidStatusResponse,
 	TikTokStatusResponse,
@@ -258,6 +259,11 @@ class ApiClient {
 		return this.get<YouTubeStatusResponse>('/youtube/status');
 	}
 
+	/** 联网验证一次 YouTube 登录状态（不会删除已保存的凭证）。 */
+	async checkYouTubeSession(): Promise<ApiResponse<YouTubeSessionCheck>> {
+		return this.post<YouTubeSessionCheck>('/youtube/session-check', {});
+	}
+
 	async searchYouTube(params: YouTubeSearchRequest): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/youtube/search', { ...params });
 	}
@@ -271,6 +277,11 @@ class ApiClient {
 	/** 列出指定 YouTube 频道的全部播放列表（添加“播放列表/收藏”来源时选择）。 */
 	async getYouTubeChannelPlaylists(url: string): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/youtube/channel-playlists', { url });
+	}
+
+	/** 列出当前登录账号自己的 YouTube 播放列表。 */
+	async getYouTubeMyPlaylists(): Promise<ApiResponse<YouTubeSearchResponse>> {
+		return this.get<YouTubeSearchResponse>('/youtube/my-playlists');
 	}
 
 	/** 接收电脑端登录助手或手动选择的 Netscape cookies.txt。 */
@@ -1472,6 +1483,9 @@ export const api = {
 	/** 从电脑端登录助手或 cookies.txt 导入 YouTube 登录状态。 */
 	importYouTubeCookies: (cookies: string) => apiClient.importYouTubeCookies(cookies),
 
+	/** 联网验证一次 YouTube 登录状态（不会删除已保存的凭证）。 */
+	checkYouTubeSession: () => apiClient.checkYouTubeSession(),
+
 	getYouTubeSources: () => apiClient.getYouTubeSources(),
 	createYouTubeSource: (request: CreateYouTubeSourceRequest) =>
 		apiClient.createYouTubeSource(request),
@@ -1592,6 +1606,7 @@ export const api = {
 	searchYouTube: (params: YouTubeSearchRequest) => apiClient.searchYouTube(params),
 	getYouTubeSourceVideos: (params: YouTubeSourceVideosRequest) =>
 		apiClient.getYouTubeSourceVideos(params),
+	getYouTubeMyPlaylists: () => apiClient.getYouTubeMyPlaylists(),
 	searchDouyin: (keyword: string) => apiClient.searchDouyin(keyword),
 	getTikTokStatus: () => apiClient.getTikTokStatus(),
 	getTikTokSecUid: () => apiClient.getTikTokSecUid(),

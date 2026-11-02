@@ -1477,6 +1477,14 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         return Ok(());
     }
 
+    // 全局批量队列是进程级单例，worker 用的是「第一个触发它的连接」。如果拿的不是
+    // 全局数据库（测试库、临时库），请求会被写到 worker 那个库里去；直接写更安全，
+    // 语义完全一致（去重 + 单个事务），只是少了跨请求合并。
+    if crate::database::get_global_db().is_none() {
+        let merged_pages = dedupe_page_models(pages);
+        return write_merged_pages(merged_pages, connection).await;
+    }
+
     let (done_tx, done_rx) = oneshot::channel();
     {
         let mut queue = PAGE_MODEL_UPDATE_QUEUE.lock().await;
@@ -1535,6 +1543,64 @@ fn get_page_active_model_id(page: &page::ActiveModel) -> Option<i32> {
     }
 }
 
+/// 按分页 id 去重（同一 id 以最后出现的为准），没有 id 的模型原样透传。
+fn dedupe_page_models(pages: Vec<page::ActiveModel>) -> Vec<page::ActiveModel> {
+    let mut ordered_ids = Vec::new();
+    let mut deduped_pages = HashMap::new();
+    let mut passthrough_pages = Vec::new();
+    for page in pages {
+        if let Some(page_id) = get_page_active_model_id(&page) {
+            if !deduped_pages.contains_key(&page_id) {
+                ordered_ids.push(page_id);
+            }
+            deduped_pages.insert(page_id, page);
+        } else {
+            passthrough_pages.push(page);
+        }
+    }
+    let mut merged_pages = ordered_ids
+        .into_iter()
+        .filter_map(|page_id| deduped_pages.remove(&page_id))
+        .collect::<Vec<_>>();
+    merged_pages.extend(passthrough_pages);
+    merged_pages
+}
+
+/// 在一个事务里写入分页状态。
+async fn write_merged_pages(
+    merged_pages: Vec<page::ActiveModel>,
+    connection: &DatabaseConnection,
+) -> Result<()> {
+    let affected_count = merged_pages.len();
+    let result = crate::database::run_traced_db_operation(
+        format!("utils.model.update_pages_model(count={affected_count})"),
+        async {
+            use sea_orm::TransactionTrait;
+
+            connection
+                .transaction::<_, (), DbErr>(move |txn| {
+                    Box::pin(async move {
+                        for page in merged_pages {
+                            page::Entity::update(page).exec(txn).await?;
+                        }
+                        Ok(())
+                    })
+                })
+                .await
+                .map_err(|err| match err {
+                    sea_orm::TransactionError::Connection(db_err)
+                    | sea_orm::TransactionError::Transaction(db_err) => db_err,
+                })?;
+            Ok::<_, DbErr>(())
+        },
+    )
+    .await;
+    if result.is_ok() {
+        notify_videos_changed();
+    }
+    result.map_err(|error| anyhow!("{:#}", error))
+}
+
 async fn flush_batched_page_updates(connection: DatabaseConnection) {
     loop {
         let mut requests = {
@@ -1564,58 +1630,17 @@ async fn flush_batched_page_updates(connection: DatabaseConnection) {
             requests.append(&mut extra_requests);
         }
 
-        let mut ordered_ids = Vec::new();
-        let mut deduped_pages = HashMap::new();
-        let mut passthrough_pages = Vec::new();
-        for request in &requests {
-            for page in &request.pages {
-                if let Some(page_id) = get_page_active_model_id(page) {
-                    if !deduped_pages.contains_key(&page_id) {
-                        ordered_ids.push(page_id);
-                    }
-                    deduped_pages.insert(page_id, page.clone());
-                } else {
-                    passthrough_pages.push(page.clone());
-                }
-            }
-        }
-
-        let mut merged_pages = ordered_ids
-            .into_iter()
-            .filter_map(|page_id| deduped_pages.remove(&page_id))
-            .collect::<Vec<_>>();
-        merged_pages.extend(passthrough_pages);
-
-        let affected_count = merged_pages.len();
-        let result = crate::database::run_traced_db_operation(
-            format!("utils.model.update_pages_model(count={affected_count})"),
-            async {
-                use sea_orm::TransactionTrait;
-
-                connection
-                    .transaction::<_, (), DbErr>(move |txn| {
-                        Box::pin(async move {
-                            for page in merged_pages {
-                                page::Entity::update(page).exec(txn).await?;
-                            }
-                            Ok(())
-                        })
-                    })
-                    .await
-                    .map_err(|err| match err {
-                        sea_orm::TransactionError::Connection(db_err)
-                        | sea_orm::TransactionError::Transaction(db_err) => db_err,
-                    })?;
-                Ok::<_, DbErr>(())
-            },
-        )
-        .await;
-
-        if result.is_ok() {
-            notify_videos_changed();
-        }
-
-        let error_text = result.err().map(|err| format!("{:#}", err));
+        // 合并本批所有请求的分页（同一 id 以最后一次为准），再一次性写入。
+        let merged_pages = dedupe_page_models(
+            requests
+                .iter()
+                .flat_map(|request| request.pages.iter().cloned())
+                .collect(),
+        );
+        let error_text = write_merged_pages(merged_pages, &connection)
+            .await
+            .err()
+            .map(|error| format!("{:#}", error));
         for request in requests {
             let _ = request.done_tx.send(match &error_text {
                 Some(err) => Err(err.clone()),
@@ -2661,6 +2686,31 @@ mod tests {
         assert_eq!(pages[0].file_size_bytes, Some(32));
         assert_eq!(pages[1].download_status, 8);
         assert_eq!(pages[1].file_size_bytes, Some(18));
+    }
+
+    #[tokio::test]
+    async fn dedupe_page_models_keeps_last_value_per_id() {
+        let db = create_test_db("dedupe-pages").await;
+        insert_test_video(&db, 1, "测试视频").await;
+        insert_test_page(&db, 1, 1, Some("/tmp/page-1.m4s".to_string())).await;
+
+        let base: page::ActiveModel = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询分页")
+            .expect("分页应存在")
+            .into();
+        let mut first = base.clone();
+        first.download_status = Set(3);
+        let mut second = base;
+        second.download_status = Set(5);
+
+        let merged = dedupe_page_models(vec![first, second]);
+        assert_eq!(merged.len(), 1, "同一分页 id 只应保留一条");
+        match &merged[0].download_status {
+            sea_orm::ActiveValue::Set(value) => assert_eq!(*value, 5),
+            other => panic!("分页状态应为 Set(5)，实际 {other:?}"),
+        }
     }
 
     #[tokio::test]

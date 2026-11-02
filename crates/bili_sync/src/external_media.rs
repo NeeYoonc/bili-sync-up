@@ -16,6 +16,13 @@ pub(crate) struct ExternalMediaMetadata {
     pub(crate) channel_id: Option<String>,
     pub(crate) channel_url: Option<String>,
     pub(crate) thumbnail: Option<String>,
+    /// 横版封面（抖音 `video.dynamic_cover`、TikTok 的横版封面）。
+    ///
+    /// `thumbnail` 用竖版封面（抖音 `video.cover`，媒体库 `poster.jpg` 需要竖图），
+    /// 这里单独给一张横图供 `fanart.jpg` / `landscape.jpg` 使用，避免把竖版封面
+    /// 拉伸/裁切成背景墙。为空时调用方回退到 `thumbnail`。
+    #[serde(default)]
+    pub(crate) fanart: Option<String>,
     pub(crate) description: Option<String>,
     pub(crate) language: Option<String>,
     pub(crate) upload_date: Option<String>,

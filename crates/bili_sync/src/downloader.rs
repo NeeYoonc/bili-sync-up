@@ -24,7 +24,14 @@ const MIN_SEGMENT_SIZE: u64 = 1024 * 1024;
 // 50~500MiB 大分片在限速连接上持续数十分钟。
 const GOOGLEVIDEO_SEGMENT_SIZE: u64 = 4 * 1024 * 1024;
 const GOOGLEVIDEO_MAX_CONNECTIONS: usize = 4;
-const RANGE_DOWNLOAD_ATTEMPTS: usize = 3;
+/// 普通 CDN（抖音/TikTok 等）的单分片上限。
+///
+/// 以前非 googlevideo 的分片数就等于并发数：16 线程下 7GB 的抖音原画会被切成
+/// 16 个 ~460MB 的大分片。CDN 限速/掐流时一个分片根本走不完，重试又是从分片开头
+/// 重来，于是永远失败（用户看到的就是「开原画一直下载失败」）。按 16MB 切分后，
+/// 一次中断只损失 16MB，而且已完成分片会记进 `.resume`，重试能接着走。
+const DEFAULT_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+const RANGE_DOWNLOAD_ATTEMPTS: usize = 4;
 // 断点续传状态文件后缀（记录已完成分片，供失败后继续下载）
 const RESUME_SIDECAR_SUFFIX: &str = ".resume";
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -728,15 +735,48 @@ impl Downloader {
                         .report_bytes(&progress_path, acc)
                         .await;
                 }
-                result
+                ((part_start, part_end), result)
             }
         }))
         .buffer_unordered(concurrency)
         .collect::<Vec<_>>()
         .await;
         let mut downloaded = 0u64;
-        for result in tasks {
-            downloaded = downloaded.saturating_add(result?);
+        let mut failed_ranges: Vec<(u64, u64)> = Vec::new();
+        for ((start, end), result) in tasks {
+            match result {
+                Ok(bytes) => downloaded = downloaded.saturating_add(bytes),
+                Err(error) => {
+                    debug!(
+                        start,
+                        end,
+                        error = %error,
+                        "Range 分片并发阶段重试后仍失败，改为串行补下"
+                    );
+                    failed_ranges.push((start, end));
+                }
+            }
+        }
+        if !failed_ranges.is_empty() {
+            // 第二轮：失败分片改成串行 + 冷却后再补。并发挤兑（CDN 限速）下这样
+            // 通常能过；已经下完的分片不会白下，也不用整体重来。
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            for (start, end) in failed_ranges {
+                let bytes = download_range_to_file_with_retry(
+                    self.client.clone(),
+                    url,
+                    path,
+                    start,
+                    end,
+                    RANGE_DOWNLOAD_ATTEMPTS,
+                    referer,
+                    cookie,
+                )
+                .await
+                .with_context(|| format!("Range 分片补下仍失败: bytes={start}-{end}"))?;
+                append_completed_range(&sidecar, start, end).await;
+                downloaded = downloaded.saturating_add(bytes);
+            }
         }
         ensure!(
             downloaded + completed_bytes == total_size,
@@ -1223,7 +1263,10 @@ fn build_parallel_ranges(
     }
 
     let max_segments = ((total_size + MIN_SEGMENT_SIZE - 1) / MIN_SEGMENT_SIZE) as usize;
-    let segment_count = concurrency.min(max_segments).max(1);
+    // 大文件不按「并发数」均分，而是限制单个分片的大小上限：限速 CDN 上小分片
+    // 才能靠断点续传逐步推进（见 DEFAULT_SEGMENT_SIZE 的说明）。
+    let max_by_size = ((total_size + DEFAULT_SEGMENT_SIZE - 1) / DEFAULT_SEGMENT_SIZE) as usize;
+    let segment_count = concurrency.max(max_by_size).min(max_segments).max(1);
     let base = total_size / segment_count as u64;
     let mut ranges = Vec::with_capacity(segment_count);
     let mut start = 0u64;
@@ -1267,7 +1310,9 @@ async fn download_range_to_file_with_retry(
                 );
                 last_error = Some(error);
                 if attempt < attempts {
-                    tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
+                    // 指数退避：限速/CDN 掐流时立刻重试只会继续被拒。
+                    let backoff_ms = 400u64 * (1u64 << (attempt as u32 - 1).min(5));
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 }
             }
         }
@@ -1824,6 +1869,34 @@ mod tests {
         assert_eq!(ranges.len(), 8);
         assert_eq!(ranges[0], (0, 8 * 1024 * 1024 - 1));
         assert_eq!(ranges[7], (56 * 1024 * 1024, total_size - 1));
+    }
+
+    #[test]
+    fn large_cdn_file_is_split_into_small_segments() {
+        // 抖音 4K60 原画单集就有 7GB：按并发数均分会切出 ~460MB 的大分片，
+        // 限速 CDN 上一个分片走不完就一直失败。分片必须限制在上限以内。
+        let total_size = 7_375_161_692u64;
+        let (concurrency, ranges) = build_parallel_ranges(total_size, 16, false, 0);
+
+        assert_eq!(concurrency, 16, "并发数不应被放大");
+        let expected = ((total_size + DEFAULT_SEGMENT_SIZE - 1) / DEFAULT_SEGMENT_SIZE) as usize;
+        assert_eq!(ranges.len(), expected);
+        // 除最后一片外都不超过上限
+        for range in &ranges[..ranges.len() - 1] {
+            let len = range.1 - range.0 + 1;
+            assert!(
+                len <= DEFAULT_SEGMENT_SIZE,
+                "分片 {} 超过上限 {}",
+                len,
+                DEFAULT_SEGMENT_SIZE
+            );
+        }
+        // 分片必须首尾相接铺满整个文件
+        assert_eq!(ranges[0].0, 0);
+        assert_eq!(ranges[ranges.len() - 1].1, total_size - 1);
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].1 + 1, pair[1].0);
+        }
     }
 
     #[test]

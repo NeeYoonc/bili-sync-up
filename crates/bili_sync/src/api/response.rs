@@ -1145,6 +1145,8 @@ pub struct DashBoardResponse {
     pub total_douyin_theaters: u64,
     pub enabled_douyin_series: u64,
     pub total_douyin_series: u64,
+    pub enabled_douyin_mixes: u64,
+    pub total_douyin_mixes: u64,
     pub enabled_tiktok_sources: u64,
     pub total_tiktok_sources: u64,
     pub enabled_tiktok_authors: u64,

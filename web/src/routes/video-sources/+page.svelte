@@ -52,6 +52,7 @@
 	import FileAudioIcon from '@lucide/svelte/icons/file-audio';
 	import FolderSyncIcon from '@lucide/svelte/icons/folder-sync';
 	import ListTreeIcon from '@lucide/svelte/icons/list-tree';
+	import LayersIcon from '@lucide/svelte/icons/layers';
 	import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
 	import SubtitlesIcon from '@lucide/svelte/icons/subtitles';
 	import LanguagesIcon from '@lucide/svelte/icons/languages';
@@ -168,6 +169,12 @@
 			youtubeSourceType: 'douyin',
 			title: '作者投稿',
 			icon: UserIcon
+		},
+		DOUYIN_MIX: {
+			type: 'douyin',
+			youtubeSourceType: 'douyin_mix',
+			title: '合集',
+			icon: LayersIcon
 		},
 		DOUYIN_LIKED: {
 			type: 'douyin',

@@ -52,14 +52,24 @@ const YTDLP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const YTDLP_RELEASE_BASE_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(90);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+/// 单次外源视频下载尝试的硬上限。
+///
+/// 下载器本身有首字节/空闲超时，但「取平台元数据 → 签名直链 → 下载 → 解密/合并」
+/// 是一条长链路，任一环节偶发卡住都会让任务永远停在「下载中」：首页进度不会消失、
+/// 队列被堵死、重启后数据库里还留着 `downloading` 状态，只能手动强制重置。
+/// 到点直接放弃本次尝试，走正常的失败/重试逻辑。
+const EXTERNAL_MEDIA_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 const MAX_DOWNLOAD_RETRIES: i32 = 4;
 /// TikTok「只回元数据、媒体字段全空」这类失败连续重试到此轮数后，才落「无法下载视频」
 /// 占位并停止自动重试。保留前几轮正常重试，是为了给用户换出口节点留出恢复机会。
 const TIKTOK_MEDIA_MISSING_PLACEHOLDER_RETRY: i32 = 2;
 const SUBSCRIPTIONS_URL: &str = "https://www.youtube.com/feed/subscriptions";
 const SUBSCRIPTION_CHANNELS_URL: &str = "https://www.youtube.com/feed/channels";
+const MY_PLAYLISTS_URL: &str = "https://www.youtube.com/feed/playlists";
 const LIKED_URL: &str = "https://www.youtube.com/playlist?list=LL";
 const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
+const PLAYLIST_CATALOG_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const SOURCE_VIDEO_PREVIEW_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
 /// 扫描失败告警静默期：同一来源失败后 6 小时内不重复打 WARN，避免私有源
 /// （稍后再看/喜欢/订阅）登录失效时每轮（约 20 分钟）刷屏告警。
@@ -295,10 +305,21 @@ pub struct YouTubeVideoResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct YouTubeSessionCheckResponse {
+    /// `valid` / `expired` / `unclear`
+    pub state: String,
+    pub message: String,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct YouTubeStatusResponse {
     pub ytdlp_available: bool,
     pub ytdlp_version: Option<String>,
     pub logged_in: bool,
+    /// 最近一次联网登录探测的结论（由守护任务刷新）。`logged_in` 只表示「导入过
+    /// 凭证」，联网结论单独展示，避免设置页把代理/风控导致的误判当成「Cookie 丢了」。
+    pub session_check: Option<YouTubeSessionCheckResponse>,
     pub default_output_path: String,
     pub container_runtime: bool,
     pub cookie_path: String,
@@ -318,17 +339,66 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         warn!(%error, "yt-dlp 自动安装失败");
     }
     let version = ytdlp_version().await;
-    let logged_in = youtube_has_session()
-        && tokio::time::timeout(Duration::from_secs(15), load_youtube_subscription_channels())
-            .await
-            .is_ok_and(|result| result.is_ok());
+    // 状态接口只读本地凭证，不做联网探测：
+    // 1) 每打开一次设置页/添加源页就发一次 /feed/channels，还会把该响应的 Set-Cookie
+    //    写回 cookies.txt，等于让「看一眼状态」变成一次静默的凭证写入；
+    // 2) 代理慢的时候 15s 超时会让状态显示成「未导入」，看起来就像 Cookie 掉了。
+    // 真实联网结论由守护任务刷新后从 `session_check` 返回。
+    let logged_in = youtube_has_session();
+    let session_check = last_youtube_session_check().map(|check| YouTubeSessionCheckResponse {
+        state: check.state.as_str().to_string(),
+        message: check.message,
+        checked_at: check.checked_at,
+    });
     Ok(ApiResponse::ok(YouTubeStatusResponse {
         ytdlp_available: version.is_some(),
         ytdlp_version: version,
         logged_in,
+        session_check,
         default_output_path: default_output_path().display().to_string(),
         container_runtime: is_container_runtime(),
         cookie_path: youtube_cookie_file().map(|path| path.display().to_string()).unwrap_or_default(),
+    }))
+}
+
+/// 手动触发一次 YouTube 登录联网验证。
+///
+/// 只做探测：有效时顺带按响应续约，失效/不确定时**不会**删除任何凭证，结果回给
+/// 前端展示，方便确认「到底是被 YouTube 挡了还是会话真过期」。
+pub async fn check_youtube_session() -> Result<ApiResponse<YouTubeSessionCheckResponse>, ApiError> {
+    if !youtube_has_session() {
+        return Err(ApiError::bad_request(
+            "尚未导入 YouTube 登录凭证，请先在设置页导入 cookies.txt 或传输登录状态",
+        ));
+    }
+    let (state, message) = match tokio::time::timeout(
+        Duration::from_secs(60),
+        probe_youtube_subscription_channels(),
+    )
+    .await
+    {
+        Ok(Ok(_)) => (
+            YoutubeSessionState::Valid,
+            "登录状态有效（已顺带完成一次会话续约）".to_string(),
+        ),
+        Ok(Err(YoutubeSessionError::Expired(error))) => {
+            (YoutubeSessionState::Expired, format!("探测返回未登录：{error:#}"))
+        }
+        Ok(Err(YoutubeSessionError::Unclear(error))) => {
+            (YoutubeSessionState::Unclear, format!("无法判断：{error:#}"))
+        }
+        Err(_) => (
+            YoutubeSessionState::Unclear,
+            "联网验证超时（代理过慢或不可用），凭证已保留".to_string(),
+        ),
+    };
+    record_youtube_session_check(state, message.clone());
+    Ok(ApiResponse::ok(YouTubeSessionCheckResponse {
+        state: state.as_str().to_string(),
+        message,
+        checked_at: last_youtube_session_check()
+            .map(|check| check.checked_at)
+            .unwrap_or_default(),
     }))
 }
 
@@ -345,16 +415,8 @@ pub async fn search_youtube(
         return Err(ApiError::from(anyhow!("YouTube 搜索仅支持频道或播放列表")));
     }
 
-    // “播放列表/收藏”来源先搜索 UP 主频道，选择频道后再加载其全部播放列表。
-    let channel_mode = matches!(source_type.as_str(), "channel" | "playlist");
-    let search_url = youtube_search_url(
-        keyword,
-        if channel_mode {
-            "channel"
-        } else {
-            &source_type
-        },
-    )?;
+    let channel_mode = source_type == "channel";
+    let search_url = youtube_search_url(keyword, &source_type)?;
     let mut command = ytdlp_command();
     command.args([
         "--flat-playlist",
@@ -490,28 +552,64 @@ pub async fn get_youtube_channel_playlists(
     }
     let channel_url = canonical_channel_url(channel_url);
     let playlists_url = format!("{channel_url}/playlists");
+    let results = fetch_youtube_playlist_catalog(&playlists_url, "加载 YouTube 频道播放列表")
+        .await
+        .map_err(ApiError::from)?;
+    let total = results.len();
+    Ok(ApiResponse::ok(YouTubeSearchResponse {
+        success: true,
+        results,
+        total,
+    }))
+}
+
+/// 列出当前登录账号自己的全部播放列表。对应 B 站「我的收藏夹」入口，
+/// 使用 cookies 访问 YouTube 的 `/feed/playlists`。
+pub async fn get_youtube_my_playlists() -> Result<ApiResponse<YouTubeSearchResponse>, ApiError> {
+    ensure_ytdlp_available().await?;
+    if !youtube_has_session() {
+        return Err(ApiError::from(anyhow!(
+            "读取自己的 YouTube 播放列表需要有效登录状态，请先在设置页导入 YouTube cookies"
+        )));
+    }
+    let results = fetch_youtube_playlist_catalog(MY_PLAYLISTS_URL, "加载我的 YouTube 播放列表")
+        .await
+        .map_err(ApiError::from)?;
+    let total = results.len();
+    Ok(ApiResponse::ok(YouTubeSearchResponse {
+        success: true,
+        results,
+        total,
+    }))
+}
+
+async fn fetch_youtube_playlist_catalog(
+    playlists_url: &str,
+    operation: &str,
+) -> Result<Vec<YouTubeSearchResult>> {
     let mut command = ytdlp_command();
     command.args([
         "--flat-playlist",
         "--dump-json",
         "--playlist-end",
-        "100",
+        "200",
         "--ignore-errors",
         "--no-warnings",
+        "--socket-timeout",
+        "20",
+        "--retries",
+        "3",
     ]);
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
     append_ytdlp_tab_args(&mut command);
-    command.arg(playlists_url.as_str());
-    let output = tokio::time::timeout(Duration::from_secs(5 * 60), command.output())
+    command.arg(playlists_url);
+    let output = tokio::time::timeout(PLAYLIST_CATALOG_TIMEOUT, command.output())
         .await
-        .map_err(|_| anyhow!("加载 YouTube 频道播放列表超时"))??;
+        .map_err(|_| anyhow!("{operation}超时"))??;
     if !output.status.success() {
-        return Err(ApiError::from(anyhow!(
-            "加载 YouTube 频道播放列表失败：{}",
-            command_error(&output)
-        )));
+        bail!("{operation}失败：{}", command_error(&output));
     }
 
     let mut seen_urls = HashSet::new();
@@ -520,15 +618,7 @@ pub async fn get_youtube_channel_playlists(
         let Ok(item) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let Some(playlist_url) = item
-            .get("webpage_url")
-            .or_else(|| item.get("url"))
-            .and_then(|value| value.as_str())
-            .filter(|value| {
-                value.contains("playlist?list=") || value.contains("/playlist/")
-            })
-            .map(str::to_string)
-        else {
+        let Some(playlist_url) = youtube_playlist_url_from_item(&item) else {
             continue;
         };
         if !seen_urls.insert(playlist_url.clone()) {
@@ -591,23 +681,42 @@ pub async fn get_youtube_channel_playlists(
             follower: item.get("playlist_count").and_then(|value| value.as_i64()),
         });
     }
-    let total = results.len();
-    Ok(ApiResponse::ok(YouTubeSearchResponse {
-        success: true,
-        results,
-        total,
-    }))
+    Ok(results)
 }
 
-/// 枚举频道、播放列表、喜欢视频或已订阅频道。响应直接复用 B 站投稿
+fn youtube_playlist_url_from_item(item: &serde_json::Value) -> Option<String> {
+    let explicit = item
+        .get("webpage_url")
+        .or_else(|| item.get("url"))
+        .and_then(|value| value.as_str());
+    if let Some(value) = explicit {
+        if value.starts_with("http") {
+            if value.contains("playlist?list=") || value.contains("/playlist/") {
+                return Some(value.to_string());
+            }
+        }
+    }
+    let id = item
+        .get("id")
+        .or_else(|| item.get("playlist_id"))
+        .and_then(|value| value.as_str())
+        .filter(|value| {
+            ["PL", "UU", "OL", "LL", "WL", "FL"]
+                .iter()
+                .any(|prefix| value.starts_with(prefix))
+        })?;
+    Some(format!("https://www.youtube.com/playlist?list={id}"))
+}
+
+/// 枚举频道、播放列表、喜欢视频、稍后再看或已订阅频道。响应直接复用 B 站投稿
 /// 选择面板的数据结构，让添加 YouTube 来源继续共用项目原有选择 UI。
 pub async fn get_youtube_source_videos(
     Query(request): Query<YouTubeSourceVideosRequest>,
 ) -> Result<ApiResponse<SubmissionVideosResponse>, ApiError> {
     let source_type = request.source_type.trim().to_ascii_lowercase();
-    if !matches!(source_type.as_str(), "subscriptions" | "channel" | "playlist" | "liked") {
+    if !youtube_source_video_selection_supported(&source_type) {
         return Err(ApiError::from(anyhow!(
-            "仅订阅动态、频道、播放列表和喜欢的视频支持内容选择"
+            "仅订阅动态、频道、播放列表、喜欢的视频和稍后再看支持内容选择"
         )));
     }
     let raw_url = request.url.as_deref().unwrap_or("").trim();
@@ -622,19 +731,32 @@ pub async fn get_youtube_source_videos(
     if source_type == "subscriptions" {
         return get_youtube_subscription_channels(page, page_size, keyword.as_deref()).await;
     }
+    if matches!(source_type.as_str(), "liked" | "watch_later") && !youtube_has_session() {
+        let label = if source_type == "watch_later" {
+            "稍后再看"
+        } else {
+            "喜欢的视频"
+        };
+        return Err(ApiError::from(anyhow!(
+            "「{label}」需要有效的 YouTube 登录状态，请先在设置页重新导入 YouTube cookies"
+        )));
+    }
 
     ensure_ytdlp_available().await?;
     let source_url = match source_type.as_str() {
         "liked" => LIKED_URL.to_string(),
-        "channel" | "playlist" => {
+        "watch_later" => WATCH_LATER_URL.to_string(),
+        "channel" => {
             if raw_url.is_empty() || !is_youtube_url(raw_url) {
                 return Err(ApiError::from(anyhow!("请输入有效的 YouTube 频道或播放列表链接")));
             }
-            if source_type == "channel" {
-                canonical_channel_url(raw_url)
-            } else {
-                raw_url.to_string()
+            canonical_channel_url(raw_url)
+        }
+        "playlist" => {
+            if raw_url.is_empty() || !is_youtube_url(raw_url) {
+                return Err(ApiError::from(anyhow!("请输入有效的 YouTube 播放列表链接")));
             }
+            normalize_youtube_playlist_url(raw_url).map_err(ApiError::from)?
         }
         "subscriptions" => unreachable!(),
         _ => unreachable!(),
@@ -654,20 +776,36 @@ pub async fn get_youtube_source_videos(
         &start.to_string(),
         "--playlist-end",
         &end_with_probe.to_string(),
+        "--yes-playlist",
+        "--socket-timeout",
+        "20",
+        "--retries",
+        "3",
     ]);
     append_ytdlp_runtime(&mut command);
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
     append_ytdlp_tab_args(&mut command);
     command.arg(&source_url);
-    let output = tokio::time::timeout(Duration::from_secs(10 * 60), command.output())
+    let output = tokio::time::timeout(SOURCE_VIDEO_PREVIEW_TIMEOUT, command.output())
         .await
         .map_err(|_| anyhow!("加载 YouTube 历史视频超时"))??;
     if !output.status.success() {
-        return Err(ApiError::from(anyhow!(
-            "加载 YouTube 历史视频失败：{}",
-            command_error(&output)
-        )));
+        let raw_error = command_error(&output);
+        let command_failure = anyhow!("加载 YouTube 历史视频失败：{raw_error}");
+        if matches!(source_type.as_str(), "liked" | "watch_later")
+            && is_youtube_auth_required_error(&command_failure)
+        {
+            let label = if source_type == "watch_later" {
+                "稍后再看"
+            } else {
+                "喜欢的视频"
+            };
+            return Err(ApiError::from(anyhow!(
+                "「{label}」读取失败：YouTube 登录状态已失效或不完整，请在设置页重新导入 YouTube cookies"
+            )));
+        }
+        return Err(ApiError::from(command_failure));
     }
 
     let mut videos = Vec::new();
@@ -683,6 +821,10 @@ pub async fn get_youtube_source_videos(
         else {
             continue;
         };
+        if ytdlp_flat_item_is_unavailable(&item) {
+            debug!(youtube_id = id, "跳过 YouTube 列表中的失效/私有视频");
+            continue;
+        }
         if !seen.insert(id.to_string()) {
             continue;
         }
@@ -761,6 +903,52 @@ pub async fn get_youtube_source_videos(
     }))
 }
 
+fn youtube_source_video_selection_supported(source_type: &str) -> bool {
+    matches!(
+        source_type,
+        "subscriptions" | "channel" | "playlist" | "liked" | "watch_later"
+    )
+}
+
+fn ytdlp_flat_item_is_unavailable(item: &serde_json::Value) -> bool {
+    if item
+        .get("is_unavailable")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let availability = item
+        .get("availability")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        availability.as_str(),
+        "private" | "premium_only" | "subscriber_only" | "needs_auth" | "unavailable"
+    ) {
+        return true;
+    }
+    let title = item
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        title.as_str(),
+        "[private video]"
+            | "private video"
+            | "[deleted video]"
+            | "deleted video"
+            | "[unavailable video]"
+            | "unavailable video"
+            | "[视频不可用]"
+            | "[私有视频]"
+            | "[已删除视频]"
+    )
+}
+
 async fn get_youtube_subscription_channels(
     page: i32,
     page_size: i32,
@@ -792,9 +980,45 @@ async fn get_youtube_subscription_channels(
 }
 
 async fn load_youtube_subscription_channels() -> Result<serde_json::Value> {
-    let contents = youtube_cookie_text()
-        .context("读取 YouTube Cookie 失败：请先在设置页导入 cookies.txt 或传输登录状态")?;
-    let cookie_jar = youtube_cookie_jar_from_text(&contents)?;
+    probe_youtube_subscription_channels()
+        .await
+        .map_err(YoutubeSessionError::into_anyhow)
+}
+
+/// YouTube 登录探测的失败分类。
+///
+/// 只有 `Expired` 表示「有明确证据说明会话已经失效」，调用方在这种情况之外一律
+/// 保留现有凭证。之前只要探测报错就带着「Cookie 已失效」的字样删除会话，一次
+/// 代理抖动或风控页命中的误判就会把用户还能用的登录状态清掉，表现为「下载正常，
+/// 过一会 Cookie 突然掉了」。
+enum YoutubeSessionError {
+    Expired(anyhow::Error),
+    Unclear(anyhow::Error),
+}
+
+impl YoutubeSessionError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Expired(error) | Self::Unclear(error) => error,
+        }
+    }
+}
+
+fn youtube_cookie_expired_error() -> anyhow::Error {
+    anyhow!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态")
+}
+
+async fn probe_youtube_subscription_channels() -> std::result::Result<serde_json::Value, YoutubeSessionError> {
+    let contents = youtube_cookie_text().ok_or_else(|| {
+        YoutubeSessionError::Unclear(anyhow!(
+            "读取 YouTube Cookie 失败：请先在设置页导入 cookies.txt 或传输登录状态"
+        ))
+    })?;
+    if !has_youtube_session_value(&contents) {
+        return Err(YoutubeSessionError::Expired(youtube_cookie_expired_error()));
+    }
+    let cookie_jar =
+        youtube_cookie_jar_from_text(&contents).map_err(YoutubeSessionError::Unclear)?;
     let mut client_builder = reqwest::Client::builder()
         // Netscape 文件同时包含 YouTube 和 Google 账号域 Cookie。必须让
         // Cookie Jar 按域名分别发送：直接拼成一个 Cookie 请求头会把
@@ -804,9 +1028,14 @@ async fn load_youtube_subscription_channels() -> Result<serde_json::Value> {
         .timeout(Duration::from_secs(30));
     let proxy = configured_external_proxy();
     if !proxy.is_empty() {
-        client_builder = client_builder.no_proxy().proxy(reqwest::Proxy::all(&proxy)?);
+        let proxy = reqwest::Proxy::all(&proxy).map_err(|error| {
+            YoutubeSessionError::Unclear(anyhow::Error::new(error).context("外源代理地址无效"))
+        })?;
+        client_builder = client_builder.no_proxy().proxy(proxy);
     }
-    let client = client_builder.build()?;
+    let client = client_builder
+        .build()
+        .map_err(|error| YoutubeSessionError::Unclear(anyhow::Error::new(error).context("构建 YouTube 请求客户端失败")))?;
     let response = client
         .get(SUBSCRIPTION_CHANNELS_URL)
         .header(
@@ -816,34 +1045,60 @@ async fn load_youtube_subscription_channels() -> Result<serde_json::Value> {
         .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
         .send()
         .await
-        .context("访问 YouTube 已订阅频道页面失败")?;
-    // 浏览器式被动续约：把页面响应里的 Set-Cookie 合并写回 cookies.txt。
+        .map_err(|error| {
+            YoutubeSessionError::Unclear(anyhow::Error::new(error).context("访问 YouTube 已订阅频道页面失败"))
+        })?;
+    let status = response.status();
+    let final_url = response.url().to_string();
     let fallback_domain = response.url().host_str().unwrap_or("www.youtube.com").to_string();
-    if let Some(merged) = crate::utils::netscape_cookies::renew_cookie_text(
+    // 浏览器式被动续约：先把响应里的 Set-Cookie 合并好，但**确认本次确实处于登录
+    // 态之后**才写回 cookies.txt。否则登录墙/风控页/同意条款页返回的 Set-Cookie 也
+    // 会盖掉本来能用的会话。
+    let renewed = crate::utils::netscape_cookies::renew_cookie_text(
         &contents,
         response.headers(),
         &fallback_domain,
         is_youtube_auth_cookie_domain,
-    ) {
-        if let Err(error) = set_youtube_cookies(&merged).await {
-            warn!(error = %error, "写回 YouTube 续约后的 Cookie 失败");
+    );
+    let html = response.text().await.map_err(|error| {
+        YoutubeSessionError::Unclear(anyhow::Error::new(error).context("读取 YouTube 已订阅频道页面失败"))
+    })?;
+
+    let verdict = youtube_login_verdict(&final_url, status, &html);
+    debug!(
+        final_url = %final_url,
+        status = status.as_u16(),
+        verdict = ?verdict,
+        "YouTube 登录状态探测结果"
+    );
+    match verdict {
+        YoutubeLoginVerdict::LoggedIn => {}
+        YoutubeLoginVerdict::LoggedOut => {
+            return Err(YoutubeSessionError::Expired(youtube_cookie_expired_error()));
+        }
+        YoutubeLoginVerdict::Unclear(reason) => {
+            return Err(YoutubeSessionError::Unclear(anyhow!(
+                "YouTube 登录状态探测不确定：{reason}（HTTP {}，最终地址 {}）",
+                status.as_u16(),
+                final_url
+            )));
         }
     }
-
-    let final_url = response.url().to_string();
-    if final_url.contains("accounts.google.com") || final_url.contains("ServiceLogin") {
-        bail!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态");
+    let initial_data = extract_youtube_initial_data(&html).ok_or_else(|| {
+        YoutubeSessionError::Unclear(anyhow!("YouTube 已订阅频道页面缺少频道数据，请重新传输登录状态后重试"))
+    })?;
+    if let Some(merged) = renewed {
+        // 续约只允许「补齐/替换」Cookie，绝不允许把会话字段弄没：一旦合并结果里
+        // 已经没有 SID/SAPISID 之类的会话 Cookie，就说明这次合并有问题，宁可不写回。
+        if !has_youtube_session_value(&merged) {
+            warn!("续约后的 YouTube Cookie 丢失了会话字段，已放弃写回，保留原凭证");
+        } else if let Err(error) = set_youtube_cookies(&merged).await {
+            warn!(error = %error, "写回 YouTube 续约后的 Cookie 失败");
+        } else {
+            debug!("YouTube 会话已按响应 Set-Cookie 续约");
+        }
     }
-    if !response.status().is_success() {
-        bail!("YouTube 已订阅频道页面返回 HTTP {}", response.status());
-    }
-
-    let html = response.text().await.context("读取 YouTube 已订阅频道页面失败")?;
-    if youtube_page_is_logged_out(&html) {
-        bail!("YouTube Cookie 已失效或不完整，请在登录 YouTube 的同一浏览器配置中重新传输登录状态");
-    }
-    extract_youtube_initial_data(&html)
-        .ok_or_else(|| anyhow!("YouTube 已订阅频道页面缺少频道数据，请重新传输登录状态后重试"))
+    Ok(initial_data)
 }
 
 fn youtube_cookie_jar(path: &Path) -> Result<Arc<reqwest::cookie::Jar>> {
@@ -889,10 +1144,68 @@ fn youtube_cookie_jar_from_text(contents: &str) -> Result<Arc<reqwest::cookie::J
     Ok(jar)
 }
 
-fn youtube_page_is_logged_out(html: &str) -> bool {
-    html.contains("\"LOGGED_IN\":false")
-        || html.contains("\"loggedIn\":false")
-        || (html.contains("accounts.google.com/ServiceLogin") && !html.contains("\"LOGGED_IN\":true"))
+/// `/feed/channels` 响应的登录判定结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum YoutubeLoginVerdict {
+    /// 明确处于登录态。
+    LoggedIn,
+    /// 明确已退出登录（有正面证据）。
+    LoggedOut,
+    /// 无法判断：同意条款页、风控/验证页、HTTP 错误、非预期页面等。
+    Unclear(&'static str),
+}
+
+/// 判断 `/feed/channels` 的响应是否处于登录态。
+///
+/// 只在拿到**正面证据**时才判定退出：被重定向到 Google 登录页，或页面里明确写着
+/// `"LOGGED_IN":false`。其余情况（同意条款页、人机验证页、非 2xx、页面结构变化）
+/// 一律判为不确定，由调用方保留现有凭证 —— 判错成「已退出」的代价是删掉用户还能
+/// 用的登录状态，比漏判一次严重得多。
+fn youtube_login_verdict(
+    final_url: &str,
+    status: reqwest::StatusCode,
+    html: &str,
+) -> YoutubeLoginVerdict {
+    if final_url.contains("accounts.google.com") || final_url.contains("ServiceLogin") {
+        return YoutubeLoginVerdict::LoggedOut;
+    }
+    if html.contains("\"LOGGED_IN\":true") || html.contains("\"loggedIn\":true") {
+        return YoutubeLoginVerdict::LoggedIn;
+    }
+    if youtube_page_is_consent_wall(final_url, html) {
+        return YoutubeLoginVerdict::Unclear("命中 YouTube 同意条款/前置确认页");
+    }
+    if youtube_page_is_challenge(final_url, html) {
+        return YoutubeLoginVerdict::Unclear("命中 YouTube 风控/人机验证页");
+    }
+    if !status.is_success() {
+        return YoutubeLoginVerdict::Unclear("页面返回非 2xx");
+    }
+    if html.contains("accounts.google.com/ServiceLogin") {
+        return YoutubeLoginVerdict::LoggedOut;
+    }
+    if html.contains("\"LOGGED_IN\":false") || html.contains("\"loggedIn\":false") {
+        return YoutubeLoginVerdict::LoggedOut;
+    }
+    YoutubeLoginVerdict::Unclear("页面既没有登录标记也没有退出标记")
+}
+
+/// 代理出口在部分区域会先弹「同意条款 / before you continue」，这类页面同样带着
+/// 未登录标记，但会话本身是好的。
+fn youtube_page_is_consent_wall(final_url: &str, html: &str) -> bool {
+    final_url.contains("consent.youtube.com")
+        || final_url.contains("consent.google.com")
+        || html.contains("consent.youtube.com")
+        || html.contains("Before you continue to YouTube")
+        || html.contains("before-you-continue")
+}
+
+/// 风控/「异常流量」验证页。
+fn youtube_page_is_challenge(final_url: &str, html: &str) -> bool {
+    final_url.contains("/sorry/")
+        || html.contains("/sorry/index")
+        || html.contains("unusual traffic")
+        || html.contains("unusual-traffic")
 }
 
 fn is_youtube_auth_cookie_domain(domain: &str) -> bool {
@@ -1093,11 +1406,31 @@ pub async fn import_youtube_cookie_file(
             "文件不是包含 YouTube 会话的 Netscape cookies.txt；请在已登录 YouTube 的浏览器中导出 cookies.txt",
         ));
     }
+    // 记下导入前的凭证：一次失败的导入不能把原本还能用的登录状态一起删掉。
+    let previous = youtube_cookie_text();
     // 先清理旧会话（数据库 + 历史文件），再将新会话写入数据库。
-    clear_youtube_login_state().await;
-    set_youtube_cookies(&request.cookies).await?;
+    clear_youtube_login_state("导入新凭证前清理旧会话").await;
+    if let Err(error) = set_youtube_cookies(&request.cookies).await {
+        // 写库失败（磁盘只读、数据库被占用等）也要把旧凭证放回去，否则用户
+        // 只是导入失败，却把原本能用的登录状态弄丢了。
+        if let Some(previous) = previous.as_deref() {
+            if let Err(restore) = set_youtube_cookies(previous).await {
+                warn!(error = %restore, "恢复导入前的 YouTube 登录凭证失败");
+            }
+        }
+        return Err(ApiError::from(error));
+    }
     if let Err(error) = validate_youtube_login_cookie().await {
-        clear_youtube_login_state().await;
+        match previous {
+            Some(previous) => {
+                if let Err(restore) = set_youtube_cookies(&previous).await {
+                    warn!(error = %restore, "恢复导入前的 YouTube 登录凭证失败");
+                } else {
+                    info!("新导入的 YouTube 凭证验证失败，已回滚到导入前的登录状态");
+                }
+            }
+            None => clear_youtube_login_state("新导入的凭证验证失败，且没有可回滚的旧凭证").await,
+        }
         return Err(ApiError::bad_request(format!(
             "YouTube cookies.txt 验证失败：{}（{}）",
             error,
@@ -1231,6 +1564,24 @@ pub async fn create_youtube_source(
         // 同一个作者才不会因为链接写法不同被当成两个源重复添加。
         let sec_uid = crate::douyin::resolve_sec_user_id(&url).await?;
         url = format!("https://www.douyin.com/user/{sec_uid}");
+    } else if source_type == "douyin_mix" {
+        // 合集统一归一成网页合集页链接（`/collection/{mix_id}`），
+        // 并确认该 id 确实是合集：抖音的收藏夹与合集共用 `/collection/` 路由，
+        // 只看链接分不出来，选错类型建出来的源会永远扫不到作品。
+        let mix_id = crate::douyin::resolve_mix_id(&url).await?;
+        let detail = crate::douyin::fetch_mix_detail(&mix_id).await?;
+        let Some(detail) = detail else {
+            return Err(ApiError::bad_request(format!(
+                "这个链接不是抖音合集（ID {mix_id}）：合集请先搜索作者再从右侧选择；若要同步收藏夹请改用「收藏夹」来源类型"
+            )));
+        };
+        debug!(
+            mix_id = %detail.id,
+            mix_name = %detail.name,
+            episode_count = ?detail.episode_count,
+            "抖音合集来源已确认"
+        );
+        url = format!("https://www.douyin.com/collection/{mix_id}");
     } else if source_type == "tiktok" {
         if !crate::tiktok::is_tiktok_url(&url) {
             return Err(ApiError::from(anyhow!("TikTok 来源必须是有效的 tiktok.com 链接")));
@@ -1539,23 +1890,26 @@ pub(crate) async fn reset_external_source_path_shared(
                 continue;
             };
             let target = new_base.join(relative);
-            if old_file == target || !old_file.is_file() {
-                continue;
+            if old_file != target && old_file.is_file() {
+                for companion in recorded_output_files(&old_file).await? {
+                    let Ok(companion_relative) = companion.strip_prefix(&old_base) else {
+                        continue;
+                    };
+                    let companion_target = new_base.join(companion_relative);
+                    move_file_cross_volume(&companion, &companion_target).await?;
+                    moved_files_count += 1;
+                }
+                if request.clean_empty_folders {
+                    cleaned_folders_count +=
+                        remove_empty_parent_directories(old_file.parent(), &old_base).await;
+                }
             }
-            for companion in recorded_output_files(&old_file).await? {
-                let Ok(companion_relative) = companion.strip_prefix(&old_base) else {
-                    continue;
-                };
-                let companion_target = new_base.join(companion_relative);
-                move_file_cross_volume(&companion, &companion_target).await?;
-                moved_files_count += 1;
-            }
-            if request.clean_empty_folders {
-                cleaned_folders_count += remove_empty_parent_directories(old_file.parent(), &old_base).await;
-            }
-            // 仅在实际移动文件时同步更新各视频 output_path（保持相对目录结构）
+            // 无论媒体文件是否还在磁盘上，都要同步数据库里的 output_path：
+            // 否则「媒体已被删除 / 还没下完」的分集仍指向旧目录，之后每轮扫描回填
+            // 封面时都会按旧路径计算，旧目录被反复重建（用户看到的
+            // 「重设路径后旧目录还在不停生成 fanart/poster」）。
             let mut active: youtube_video::ActiveModel = video.clone().into();
-            active.output_path = Set(Some(new_base.join(relative).display().to_string()));
+            active.output_path = Set(Some(target.display().to_string()));
             active.updated_at = Set(now_standard_string());
             active.update(txn).await?;
         }
@@ -1563,6 +1917,14 @@ pub(crate) async fn reset_external_source_path_shared(
     let mut active: youtube_source::ActiveModel = source.into();
     active.path = Set(new_path.to_string());
     active.update(txn).await?;
+    // 旧目录里没下完的半成品（`.download.mp4` / `.merging.mp4` / `.resume` 等）
+    // 不属于任何已记录视频，上面按 output_path 搬迁时根本不会碰到，会在旧目录里
+    // 越堆越多。换目录时按下载器自己的命名规则扫一遍删掉。
+    let cleaned_partial_files_count = if old_base != new_base {
+        remove_partial_download_artifacts(&old_base).await
+    } else {
+        0
+    };
     Ok(ResetVideoSourcePathResponse {
         success: true,
         source_id: id,
@@ -1573,10 +1935,11 @@ pub(crate) async fn reset_external_source_path_shared(
         updated_videos_count: videos.len(),
         cleaned_folders_count,
         message: format!(
-            "{}视频源路径重设完成，移动 {} 个文件，清理 {} 个空文件夹",
+            "{}视频源路径重设完成，移动 {} 个文件，清理 {} 个空文件夹、{} 个未完成的临时文件",
             external_platform_label(source_type),
             moved_files_count,
-            cleaned_folders_count
+            cleaned_folders_count,
+            cleaned_partial_files_count
         ),
     })
 }
@@ -1795,6 +2158,7 @@ fn youtube_source_type_label(source_type: &str) -> &'static str {
         "douyin_watch_later" => "抖音稍后再看",
         "douyin_theater" => "抖音放映厅",
         "douyin_series" => "抖音短剧",
+        "douyin_mix" => "抖音合集",
         _ => "YouTube",
     }
 }
@@ -2099,6 +2463,8 @@ async fn remove_youtube_task_artifact(
     let mut upper_face = false;
     let mut upper_info = false;
     let mut media = false;
+    let mut danmaku = false;
+    let mut subtitle = false;
     for &index in video_indexes {
         match index {
             0 => cover = true,
@@ -2114,11 +2480,16 @@ async fn remove_youtube_task_artifact(
             0 => cover = true,
             1 => media = true,
             2 => nfo = true,
+            3 => danmaku = true,
+            4 => subtitle = true,
             _ => {}
         }
     }
     if let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) {
         let output_path = PathBuf::from(output_path);
+        if (cover || nfo) && source.source_type == "douyin_collection" {
+            cleanup_legacy_collection_series_sidecars(source, &output_path).await?;
+        }
         if cover {
             if let Ok(thumb) = youtube_sidecar_path(&output_path, "-thumb.jpg") {
                 remove_file_if_exists(&thumb).await?;
@@ -2130,8 +2501,9 @@ async fn remove_youtube_task_artifact(
         if nfo {
             let nfo_path = output_path.with_extension("nfo");
             remove_file_if_exists(&nfo_path).await?;
-            // 抖音短剧/放映厅/合集是番剧结构，剧集根目录还有 tvshow.nfo。
-            if is_episodic_douyin_source(source) {
+            // 抖音短剧/放映厅/合集确有集号、实际使用 Season 结构时，
+            // 剧集根目录还会有 tvshow.nfo。
+            if uses_episodic_layout(source, video.episode_number) {
                 if let Some(series_dir) = output_path.parent().and_then(|dir| dir.parent()) {
                     let tvshow = series_dir.join("tvshow.nfo");
                     remove_file_if_exists(&tvshow).await?;
@@ -2144,6 +2516,19 @@ async fn remove_youtube_task_artifact(
                 remove_file_if_exists(&page).await?;
             }
         }
+        if danmaku {
+            remove_file_if_exists(&external_ass_path(&output_path)).await?;
+            remove_file_if_exists(&output_path.with_extension("ass")).await?;
+            for suffix in ["danmaku.json", "danmaku.json.download", "danmaku.checked", "live_chat.json"] {
+                remove_file_if_exists(&output_path.with_extension(suffix)).await?;
+            }
+        }
+        if subtitle {
+            remove_external_subtitle_files(&output_path).await?;
+        }
+        for suffix in ["subtitle.checked", "danmaku.checked", "live_chat.checked"] {
+            remove_file_if_exists(&output_path.with_extension(suffix)).await?;
+        }
     }
     if upper_face || upper_info {
         let (face_path, person_nfo_path) = youtube_upper_paths(&video.uploader);
@@ -2154,7 +2539,61 @@ async fn remove_youtube_task_artifact(
             remove_file_if_exists(&person_nfo_path).await?;
         }
     }
+    if let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) {
+        prune_empty_external_dirs(source, Path::new(output_path)).await;
+    }
     Ok(())
+}
+
+async fn remove_external_subtitle_files(output_path: &Path) -> Result<()> {
+    let Some(parent) = output_path.parent() else {
+        return Ok(());
+    };
+    let stem = output_path.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+    if stem.is_empty() {
+        return Ok(());
+    }
+    let prefix = format!("{stem}.");
+    let danmaku_ass = format!("{stem}.zh-CN.default.ass");
+    let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
+        return Ok(());
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+        if name.starts_with(&prefix)
+            && matches!(extension, "vtt" | "srt" | "ass" | "ssa")
+            && name != danmaku_ass
+        {
+            remove_file_if_exists(&path).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn prune_empty_external_dirs(source: &youtube_source::Model, output_path: &Path) {
+    let root = PathBuf::from(source.path.trim());
+    let mut current = output_path.parent().map(Path::to_path_buf);
+    while let Some(dir) = current {
+        if dir == root || !dir.starts_with(&root) {
+            break;
+        }
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            break;
+        };
+        if entries.next_entry().await.ok().flatten().is_some() {
+            break;
+        }
+        if let Err(error) = tokio::fs::remove_dir(&dir).await {
+            debug!(path = %dir.display(), %error, "清理空外源目录失败");
+            break;
+        }
+        debug!(path = %dir.display(), "已清理空外源目录");
+        current = dir.parent().map(Path::to_path_buf);
+    }
 }
 
 /// 按 B 站语义整体重置一条外源视频的任务状态位并落库。
@@ -2477,6 +2916,9 @@ async fn regenerate_youtube_artifacts(
                 parent.display()
             );
         }
+        if source.source_type == "douyin_collection" {
+            cleanup_legacy_collection_series_sidecars(&source, &output_path).await?;
+        }
     }
     let downloader = TASK_CONTROLLER.get_downloader().await;
     if regen.cover {
@@ -2516,14 +2958,22 @@ async fn regenerate_youtube_artifacts(
         )
         .await
         .with_context(|| format!("重新生成{platform}视频信息/NFO失败"))?;
-        // 抖音短剧/放映厅/合集是番剧结构：单集 NFO 之外还要刷新剧集 tvshow.nfo。
-        if is_episodic_douyin_source(&source) {
+        // 抖音短剧/放映厅/合集确有集号、实际使用 Season 结构时，
+        // 单集 NFO 之外还要刷新剧集 tvshow.nfo。
+        if uses_episodic_layout(&source, video.episode_number) {
             if let (Some(season_dir), Some(downloader)) = (output_path.parent(), downloader.as_deref()) {
                 if let Some(series_dir) = season_dir.parent() {
                     let tvshow = series_dir.join("tvshow.nfo");
                     remove_file_if_exists(&tvshow).await?;
                     if let Err(error) =
-                        ensure_youtube_series_sidecars(downloader, metadata, &output_path, &source).await
+                        ensure_youtube_series_sidecars(
+                            downloader,
+                            metadata,
+                            &output_path,
+                            &source,
+                            avatar_url.as_deref(),
+                        )
+                        .await
                     {
                         warn!(platform, %error, "{platform}剧集 tvshow.nfo 重建失败（单集 NFO 已更新）");
                     }
@@ -2719,11 +3169,11 @@ pub async fn process_scheduled_sources(
     if sources.is_empty() {
         return Ok(results);
     }
+    recover_interrupted_downloads(db).await?;
     if let Err(error) = ensure_ytdlp_available().await {
         warn!(error = %error, "已配置 YouTube/抖音视频源，但 yt-dlp 自动安装失败；跳过本轮扫描");
         return Ok(results);
     }
-    recover_interrupted_downloads(db).await?;
     let startup_round = EXTERNAL_STARTUP_SCAN_PENDING.swap(false, Ordering::SeqCst);
     if startup_round && STARTUP_EXTERNAL_SCAN_GRACE_SECONDS > 0 {
         info!(
@@ -2920,6 +3370,9 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     if is_douyin_source(source) {
         return scan_douyin_source(db, source).await;
     }
+    if let Err(error) = cleanup_external_checked_markers_for_source(db, source).await {
+        warn!(source_id = source.id, error = %error, "清理外部平台检查标记失败，继续扫描");
+    }
     if source.source_type == "tiktok_favorite" {
         crate::tiktok::ensure_tiktok_session()?;
         return crate::tiktok::scan_tiktok_favorite_source(db, source).await;
@@ -3003,6 +3456,10 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         let Some(youtube_id) = item.get("id").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) else {
             continue;
         };
+        if ytdlp_flat_item_is_unavailable(&item) {
+            debug!(youtube_id, "跳过 YouTube 列表中的失效/私有视频");
+            continue;
+        }
         scanned_video_ids.insert(youtube_id.to_string());
         if source.source_type == "subscriptions"
             && !selected_channels.is_empty()
@@ -3155,7 +3612,56 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     Ok(added)
 }
 
+async fn cleanup_external_checked_markers_for_source(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    let videos = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(source.id))
+        .filter(youtube_video::Column::OutputPath.is_not_null())
+        .all(db)
+        .await?;
+    for video in videos {
+        let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        let output_path = Path::new(output_path);
+        for suffix in ["subtitle.checked", "danmaku.checked", "live_chat.checked"] {
+            let path = output_path.with_extension(suffix);
+            if let Err(error) = remove_file_if_exists(&path).await {
+                warn!(path = %path.display(), error = %error, "清理外部平台检查标记失败");
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
+    if let Err(error) = migrate_douyin_sidecars_for_source(db, source).await {
+        warn!(
+            source_id = source.id,
+            error = %error,
+            "抖音旧弹幕附属文件迁移失败，继续扫描"
+        );
+    }
+    if is_episodic_douyin_source(source) {
+        if let Err(error) = backfill_episodic_sidecars_from_first_video(db, source).await {
+            warn!(
+                source_id = source.id,
+                error = %error,
+                "抖音剧集根目录封面/演员信息补全失败，继续扫描"
+            );
+        }
+    }
+    if source.source_type == "douyin_collection" {
+        if let Err(error) = cleanup_legacy_collection_sidecars_for_source(db, source).await {
+            warn!(
+                source_id = source.id,
+                error = %error,
+                "抖音收藏夹旧剧集附属文件批量清理失败，继续扫描"
+            );
+        }
+    }
     let selected_history = source
         .selected_videos
         .as_deref()
@@ -3300,6 +3806,154 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
         notify_queue_status_changed();
     }
     Ok(added)
+}
+
+async fn migrate_douyin_sidecars_for_source(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    if !is_douyin_source(source) {
+        return Ok(());
+    }
+    let videos = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(source.id))
+        .filter(youtube_video::Column::OutputPath.is_not_null())
+        .filter(youtube_video::Column::EpisodeNumber.is_not_null())
+        .all(db)
+        .await?;
+    for video in videos {
+        let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        crate::douyin::migrate_douyin_sidecar_names(Path::new(output_path)).await?;
+    }
+    Ok(())
+}
+
+async fn backfill_episodic_sidecars_from_first_video(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    if !is_episodic_douyin_source(source) {
+        return Ok(());
+    }
+    let videos = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(source.id))
+        .filter(youtube_video::Column::OutputPath.is_not_null())
+        .order_by_asc(youtube_video::Column::EpisodeNumber)
+        .order_by_asc(youtube_video::Column::Id)
+        .all(db)
+        .await?;
+    // 只按「媒体确实还在磁盘上」的分集回填：媒体已删除 / 未下完的分集如果仍留着
+    // 旧的 output_path，就会把封面写到已经不用的目录里 —— 重设路径后旧目录被
+    // 反复重建、每轮扫描都冒出 fanart/poster 就是这么来的。
+    let Some(video) = videos.into_iter().find(|video| {
+        video
+            .output_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty() && Path::new(path).is_file())
+    }) else {
+        return Ok(());
+    };
+    let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let output_path = PathBuf::from(output_path);
+    let Some(season_dir) = output_path.parent() else {
+        return Ok(());
+    };
+    let Some(series_dir) = season_dir.parent() else {
+        return Ok(());
+    };
+    let thumb = youtube_sidecar_path(&output_path, "-thumb.jpg")?;
+    let fanart = youtube_sidecar_path(&output_path, "-fanart.jpg")?;
+    for (name, source_path) in [
+        ("folder.jpg", &thumb),
+        ("poster.jpg", &thumb),
+        // 竖图给 poster/folder，横图给 landscape/fanart，避免把竖版封面拉成背景墙
+        ("landscape.jpg", &fanart),
+        ("fanart.jpg", &fanart),
+    ] {
+        let target = series_dir.join(name);
+        if tokio::fs::metadata(&target)
+            .await
+            .is_ok_and(|metadata| metadata.len() >= 1024)
+            || !tokio::fs::metadata(source_path)
+                .await
+                .is_ok_and(|metadata| metadata.len() >= 1024)
+        {
+            continue;
+        }
+        tokio::fs::copy(source_path, &target)
+            .await
+            .with_context(|| format!("补全剧集根目录封面失败: {}", target.display()))?;
+        if let Err(error) = ensure_jpeg_image(&target).await {
+            warn!(path = %target.display(), %error, "剧集根目录封面转 JPEG 失败（文件仍是原始格式）");
+        }
+    }
+
+    let tvshow_path = series_dir.join("tvshow.nfo");
+    let Ok(tvshow) = tokio::fs::read_to_string(&tvshow_path).await else {
+        return Ok(());
+    };
+    if tvshow.contains("<actor>") || video.uploader.trim().is_empty() {
+        return Ok(());
+    }
+    let avatar = tokio::fs::read_to_string(output_path.with_extension("nfo"))
+        .await
+        .ok()
+        .and_then(|nfo| extract_xml_tag_text(&nfo, "thumb"));
+    let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
+    let thumb = avatar
+        .map(|value| format!("<thumb>{}</thumb>", escape(&value)))
+        .unwrap_or_default();
+    let actor = format!(
+        "    <actor><name>{}</name><role>UP主</role>{thumb}</actor>\n",
+        escape(video.uploader.trim())
+    );
+    let Some(season_tag) = tvshow.find("    <season>") else {
+        return Ok(());
+    };
+    let refreshed = format!("{}{}{}", &tvshow[..season_tag], actor, &tvshow[season_tag..]);
+    let temporary = unique_download_path(&tvshow_path);
+    tokio::fs::write(&temporary, refreshed).await?;
+    replace_file(&temporary, &tvshow_path).await?;
+    info!(
+        source_id = source.id,
+        path = %tvshow_path.display(),
+        "已为抖音剧集 tvshow.nfo 补全 UP 主演员信息"
+    );
+    Ok(())
+}
+
+fn extract_xml_tag_text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    let value = quick_xml::escape::unescape(xml[start..end].trim()).ok()?.into_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+async fn cleanup_legacy_collection_sidecars_for_source(
+    db: &DatabaseConnection,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    if source.source_type != "douyin_collection" {
+        return Ok(());
+    }
+    let videos = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(source.id))
+        .filter(youtube_video::Column::OutputPath.is_not_null())
+        .all(db)
+        .await?;
+    for video in videos {
+        let Some(output_path) = video.output_path.as_deref().filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        cleanup_legacy_collection_series_sidecars(source, Path::new(output_path)).await?;
+    }
+    Ok(())
 }
 
 fn youtube_item_is_newer_than_source(item: &serde_json::Value, created_at: &str) -> bool {
@@ -3533,7 +4187,20 @@ async fn download_video(
 
         // 每次重试都重新让 yt-dlp 解析签名直链，避免复用已经限速或失效的
         // GoogleVideo URL；媒体仍由 UnifiedDownloader 和原 ffmpeg 链路处理。
-        let result = download_youtube_media(downloader, &source, &video).await;
+        // 整次尝试套一层硬超时：任何环节卡死都不能让任务永久停在「下载中」。
+        let result = match tokio::time::timeout(
+            EXTERNAL_MEDIA_ATTEMPT_TIMEOUT,
+            download_youtube_media(downloader, &source, &video),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!(
+                "{}视频下载超时：{} 分钟内没有任何结果，已中止本次尝试（请检查网络/代理，或稍后重试）",
+                platform_label,
+                EXTERNAL_MEDIA_ATTEMPT_TIMEOUT.as_secs() / 60
+            )),
+        };
         let mut active: youtube_video::ActiveModel = video.clone().into();
         active.updated_at = Set(now_standard_string());
         match result {
@@ -3672,12 +4339,15 @@ async fn download_video(
                 video = active.update(db).await?;
                 // 前两次重试失败只记 debug，第三次起才报 WARN，避免每轮重试都刷屏。
                 if retry_count >= 3 {
+                    // `{:#}` 才会带出完整错误链（外层「统一下载器下载失败」→ 内层
+                    // HTTP 状态/网络错误），否则日志里只剩一句没有信息量的包装文案。
+                    let chained = format!("{:#}", error);
                     warn!(
                         platform = platform_label,
                         source_id = source.id,
                         retry_count,
                         max_retries = MAX_DOWNLOAD_RETRIES,
-                        error = %error,
+                        error = %chained,
                         "{}视频源「{}」视频「{}」下载失败，真实错误已持久化",
                         platform_label,
                         source.name,
@@ -3706,9 +4376,11 @@ async fn download_video(
                 // 其它平台维持原有 5 秒/次退避。YouTube 命中验证墙（Sign in to
                 // confirm you're not a bot）时拉长到 5 分钟级，让出口 IP 冷却，
                 // 避免每 5 秒空转把风控越打越重。
-                let retry_delay = if crate::tiktok::is_tiktok_source(&source) {
+                // 抖音/TikTok 的失败大多是 CDN 限速，窗口是按时间恢复的：5 秒一次的
+                // 重试只会继续挨打，改成 30s 起的阶梯退避。
+                let retry_delay = if is_douyin_source(&source) || crate::tiktok::is_tiktok_source(&source) {
                     Duration::from_secs((retry_count.max(1) as u64) * 30)
-                } else if !crate::tiktok::is_tiktok_source(&source) && !is_douyin_source(&source) && is_youtube_bot_wall_error(&error) {
+                } else if is_youtube_bot_wall_error(&error) {
                     Duration::from_secs(300 * (retry_count.max(1) as u64))
                 } else {
                     Duration::from_secs((retry_count.max(1) as u64) * 5)
@@ -4238,6 +4910,7 @@ async fn download_youtube_media(
                 channel_id: None,
                 channel_url: None,
                 thumbnail: video.thumbnail.clone(),
+                fanart: None,
                 description: None,
                 language: None,
                 upload_date: video.published_at.clone(),
@@ -4585,6 +5258,11 @@ async fn download_youtube_media(
         }
     }
 
+    if source.source_type == "douyin_collection" {
+        if let Err(error) = cleanup_legacy_collection_series_sidecars(source, &output_path).await {
+            warn!(platform, %error, "抖音收藏夹旧剧集附属文件清理失败");
+        }
+    }
     let sidecars = if source.audio_only && source.audio_only_m4a_only && !metadata.is_slideshow() {
         YoutubeSidecarOutcome::default()
     } else {
@@ -4596,6 +5274,7 @@ async fn download_youtube_media(
             &title,
             &uploader,
             source,
+            video.episode_number,
         )
         .await
     };
@@ -5340,10 +6019,8 @@ fn youtube_output_path(
     // 抖音短剧/放映厅/合集与 B 站合集 up_seasonal 模式保持一致：
     // 下载根目录/剧集名/S01E001 - 每集标题.mp4。一个剧集一个目录，
     // 文件名带三位集号保证文件系统排序稳定；无集号时回退到普通单 P 命名。
-    let episodic_source = matches!(
-        source.source_type.as_str(),
-        "douyin_theater" | "douyin_series" | "douyin_collection"
-    );
+    let episodic_source = uses_episodic_layout(source, video.episode_number);
+    let root = PathBuf::from(&source.path);
     let (video_folder, page_name) = if episodic_source {
         if let Some(episode) = video.episode_number.filter(|value| *value >= 1) {
             // 与 B 站番剧标准结构保持一致：
@@ -5354,8 +6031,33 @@ fn youtube_output_path(
             } else {
                 series_folder
             };
-            let video_folder = format!("{series_folder}/Season 01");
-            (video_folder, format!("S01E{:02}", episode))
+            // 快捷路径模板可能已经把合集名带入 source.path。此时直接以该目录
+            // 作为合集根目录，避免生成 `合集名/合集名/Season 01`。
+            let video_folder = if path_leaf_matches(&root, &series_folder) {
+                "Season 01".to_string()
+            } else {
+                format!("{series_folder}/Season 01")
+            };
+            // 抖音合集按 B 站合集默认模板命名：`S01E01 - 集标题`（标题只做目录名清洗，
+            // NFO/媒体库标题仍是原始标题）。短剧/放映厅保持原有的纯集号写法，
+            // 避免已有剧集目录成批改名。
+            let page_name = if source.source_type == "douyin_mix" {
+                let episode_title = crate::utils::title_clean::clean_title_for_path(title);
+                if episode_title.is_empty() || episode_title == "无标题" {
+                    format!("S01E{:02}", episode)
+                } else {
+                    // filenamify 会把单个路径段截到 200 字节并处理非法字符，
+                    // 加上前缀与扩展名仍远低于文件系统 255 字节上限。
+                    format!(
+                        "S01E{:02} - {}",
+                        episode,
+                        crate::utils::filenamify::filenamify(episode_title)
+                    )
+                }
+            } else {
+                format!("S01E{:02}", episode)
+            };
+            (video_folder, page_name)
         } else {
             crate::config::with_config(|bundle| {
                 Ok::<_, anyhow::Error>((
@@ -5380,12 +6082,17 @@ fn youtube_output_path(
     } else {
         "mp4"
     };
-    let root = PathBuf::from(&source.path);
     if source.flat_folder {
         Ok(root.join(format!("{page_name}.{extension}")))
     } else {
         Ok(root.join(video_folder).join(format!("{page_name}.{extension}")))
     }
+}
+
+fn path_leaf_matches(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
 }
 
 /// 附属文件子任务的结果：告警文案 + 本次解析到的头像地址。
@@ -5412,6 +6119,7 @@ async fn ensure_youtube_sidecars(
     title: &str,
     uploader: &str,
     source: &youtube_source::Model,
+    episode_number: Option<i32>,
 ) -> YoutubeSidecarOutcome {
     let mut warnings = Vec::new();
     let platform = source_platform_label(source);
@@ -5482,9 +6190,12 @@ async fn ensure_youtube_sidecars(
             info!(platform, youtube_id = %metadata.id, "{}视频源「{}」视频「{}」{} 子任务完成", platform, source.name, title, task);
         }
     }
-    // 短剧/放映厅/合集按番剧结构补充剧集级附属文件（tvshow.nfo、season.nfo、folder.jpg、poster.jpg）。
-    if is_episodic_douyin_source(source) {
-        if let Err(error) = ensure_youtube_series_sidecars(downloader, metadata, output_path, source).await {
+    // 短剧/放映厅/合集确有集号、按番剧结构补充剧集级附属文件
+    //（tvshow.nfo、season.nfo、folder.jpg、poster.jpg）。
+    if uses_episodic_layout(source, episode_number) {
+        if let Err(error) =
+            ensure_youtube_series_sidecars(downloader, metadata, output_path, source, avatar_url.as_deref()).await
+        {
             warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」媒体已下载，但剧集附属文件子任务失败", platform, source.name);
             warnings.push(format!("剧集附属文件生成失败：{error:#}"));
         }
@@ -5498,8 +6209,56 @@ async fn ensure_youtube_sidecars(
 fn is_episodic_douyin_source(source: &youtube_source::Model) -> bool {
     matches!(
         source.source_type.as_str(),
-        "douyin_theater" | "douyin_series" | "douyin_collection"
+        "douyin_theater" | "douyin_series" | "douyin_mix"
     )
+}
+
+/// 只有来源本身是剧集类型且当前作品确实有集号时，才使用
+/// `剧集名/Season 01/S01E01...` 文件树。否则一律回退普通单视频模板，
+/// 避免出现“普通目录里硬塞 season.nfo”的半套剧集结构。
+fn uses_episodic_layout(source: &youtube_source::Model, episode_number: Option<i32>) -> bool {
+    is_episodic_douyin_source(source) && episode_number.is_some_and(|episode| episode >= 1)
+}
+
+/// 清理旧版本把抖音收藏夹误当剧集时留下的附属文件。
+///
+/// 仅当根目录 `tvshow.nfo` 确实是本收藏夹源生成的内容时才一并删除同组封面，
+/// 避免误删同一目录下用户自己的图片。收藏夹的视频目录内 `season.nfo`
+/// 也是旧版本硬塞进去的固定模板文件，可安全删除。
+async fn cleanup_legacy_collection_series_sidecars(
+    source: &youtube_source::Model,
+    output_path: &Path,
+) -> Result<()> {
+    if source.source_type != "douyin_collection" {
+        return Ok(());
+    }
+    let Some(media_dir) = output_path.parent() else {
+        return Ok(());
+    };
+
+    let season_path = media_dir.join("season.nfo");
+    if let Ok(contents) = tokio::fs::read_to_string(&season_path).await {
+        if contents.contains("<season>") && contents.contains("<seasonnumber>1</seasonnumber>") {
+            remove_file_if_exists(&season_path).await?;
+        }
+    }
+
+    let Some(shared_dir) = media_dir.parent() else {
+        return Ok(());
+    };
+    let tvshow_path = shared_dir.join("tvshow.nfo");
+    let Ok(tvshow) = tokio::fs::read_to_string(&tvshow_path).await else {
+        return Ok(());
+    };
+    let escaped_source_url = quick_xml::escape::escape(&source.url).into_owned();
+    if !tvshow.contains(r#"<uniqueid type="douyin""#) || !tvshow.contains(&escaped_source_url) {
+        return Ok(());
+    }
+    remove_file_if_exists(&tvshow_path).await?;
+    for name in ["folder.jpg", "poster.jpg"] {
+        remove_file_if_exists(&shared_dir.join(name)).await?;
+    }
+    Ok(())
 }
 
 /// 抖音短剧/放映厅/合集按番剧结构生成剧集级附属文件：
@@ -5510,6 +6269,7 @@ async fn ensure_youtube_series_sidecars(
     metadata: &ExternalMediaMetadata,
     output_path: &Path,
     source: &youtube_source::Model,
+    avatar_url: Option<&str>,
 ) -> Result<()> {
     let platform = source_platform_label(source);
     let Some(season_dir) = output_path.parent() else {
@@ -5525,19 +6285,42 @@ async fn ensure_youtube_series_sidecars(
     let thumb_exists = tokio::fs::metadata(&thumb_path)
         .await
         .is_ok_and(|metadata| metadata.len() >= 1024);
-    for name in ["folder.jpg", "poster.jpg"] {
+    let fanart_path = youtube_sidecar_path(output_path, "-fanart.jpg")?;
+    let fanart_exists = tokio::fs::metadata(&fanart_path)
+        .await
+        .is_ok_and(|metadata| metadata.len() >= 1024);
+    for (name, source_path, source_exists) in [
+        ("folder.jpg", &thumb_path, thumb_exists),
+        ("poster.jpg", &thumb_path, thumb_exists),
+        ("landscape.jpg", &fanart_path, fanart_exists),
+        ("fanart.jpg", &fanart_path, fanart_exists),
+    ] {
         let target = series_dir.join(name);
         if tokio::fs::metadata(&target)
             .await
             .is_ok_and(|metadata| metadata.len() >= 1024)
         {
+            // 已存在的封面也顺手校正：老版本可能把 WebP 存成了 .jpg。
+            if let Err(error) = ensure_jpeg_image(&target).await {
+                warn!(platform, path = %target.display(), %error, "{}剧集封面转 JPEG 失败（文件仍是原始格式）", platform);
+            }
             continue;
         }
-        if thumb_exists {
-            tokio::fs::copy(&thumb_path, &target)
+        if source_exists {
+            tokio::fs::copy(source_path, &target)
                 .await
                 .with_context(|| format!("生成{platform}剧集封面失败: {}", target.display()))?;
-        } else if let Some(url) = metadata.thumbnail.as_deref() {
+        } else {
+            // 竖图（folder/poster）用竖版封面；横图（landscape/fanart）优先平台给出的
+            // 横版封面（抖音 dynamic_cover），没有再退回竖版，避免背景墙被拉伸。
+            let url = if matches!(name, "landscape.jpg" | "fanart.jpg") {
+                metadata.fanart.as_deref().or(metadata.thumbnail.as_deref())
+            } else {
+                metadata.thumbnail.as_deref()
+            };
+            let Some(url) = url else {
+                continue;
+            };
             // 剧集封面同样按剧集共享，多个分集并发下载时会争用同一临时文件
             let temporary = unique_download_path(&target);
             if let Err(error) = fetch_platform_asset(downloader, source, &[url], &temporary)
@@ -5549,6 +6332,10 @@ async fn ensure_youtube_series_sidecars(
             }
             replace_file(&temporary, &target).await?;
         }
+        // 封面可能是 WebP（抖音常见），落盘名是 .jpg，统一转成真 JPEG。
+        if let Err(error) = ensure_jpeg_image(&target).await {
+            warn!(platform, path = %target.display(), %error, "{}剧集封面转 JPEG 失败（文件仍是原始格式）", platform);
+        }
         info!(platform, path = %target.display(), "{}视频源「{}」剧集封面生成完成", platform, source.name);
     }
 
@@ -5557,11 +6344,12 @@ async fn ensure_youtube_series_sidecars(
         return Ok(());
     }
     let tvshow_path = series_dir.join("tvshow.nfo");
-    if !tokio::fs::metadata(&tvshow_path)
-        .await
-        .is_ok_and(|metadata| metadata.len() > 0)
-    {
-        let xml = generate_youtube_tvshow_nfo(source, metadata);
+    let needs_tvshow_refresh = match tokio::fs::read_to_string(&tvshow_path).await {
+        Ok(contents) => !contents.contains("<actor>"),
+        Err(_) => true,
+    };
+    if needs_tvshow_refresh {
+        let xml = generate_youtube_tvshow_nfo(source, metadata, avatar_url);
         let temporary = unique_download_path(&series_dir.join("tvshow.nfo"));
         tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
             format!("写入{platform}剧集 NFO 失败: {}", temporary.display())
@@ -5586,11 +6374,34 @@ async fn ensure_youtube_series_sidecars(
     Ok(())
 }
 
-fn generate_youtube_tvshow_nfo(source: &youtube_source::Model, metadata: &ExternalMediaMetadata) -> String {
+fn generate_youtube_tvshow_nfo(
+    source: &youtube_source::Model,
+    metadata: &ExternalMediaMetadata,
+    avatar_url: Option<&str>,
+) -> String {
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     let platform = source_platform(source);
     let studio = source_platform_label(source);
     let description = metadata.description.as_deref().unwrap_or_default();
+    let uploader = metadata
+        .uploader
+        .as_deref()
+        .or(metadata.channel.as_deref())
+        .unwrap_or_default()
+        .trim();
+    let actor = if uploader.is_empty() {
+        String::new()
+    } else {
+        let thumb = avatar_url
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("<thumb>{}</thumb>", escape(value)))
+            .unwrap_or_default();
+        format!(
+            "    <actor><name>{}</name><role>UP主</role>{thumb}</actor>\n",
+            escape(uploader)
+        )
+    };
+    let thumbnail = metadata.thumbnail.as_deref().unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <tvshow>
@@ -5600,6 +6411,8 @@ fn generate_youtube_tvshow_nfo(source: &youtube_source::Model, metadata: &Extern
     <plot>{}</plot>
     <studio>{}</studio>
     <uniqueid type="{}" default="true">{}</uniqueid>
+{}    <thumb aspect="poster">{}</thumb>
+    <fanart><thumb>{}</thumb></fanart>
     <season>-1</season>
     <episode>-1</episode>
 </tvshow>
@@ -5611,6 +6424,9 @@ fn generate_youtube_tvshow_nfo(source: &youtube_source::Model, metadata: &Extern
         escape(studio),
         escape(platform),
         escape(&source.url),
+        actor,
+        escape(thumbnail),
+        escape(thumbnail),
     )
 }
 
@@ -5900,6 +6716,76 @@ fn youtube_sidecar_path(output_path: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(parent.join(format!("{stem}{suffix}")))
 }
 
+fn is_jpeg_header(head: &[u8]) -> bool {
+    head.len() >= 3 && head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF
+}
+
+/// 是否需要把图片转成 JPEG（WebP / PNG / GIF）。
+fn needs_jpeg_conversion(head: &[u8]) -> bool {
+    if head.len() < 12 {
+        return false;
+    }
+    (head.starts_with(b"RIFF") && &head[8..12] == b"WEBP")
+        || head.starts_with(&[0x89, b'P', b'N', b'G'])
+        || head.starts_with(b"GIF8")
+}
+
+/// 确保图片文件真的是 JPEG：按文件头判断，不是就调用项目自带的 ffmpeg 转一遍。
+///
+/// 抖音封面接口会随机返回 `image/jpeg` 或 `image/webp`，而 URL 上完全看不出来，
+/// 我们却统一按 `.jpg` / `poster.jpg` 落盘。WebP 顶着 `.jpg` 的名字时，部分媒体库
+/// 和播放器会直接显示不出来，所以这里统一转成真正的 JPEG。
+async fn ensure_jpeg_image(path: &Path) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut head = [0u8; 16];
+    let read = match tokio::fs::File::open(path).await {
+        Ok(mut file) => file.read(&mut head).await.unwrap_or(0),
+        Err(_) => return Ok(()),
+    };
+    if read == 0 || is_jpeg_header(&head[..read]) || !needs_jpeg_conversion(&head[..read]) {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("cover.jpg");
+    // 同一张合集封面会被多个分集并发校正，临时名必须唯一，否则先完成的那个把
+    // 临时文件 rename 走，另一个会读到 0 字节或直接报错。
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let temporary = path.with_file_name(format!("{file_name}.{unique}.convert.jpg"));
+    let output = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            // mjpeg 需要偶数宽高，顺手抹平，避免 1 像素奇数的封面直接转失败。
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-pix_fmt",
+            "yuvj420p",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+        ])
+        .arg(&temporary)
+        .output()
+        .await
+        .with_context(|| format!("封面转 JPEG 失败（启动 ffmpeg 出错）: {}", path.display()))?;
+    if !output.status.success() {
+        let _ = remove_file_if_exists(&temporary).await;
+        bail!(
+            "封面转 JPEG 失败: {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    replace_file(&temporary, path).await?;
+    debug!(path = %path.display(), "封面不是 JPEG，已转换为 JPEG");
+    Ok(())
+}
+
 async fn download_youtube_cover(
     downloader: &UnifiedDownloader,
     metadata: &ExternalMediaMetadata,
@@ -5932,10 +6818,50 @@ async fn download_youtube_cover(
         .await
         .is_ok_and(|metadata| metadata.len() >= 1024)
     {
-        tokio::fs::copy(&thumb_path, &fanart_path)
-            .await
-            .with_context(|| format!("生成{platform} fanart 失败: {}", fanart_path.display()))?;
+        // 优先用平台单独提供的横版封面（抖音 `video.dynamic_cover`）：竖版封面
+        // 直接当背景墙会被拉伸/裁切。拿不到横图时才退回竖版封面。
+        let mut downloaded = false;
+        if let Some(url) = metadata.fanart.as_deref().filter(|value| !value.trim().is_empty()) {
+            let temporary = youtube_sidecar_path(output_path, "-fanart.download")?;
+            match fetch_platform_asset(downloader, source, &[url], &temporary).await {
+                Ok(()) => {
+                    replace_file(&temporary, &fanart_path).await?;
+                    downloaded = true;
+                }
+                Err(error) => {
+                    let _ = remove_file_if_exists(&temporary).await;
+                    warn!(
+                        platform,
+                        youtube_id = %metadata.id,
+                        %error,
+                        "{}视频源「{}」横版封面下载失败，回退到竖版封面",
+                        platform,
+                        source.name
+                    );
+                }
+            }
+        }
+        if !downloaded {
+            tokio::fs::copy(&thumb_path, &fanart_path)
+                .await
+                .with_context(|| format!("生成{platform} fanart 失败: {}", fanart_path.display()))?;
+        }
         info!(platform = source_platform_label(source), youtube_id = %metadata.id, path = %fanart_path.display(), "{}视频源「{}」视频「{}」 fanart 生成完成", source_platform_label(source), source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
+    }
+    // 抖音封面会随机给 JPEG / WebP，统一转成真 JPEG，避免媒体库认不出 .jpg 里的 WebP。
+    for (label, cover) in [("thumb", &thumb_path), ("fanart", &fanart_path)] {
+        if let Err(error) = ensure_jpeg_image(cover).await {
+            warn!(
+                platform = source_platform_label(source),
+                youtube_id = %metadata.id,
+                path = %cover.display(),
+                %error,
+                "{}视频「{}」{} 封面转 JPEG 失败（文件仍是原始格式）",
+                platform,
+                metadata.title.as_deref().unwrap_or(&metadata.id),
+                label
+            );
+        }
     }
     Ok(())
 }
@@ -6034,6 +6960,7 @@ fn build_youtube_movie_nfo_xml(
 ) -> String {
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     let avatar = avatar_url.filter(|url| !url.trim().is_empty());
+    let actor_role = if platform == "douyin" { "UP主" } else { "频道" };
     let mut actors = Vec::new();
     for (index, name) in std::iter::once(uploader)
         .chain(co_creators.iter().map(String::as_str))
@@ -6049,12 +6976,17 @@ fn build_youtube_movie_nfo_xml(
             String::new()
         };
         actors.push(format!(
-            "    <actor><name>{}</name><role>频道</role>{}</actor>",
+            "    <actor><name>{}</name><role>{actor_role}</role>{}</actor>",
             escape(name),
             thumb
         ));
     }
     let actor_lines = actors.join("\n");
+    let director_block = if platform == "douyin" {
+        String::new()
+    } else {
+        format!("    <director>{}</director>\n", escape(uploader))
+    };
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n\
 <movie>\n\
@@ -6067,7 +6999,7 @@ fn build_youtube_movie_nfo_xml(
     <premiered>{}</premiered>\n\
     <aired>{}</aired>\n\
     <studio>{}</studio>\n\
-    <director>{}</director>\n\
+{}\
 {actor_lines}\n\
     <thumb aspect=\"poster\">{}</thumb>\n\
     <fanart><thumb>{}</thumb></fanart>\n\
@@ -6083,7 +7015,7 @@ fn build_youtube_movie_nfo_xml(
         aired.format("%Y-%m-%d"),
         aired.format("%Y-%m-%d"),
         escape(studio),
-        escape(uploader),
+        director_block,
         escape(thumbnail),
         escape(thumbnail),
         escape(video_url),
@@ -6156,7 +7088,6 @@ async fn download_youtube_subtitle(
     if youtube_subtitle_exists(output_path).await? {
         return Ok(());
     }
-    let checked_path = output_path.with_extension("subtitle.checked");
     let mut requested_order = youtube_subtitle_language_candidates(preferred_language);
     requested_order.extend(["zh-Hans", "zh-CN", "zh", "en", "ja"].map(str::to_string));
     requested_order.dedup();
@@ -6176,9 +7107,6 @@ async fn download_youtube_subtitle(
     });
     let selected = manual.or(automatic);
     let Some((language, subtitle, url)) = selected else {
-        tokio::fs::write(&checked_path, b"no matching subtitle\n")
-            .await
-            .with_context(|| format!("写入字幕检查标记失败: {}", checked_path.display()))?;
         info!(youtube_id = %metadata.id, "{}视频源「{}」视频「{}」没有匹配的字幕，跳过字幕子任务", platform, source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
         return Ok(());
     };
@@ -6191,7 +7119,6 @@ async fn download_youtube_subtitle(
         let _ = remove_file_if_exists(&subtitle_path).await;
         return Err(error);
     }
-    let _ = remove_file_if_exists(&checked_path).await;
     info!(platform, youtube_id = %metadata.id, path = %subtitle_path.display(), "{}视频源「{}」视频「{}」字幕下载完成", platform, source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
     Ok(())
 }
@@ -6213,8 +7140,8 @@ async fn write_external_danmaku_ass(
     duration_seconds: i32,
     danmaku: Vec<DanmakuElem>,
 ) -> Result<()> {
-    let ass_path = output_path.with_extension("ass");
-    let temporary = output_path.with_extension("ass.download");
+    let ass_path = external_ass_path(output_path);
+    let temporary = output_path.with_extension("zh-CN.default.ass.download");
     let page = BiliPageInfo {
         cid: 0,
         page: 1,
@@ -6229,6 +7156,10 @@ async fn write_external_danmaku_ass(
         return Err(error).context("生成媒体 ASS 弹幕失败");
     }
     replace_file(&temporary, &ass_path).await
+}
+
+fn external_ass_path(output_path: &Path) -> PathBuf {
+    output_path.with_extension("zh-CN.default.ass")
 }
 
 fn youtube_runs_text(value: Option<&serde_json::Value>) -> String {
@@ -6362,8 +7293,8 @@ async fn download_youtube_live_chat(
     title: &str,
 ) -> Result<()> {
     let live_chat_path = output_path.with_extension("live_chat.json");
-    let live_chat_ass_path = output_path.with_extension("ass");
-    let checked_path = output_path.with_extension("live_chat.checked");
+    let live_chat_ass_path = external_ass_path(output_path);
+    let _ = remove_file_if_exists(&output_path.with_extension("live_chat.checked")).await;
     if tokio::fs::metadata(&live_chat_path)
         .await
         .is_ok_and(|metadata| metadata.len() > 0)
@@ -6371,9 +7302,6 @@ async fn download_youtube_live_chat(
             .await
             .is_ok_and(|metadata| metadata.len() > 0)
     {
-        return Ok(());
-    }
-    if tokio::fs::metadata(&checked_path).await.is_ok() {
         return Ok(());
     }
     if tokio::fs::metadata(&live_chat_path)
@@ -6390,12 +7318,7 @@ async fn download_youtube_live_chat(
         .or_else(|| metadata.automatic_captions.get("live_chat"))
         .and_then(|items| items.iter().find(|item| item.url.as_deref().is_some()));
     let Some(url) = live_chat.and_then(|item| item.url.as_deref()) else {
-        // 直播聊天回放在视频结束后是静态资源。为“没有直播聊天”的视频写入
-        // 持久标记，确保每个视频只检查一次，后续扫描/重启不再反复解析。
-        tokio::fs::write(&checked_path, b"no live chat replay\n")
-            .await
-            .with_context(|| format!("写入 YouTube 直播聊天检查标记失败: {}", checked_path.display()))?;
-        debug!(youtube_id = %metadata.id, "YouTube 视频没有直播聊天，已记录检查结果");
+        debug!(youtube_id = %metadata.id, "YouTube 视频没有直播聊天，跳过");
         return Ok(());
     };
     let _ = url;
@@ -6430,7 +7353,6 @@ async fn download_youtube_live_chat(
         bail!("yt-dlp 未生成 YouTube 直播聊天文件");
     }
     let count = convert_youtube_live_chat_to_ass(metadata, output_path, title).await?;
-    let _ = remove_file_if_exists(&checked_path).await;
     info!(youtube_id = %metadata.id, count, json = %live_chat_path.display(), ass = %live_chat_ass_path.display(), "YouTube 直播聊天 JSON 和 ASS 下载完成");
     Ok(())
 }
@@ -6460,12 +7382,7 @@ fn select_subtitle_item<'a>(
 }
 
 async fn youtube_subtitle_exists(output_path: &Path) -> Result<bool> {
-    if tokio::fs::metadata(output_path.with_extension("subtitle.checked"))
-        .await
-        .is_ok_and(|metadata| metadata.len() > 0)
-    {
-        return Ok(true);
-    }
+    let _ = remove_file_if_exists(&output_path.with_extension("subtitle.checked")).await;
     let Some(parent) = output_path.parent() else {
         return Ok(false);
     };
@@ -6684,6 +7601,7 @@ pub(crate) fn normalize_source_type(value: &str) -> Result<&'static str> {
         "douyin_watch_later" => Ok("douyin_watch_later"),
         "douyin_theater" => Ok("douyin_theater"),
         "douyin_series" => Ok("douyin_series"),
+        "douyin_mix" => Ok("douyin_mix"),
         _ => bail!("来源类型必须是 subscriptions、channel、playlist、liked、watch_later 或有效的抖音来源类型"),
     }
 }
@@ -6692,7 +7610,15 @@ fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
         "subscriptions" => Ok(SUBSCRIPTIONS_URL.to_string()),
         "liked" => Ok(LIKED_URL.to_string()),
         "watch_later" => Ok(WATCH_LATER_URL.to_string()),
-        "douyin" | "douyin_collection" | "douyin_theater" | "douyin_series" | "tiktok" | "tiktok_collection" => supplied
+        "playlist" => {
+            let url = supplied
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .context("播放列表来源必须填写链接")?;
+            normalize_youtube_playlist_url(url)
+        }
+        "douyin" | "douyin_collection" | "douyin_theater" | "douyin_series" | "douyin_mix" | "tiktok"
+        | "tiktok_collection" => supplied
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
@@ -6713,6 +7639,17 @@ fn resolve_source_url(kind: &str, supplied: Option<&str>) -> Result<String> {
             })
         }
     }
+}
+
+/// 从 `watch?v=...&list=...`、`playlist?list=...` 等链接中只保留播放列表 ID，
+/// 统一转成 `playlist?list=`，避免 yt-dlp 把“视频 + 列表”误当成单个视频。
+fn normalize_youtube_playlist_url(value: &str) -> Result<String> {
+    let url = reqwest::Url::parse(value.trim()).context("YouTube 播放列表链接格式无效")?;
+    let list_id = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "list" && !value.trim().is_empty()).then(|| value.into_owned()))
+        .context("YouTube 播放列表链接缺少 list= 参数")?;
+    Ok(format!("https://www.youtube.com/playlist?list={list_id}"))
 }
 
 /// 外源「同一个源」的判定键。
@@ -6740,6 +7677,7 @@ fn external_source_identity(source_type: &str, url: &str) -> String {
         "douyin_collection" => format!("douyin:collection:{last_segment}"),
         "douyin_theater" => format!("douyin:theater:{last_segment}"),
         "douyin_series" => format!("douyin:series:{last_segment}"),
+        "douyin_mix" => format!("douyin:mix:{last_segment}"),
         "douyin_liked" => "douyin:liked".to_string(),
         "douyin_watch_later" => "douyin:watch_later".to_string(),
         "tiktok" => format!("tiktok:user:{last_segment}"),
@@ -7291,7 +8229,12 @@ async fn set_youtube_cookies(contents: &str) -> Result<()> {
 }
 
 /// 清理 YouTube 登录状态：数据库凭证 + 旧版/历史残留文件。
-async fn clear_youtube_login_state() {
+///
+/// 只有两个调用方：导入新凭证前清场、导入失败且无可回滚的旧凭证。守护任务不再
+/// 调用它 —— 自动删凭证正是「Cookie 过一会就掉了」的来源。`reason` 会打进日志，
+/// 以后再出现「掉了」可以直接看是谁删的。
+async fn clear_youtube_login_state(reason: &str) {
+    warn!(reason, "清理 YouTube 登录凭证");
     if crate::credential_store::has(crate::credential_store::keys::YOUTUBE_COOKIES) {
         if let Err(error) = crate::credential_store::delete(crate::credential_store::keys::YOUTUBE_COOKIES).await {
             warn!(error = %error, "清理数据库中的 YouTube 登录凭证失败");
@@ -7305,8 +8248,19 @@ fn youtube_has_session() -> bool {
     youtube_cookie_text().is_some_and(|contents| has_youtube_session_value(&contents))
 }
 
+/// 去掉 Netscape 文件的 `#HttpOnly_` 前缀。
+///
+/// 浏览器扩展导出的 cookies.txt 会把 HttpOnly Cookie 写成 `#HttpOnly_.youtube.com…`，
+/// 而 `SID` / `SAPISID` / `__Secure-1PSID` 这些会话 Cookie **全都是 HttpOnly**。
+/// 之前这里直接按「以 # 开头就是注释」跳过，等于把整台机器的会话字段当注释丢掉：
+/// 凭证明明在库里、下载也能用，界面却显示「未导入」，守护任务还会判成失效。
+fn strip_httponly_prefix(line: &str) -> &str {
+    line.strip_prefix("#HttpOnly_").unwrap_or(line)
+}
+
 fn has_youtube_session_value(contents: &str) -> bool {
-    contents.lines().any(|line| {
+    contents.lines().any(|raw_line| {
+        let line = strip_httponly_prefix(raw_line);
         if line.trim_start().starts_with('#') {
             return false;
         }
@@ -7352,6 +8306,64 @@ async fn clear_youtube_login_state_files_except(exclude: Option<&Path>) {
 /// 外源（YouTube/抖音）登录状态守护任务的启动延迟与检查间隔。
 const EXTERNAL_LOGIN_GUARD_STARTUP_DELAY: Duration = Duration::from_secs(5 * 60);
 const EXTERNAL_LOGIN_GUARD_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// 一次探测判定「已退出」后，等多久再复查一次。
+///
+/// 只有连续两次都拿到明确失效的证据才清理会话。单次判定的误报来源太多（代理节点
+/// 切到需要同意条款的地区、碰到人机验证页、上游抖动），而这些误报一旦直接删凭证
+/// 就是不可逆的。
+const YOUTUBE_SESSION_RECHECK_DELAY: Duration = Duration::from_secs(30);
+
+/// 最近一次联网登录探测的结论。
+///
+/// `Unclear` 是独立的一档：代理抖动、风控页、同意条款页都落在这里，既不能当成
+/// 「有效」也不能当成「失效」——把它和 `Expired` 合并正是「Cookie 过一会就掉了」
+/// 的根源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum YoutubeSessionState {
+    Valid,
+    Expired,
+    Unclear,
+}
+
+impl YoutubeSessionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Expired => "expired",
+            Self::Unclear => "unclear",
+        }
+    }
+}
+
+/// 最近一次 YouTube 登录探测的结论，只用于设置页展示，不作为是否保留凭证的依据。
+#[derive(Debug, Clone)]
+struct YoutubeSessionCheck {
+    state: YoutubeSessionState,
+    message: String,
+    checked_at: String,
+}
+
+static YOUTUBE_SESSION_CHECK: LazyLock<StdMutex<Option<YoutubeSessionCheck>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+fn record_youtube_session_check(state: YoutubeSessionState, message: impl Into<String>) {
+    let mut guard = YOUTUBE_SESSION_CHECK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *guard = Some(YoutubeSessionCheck {
+        state,
+        message: message.into(),
+        checked_at: now_standard_string(),
+    });
+}
+
+fn last_youtube_session_check() -> Option<YoutubeSessionCheck> {
+    YOUTUBE_SESSION_CHECK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
 
 /// 外源登录状态守护调度器。
 ///
@@ -7401,23 +8413,82 @@ async fn guard_external_login_states() -> Result<()> {
 
     // YouTube：订阅频道页面探测即续约。
     if youtube_has_session() {
-        match load_youtube_subscription_channels().await {
-            Ok(_) => info!("YouTube 登录状态有效，已完成会话续约"),
-            Err(error) if format!("{:#}", error).contains("Cookie 已失效") => {
-                clear_youtube_login_state().await;
-                record_external_login_expired(
-                    "YouTube",
-                    "YouTube 登录状态已过期或未登录，已清理残留会话；请重新在设置页导入 cookies.txt",
-                )
-                .await;
+        match probe_youtube_subscription_channels().await {
+            Ok(_) => {
+                record_youtube_session_check(YoutubeSessionState::Valid, "登录状态有效，已完成会话续约");
+                info!("YouTube 登录状态有效，已完成会话续约");
             }
-            Err(error) => {
-                // 代理未开/上游抖动等网络原因：会话无法续约但保留现状。从 debug
+            Err(YoutubeSessionError::Expired(error)) => {
+                warn!(
+                    error = %error,
+                    delay_secs = YOUTUBE_SESSION_RECHECK_DELAY.as_secs(),
+                    "YouTube 登录状态疑似失效，稍后复查确认；本次不清理凭证"
+                );
+                tokio::time::sleep(YOUTUBE_SESSION_RECHECK_DELAY).await;
+                match probe_youtube_subscription_channels().await {
+                    Ok(_) => {
+                        record_youtube_session_check(
+                            YoutubeSessionState::Valid,
+                            "复查通过（首次探测疑似误判），已保留会话",
+                        );
+                        info!("YouTube 登录状态复查通过，保留现有会话");
+                    }
+                    Err(YoutubeSessionError::Expired(error)) => {
+                        // 连续两次都拿不到登录态：只提示，**绝不自动删凭证**。
+                        // 代理出口被 YouTube 判定为可疑时同样会返回登录墙，这类误判
+                        // 与服务端真过期在协议层面无法区分；删掉用户仍可用的凭证
+                        // （表现为「Cookie 过一会就掉了」）代价远大于留着过期凭证。
+                        warn!(
+                            error = %error,
+                            "YouTube 登录状态连续两次探测为未登录，保留凭证不做清理；请到设置页确认后重新导入 cookies.txt"
+                        );
+                        if let Some(contents) = youtube_cookie_text() {
+                            warn!(
+                                diagnostic = %youtube_cookie_diagnostic(&contents),
+                                "YouTube 已保存的登录凭证现状"
+                            );
+                        }
+                        // 只在「上一次结论不是失效」时推送：守护任务每 6 小时跑一次，
+                        // 凭证又不再自动清理，不做去重就会变成每 6 小时一条重复推送。
+                        let already_reported = last_youtube_session_check()
+                            .is_some_and(|check| check.state == YoutubeSessionState::Expired);
+                        record_youtube_session_check(
+                            YoutubeSessionState::Expired,
+                            "最近探测返回未登录（代理/风控也可能是同样表现），凭证已保留，可重新导入",
+                        );
+                        if already_reported {
+                            info!("YouTube 登录状态仍为未登录，此前已提示过，本次不重复推送");
+                        } else {
+                            record_external_login_expired(
+                                "YouTube",
+                                "YouTube 登录状态疑似失效（凭证已保留，未清理）。若订阅、稍后再看等读取失败，请在设置页重新导入 cookies.txt",
+                            )
+                            .await;
+                        }
+                    }
+                    Err(YoutubeSessionError::Unclear(error)) => {
+                        warn!(
+                            error = %error,
+                            "YouTube 登录状态复查结果不确定，保留现有会话"
+                        );
+                        record_youtube_session_check(
+                            YoutubeSessionState::Unclear,
+                            "复查结果不确定（代理/网络/风控），凭证已保留",
+                        );
+                    }
+                }
+            }
+            Err(YoutubeSessionError::Unclear(error)) => {
+                // 代理未开/上游抖动/风控页等：会话无法续约但保留现状。从 debug
                 // 提升为 warn，避免用户看到“会话一直失效”却不知道是代理/网络导致
                 // 续约根本没发生。
                 warn!(
                     error = %error,
-                    "YouTube 登录状态检查失败（代理/网络不可用），本次未能续约会话，保留现有会话。请确认外源代理（proxy/youtube_proxy）可用"
+                    "YouTube 登录状态检查结果不确定（代理/网络/风控），本次未续约也未清理会话，保留现有凭证。请确认外源代理（proxy/youtube_proxy）可用"
+                );
+                record_youtube_session_check(
+                    YoutubeSessionState::Unclear,
+                    "检查结果不确定（代理/网络/风控），凭证已保留",
                 );
             }
         }
@@ -7426,7 +8497,7 @@ async fn guard_external_login_states() -> Result<()> {
 }
 
 async fn record_external_login_expired(platform: &str, message: &str) {
-    info!(platform, "{}登录状态过期，已清理残留会话并提示重新导入", platform);
+    info!(platform, "{}登录状态过期，已发送重新导入提示", platform);
     if let Err(error) = crate::utils::notification::send_error_notification(
         &format!("{platform}登录状态过期"),
         message,
@@ -7509,6 +8580,63 @@ async fn recorded_output_files(output: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+/// 文件名是否符合下载器自己生成「半成品」的命名规则。
+///
+/// 只认本项目写出来的临时名（`.download.*`、`.merging.*`、`.decrypted.*`、
+/// `.audio-source*`、`.resume` 断点状态等），不会误删用户的普通文件。
+fn is_partial_download_artifact(name: &str) -> bool {
+    name.ends_with(".resume")
+        || name.ends_with(".download")
+        || name.contains(".download.")
+        || name.contains(".merging.")
+        || name.contains(".decrypted.")
+        || name.contains(".audio-source")
+        || name.contains(".tmp_video")
+        || name.contains(".tmp_audio")
+}
+
+/// 递归清理源目录里残留的半成品文件，返回删除个数（用于重设路径后的旧目录）。
+async fn remove_partial_download_artifacts(root: &Path) -> usize {
+    /// 媒体目录就是 `源根/UP/季` 这几层，留一点余量防止异常深层目录扫描。
+    const MAX_DEPTH: usize = 6;
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut removed = 0usize;
+    while let Some((directory, depth)) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&directory).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if depth < MAX_DEPTH {
+                    stack.push((entry.path(), depth + 1));
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !is_partial_download_artifact(&name) {
+                continue;
+            }
+            if tokio::fs::remove_file(entry.path()).await.is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        info!(
+            path = %root.display(),
+            removed,
+            "已清理旧目录中未完成的下载临时文件"
+        );
+    }
+    removed
 }
 
 async fn move_file_cross_volume(source: &Path, target: &Path) -> Result<()> {
@@ -7632,6 +8760,7 @@ fn append_ytdlp_tab_args(command: &mut Command) {
 /// 本地化错误文本（如“远程主机强迫关闭了一个现有的连接”）不乱码。
 pub(crate) fn ytdlp_command() -> Command {
     let mut command = crate::utils::process::tokio_command(ytdlp_executable());
+    command.kill_on_drop(true);
     command.env("PYTHONUTF8", "1");
     command.env("PYTHONIOENCODING", "utf-8");
     command
@@ -7753,7 +8882,9 @@ fn is_netscape_youtube_cookie_file(contents: &str) -> bool {
         .take(4)
         .any(|line| line.contains("HTTP Cookie File") || line.contains("Netscape"));
     has_header
-        && contents.lines().any(|line| {
+        && contents.lines().any(|raw_line| {
+            // 浏览器扩展导出的会话 Cookie 带 `#HttpOnly_` 前缀，不能当成注释跳过。
+            let line = strip_httponly_prefix(raw_line);
             if line.trim_start().starts_with('#') {
                 return false;
             }
@@ -7892,6 +9023,66 @@ mod tests {
     }
 
     #[test]
+    fn detects_non_jpeg_cover_payloads() {
+        // 抖音封面会随机返回 JPEG / WebP，只能靠文件头判断，不能看后缀。
+        assert!(is_jpeg_header(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0]));
+        assert!(!is_jpeg_header(b"RIFF\x00\x00\x00\x00WEBP"));
+        assert!(needs_jpeg_conversion(b"RIFF\x24\x00\x00\x00WEBPVP8 "));
+        assert!(needs_jpeg_conversion(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]));
+        assert!(needs_jpeg_conversion(b"GIF89a......"));
+        // 已经是 JPEG 的不再转（避免每轮扫描都空跑 ffmpeg）
+        assert!(!needs_jpeg_conversion(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn partial_artifact_detection_covers_downloader_temp_names() {
+        for name in [
+            "S01E01 - 标题.download.mp4",
+            "S01E01 - 标题.merging.mp4",
+            "S01E01 - 标题.decrypted.mp4",
+            "S01E01 - 标题.audio-source.mp4",
+            "S01E01 - 标题.download.mp4.resume",
+            "S01E01 - 标题.nfo.download",
+            "folder.jpg.0198a2bc.download",
+        ] {
+            assert!(is_partial_download_artifact(name), "{name} 应判为半成品");
+        }
+        for name in [
+            "S01E01 - 标题.mp4",
+            "S01E01 - 标题.nfo",
+            "S01E01 - 标题.zh-CN.default.ass",
+            "S01E01 - 标题-thumb.jpg",
+        ] {
+            assert!(!is_partial_download_artifact(name), "{name} 不应被判为半成品");
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_partial_artifacts_keeps_finished_media() {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-partial-{}-{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let season = root.join("合集").join("Season 01");
+        tokio::fs::create_dir_all(&season).await.unwrap();
+        let keep = season.join("S01E01 - 标题.mp4");
+        let keep_nfo = season.join("S01E01 - 标题.nfo");
+        let partial = season.join("S01E02 - 标题.download.mp4");
+        let resume = season.join("S01E02 - 标题.download.mp4.resume");
+        for path in [&keep, &keep_nfo, &partial, &resume] {
+            tokio::fs::write(path, b"x").await.unwrap();
+        }
+        let removed = remove_partial_download_artifacts(&root).await;
+        assert_eq!(removed, 2);
+        assert!(keep.exists());
+        assert!(keep_nfo.exists());
+        assert!(!partial.exists());
+        assert!(!resume.exists());
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[test]
     fn startup_skips_recently_scanned_sources() {
         let now = chrono::Local::now().naive_local();
         let recent = now.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -7906,9 +9097,13 @@ mod tests {
         canonical_channel_url, checksum_for_release_asset, collect_external_scan_result,
         collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
-        normalize_source_type, parse_youtube_live_chat, resolve_source_url, should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
-        youtube_page_is_logged_out, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
-        ytdlp_runtime_target_env, SUBSCRIPTIONS_URL,
+        has_youtube_session_value,
+        is_jpeg_header, needs_jpeg_conversion,
+        is_partial_download_artifact, remove_partial_download_artifacts,
+        normalize_source_type, normalize_youtube_playlist_url, parse_youtube_live_chat, resolve_source_url,
+        should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
+        youtube_login_verdict, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
+        ytdlp_runtime_target_env, YoutubeLoginVerdict, SUBSCRIPTIONS_URL, WATCH_LATER_URL,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -8149,15 +9344,80 @@ mod tests {
     fn episodic_douyin_source_is_detected() {
         assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_theater")));
         assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_series")));
-        assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_collection")));
+        assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_mix")));
+        assert!(!super::is_episodic_douyin_source(&sample_external_source("douyin_collection")));
         assert!(!super::is_episodic_douyin_source(&sample_external_source("douyin")));
+    }
+
+    #[test]
+    fn episodic_layout_requires_a_real_episode_number() {
+        let series = sample_external_source("douyin_series");
+        assert!(super::uses_episodic_layout(&series, Some(1)));
+        assert!(!super::uses_episodic_layout(&series, None));
+        assert!(!super::uses_episodic_layout(&series, Some(0)));
+
+        let collection = sample_external_source("douyin_collection");
+        assert!(
+            !super::uses_episodic_layout(&collection, Some(3)),
+            "抖音收藏夹即使标题里碰巧带集号，也必须保持普通单视频目录"
+        );
     }
     #[test]
     fn validates_types_and_urls() {
         assert_eq!(normalize_source_type("playlist").unwrap(), "playlist");
         assert_eq!(resolve_source_url("subscriptions", None).unwrap(), SUBSCRIPTIONS_URL);
+        assert_eq!(resolve_source_url("watch_later", None).unwrap(), WATCH_LATER_URL);
+        assert_eq!(
+            normalize_youtube_playlist_url("https://www.youtube.com/watch?v=abc&list=PL123&pp=xyz").unwrap(),
+            "https://www.youtube.com/playlist?list=PL123"
+        );
+        assert!(super::youtube_source_video_selection_supported("watch_later"));
+        assert!(super::youtube_source_video_selection_supported("playlist"));
+        assert!(!super::youtube_source_video_selection_supported("douyin"));
         assert!(is_youtube_url("https://www.youtube.com/watch?v=abc"));
         assert!(!is_youtube_url("https://youtube.example.com"));
+    }
+
+    #[test]
+    fn playlist_catalog_accepts_bare_ytdlp_playlist_ids() {
+        let item = serde_json::json!({"id": "PLabc123", "title": "测试列表"});
+        assert_eq!(
+            super::youtube_playlist_url_from_item(&item).as_deref(),
+            Some("https://www.youtube.com/playlist?list=PLabc123")
+        );
+    }
+
+    #[test]
+    fn filters_unavailable_videos_from_youtube_lists() {
+        assert!(super::ytdlp_flat_item_is_unavailable(
+            &serde_json::json!({"id": "deleted", "title": "[Deleted video]"})
+        ));
+        assert!(super::ytdlp_flat_item_is_unavailable(
+            &serde_json::json!({"id": "private", "availability": "private"})
+        ));
+        assert!(!super::ytdlp_flat_item_is_unavailable(
+            &serde_json::json!({"id": "public", "title": "正常视频", "availability": "public"})
+        ));
+    }
+
+    #[test]
+    fn douyin_tvshow_nfo_includes_uploader_actor_and_avatar() {
+        let source = sample_external_source("douyin_mix");
+        let metadata: crate::external_media::ExternalMediaMetadata = serde_json::from_str(
+            r#"{"id":"mix-episode","uploader":"测试作者","description":"合集简介"}"#,
+        )
+        .expect("metadata 应可构造");
+        let xml = super::generate_youtube_tvshow_nfo(
+            &source,
+            &metadata,
+            Some("https://example.com/avatar.jpg"),
+        );
+        assert!(
+            xml.contains(
+                "<actor><name>测试作者</name><role>UP主</role><thumb>https://example.com/avatar.jpg</thumb></actor>"
+            ),
+            "{xml}"
+        );
     }
 
     #[test]
@@ -8507,14 +9767,15 @@ mod tests {
             Some("https://p3.douyinpic.com/avatar.jpeg"),
         );
         assert!(
-            xml.contains("<actor><name>古德末泥(高智版)</name><role>频道</role><thumb>https://p3.douyinpic.com/avatar.jpeg</thumb></actor>"),
+            xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role><thumb>https://p3.douyinpic.com/avatar.jpeg</thumb></actor>"),
             "主频道 actor 应带 <thumb> 头像: {xml}"
         );
         assert_eq!(
-            xml.matches("<role>频道</role><thumb>").count(),
+            xml.matches("<role>UP主</role><thumb>").count(),
             1,
             "只有主频道 actor 写头像 <thumb>: {xml}"
         );
+        assert!(!xml.contains("<director>"), "抖音 UGC 不应把同一 UP 重复写成导演: {xml}");
         assert!(xml.contains("<fanart><thumb>https://example.com/cover.jpg</thumb></fanart>"), "{xml}");
 
         // 空白头像地址不写 <thumb>，避免生成空标签
@@ -8531,9 +9792,9 @@ mod tests {
             "https://www.douyin.com/video/7515762262805777727",
             Some("   "),
         );
-        assert!(xml.contains("<actor><name>古德末泥(高智版)</name><role>频道</role></actor>"), "{xml}");
+        assert!(xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role></actor>"), "{xml}");
         assert_eq!(
-            xml.matches("<role>频道</role><thumb>").count(),
+            xml.matches("<role>UP主</role><thumb>").count(),
             0,
             "空白头像地址不应写 <thumb>: {xml}"
         );
@@ -8613,7 +9874,7 @@ mod tests {
         let source = sample_external_source("tiktok_collection");
         let metadata: crate::external_media::ExternalMediaMetadata =
             serde_json::from_str(r#"{"id":"vid1"}"#).expect("metadata 应可构造");
-        let xml = super::generate_youtube_tvshow_nfo(&source, &metadata);
+        let xml = super::generate_youtube_tvshow_nfo(&source, &metadata, None);
         assert!(xml.contains("<studio>TikTok</studio>"), "TikTok tvshow studio 应为 TikTok: {xml}");
         assert!(xml.contains(r#"<uniqueid type="tiktok""#), "TikTok tvshow uniqueid type 应为 tiktok: {xml}");
         assert!(!xml.contains("<studio>YouTube</studio>"), "TikTok tvshow studio 不应是 YouTube: {xml}");
@@ -8661,6 +9922,23 @@ mod tests {
         let youtube_session = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tvalue\n";
         assert!(is_netscape_youtube_cookie_file(google_only));
         assert!(is_netscape_youtube_cookie_file(youtube_session));
+    }
+
+    #[test]
+    fn login_cookie_accepts_httponly_prefixed_session_cookies() {
+        // 浏览器扩展（Get cookies.txt LOCALLY 等）导出的会话 Cookie 带 #HttpOnly_ 前缀，
+        // 而 SID/SAPISID/__Secure-1PSID 全都是 HttpOnly。
+        let exported = concat!(
+            "# Netscape HTTP Cookie File\n",
+            "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1800000000\t__Secure-1PSID\tvalue1\n",
+            "#HttpOnly_.google.com\tTRUE\t/\tTRUE\t1800000000\tSID\tvalue2\n",
+        );
+        assert!(is_netscape_youtube_cookie_file(exported));
+        assert!(has_youtube_session_value(exported));
+        // 只有普通 Cookie（没有会话字段）时仍然判定为未登录。
+        let visitor_only = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tYSC\tvalue\n";
+        assert!(!is_netscape_youtube_cookie_file(visitor_only));
+        assert!(!has_youtube_session_value(visitor_only));
     }
 
     #[test]
@@ -8737,10 +10015,74 @@ mod tests {
 
     #[test]
     fn detects_logged_out_youtube_page() {
-        assert!(youtube_page_is_logged_out(
-            r#"{"LOGGED_IN":false,"signInUrl":"https://accounts.google.com/ServiceLogin"}"#
+        assert_eq!(
+            youtube_login_verdict(
+                "https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                r#"{"LOGGED_IN":false,"signInUrl":"https://accounts.google.com/ServiceLogin"}"#
+            ),
+            YoutubeLoginVerdict::LoggedOut
+        );
+        assert_eq!(
+            youtube_login_verdict(
+                "https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                r#"{"LOGGED_IN":true}"#
+            ),
+            YoutubeLoginVerdict::LoggedIn
+        );
+    }
+
+    #[test]
+    fn youtube_login_verdict_treats_interstitials_as_unclear() {
+        // 代理出口需要先同意条款：页面同样带未登录标记，但会话没坏。
+        assert!(matches!(
+            youtube_login_verdict(
+                "https://consent.youtube.com/m?continue=https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                r#"{"LOGGED_IN":false}"#
+            ),
+            YoutubeLoginVerdict::Unclear(_)
         ));
-        assert!(!youtube_page_is_logged_out(r#"{"LOGGED_IN":true}"#));
+        // 风控/异常流量验证页。
+        assert!(matches!(
+            youtube_login_verdict(
+                "https://www.youtube.com/sorry/index?continue=/feed/channels",
+                reqwest::StatusCode::OK,
+                "<html>Our systems have detected unusual traffic</html>"
+            ),
+            YoutubeLoginVerdict::Unclear(_)
+        ));
+        // 上游 5xx：不能据此判断 Cookie 失效。
+        assert!(matches!(
+            youtube_login_verdict(
+                "https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::BAD_GATEWAY,
+                "<html>502</html>"
+            ),
+            YoutubeLoginVerdict::Unclear(_)
+        ));
+        // 页面结构变了（既没有登录标记也没有退出标记）：保持不确定。
+        assert!(matches!(
+            youtube_login_verdict(
+                "https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                "<html>something unexpected</html>"
+            ),
+            YoutubeLoginVerdict::Unclear(_)
+        ));
+    }
+
+    #[test]
+    fn youtube_login_verdict_detects_login_redirect() {
+        assert_eq!(
+            youtube_login_verdict(
+                "https://accounts.google.com/ServiceLogin?continue=https://www.youtube.com/feed/channels",
+                reqwest::StatusCode::OK,
+                "<html></html>"
+            ),
+            YoutubeLoginVerdict::LoggedOut
+        );
     }
 
     #[test]
@@ -8853,6 +10195,7 @@ mod tests {
             channel_id: None,
             channel_url: None,
             thumbnail: None,
+            fanart: None,
             description: None,
             language: None,
             upload_date: None,
@@ -8871,6 +10214,125 @@ mod tests {
             .join("Season 01")
             .join("S01E03.mp4");
         assert_eq!(path, expected, "短剧应输出 下载根/剧集名/Season 01/S01E03.mp4");
+    }
+
+    /// 抖音合集按 B 站合集默认模板命名：`合集名/Season 01/S01E01 - 集标题.mp4`。
+    #[test]
+    fn builds_douyin_mix_output_path_with_episode_title() {
+        use bili_sync_entity::{youtube_source, youtube_video};
+        use crate::external_media::ExternalMediaMetadata;
+        use std::collections::HashMap;
+
+        let mut source = youtube_source::Model::default();
+        source.id = 9;
+        source.source_type = "douyin_mix".to_string();
+        source.name = "传奇剧场（剧情）".to_string();
+        source.path = "F:/Downloads/测试".to_string();
+
+        let mut video = youtube_video::Model::default();
+        video.episode_number = Some(12);
+
+        let metadata = ExternalMediaMetadata {
+            id: "7604472777650785551".to_string(),
+            title: None,
+            uploader: Some("我是战魂".to_string()),
+            uploader_url: None,
+            channel: None,
+            channel_id: None,
+            channel_url: None,
+            thumbnail: None,
+            fanart: None,
+            description: None,
+            language: None,
+            upload_date: Some("20260208".to_string()),
+            duration: None,
+            formats: Vec::new(),
+            subtitles: HashMap::new(),
+            automatic_captions: HashMap::new(),
+            images: Vec::new(),
+            music_urls: Vec::new(),
+            creators: None,
+            slides: Vec::new(),
+        };
+
+        // 标题里的 #话题 只影响落盘名，不进NFO
+        let title = "寂寞的蜈蚣洞的冲突开始了 #热血传奇 #传奇复古 #176传奇";
+        let path = super::youtube_output_path(&source, &video, &metadata, title, "我是战魂").unwrap();
+        // 目录名与 B 站一致走 filenamify（全角括号会转半角），文件名的标题再按目录名规则清洗
+        let mix_folder = crate::utils::filenamify::filenamify(&source.name);
+        let expected = Path::new("F:/Downloads/测试")
+            .join(&mix_folder)
+            .join("Season 01")
+            .join("S01E12 - 寂寞的蜈蚣洞的冲突开始了.mp4");
+        assert_eq!(path, expected, "合集应输出 下载根/合集名/Season 01/S01E01 - 集标题.mp4");
+
+        // 图文作品没有文案时只保留集号，不出现「无标题」
+        let untitled = super::youtube_output_path(&source, &video, &metadata, "无标题", "我是战魂").unwrap();
+        assert_eq!(untitled.file_name().and_then(|name| name.to_str()), Some("S01E12.mp4"));
+    }
+
+    #[test]
+    fn douyin_mix_path_does_not_repeat_collection_folder() {
+        use crate::external_media::ExternalMediaMetadata;
+        use bili_sync_entity::{youtube_source, youtube_video};
+
+        let mut source = youtube_source::Model::default();
+        source.id = 9;
+        source.source_type = "douyin_mix".to_string();
+        source.name = "外卖小哥修仙记".to_string();
+        source.path = "J:/EMBY/DY收藏夹合集/外卖小哥修仙记".to_string();
+        let video = youtube_video::Model {
+            episode_number: Some(1),
+            ..Default::default()
+        };
+        let metadata: ExternalMediaMetadata =
+            serde_json::from_str(r#"{"id":"mix1","title":"第一集","uploader":"作者"}"#).unwrap();
+
+        let path = super::youtube_output_path(&source, &video, &metadata, "第一集", "作者").unwrap();
+        let expected = Path::new("J:/EMBY/DY收藏夹合集/外卖小哥修仙记")
+            .join("Season 01")
+            .join("S01E01 - 第一集.mp4");
+        assert_eq!(path, expected, "source.path 已包含合集名时不能重复追加");
+    }
+
+    #[test]
+    fn builds_douyin_collection_output_path_as_regular_video() {
+        use crate::external_media::ExternalMediaMetadata;
+        use bili_sync_entity::{youtube_source, youtube_video};
+
+        let mut collection_source = youtube_source::Model::default();
+        collection_source.id = 6;
+        collection_source.source_type = "douyin_collection".to_string();
+        collection_source.name = "收藏夹".to_string();
+        collection_source.path = "F:/Downloads/收藏夹douyin".to_string();
+
+        let mut regular_source = collection_source.clone();
+        regular_source.source_type = "douyin".to_string();
+
+        let video = youtube_video::Model {
+            episode_number: Some(3),
+            ..Default::default()
+        };
+        let metadata: ExternalMediaMetadata = serde_json::from_str(
+            r#"{"id":"7666885554109183667","title":"测试收藏视频","uploader":"测试作者","upload_date":"20260727"}"#,
+        )
+        .expect("metadata 应可构造");
+
+        let collection_path =
+            super::youtube_output_path(&collection_source, &video, &metadata, "测试收藏视频", "测试作者").unwrap();
+        let regular_path =
+            super::youtube_output_path(&regular_source, &video, &metadata, "测试收藏视频", "测试作者").unwrap();
+        assert_eq!(
+            collection_path, regular_path,
+            "抖音收藏夹应和普通单视频使用同一套目录模板，不能生成 Season 01"
+        );
+        assert!(
+            !collection_path
+                .components()
+                .any(|component| component.as_os_str() == "Season 01"),
+            "收藏夹路径不应包含 Season 01: {}",
+            collection_path.display()
+        );
     }
 
     #[test]
@@ -8895,6 +10357,7 @@ mod tests {
             channel_id: None,
             channel_url: None,
             thumbnail: None,
+            fanart: None,
             description: None,
             language: None,
             upload_date: Some("20260822".to_string()),
@@ -8940,6 +10403,7 @@ mod tests {
             channel_id: None,
             channel_url: None,
             thumbnail: None,
+            fanart: None,
             description: None,
             language: None,
             upload_date: None,
@@ -8990,6 +10454,94 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
+    #[tokio::test]
+    async fn clearing_subtitle_and_danmaku_tasks_removes_markers_and_empty_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-reset-sidecars-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let series_dir = root.join("测试合集");
+        let season_dir = series_dir.join("Season 01");
+        tokio::fs::create_dir_all(&season_dir).await.unwrap();
+        let output = season_dir.join("S01E01 - 测试.mp4");
+        tokio::fs::write(output.with_extension("zh-CN.default.ass"), b"danmaku")
+            .await
+            .unwrap();
+        tokio::fs::write(output.with_extension("zh-CN.vtt"), b"subtitle")
+            .await
+            .unwrap();
+        for suffix in ["subtitle.checked", "danmaku.checked"] {
+            tokio::fs::write(output.with_extension(suffix), b"checked")
+                .await
+                .unwrap();
+        }
+        let mut video = super::youtube_video::Model::default();
+        video.output_path = Some(output.display().to_string());
+        video.episode_number = Some(1);
+        let mut source = sample_external_source("douyin_mix");
+        source.path = root.display().to_string();
+
+        super::remove_youtube_task_artifact(&video, &source, &[], &[3, 4])
+            .await
+            .unwrap();
+
+        assert!(!output.with_extension("zh-CN.default.ass").exists());
+        assert!(!output.with_extension("zh-CN.vtt").exists());
+        assert!(!output.with_extension("subtitle.checked").exists());
+        assert!(!output.with_extension("danmaku.checked").exists());
+        assert!(!season_dir.exists(), "空 Season 目录应被清理");
+        assert!(!series_dir.exists(), "空合集目录应被清理");
+        assert!(root.exists(), "视频源根目录不应被清理");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn collection_cleanup_removes_legacy_series_sidecars_only_for_matching_source() {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-collection-sidecars-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let uploader_dir = root.join("测试作者");
+        let video_dir = uploader_dir.join("测试视频");
+        tokio::fs::create_dir_all(&video_dir).await.unwrap();
+
+        let mut source = sample_external_source("douyin_collection");
+        source.url = "https://www.douyin.com/collection/7672884606911354673".to_string();
+        let output_path = video_dir.join("测试视频.mp4");
+        tokio::fs::write(&output_path, b"video").await.unwrap();
+        tokio::fs::write(
+            uploader_dir.join("tvshow.nfo"),
+            format!(
+                r#"<tvshow><uniqueid type="douyin" default="true">{}</uniqueid></tvshow>"#,
+                source.url
+            ),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            video_dir.join("season.nfo"),
+            "<season><seasonnumber>1</seasonnumber></season>",
+        )
+        .await
+        .unwrap();
+        for name in ["folder.jpg", "poster.jpg"] {
+            tokio::fs::write(uploader_dir.join(name), vec![1u8; 2048]).await.unwrap();
+        }
+
+        super::cleanup_legacy_collection_series_sidecars(&source, &output_path)
+            .await
+            .unwrap();
+
+        assert!(!uploader_dir.join("tvshow.nfo").exists());
+        assert!(!uploader_dir.join("folder.jpg").exists());
+        assert!(!uploader_dir.join("poster.jpg").exists());
+        assert!(!video_dir.join("season.nfo").exists());
+        assert!(output_path.exists(), "清理剧集附属文件不能删除视频本体");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
     /// 外源互斥的判定键：同一个源不能因为链接写法不同（尾斜杠 / 大小写 /
     /// 多余的查询参数）被当成两个源重复添加。
     #[test]
@@ -9001,7 +10553,7 @@ mod tests {
             identity("douyin", "https://www.douyin.com/user/MS4wLjABAAAAtest"),
             identity("douyin", "https://www.douyin.com/user/MS4wLjABAAAAtest/"),
         );
-        // 抖音合集 / 放映厅 / 短剧：按末段 id
+        // 抖音收藏夹 / 放映厅 / 短剧 / 合集：按末段 id
         assert_eq!(
             identity("douyin_collection", "https://www.douyin.com/collection/7672884606911354673?from=web"),
             "douyin:collection:7672884606911354673",
@@ -9013,6 +10565,11 @@ mod tests {
         assert_eq!(
             identity("douyin_series", "https://www.douyin.com/series/7663823934580033574"),
             "douyin:series:7663823934580033574",
+        );
+        // 合集与收藏夹共用 /collection/ 路由，但类型不同就是不同的源
+        assert_eq!(
+            identity("douyin_mix", "https://www.douyin.com/collection/7600294985053702190"),
+            "douyin:mix:7600294985053702190",
         );
         // TikTok handle 大小写不敏感
         assert_eq!(

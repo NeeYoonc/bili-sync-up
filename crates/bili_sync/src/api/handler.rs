@@ -16838,7 +16838,13 @@ pub async fn proxy_image(
         };
 
         if !response.status().is_success() {
-            tracing::error!("图片下载状态码错误 - URL: {}, 状态码: {}", url, response.status());
+            // 封面缺失是常态（YouTube 会给无封面视频一个不存在的
+            // `img/no_thumbnail.jpg`，抖音也会删旧封面），404 不该刷 ERROR 日志。
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                tracing::debug!("图片不存在（404） - URL: {}", url);
+            } else {
+                tracing::warn!("图片下载状态码异常 - URL: {}, 状态码: {}", url, response.status());
+            }
             return Err(anyhow!("图片请求失败: {}", response.status()).into());
         }
 
@@ -20853,6 +20859,7 @@ ORDER BY
     let (enabled_douyin_watch_later, total_douyin_watch_later) = youtube_type_count("douyin_watch_later");
     let (enabled_douyin_theaters, total_douyin_theaters) = youtube_type_count("douyin_theater");
     let (enabled_douyin_series, total_douyin_series) = youtube_type_count("douyin_series");
+    let (enabled_douyin_mixes, total_douyin_mixes) = youtube_type_count("douyin_mix");
     let (enabled_tiktok_authors, total_tiktok_authors) = youtube_type_count("tiktok");
     let (enabled_tiktok_liked, total_tiktok_liked) = youtube_type_count("tiktok_favorite");
     let (enabled_tiktok_collections, total_tiktok_collections) = youtube_type_count("tiktok_collection");
@@ -20940,6 +20947,8 @@ ORDER BY
         total_douyin_theaters,
         enabled_douyin_series,
         total_douyin_series,
+        enabled_douyin_mixes,
+        total_douyin_mixes,
         enabled_tiktok_sources,
         total_tiktok_sources,
         enabled_tiktok_authors,
