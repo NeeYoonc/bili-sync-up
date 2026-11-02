@@ -47,11 +47,11 @@ jobs:
     name: Build ${{ matrix.platform.name }}
     needs: build_frontend
     runs-on: ${{ matrix.platform.os }}
-    # GitHub 的 macOS 托管 runner 容量紧张，排队超过约 15 分钟会被直接 cancel
-    # （runner 为空、steps 为空，日志里是 "The job was not acquired by Runner of type
-    # hosted"）。PR 阶段把它当作「尽力而为」，避免一次排队失败就卡住合并；
-    # tag / main 上仍然严格要求，发布产物不会缺。
-    continue-on-error: ${{ startsWith(matrix.platform.os, 'macos') && github.event_name == 'pull_request' }}
+    # GitHub 托管 macOS runner 容量长期紧张：排队约 15 分钟拿不到机器就会被直接
+    # cancel（runner 名称为空、steps 为空，注解是 not acquired by Runner of type
+    # hosted），和代码无关。PR 阶段跳过 macOS（其余 5 个平台照常全量构建）；
+    # push 到 main / 发 tag 时仍然构建 macOS 产物。
+    if: ${{ !(matrix.platform.macos && github.event_name == 'pull_request') }}
     strategy:
       fail-fast: false
       matrix:
@@ -81,11 +81,13 @@ jobs:
             name: macos-x86_64
             bin: bili-sync-rs
             archive_name: bili-sync-rs-macos-x86_64.tar.gz
+            macos: true
           - target: aarch64-apple-darwin
             os: macos-latest
             name: macos-aarch64
             bin: bili-sync-rs
             archive_name: bili-sync-rs-macos-aarch64.tar.gz
+            macos: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
