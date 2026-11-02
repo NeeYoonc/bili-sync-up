@@ -523,6 +523,22 @@
 		return false;
 	}
 
+	/**
+	 * 手动获取「自己的」抖音收藏夹 / 收藏的合集。
+	 *
+	 * 必须先清掉上一次「搜索 UP 主」留下的状态：
+	 * - douyinCollectionSearchMode 为 true 时右侧列表是被隐藏的（会让按钮看起来没反应）；
+	 * - douyinCatalogOwnerName 不清理会让标题停在「XX 的收藏夹 / 合集」。
+	 */
+	async function loadOwnDouyinCatalog() {
+		douyinCatalog = [];
+		douyinCatalogOwnerName = '';
+		douyinCollectionSearchMode = false;
+		showSubmissionSelection = false;
+		showSearchResults = false;
+		await loadDouyinCatalog();
+	}
+
 	async function loadYoutubeChannelPlaylists(channelUrl: string) {
 		youtubeChannelPlaylists = [];
 		youtubePlaylistPanelTitle = '该 UP 的播放列表';
@@ -4153,7 +4169,7 @@
 											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_mix'}
 												<Button
 													type="button"
-													onclick={() => loadDouyinCatalog()}
+													onclick={() => loadOwnDouyinCatalog()}
 													disabled={loadingDouyinCatalog}
 													size="sm"
 													variant="outline"
@@ -4165,7 +4181,7 @@
 											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection'}
 												<Button
 													type="button"
-													onclick={() => loadDouyinCatalog()}
+													onclick={() => loadOwnDouyinCatalog()}
 													disabled={loadingDouyinCatalog}
 													size="sm"
 													variant="outline"

@@ -1410,7 +1410,16 @@ pub async fn import_youtube_cookie_file(
     let previous = youtube_cookie_text();
     // 先清理旧会话（数据库 + 历史文件），再将新会话写入数据库。
     clear_youtube_login_state("导入新凭证前清理旧会话").await;
-    set_youtube_cookies(&request.cookies).await?;
+    if let Err(error) = set_youtube_cookies(&request.cookies).await {
+        // 写库失败（磁盘只读、数据库被占用等）也要把旧凭证放回去，否则用户
+        // 只是导入失败，却把原本能用的登录状态弄丢了。
+        if let Some(previous) = previous.as_deref() {
+            if let Err(restore) = set_youtube_cookies(previous).await {
+                warn!(error = %restore, "恢复导入前的 YouTube 登录凭证失败");
+            }
+        }
+        return Err(ApiError::from(error));
+    }
     if let Err(error) = validate_youtube_login_cookie().await {
         match previous {
             Some(previous) => {
@@ -6740,7 +6749,10 @@ async fn ensure_jpeg_image(path: &Path) -> Result<()> {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("cover.jpg");
-    let temporary = path.with_file_name(format!("{file_name}.convert.jpg"));
+    // 同一张合集封面会被多个分集并发校正，临时名必须唯一，否则先完成的那个把
+    // 临时文件 rename 走，另一个会读到 0 字节或直接报错。
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let temporary = path.with_file_name(format!("{file_name}.{unique}.convert.jpg"));
     let output = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
         .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
         .arg(path)
@@ -8436,15 +8448,23 @@ async fn guard_external_login_states() -> Result<()> {
                                 "YouTube 已保存的登录凭证现状"
                             );
                         }
+                        // 只在「上一次结论不是失效」时推送：守护任务每 6 小时跑一次，
+                        // 凭证又不再自动清理，不做去重就会变成每 6 小时一条重复推送。
+                        let already_reported = last_youtube_session_check()
+                            .is_some_and(|check| check.state == YoutubeSessionState::Expired);
                         record_youtube_session_check(
                             YoutubeSessionState::Expired,
                             "最近探测返回未登录（代理/风控也可能是同样表现），凭证已保留，可重新导入",
                         );
-                        record_external_login_expired(
-                            "YouTube",
-                            "YouTube 登录状态疑似失效（凭证已保留，未清理）。若订阅、稍后再看等读取失败，请在设置页重新导入 cookies.txt",
-                        )
-                        .await;
+                        if already_reported {
+                            info!("YouTube 登录状态仍为未登录，此前已提示过，本次不重复推送");
+                        } else {
+                            record_external_login_expired(
+                                "YouTube",
+                                "YouTube 登录状态疑似失效（凭证已保留，未清理）。若订阅、稍后再看等读取失败，请在设置页重新导入 cookies.txt",
+                            )
+                            .await;
+                        }
                     }
                     Err(YoutubeSessionError::Unclear(error)) => {
                         warn!(
