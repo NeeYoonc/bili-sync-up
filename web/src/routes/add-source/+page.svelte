@@ -500,17 +500,9 @@
 			youtubeSourceType === 'douyin_liked' ||
 			youtubeSourceType === 'douyin_watch_later' ||
 			youtubeSourceType === 'tiktok_favorite';
-		if (sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection') {
-			void loadDouyinCatalog();
-		}
-		if (sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_mix') {
-			void loadDouyinCatalog();
-		}
-		if (sourcePlatform === 'youtube' && youtubeSourceType === 'playlist') {
-			if (youtubeStatus?.logged_in) {
-				void loadYoutubeOwnPlaylists();
-			}
-		}
+		// 统一为手动获取：下拉切换类型时不再自动拉取“我的列表”，
+		// 与 B 站收藏夹 / 关注的合集一致，由用户点击“获取自己的列表 / 获取收藏的合集 /
+		// 获取自己的收藏夹”触发。选 UP / 频道后加载其右侧列表的逻辑不受影响，仍保留。
 	}
 
 	function douyinSourceNeedsSelection(): boolean {
@@ -4170,6 +4162,18 @@
 													{loadingDouyinCatalog ? '获取中...' : '获取收藏的合集'}
 												</Button>
 											{/if}
+											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection'}
+												<Button
+													type="button"
+													onclick={() => loadDouyinCatalog()}
+													disabled={loadingDouyinCatalog}
+													size="sm"
+													variant="outline"
+													class={isMobile ? 'w-full' : ''}
+												>
+													{loadingDouyinCatalog ? '获取中...' : '获取自己的收藏夹'}
+												</Button>
+											{/if}
 											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin'}
 												<Button
 													type="button"
@@ -4202,11 +4206,11 @@
 													? youtubeSourceType === 'douyin'
 														? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
 														: youtubeSourceType === 'douyin_collection'
-															? '先搜索 UP 主，选择后加载其公开收藏夹，再选收藏夹自动填充名称和链接。'
+															? '点击“获取自己的收藏夹”展示当前账号的收藏夹；也可搜索 UP 主，选择后加载其公开收藏夹，再选收藏夹自动填充名称和链接。'
 															: youtubeSourceType === 'douyin_mix'
-																? '默认展示当前账号收藏的合集；也可搜索 UP 主后选择该作者创建的合集，或直接粘贴合集链接。'
+																? '点击“获取收藏的合集”展示当前账号收藏的合集；也可搜索 UP 主后选择该作者创建的合集，或直接粘贴合集链接。'
 															: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
-													: '默认展示自己的播放列表；也可按名称搜索公开播放列表，选择后自动填充名称、链接和快捷路径模板。'}
+													: '点击“获取自己的列表”展示自己的播放列表；也可按名称搜索公开播放列表，选择后自动填充名称、链接和快捷路径模板。'}
 										</p>
 									</div>
 								</div>
