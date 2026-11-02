@@ -47,6 +47,11 @@ jobs:
     name: Build ${{ matrix.platform.name }}
     needs: build_frontend
     runs-on: ${{ matrix.platform.os }}
+    # GitHub 的 macOS 托管 runner 容量紧张，排队超过约 15 分钟会被直接 cancel
+    # （runner 为空、steps 为空，日志里是 "The job was not acquired by Runner of type
+    # hosted"）。PR 阶段把它当作「尽力而为」，避免一次排队失败就卡住合并；
+    # tag / main 上仍然严格要求，发布产物不会缺。
+    continue-on-error: ${{ startsWith(matrix.platform.os, 'macos') && github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
