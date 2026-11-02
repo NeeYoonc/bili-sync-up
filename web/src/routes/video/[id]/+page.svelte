@@ -76,6 +76,10 @@
 	$: isMangaChapter = videoData?.source?.source_type === 'manga';
 	// 只由视频段组成的图集（多段视频/动态）没有原图，不能再提示「图片尚未下载」
 	$: imagePostVideoOnly = Boolean(videoData?.video.image_post_video_only);
+	$: imagePostVideoEnabled = videoData?.source?.generate_image_post_video ?? true;
+	// 纯图片作品关闭合成后没有本地 MP4；混排作品的分页仍是平台视频，照常可播。
+	$: showLocalVideoButton =
+		!isImagePost || imagePostVideoEnabled || imagePostVideoOnly || (videoData?.pages?.length ?? 0) > 1;
 	$: safeImageIndex = imageUrls.length > 0 ? Math.min(Math.max(currentImageIndex, 0), imageUrls.length - 1) : 0;
 
 	function videoDetailHref(videoId: number) {
@@ -1098,6 +1102,10 @@
 										本条作品由 {(videoData?.pages?.length ?? 1)} 段动态组成，没有可查看的原图；
 										每一段都是独立视频，点对应分段的「播放视频」即可逐段查看。
 									</div>
+								{:else if isImagePost && !imagePostVideoEnabled}
+									<div class="text-muted-foreground mb-2 text-center text-xs">
+										该视频源已关闭图文作品合成视频，仅保留原图与配乐。
+									</div>
 								{/if}
 								<div class="flex justify-center gap-2">
 									{#if isImagePost && !imagePostVideoOnly}
@@ -1113,7 +1121,7 @@
 											{imageUrls.length > 0 ? `查看图片（${imageUrls.length}）` : '图片尚未下载'}
 										</Button>
 									{/if}
-									{#if !isMangaChapter && pageInfo.download_status[1] === 7}
+									{#if !isMangaChapter && pageInfo.download_status[1] === 7 && showLocalVideoButton}
 										<Button
 											size="sm"
 											variant="default"

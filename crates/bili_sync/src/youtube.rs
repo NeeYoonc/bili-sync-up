@@ -162,6 +162,9 @@ pub struct CreateYouTubeSourceRequest {
     pub audio_only_m4a_only: bool,
     #[serde(default)]
     pub flat_folder: bool,
+    /// 图文作品是否额外合成幻灯片 MP4；关闭时只保留原图与配乐。
+    #[serde(default)]
+    pub generate_image_post_video: Option<bool>,
     pub download_danmaku: Option<bool>,
     #[serde(default)]
     pub download_subtitle: bool,
@@ -206,6 +209,8 @@ pub struct UpdateYouTubeSourceRequest {
     pub audio_only: Option<bool>,
     pub audio_only_m4a_only: Option<bool>,
     pub flat_folder: Option<bool>,
+    /// 图文作品是否额外合成幻灯片 MP4。
+    pub generate_image_post_video: Option<bool>,
     /// YouTube 中对应直播聊天回放文件。
     pub download_danmaku: Option<bool>,
     pub download_subtitle: Option<bool>,
@@ -258,6 +263,7 @@ pub struct YouTubeSourceResponse {
     pub audio_only: bool,
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
+    pub generate_image_post_video: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
     pub ai_subtitle_language: String,
@@ -1614,6 +1620,7 @@ pub async fn create_youtube_source(
         audio_only: Set(request.audio_only),
         audio_only_m4a_only: Set(request.audio_only_m4a_only),
         flat_folder: Set(request.flat_folder),
+        generate_image_post_video: Set(request.generate_image_post_video.unwrap_or(true)),
         download_danmaku: Set(request.download_danmaku.unwrap_or(true)),
         download_subtitle: Set(request.download_subtitle),
         ai_subtitle_language: Set(request
@@ -1727,6 +1734,9 @@ pub async fn update_youtube_source(
     }
     if let Some(value) = request.flat_folder {
         active.flat_folder = Set(value);
+    }
+    if let Some(value) = request.generate_image_post_video {
+        active.generate_image_post_video = Set(value);
     }
     if let Some(value) = request.download_danmaku {
         active.download_danmaku = Set(value);
@@ -2333,6 +2343,7 @@ async fn unified_youtube_parts(
             audio_only: source.audio_only,
             audio_only_m4a_only: false,
             flat_folder: false,
+            generate_image_post_video: source.generate_image_post_video,
         },
     )
 }
@@ -4264,7 +4275,12 @@ async fn download_video(
                     return Ok(());
                 }
                 let downloaded_title = downloaded.title.clone();
-                if source.ai_rename && crate::config::reload_config().ai_rename.enabled {
+                // 关闭图文视频合成后没有主媒体文件，只保留原图目录；此时跳过
+                // 单文件 AI 重命名，避免对不存在的 MP4 做改名。
+                if source.ai_rename
+                    && crate::config::reload_config().ai_rename.enabled
+                    && downloaded.output_path.is_file()
+                {
                     match ai_rename_external_file(&source, &video, &downloaded, None, None).await {
                         Ok(path) => downloaded.output_path = path,
                         Err(error) => {
@@ -4981,7 +4997,17 @@ async fn download_youtube_media(
         source.name,
         title
     );
-    let media_exists = is_reusable_media_file(&output_path).await;
+    let mut media_exists = is_reusable_media_file(&output_path).await;
+    // 关闭图文视频后，重置/重新处理旧作品时应清掉上一版生成的幻灯片 MP4；
+    // 混排作品含真实视频段，不走这里的清理。
+    if media_exists
+        && metadata.is_slideshow()
+        && !source.generate_image_post_video
+        && !metadata.slides.iter().any(crate::external_media::ExternalImageSlide::is_video)
+    {
+        remove_file_if_exists(&output_path).await?;
+        media_exists = false;
+    }
     if media_exists {
         info!(path = %output_path.display(), "{}视频源「{}」视频「{}」目标文件已存在，复用现有文件", platform, source.name, title);
     } else {
@@ -7519,6 +7545,7 @@ pub(crate) async fn source_response(db: &DatabaseConnection, source: youtube_sou
         audio_only: source.audio_only,
         audio_only_m4a_only: source.audio_only_m4a_only,
         flat_folder: source.flat_folder,
+        generate_image_post_video: source.generate_image_post_video,
         download_danmaku: source.download_danmaku,
         download_subtitle: source.download_subtitle,
         ai_subtitle_language: source.ai_subtitle_language,
@@ -9203,6 +9230,7 @@ mod tests {
             audio_only: false,
             audio_only_m4a_only: false,
             flat_folder: false,
+            generate_image_post_video: true,
             download_danmaku: false,
             download_subtitle: false,
             ai_subtitle_language: String::new(),

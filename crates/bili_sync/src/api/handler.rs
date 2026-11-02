@@ -3787,6 +3787,7 @@ fn build_video_source_tag(
         audio_only,
         audio_only_m4a_only,
         flat_folder,
+        generate_image_post_video: true,
     }
 }
 

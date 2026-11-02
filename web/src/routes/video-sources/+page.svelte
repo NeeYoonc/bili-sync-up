@@ -51,6 +51,7 @@
 	import MusicIcon from '@lucide/svelte/icons/music';
 	import FileAudioIcon from '@lucide/svelte/icons/file-audio';
 	import FolderSyncIcon from '@lucide/svelte/icons/folder-sync';
+	import ImageIcon from '@lucide/svelte/icons/image';
 	import ListTreeIcon from '@lucide/svelte/icons/list-tree';
 	import LayersIcon from '@lucide/svelte/icons/layers';
 	import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
@@ -371,6 +372,7 @@
 			audio_only: source.audio_only,
 			audio_only_m4a_only: source.audio_only_m4a_only,
 			flat_folder: source.flat_folder,
+			generate_image_post_video: source.generate_image_post_video,
 			split_chapters_after_download: false,
 			download_charge_videos: false,
 			download_danmaku: source.download_danmaku,
@@ -1041,6 +1043,36 @@
 					updateSourceInStore(sourceType, sourceId, (source) => ({
 						...source,
 						flat_folder: data.flat_folder
+					}));
+				}
+			}
+		);
+	}
+
+	// 切换图文作品是否额外合成幻灯片 MP4
+	async function handleToggleGenerateImagePostVideo(
+		sourceType: string,
+		sourceId: number,
+		currentGenerateImagePostVideo: boolean
+	) {
+		const nextGenerateImagePostVideo = !currentGenerateImagePostVideo;
+		await updateAndApply(
+			() =>
+				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
+					generate_image_post_video: nextGenerateImagePostVideo
+				}),
+			{
+				successToast: () => ({
+					title: '设置更新成功',
+					description: nextGenerateImagePostVideo
+						? '已启用图文作品合成视频'
+						: '已关闭图文作品合成视频，后续仅保存原图与配乐'
+				}),
+				applyLocalUpdate: (data) => {
+					updateSourceInStore(sourceType, sourceId, (source) => ({
+						...source,
+						generate_image_post_video:
+							data.generate_image_post_video ?? nextGenerateImagePostVideo
 					}));
 				}
 			}
@@ -1898,6 +1930,9 @@
 													{#if source.flat_folder}
 														<span class="text-purple-600">平铺目录</span>
 													{/if}
+													{#if (sourceConfig.type === 'douyin' || sourceConfig.type === 'tiktok') && source.generate_image_post_video === false}
+														<span class="text-sky-600">图文不生成视频</span>
+													{/if}
 													{#if source.split_chapters_after_download}
 														<span class="text-emerald-600">分章下载</span>
 													{/if}
@@ -2178,6 +2213,30 @@
 															: 'text-gray-400'}"
 													/>
 												</Button>
+
+												<!-- 图文作品合成视频 -->
+												{#if sourceConfig.type === 'douyin' || sourceConfig.type === 'tiktok'}
+													<Button
+														size="sm"
+														variant="ghost"
+														onclick={() =>
+															handleToggleGenerateImagePostVideo(
+																sourceConfig.type,
+																source.id,
+																source.generate_image_post_video ?? true
+															)}
+														title={source.generate_image_post_video === false
+															? '启用图文作品合成视频'
+															: '关闭图文作品合成视频（仅保存原图和配乐）'}
+														class="h-8 w-8 p-0"
+													>
+														<ImageIcon
+															class="h-4 w-4 {source.generate_image_post_video === false
+																? 'text-gray-400'
+																: 'text-sky-600'}"
+														/>
+													</Button>
+												{/if}
 
 												<!-- 分章下载 -->
 												{#if !isExternalSourceType(sourceConfig.type)}

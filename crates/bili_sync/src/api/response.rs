@@ -49,6 +49,8 @@ pub struct VideoSourceTag {
     pub audio_only: bool,
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
+    /// 图文作品是否生成幻灯片 MP4；非图文源固定为 true。
+    pub generate_image_post_video: bool,
 }
 
 #[derive(Serialize, ToSchema)]
