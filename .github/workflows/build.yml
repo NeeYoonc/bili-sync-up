@@ -132,7 +132,9 @@ jobs:
   # Runner of type hosted），和代码无关。PR 阶段不跑 macOS（其余 5 个平台照常全量
   # 构建）；push 到 main / 发 tag 时仍然构建 macOS 产物，保证 release 资产齐全。
   build_macos:
-    name: Build ${{ matrix.platform.name }}
+    # 静态名字：PR 阶段整 job 被跳过时不会显示成未展开的 ${{ matrix... }}。
+    # 两个矩阵项在 tag / main 的 run 里通过产物名区分。
+    name: Build macOS
     needs: build_frontend
     if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.platform.os }}
