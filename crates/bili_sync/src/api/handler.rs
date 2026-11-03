@@ -17436,6 +17436,50 @@ pub async fn setup_auth_token(
     Ok(ApiResponse::ok(response))
 }
 
+/// 把当前内存里的 B 站凭据写入数据库，并重新加载配置包。
+///
+/// **无论是否正在扫描都必须落库**。之前扫描期间只把「重载配置」任务入队，新凭据
+/// 只写在内存里；随后那次 reload 又从数据库读回旧凭据，于是「扫码登录成功，但一直
+/// 报账号未登录（-101）」。写库失败时短暂重试几次，避开扫描期间的 SQLite 写锁。
+async fn persist_bilibili_credential(
+    db: &DatabaseConnection,
+    credential: &crate::bilibili::Credential,
+) -> Result<(), ApiError> {
+    use crate::config::ConfigManager;
+
+    // 注意：`Config::clone()` 会为 credential 新建一个 ArcSwap（不是共享槽位），
+    // 所以 `reload_config().credential.store(...)` 只改到临时副本。这里必须直接用
+    // 调用方手上的新凭据序列化，写库后再 reload 配置包让它全局生效。
+    let credential_value = serde_json::to_value(credential)
+        .map_err(|error| ApiError::from(anyhow!("序列化凭据失败: {error}")))?;
+    let manager = ConfigManager::new(db.clone());
+
+    let mut last_error: Option<anyhow::Error> = None;
+    for attempt in 1..=5u32 {
+        match manager.update_config_item("credential", credential_value.clone()).await {
+            Ok(()) => {
+                last_error = None;
+                break;
+            }
+            Err(error) => {
+                warn!(attempt, %error, "保存 B站凭据到数据库失败，稍后重试");
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(300 * u64::from(attempt))).await;
+            }
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(ApiError::from(anyhow!("保存凭证失败: {error}")));
+    }
+    info!("B站凭证已保存到数据库");
+
+    if let Err(error) = crate::config::reload_config_bundle().await {
+        warn!(%error, "重新加载配置包失败，回退到直接重载配置");
+        crate::config::reload_config();
+    }
+    Ok(())
+}
+
 /// 更新B站登录凭证
 #[utoipa::path(
     put,
@@ -17508,47 +17552,9 @@ pub async fn update_credential(
         tracing::debug!("使用用户提供的 DedeUserID__ckMd5");
     }
 
-    // 更新配置中的凭证
-    let config = crate::config::reload_config();
-    config.credential.store(Some(std::sync::Arc::new(new_credential)));
-
-    // 移除配置文件保存 - 配置现在完全基于数据库
-    // config.save().map_err(|e| ApiError::from(anyhow!("保存配置失败: {}", e)))?;
-
-    // 检查是否正在扫描，如果是则通过任务队列处理
-    if crate::task::is_scanning() {
-        // 将配置更新任务加入队列
-        use uuid::Uuid;
-        let reload_task = crate::task::ReloadConfigTask {
-            task_id: Uuid::new_v4().to_string(),
-        };
-        crate::task::enqueue_reload_task(reload_task, &db).await?;
-        info!("检测到正在扫描，凭证保存任务已加入队列");
-    } else {
-        // 只更新凭据配置项，避免覆盖其他配置
-        use crate::config::ConfigManager;
-        let manager = ConfigManager::new(db.as_ref().clone());
-
-        let credential_json = serde_json::to_value(&config.credential).map_err(|e| {
-            warn!("序列化凭据失败: {}", e);
-            e
-        });
-
-        if let Ok(credential_value) = credential_json {
-            if let Err(e) = manager.update_config_item("credential", credential_value).await {
-                warn!("更新凭据配置失败: {}", e);
-            } else {
-                info!("凭证已保存到数据库");
-            }
-        }
-
-        // 重新加载全局配置包（从数据库）
-        if let Err(e) = crate::config::reload_config_bundle().await {
-            warn!("重新加载配置包失败: {}", e);
-            // 回退到传统的重新加载方式
-            crate::config::reload_config();
-        }
-    }
+    // 无论是否正在扫描都直接落库：扫描期间只入队 reload 会导致新凭据丢失
+    // （reload 会把内存改回数据库里的旧值）。写库后再 reload 配置包生效。
+    persist_bilibili_credential(db.as_ref(), &new_credential).await?;
 
     let response = crate::api::response::UpdateCredentialResponse {
         success: true,
@@ -17856,54 +17862,16 @@ pub async fn poll_qr_status(
             user_info: None,
         },
         LoginStatus::Confirmed(login_result) => {
-            // 保存凭证到配置系统
-            let config = crate::config::reload_config();
-            config
-                .credential
-                .store(Some(std::sync::Arc::new(login_result.credential.clone())));
+            // 扫码确认后立即落库并重载配置包：写库 → reload 才真正全局生效。
+            // （扫描期间只入队 reload 会让新凭据丢失，表现为「登录成功但一直 -101」。）
+            persist_bilibili_credential(db.as_ref(), &login_result.credential).await?;
 
-            // 检查是否正在扫描，如果是则通过任务队列处理
-            if crate::task::is_scanning() {
-                // 将配置更新任务加入队列
-                use uuid::Uuid;
-                let reload_task = crate::task::ReloadConfigTask {
-                    task_id: Uuid::new_v4().to_string(),
-                };
-                crate::task::enqueue_reload_task(reload_task, &db)
-                    .await
-                    .map_err(|e| ApiError::from(anyhow!("保存凭证失败: {}", e)))?;
-                info!("检测到正在扫描，凭证保存任务已加入队列");
+            // 用户登录成功后，尝试初始化硬件指纹
+            use crate::hardware::HardwareFingerprint;
+            if let Err(e) = HardwareFingerprint::reinit_if_user_changed(db.as_ref()).await {
+                debug!("硬件指纹初始化失败: {}", e);
             } else {
-                // 只更新凭据配置项，避免覆盖其他配置
-                use crate::config::ConfigManager;
-                let manager = ConfigManager::new(db.as_ref().clone());
-
-                let credential_json = serde_json::to_value(&config.credential).map_err(|e| {
-                    error!("序列化凭据失败: {}", e);
-                    ApiError::from(anyhow!("序列化凭据失败: {}", e))
-                })?;
-
-                if let Err(e) = manager.update_config_item("credential", credential_json).await {
-                    error!("保存凭证到数据库失败: {}", e);
-                    return Err(ApiError::from(anyhow!("保存凭证失败: {}", e)));
-                } else {
-                    info!("扫码登录凭证已保存到数据库");
-                }
-
-                // 重新加载全局配置包（从数据库）
-                if let Err(e) = crate::config::reload_config_bundle().await {
-                    warn!("重新加载配置包失败: {}", e);
-                    // 回退到传统的重新加载方式
-                    crate::config::reload_config();
-                }
-
-                // 用户登录成功后，尝试初始化硬件指纹
-                use crate::hardware::HardwareFingerprint;
-                if let Err(e) = HardwareFingerprint::reinit_if_user_changed(db.as_ref()).await {
-                    debug!("硬件指纹初始化失败: {}", e);
-                } else {
-                    info!("登录后硬件指纹初始化完成");
-                }
+                info!("登录后硬件指纹初始化完成");
             }
 
             crate::api::response::QRPollResponse {
