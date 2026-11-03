@@ -825,6 +825,51 @@ async fn external_source_path_is_shared(
 }
 
 /// 删除指定目录（仅当目录存在且为空）
+/// 删除合集根目录里由本来源生成的 `tvshow.nfo` / `season.nfo` 与四张封面。
+///
+/// 这些文件没有视频文件名前缀，删除源时按 `output_path` 逐个删文件永远碰不到，
+/// 于是删完源还会留在目录里。只有 `tvshow.nfo` 确实带本来源链接时才动手，避免误删
+/// 同目录下别人的元数据；目录与其他来源共享时只删 NFO，不动图片。
+fn remove_owned_series_sidecars(base: &std::path::Path, source_url: &str, shared_path: bool) -> usize {
+    if base.as_os_str().is_empty() || source_url.trim().is_empty() {
+        return 0;
+    }
+    let escaped_source_url = quick_xml::escape::escape(source_url).into_owned();
+    // 平铺目录时合集文件就在源目录；Season 结构时在下一层合集目录里。
+    let mut candidates = vec![base.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                candidates.push(entry.path());
+            }
+        }
+    }
+
+    let mut removed = 0usize;
+    for dir in candidates {
+        let tvshow = dir.join("tvshow.nfo");
+        let owned = std::fs::read_to_string(&tvshow)
+            .map(|contents| contents.contains(&escaped_source_url))
+            .unwrap_or(false);
+        if !owned {
+            continue;
+        }
+        for name in ["tvshow.nfo", "season.nfo"] {
+            if std::fs::remove_file(dir.join(name)).is_ok() {
+                removed += 1;
+            }
+        }
+        if !shared_path {
+            for name in ["poster.jpg", "folder.jpg", "landscape.jpg", "fanart.jpg"] {
+                if std::fs::remove_file(dir.join(name)).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
+}
+
 fn cleanup_empty_dir_if_empty(dir: &str, label: &str) {
     use std::fs;
     use std::path::Path;
@@ -1301,6 +1346,8 @@ mod cleanup_tests {
                 flat_folder: false,
                 remove_base_dir: true,
                 output_paths: vec![output.to_string_lossy().into_owned()],
+                source_url: String::new(),
+                shared_path: false,
             },
         )
         .await;
@@ -1310,6 +1357,50 @@ mod cleanup_tests {
             "非平铺外部平台源应连同头像、person.nfo 和图文原图完整删除"
         );
         assert!(root.exists(), "不应删除视频源基础目录之外的父目录");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn external_flat_cleanup_removes_owned_series_sidecars() {
+        // 合集级图片与 tvshow/season.nfo 没有视频文件名前缀，删源时必须能一起清掉，
+        // 否则会一直留在目录里（用户看到的就是「删了源，poster/fanart 还在」）。
+        let root = unique_temp_dir("external-source-series");
+        fs::create_dir_all(&root).unwrap();
+        let source_url = "https://www.douyin.com/collection/7651094555982301227";
+        let output = root.join("S01E01 - x.mp4");
+        fs::write(&output, b"media").unwrap();
+        fs::write(
+            root.join("tvshow.nfo"),
+            format!(r#"<uniqueid type="douyin">{source_url}</uniqueid>"#),
+        )
+        .unwrap();
+        for name in ["poster.jpg", "folder.jpg", "landscape.jpg", "fanart.jpg", "season.nfo"] {
+            fs::write(root.join(name), b"x").unwrap();
+        }
+        fs::write(root.join("保留.txt"), b"keep").unwrap();
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        execute_local_source_cleanup_plan(
+            &db,
+            LocalSourceCleanupPlan::External {
+                log_name: "抖音视频源测试".to_string(),
+                platform_label: "抖音",
+                base_path: root.to_string_lossy().into_owned(),
+                flat_folder: true,
+                remove_base_dir: false,
+                output_paths: vec![output.to_string_lossy().into_owned()],
+                source_url: source_url.to_string(),
+                shared_path: false,
+            },
+        )
+        .await;
+
+        assert!(!root.join("tvshow.nfo").exists(), "属于本源生成的 tvshow.nfo 应删除");
+        assert!(!root.join("season.nfo").exists());
+        for name in ["poster.jpg", "folder.jpg", "landscape.jpg", "fanart.jpg"] {
+            assert!(!root.join(name).exists(), "合集封面 {name} 应删除");
+        }
+        assert!(root.join("保留.txt").exists(), "不应删除无关文件");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1334,6 +1425,8 @@ mod cleanup_tests {
                 flat_folder: true,
                 remove_base_dir: false,
                 output_paths: vec![output.to_string_lossy().into_owned()],
+                source_url: String::new(),
+                shared_path: false,
             },
         )
         .await;
@@ -7063,6 +7156,10 @@ enum LocalSourceCleanupPlan {
         flat_folder: bool,
         remove_base_dir: bool,
         output_paths: Vec<String>,
+        /// 本来源的原始链接：用于确认 `tvshow.nfo` 确实是本来源生成的。
+        source_url: String,
+        /// 该目录是否与其他来源重叠（共享时不能删合集级图片）。
+        shared_path: bool,
     },
 }
 
@@ -7392,6 +7489,8 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
             flat_folder,
             remove_base_dir,
             output_paths,
+            source_url,
+            shared_path,
         } => {
             if is_dangerous_path_for_deletion(&base_path) {
                 warn!(platform = platform_label, path = %base_path, "检测到危险路径，跳过{} 本地清理", log_name);
@@ -7491,6 +7590,18 @@ async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: Lo
                 }
             }
 
+            // 合集级附属文件（poster/folder/landscape/fanart、tvshow.nfo、season.nfo）
+            // 没有视频文件名前缀，上面按 stem 删文件永远碰不到，删源后会一直留在目录里。
+            let cleaned_series_files = remove_owned_series_sidecars(&base, &source_url, shared_path);
+            if cleaned_series_files > 0 {
+                info!(
+                    platform = platform_label,
+                    path = %base.display(),
+                    cleaned_series_files,
+                    "{} 合集级图片/NFO 已清理",
+                    log_name
+                );
+            }
             cleanup_empty_dir_if_empty(&base_path, &format!("{}视频源基础目录", platform_label));
             info!(platform = platform_label, "{} 本地文件清理完成", log_name);
             return;
@@ -8258,8 +8369,8 @@ pub async fn delete_video_source_internal(
                 .await?;
 
             if delete_local_files {
-                let remove_base_dir =
-                    !source.flat_folder && !external_source_path_is_shared(&txn, source.id, &source.path).await?;
+                let shared_path = external_source_path_is_shared(&txn, source.id, &source.path).await?;
+                let remove_base_dir = !source.flat_folder && !shared_path;
                 if !source.flat_folder && !remove_base_dir {
                     info!(
                         platform = platform_label,
@@ -8275,6 +8386,8 @@ pub async fn delete_video_source_internal(
                     flat_folder: source.flat_folder,
                     remove_base_dir,
                     output_paths: videos.iter().filter_map(|video| video.output_path.clone()).collect(),
+                    source_url: source.url.clone(),
+                    shared_path,
                 });
             }
 

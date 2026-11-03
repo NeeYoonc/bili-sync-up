@@ -2515,7 +2515,7 @@ async fn remove_youtube_task_artifact(
             // 抖音短剧/放映厅/合集确有集号、实际使用 Season 结构时，
             // 剧集根目录还会有 tvshow.nfo。
             if uses_episodic_layout(source, video.episode_number) {
-                if let Some(series_dir) = output_path.parent().and_then(|dir| dir.parent()) {
+                if let Some(series_dir) = episodic_series_dir(&output_path, &source.path) {
                     let tvshow = series_dir.join("tvshow.nfo");
                     remove_file_if_exists(&tvshow).await?;
                 }
@@ -2972,8 +2972,8 @@ async fn regenerate_youtube_artifacts(
         // 抖音短剧/放映厅/合集确有集号、实际使用 Season 结构时，
         // 单集 NFO 之外还要刷新剧集 tvshow.nfo。
         if uses_episodic_layout(&source, video.episode_number) {
-            if let (Some(season_dir), Some(downloader)) = (output_path.parent(), downloader.as_deref()) {
-                if let Some(series_dir) = season_dir.parent() {
+            if let Some(downloader) = downloader.as_deref() {
+                if let Some(series_dir) = episodic_series_dir(&output_path, &source.path) {
                     let tvshow = series_dir.join("tvshow.nfo");
                     remove_file_if_exists(&tvshow).await?;
                     if let Err(error) =
@@ -3870,10 +3870,7 @@ async fn backfill_episodic_sidecars_from_first_video(
         return Ok(());
     };
     let output_path = PathBuf::from(output_path);
-    let Some(season_dir) = output_path.parent() else {
-        return Ok(());
-    };
-    let Some(series_dir) = season_dir.parent() else {
+    let Some(series_dir) = episodic_series_dir(&output_path, &source.path) else {
         return Ok(());
     };
     let thumb = youtube_sidecar_path(&output_path, "-thumb.jpg")?;
@@ -3893,6 +3890,14 @@ async fn backfill_episodic_sidecars_from_first_video(
                 .await
                 .is_ok_and(|metadata| metadata.len() >= 1024)
         {
+            // 合集封面已存在，但单集封面更新过（换了封面 / 改了竖图横图映射）时刷新一次，
+            // 否则老库里的 poster.jpg 会一直是旧图。
+            if let Ok(target_meta) = tokio::fs::metadata(&target).await {
+                if target_meta.len() >= 1024 && cover_source_is_newer(source_path, &target_meta).await {
+                    let _ = tokio::fs::copy(source_path, &target).await;
+                    let _ = ensure_jpeg_image(&target).await;
+                }
+            }
             continue;
         }
         tokio::fs::copy(source_path, &target)
@@ -6246,6 +6251,32 @@ fn uses_episodic_layout(source: &youtube_source::Model, episode_number: Option<i
     is_episodic_douyin_source(source) && episode_number.is_some_and(|episode| episode >= 1)
 }
 
+/// 剧集根目录（放 `poster.jpg` / `folder.jpg` / `landscape.jpg` / `fanart.jpg` /
+/// `tvshow.nfo` 的那一层）。
+///
+/// 不能一律取视频文件的上两级目录：**平铺目录（flat_folder）**时视频直接放在源目录
+/// 里，再往上退一层就写到「源目录的上一级」。多个源共用同一个父目录时，封面会互相
+/// 覆盖，还会出现「重设路径后旧目录仍在生成封面」「图片是别的合集的」这类现象。
+fn episodic_series_dir(output_path: &Path, source_path: &str) -> Option<PathBuf> {
+    let media_dir = output_path.parent()?;
+    let in_season_dir = media_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.trim().to_ascii_lowercase().starts_with("season"));
+    let candidate = if in_season_dir {
+        media_dir.parent()?.to_path_buf()
+    } else {
+        media_dir.to_path_buf()
+    };
+    // 兜底：永远不写到源目录之外，避免再次把附属文件甩到父目录。
+    let base = PathBuf::from(source_path);
+    if candidate.starts_with(&base) {
+        Some(candidate)
+    } else {
+        Some(base)
+    }
+}
+
 /// 清理旧版本把抖音收藏夹误当剧集时留下的附属文件。
 ///
 /// 仅当根目录 `tvshow.nfo` 确实是本收藏夹源生成的内容时才一并删除同组封面，
@@ -6301,7 +6332,7 @@ async fn ensure_youtube_series_sidecars(
     let Some(season_dir) = output_path.parent() else {
         return Ok(());
     };
-    let Some(series_dir) = season_dir.parent() else {
+    let Some(series_dir) = episodic_series_dir(output_path, &source.path) else {
         return Ok(());
     };
     tokio::fs::create_dir_all(&series_dir).await.ok();
@@ -6322,15 +6353,29 @@ async fn ensure_youtube_series_sidecars(
         ("fanart.jpg", &fanart_path, fanart_exists),
     ] {
         let target = series_dir.join(name);
-        if tokio::fs::metadata(&target)
-            .await
-            .is_ok_and(|metadata| metadata.len() >= 1024)
-        {
-            // 已存在的封面也顺手校正：老版本可能把 WebP 存成了 .jpg。
-            if let Err(error) = ensure_jpeg_image(&target).await {
-                warn!(platform, path = %target.display(), %error, "{}剧集封面转 JPEG 失败（文件仍是原始格式）", platform);
+        if let Ok(target_meta) = tokio::fs::metadata(&target).await {
+            if target_meta.len() >= 1024 {
+                // 单集封面比合集封面新时刷新一次：否则换了封面、改了「竖图/横图」映射
+                // 之后，合集目录里一直是老图（poster.jpg 还是旧版横版图就是这么来的）。
+                if source_exists && cover_source_is_newer(source_path, &target_meta).await {
+                    match tokio::fs::copy(source_path, &target).await {
+                        Ok(_) => info!(
+                            platform,
+                            path = %target.display(),
+                            "{}合集封面已按最新单集封面刷新",
+                            platform
+                        ),
+                        Err(error) => {
+                            warn!(platform, path = %target.display(), %error, "{}合集封面刷新失败", platform)
+                        }
+                    }
+                }
+                // 已存在的封面也顺手校正：老版本可能把 WebP 存成了 .jpg。
+                if let Err(error) = ensure_jpeg_image(&target).await {
+                    warn!(platform, path = %target.display(), %error, "{}剧集封面转 JPEG 失败（文件仍是原始格式）", platform);
+                }
+                continue;
             }
-            continue;
         }
         if source_exists {
             tokio::fs::copy(source_path, &target)
@@ -6740,6 +6785,17 @@ fn youtube_sidecar_path(output_path: &Path, suffix: &str) -> Result<PathBuf> {
         .and_then(|value| value.to_str())
         .context("媒体输出文件名无效")?;
     Ok(parent.join(format!("{stem}{suffix}")))
+}
+
+/// 单集封面是否比合集封面新（用来决定要不要刷新合集目录里的 poster/fanart 等）。
+async fn cover_source_is_newer(source_path: &Path, target_meta: &std::fs::Metadata) -> bool {
+    let Ok(source_meta) = tokio::fs::metadata(source_path).await else {
+        return false;
+    };
+    match (source_meta.modified(), target_meta.modified()) {
+        (Ok(source_time), Ok(target_time)) => source_time > target_time,
+        _ => false,
+    }
 }
 
 fn is_jpeg_header(head: &[u8]) -> bool {
@@ -9050,6 +9106,36 @@ mod tests {
     }
 
     #[test]
+    fn episodic_series_dir_handles_flat_and_season_layouts() {
+        // 平铺目录：视频直接在源目录里，合集根就是源目录，不能再往上退一层
+        assert_eq!(
+            episodic_series_dir(Path::new(r"J:\EMBY\AI短剧\困兽之战\S01E01 - x.mp4"), r"J:\EMBY\AI短剧\困兽之战"),
+            Some(PathBuf::from(r"J:\EMBY\AI短剧\困兽之战"))
+        );
+        // Season 结构：合集根是 Season 的上一层
+        assert_eq!(
+            episodic_series_dir(
+                Path::new(r"J:\EMBY\AI短剧\困兽之战\Season 01\S01E01 - x.mp4"),
+                r"J:\EMBY\AI短剧\困兽之战"
+            ),
+            Some(PathBuf::from(r"J:\EMBY\AI短剧\困兽之战"))
+        );
+        // 源根目录下再套一层合集名的 Season 结构
+        assert_eq!(
+            episodic_series_dir(
+                Path::new(r"J:\EMBY\AI短剧\陆离志怪录\Season 01\S01E01 - x.mp4"),
+                r"J:\EMBY\AI短剧"
+            ),
+            Some(PathBuf::from(r"J:\EMBY\AI短剧\陆离志怪录"))
+        );
+        // 无论如何都不能写到源目录之外（旧版本就是这样把封面甩到父目录的）
+        assert_eq!(
+            episodic_series_dir(Path::new(r"D:\other\S01E01 - x.mp4"), r"J:\EMBY\AI短剧\困兽之战"),
+            Some(PathBuf::from(r"J:\EMBY\AI短剧\困兽之战"))
+        );
+    }
+
+    #[test]
     fn detects_non_jpeg_cover_payloads() {
         // 抖音封面会随机返回 JPEG / WebP，只能靠文件头判断，不能看后缀。
         assert!(is_jpeg_header(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0]));
@@ -9125,7 +9211,7 @@ mod tests {
         collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
         has_youtube_session_value,
-        is_jpeg_header, needs_jpeg_conversion,
+        is_jpeg_header, needs_jpeg_conversion, episodic_series_dir,
         is_partial_download_artifact, remove_partial_download_artifacts,
         normalize_source_type, normalize_youtube_playlist_url, parse_youtube_live_chat, resolve_source_url,
         should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
@@ -9133,7 +9219,7 @@ mod tests {
         ytdlp_runtime_target_env, YoutubeLoginVerdict, SUBSCRIPTIONS_URL, WATCH_LATER_URL,
     };
     use std::collections::HashSet;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use bili_sync_migration::MigratorTrait;
     use sea_orm::ActiveModelTrait;

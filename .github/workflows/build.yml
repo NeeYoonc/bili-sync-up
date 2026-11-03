@@ -71,16 +71,6 @@ jobs:
             name: Linux-armv7l-musl
             bin: bili-sync-rs
             archive_name: bili-sync-rs-Linux-armv7l-musl.tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-15
-            name: macos-x86_64
-            bin: bili-sync-rs
-            archive_name: bili-sync-rs-macos-x86_64.tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            name: macos-aarch64
-            bin: bili-sync-rs
-            archive_name: bili-sync-rs-macos-aarch64.tar.gz
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -137,10 +127,84 @@ jobs:
           name: ${{ matrix.platform.archive_name }}
           path: ${{ github.workspace }}/${{ matrix.platform.archive_name }}
 
+  # macOS 单独拆开：GitHub 托管 macOS runner 容量长期紧张，排队约 15 分钟拿不到
+  # 机器就会被直接 cancel（runner 名称为空、steps 为空，注解是 not acquired by
+  # Runner of type hosted），和代码无关。PR 阶段不跑 macOS（其余 5 个平台照常全量
+  # 构建）；push 到 main / 发 tag 时仍然构建 macOS 产物，保证 release 资产齐全。
+  build_macos:
+    # 静态名字：PR 阶段整 job 被跳过时不会显示成未展开的 ${{ matrix... }}。
+    # 两个矩阵项在 tag / main 的 run 里通过产物名区分。
+    name: Build macOS
+    needs: build_frontend
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - target: x86_64-apple-darwin
+            os: macos-15
+            name: macos-x86_64
+            bin: bili-sync-rs
+            archive_name: bili-sync-rs-macos-x86_64.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: macos-aarch64
+            bin: bili-sync-rs
+            archive_name: bili-sync-rs-macos-aarch64.tar.gz
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Reset frontend build output
+        shell: bash
+        run: |
+          rm -rf web/build
+          mkdir -p web/build
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: web-build
+          path: web/build
+
+      - name: Read Rust toolchain version
+        id: read_rust_toolchain
+        shell: bash
+        run: |
+          channel=$(grep '^channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')
+          echo "value=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          target: ${{ matrix.platform.target }}
+          toolchain: ${{ steps.read_rust_toolchain.outputs.value }}
+          args: "--locked --release -p bili_sync"
+          strip: true
+
+      - name: Package archive
+        shell: bash
+        run: |
+          cd target/${{ matrix.platform.target }}/release
+          tar czf "../../../${{ matrix.platform.archive_name }}" "${{ matrix.platform.bin }}"
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.platform.archive_name }}
+          path: ${{ github.workspace }}/${{ matrix.platform.archive_name }}
+
   release:
     name: Create release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, build_macos]
+    # 发版时不要把整个 release 卡在 macOS 上：GitHub 的 macOS runner 经常因为排队
+    # 超时被直接 cancel（与代码无关）。只要 Windows / Linux 全绿就发布，macOS 产物
+    # 有就一起带上，没有就缺这两个资产（之后可单独重跑补）。
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
