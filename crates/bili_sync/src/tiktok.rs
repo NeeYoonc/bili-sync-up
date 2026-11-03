@@ -3250,6 +3250,22 @@ pub async fn tiktok_sdk_scheduler() {
     }
 }
 
+/// 是否存在启用的 TikTok 视频源。
+async fn has_enabled_tiktok_sources() -> bool {
+    let Some(db) = crate::database::get_global_db() else {
+        // 数据库还没就绪时按「有」处理，避免启动早期误跳过。
+        return true;
+    };
+    use sea_orm::PaginatorTrait;
+    youtube_source::Entity::find()
+        .filter(youtube_source::Column::Enabled.eq(true))
+        .filter(youtube_source::Column::SourceType.like("tiktok%"))
+        .count(db.as_ref())
+        .await
+        .map(|count| count > 0)
+        .unwrap_or(true)
+}
+
 /// 单轮 TikTok webmssdk SDK 自动更新。
 async fn refresh_tiktok_sdk_runtime() -> Result<()> {
     if !tiktok_sdk_autoupdate_enabled() {
@@ -3259,6 +3275,12 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
     // Canary 需要登录 Cookie；未导入时跳过自动更新。
     if !tiktok_cookie_values().contains_key("sessionid") {
         debug!("未导入 TikTok 登录 Cookie，跳过 webmssdk SDK 自动更新");
+        return Ok(());
+    }
+    // 没有启用的 TikTok 源时没必要跑：discover 要拉 Node 管理器、canary 还会打真实
+    // 关注接口（网络不通时会连续失败重试），白占 CPU/网络，拖慢同一进程里的扫描。
+    if !has_enabled_tiktok_sources().await {
+        debug!("没有启用的 TikTok 视频源，跳过 webmssdk SDK 自动更新");
         return Ok(());
     }
     let manager = ensure_tiktok_sdk_manager().await?;
