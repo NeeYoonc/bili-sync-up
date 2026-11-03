@@ -3135,10 +3135,6 @@ pub async fn unified_youtube_image_path(
 
 /// 由现有 `video_downloader` 的同一周期调用。来源扫描和待下载任务都受全局暂停、
 /// 下载并发配置及相同的日志/通知周期控制。
-/// 进程启动后的首次外源扫描宽限（秒）：避免与其它启动任务叠加触发抖音风控。
-/// 抖音源启动轮另有“最近扫过就跳过”保护，因此这里只保留避开启动风暴的短宽限，
-/// 不再让 YouTube 源无谓等待 60 秒。
-const STARTUP_EXTERNAL_SCAN_GRACE_SECONDS: u64 = 15;
 /// TikTok 对连续请求敏感（403/验证页风控），相邻视频下载间的固定间隔（秒）。
 const TIKTOK_DOWNLOAD_INTERVAL_SECONDS: u64 = 6;
 /// 进程启动后的首次外源扫描是否仍未执行（仅对启动轮生效）。
@@ -3186,17 +3182,6 @@ pub async fn process_scheduled_sources(
         return Ok(results);
     }
     let startup_round = EXTERNAL_STARTUP_SCAN_PENDING.swap(false, Ordering::SeqCst);
-    if startup_round && STARTUP_EXTERNAL_SCAN_GRACE_SECONDS > 0 {
-        info!(
-            grace_seconds = STARTUP_EXTERNAL_SCAN_GRACE_SECONDS,
-            "进程启动后延迟 {} 秒开始首次外源扫描，避免启动阶段叠加触发抖音风控",
-            STARTUP_EXTERNAL_SCAN_GRACE_SECONDS
-        );
-        tokio::time::sleep(Duration::from_secs(STARTUP_EXTERNAL_SCAN_GRACE_SECONDS)).await;
-        if TASK_CONTROLLER.is_paused() {
-            return Ok(results);
-        }
-    }
     for source in &sources {
         if TASK_CONTROLLER.is_paused() {
             return Ok(results);
@@ -3211,6 +3196,14 @@ pub async fn process_scheduled_sources(
             continue;
         }
         let scan_started_at = now_standard_string();
+        // 每个外源都打一条「开始扫描」：以前只有失败/有新视频时才出日志，YouTube
+        // 源在「没有新视频」的轮次里完全静默，看起来像没扫。日志沿用项目里其它
+        // 外源日志的纯文本风格，不额外挂字段，免得行尾跟一长串 kv 显得乱。
+        info!(
+            "开始扫描{}视频源「{}」",
+            source_platform_label(source),
+            source.name
+        );
         let mut scan_result = scan_source(db, source).await;
         if let Err(error) = scan_result.as_ref() {
             if is_douyin_source(source) && crate::douyin::is_douyin_risk_error(error) {
@@ -3241,6 +3234,12 @@ pub async fn process_scheduled_sources(
         }
         // 外源新增视频并入「扫描完成」推送：与 B 站源共用同一份扫描摘要。
         if let Ok(added) = scan_result.as_ref() {
+            info!(
+                "{}视频源「{}」扫描完成，新增 {} 个视频",
+                source_platform_label(source),
+                source.name,
+                added
+            );
             results.push(collect_external_scan_result(db, source, &scan_started_at, *added).await);
         }
         if let Err(error) = scan_result {
@@ -4027,6 +4026,31 @@ async fn download_pending(
     if videos.is_empty() {
         return Ok(());
     }
+    // 只看「来源仍启用」的视频：禁用来源的待下载任务以前也会进循环，而且 TikTok
+    // 会先白等 6 秒/条节流再发现来源被禁用（130 条 TikTok 待下载 = 十几分钟静默），
+    // 表现就是「扫描完最后一个源之后卡住不动」。
+    let enabled_source_ids: HashSet<i32> = youtube_source::Entity::find()
+        .filter(youtube_source::Column::Enabled.eq(true))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|source| source.id)
+        .collect();
+    let videos = videos
+        .into_iter()
+        .filter(|video| enabled_source_ids.contains(&video.source_id))
+        .collect::<Vec<_>>();
+    if videos.is_empty() {
+        return Ok(());
+    }
+    // 下载阶段以前全程无日志：一旦有待下载任务（尤其 TikTok 每条固定 6 秒节流），
+    // 日志里就停在最后一个源的「扫描完成」，看起来像卡死。补上开始/结束两条，
+    // 下一轮再出问题能直接看出卡在扫描还是下载。
+    info!(
+        "开始下载外源待处理视频，共 {} 个（并发 {}）",
+        videos.len(),
+        concurrent_limit
+    );
     let platforms = Arc::new(
         youtube_source::Entity::find()
             .all(db)
@@ -4064,6 +4088,7 @@ async fn download_pending(
             }
         })
         .await;
+    info!("外源待处理视频下载阶段结束");
     Ok(())
 }
 
@@ -4204,6 +4229,8 @@ async fn download_video(
         // 每次重试都重新让 yt-dlp 解析签名直链，避免复用已经限速或失效的
         // GoogleVideo URL；媒体仍由 UnifiedDownloader 和原 ffmpeg 链路处理。
         // 整次尝试套一层硬超时：任何环节卡死都不能让任务永久停在「下载中」。
+        // 计时用于「下载完成」日志里的耗时/平均速度，与 B 站保持同一模板。
+        let attempt_started = Instant::now();
         let result = match tokio::time::timeout(
             EXTERNAL_MEDIA_ATTEMPT_TIMEOUT,
             download_youtube_media(downloader, &source, &video),
@@ -4317,16 +4344,41 @@ async fn download_video(
                 active.published_at = Set(downloaded.published_at);
                 active.duration_seconds = Set(downloaded.duration_seconds);
                 active.is_image_post = Set(downloaded.is_image_post);
-                info!(
-                    platform = platform_label,
-                    source_id = source.id,
-                    youtube_id = %video.youtube_id,
-                    path = %downloaded.output_path.display(),
-                    "{}视频源「{}」视频「{}」下载完成",
-                    platform_label,
-                    source.name,
-                    downloaded_title
-                );
+                // 与 B 站「视频下载完成，总大小: x MB，耗时: y 秒，平均速度: z MB/s」
+                // 使用同一套模板；外源多平台并发，前面保留来源/标题便于定位。
+                let download_type = if source.audio_only { "音频" } else { "视频" };
+                let total_bytes = external_output_total_bytes(&downloaded.output_path).await;
+                let elapsed_secs = attempt_started.elapsed().as_secs_f64();
+                if total_bytes > 0 && elapsed_secs > 0.0 {
+                    let (speed, unit) = format_transfer_speed(total_bytes as f64 / elapsed_secs);
+                    info!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        youtube_id = %video.youtube_id,
+                        path = %downloaded.output_path.display(),
+                        "{}视频源「{}」{}「{}」下载完成，总大小: {:.2} MB，耗时: {:.2} 秒，平均速度: {:.2} {}",
+                        platform_label,
+                        source.name,
+                        download_type,
+                        downloaded_title,
+                        total_bytes as f64 / 1_048_576.0,
+                        elapsed_secs,
+                        speed,
+                        unit
+                    );
+                } else {
+                    info!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        youtube_id = %video.youtube_id,
+                        path = %downloaded.output_path.display(),
+                        "{}视频源「{}」{}「{}」下载完成",
+                        platform_label,
+                        source.name,
+                        download_type,
+                        downloaded_title
+                    );
+                }
                 active.update(db).await?;
                 notify_videos_changed();
                 notify_queue_status_changed();
@@ -4456,6 +4508,46 @@ struct DownloadedYouTubeMedia {
     paid_content: bool,
     /// 因未达到设定的最低分辨率等原因主动跳过下载，不作为错误/失败处理。
     skipped: bool,
+}
+
+/// 外源「下载完成」日志用的总大小：普通视频/音频取文件大小，图文作品取目录内
+/// 全部文件之和（没有合成 MP4 时目录里只有原图与配乐）。
+async fn external_output_total_bytes(path: &Path) -> u64 {
+    let Ok(metadata) = tokio::fs::metadata(path).await else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    let mut total = 0u64;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if let Ok(metadata) = entry.metadata().await {
+                total += metadata.len();
+            }
+        }
+    }
+    total
+}
+
+/// 与 B 站下载日志一致的速度单位选择（MB/s → KB/s → B/s）。
+fn format_transfer_speed(bytes_per_second: f64) -> (f64, &'static str) {
+    if bytes_per_second >= 1_048_576.0 {
+        (bytes_per_second / 1_048_576.0, "MB/s")
+    } else if bytes_per_second >= 1_024.0 {
+        (bytes_per_second / 1_024.0, "KB/s")
+    } else {
+        (bytes_per_second, "B/s")
+    }
 }
 
 struct SelectedStreams {
