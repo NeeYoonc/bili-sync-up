@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -30,8 +30,101 @@ const CACERT_DOWNLOAD_URL: &str = "https://curl.se/ca/cacert.pem";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(240);
 /// 单个官方接口请求超时。
 pub(crate) const TIKTOK_IMPERSONATE_TIMEOUT: Duration = Duration::from_secs(45);
+/// 建连（DNS + TCP + TLS）阶段的超时。
+///
+/// 注意：curl 的 `--connect-timeout` **包含 TLS 握手**。实测这台机器的代理
+/// （127.0.0.1:7897）连 tiktok.com 时 TLS 握手要 8~14 秒，偶尔还会直接 SSL
+/// 报错或被拖到 90 秒——按 10 秒上限会把本来能成功的请求提前掐掉（表现为
+/// 「退出码 28」但实际只等了 10 秒）。这里放宽到 30 秒，仍能在网络不可达时
+/// 比 `--max-time 45` 略早失败。
+const TIKTOK_IMPERSONATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 写入命令 stdout 的 HTTP 状态码标记。
 const STATUS_MARKER: &str = "\n__BILI_SYNC_HTTP__";
+
+/// 只保留 `scheme://host[:port]/path`，去掉查询串。
+///
+/// TikTok 签名 URL 的 query 里塞了 `X-Dynosaur` / `X-Gnarly` / `msToken` 等，
+/// 动辄 1~3 KB：原样写进日志和界面既没法看，也等于把会话签名到处散播。
+fn redact_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => {
+            let mut out = format!("{}://", parsed.scheme());
+            if let Some(host) = parsed.host_str() {
+                out.push_str(host);
+            }
+            if let Some(port) = parsed.port() {
+                out.push(':');
+                out.push_str(&port.to_string());
+            }
+            out.push_str(parsed.path());
+            out
+        }
+        Err(_) => url.split('?').next().unwrap_or(url).to_string(),
+    }
+}
+
+/// curl 退出码 → 可操作的中文原因（curl 的 CURLE_* 语义）。
+fn curl_exit_hint(
+    code: i32,
+    elapsed: Duration,
+    connect_timeout: Duration,
+    max_time: Duration,
+) -> Option<String> {
+    let hint = match code {
+        5 => "代理地址无法解析".to_string(),
+        6 => "无法解析域名（DNS 失败）".to_string(),
+        7 => "无法连接目标服务器（网络不可达或被拒绝）".to_string(),
+        // 28 既可能是建连/握手超时，也可能是整体超时，写清楚实际等了多久、
+        // 卡的是哪一段，方便判断是代理太慢还是对方一直不回包。
+        28 => format!(
+            "连接或读取超时（已等待 {:.1} 秒；建连上限 {} 秒、总上限 {} 秒）{}",
+            elapsed.as_secs_f64(),
+            connect_timeout.as_secs(),
+            max_time.as_secs(),
+            if elapsed + Duration::from_secs(1) < max_time {
+                "，卡在建连/握手阶段"
+            } else {
+                "，卡在等待响应"
+            }
+        ),
+        35 => "TLS 握手失败（代理节点不稳定时常出现，可换节点后重试）".to_string(),
+        52 => "服务器没有返回任何数据".to_string(),
+        56 => "接收数据失败（连接被重置）".to_string(),
+        60 => "CA 证书校验失败，请检查 curl-impersonate 的 cacert.pem".to_string(),
+        _ => return None,
+    };
+    Some(hint)
+}
+
+/// 这些退出码都属于「出口网络/代理不通」，提示用户去看代理配置。
+fn is_network_exit_code(code: i32) -> bool {
+    matches!(code, 5 | 6 | 7 | 28 | 35 | 52 | 56)
+}
+
+/// 统一的 curl-impersonate 失败描述：中文原因 + curl 输出 + 去掉 query 的目标地址。
+#[allow(clippy::too_many_arguments)]
+fn describe_curl_failure(
+    action: &str,
+    code: i32,
+    stderr: &str,
+    url: &str,
+    elapsed: Duration,
+    connect_timeout: Duration,
+    max_time: Duration,
+) -> String {
+    let mut message = match curl_exit_hint(code, elapsed, connect_timeout, max_time) {
+        Some(hint) => format!("curl-impersonate {action}失败（退出码 {code}）：{hint}"),
+        None => format!("curl-impersonate {action}失败（退出码 {code}）"),
+    };
+    if is_network_exit_code(code) {
+        message.push_str("；请检查外源代理（proxy/youtube_proxy）是否可用、出口网络能否访问 tiktok.com");
+    }
+    if !stderr.is_empty() {
+        message.push_str(&format!("；curl 输出：{stderr}"));
+    }
+    message.push_str(&format!("；目标：{}", redact_url(url)));
+    message
+}
 
 struct CurlImpersonatePackage {
     target_key: &'static str,
@@ -342,6 +435,8 @@ pub(crate) async fn tiktok_impersonated_get(
         .arg("chrome131")
         .arg("-s")
         .arg("--compressed")
+        .arg("--connect-timeout")
+        .arg(timeout.min(TIKTOK_IMPERSONATE_CONNECT_TIMEOUT).as_secs().to_string())
         .arg("--max-time")
         .arg(timeout.as_secs().to_string())
         .arg("--write-out")
@@ -392,19 +487,29 @@ pub(crate) async fn tiktok_impersonated_get(
     }
     command.arg(url);
 
+    let request_started = Instant::now();
     let output = tokio::time::timeout(timeout + Duration::from_secs(10), command.output())
         .await
-        .map_err(|_| anyhow!("curl-impersonate 请求超时：{url}"))?
-        .map_err(|error| anyhow!("启动 curl-impersonate 失败（{error}）：{url}"))?;
+        .map_err(|_| {
+            anyhow!(
+                "curl-impersonate 请求超时（超过 {} 秒无结果）；请检查外源代理（proxy/youtube_proxy）是否可用、出口网络能否访问 tiktok.com；目标：{}",
+                timeout.as_secs() + 10,
+                redact_url(url)
+            )
+        })?
+        .map_err(|error| anyhow!("启动 curl-impersonate 失败（{error}）：{}", redact_url(url)))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&header_dump);
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        bail!(
-            "curl-impersonate 请求失败（退出码 {}）：{}{}",
+        bail!(describe_curl_failure(
+            "请求",
             output.status.code().unwrap_or(-1),
-            if stderr.is_empty() { String::new() } else { format!("：{stderr}") },
-            url
-        );
+            &stderr,
+            url,
+            request_started.elapsed(),
+            timeout.min(TIKTOK_IMPERSONATE_CONNECT_TIMEOUT),
+            timeout
+        ));
     }
     let (status, body) = parse_status_body(&output.stdout)?;
     let response_headers = parse_dump_headers(&header_dump);
@@ -481,17 +586,22 @@ pub(crate) async fn tiktok_impersonated_download(
     }
     command.arg(url);
 
+    let download_started = Instant::now();
     let cmd_output = tokio::time::timeout(timeout + Duration::from_secs(30), command.output())
         .await
-        .map_err(|_| anyhow!("curl-impersonate 媒体下载超时：{url}"))?
-        .map_err(|error| anyhow!("启动 curl-impersonate 媒体下载失败（{error}）：{url}"))?;
+        .map_err(|_| anyhow!("curl-impersonate 媒体下载超时：{}", redact_url(url)))?
+        .map_err(|error| anyhow!("启动 curl-impersonate 媒体下载失败（{error}）：{}", redact_url(url)))?;
     if !cmd_output.status.success() {
         let stderr = String::from_utf8_lossy(&cmd_output.stderr).trim().to_string();
-        bail!(
-            "curl-impersonate 媒体下载失败（退出码 {}）{}：{url}",
+        bail!(describe_curl_failure(
+            "媒体下载",
             cmd_output.status.code().unwrap_or(-1),
-            if stderr.is_empty() { String::new() } else { format!("：{stderr}") }
-        );
+            &stderr,
+            url,
+            download_started.elapsed(),
+            Duration::from_secs(30),
+            timeout
+        ));
     }
     Ok(())
 }
@@ -562,4 +672,70 @@ fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         start = pos.unwrap() + needle.len();
     }
     pos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_url_drops_signed_query() {
+        let url = "https://www.tiktok.com/api/user/list/?aid=1988&X-Dynosaur=abc&msToken=secret";
+        assert_eq!(redact_url(url), "https://www.tiktok.com/api/user/list/");
+    }
+
+    #[test]
+    fn redact_url_keeps_port_and_unparsable_urls() {
+        assert_eq!(redact_url("https://example.com:8443/a/b?x=1"), "https://example.com:8443/a/b");
+        assert_eq!(redact_url("not a url?x=1"), "not a url");
+    }
+
+    #[test]
+    fn timeout_exit_code_explains_itself() {
+        let message = describe_curl_failure(
+            "请求",
+            28,
+            "",
+            "https://www.tiktok.com/api/user/list/?aid=1988&X-Dynosaur=abc",
+            Duration::from_secs_f64(30.0),
+            Duration::from_secs(30),
+            Duration::from_secs(45),
+        );
+        assert!(message.contains("退出码 28"), "{message}");
+        assert!(message.contains("超时"), "{message}");
+        assert!(message.contains("已等待 30.0 秒"), "{message}");
+        assert!(message.contains("卡在建连/握手阶段"), "{message}");
+        assert!(message.contains("proxy/youtube_proxy"), "{message}");
+        assert!(message.ends_with("目标：https://www.tiktok.com/api/user/list/"), "{message}");
+        assert!(!message.contains("X-Dynosaur"), "{message}");
+    }
+
+    #[test]
+    fn total_timeout_says_waiting_for_response() {
+        let message = describe_curl_failure(
+            "请求",
+            28,
+            "",
+            "https://www.tiktok.com/api/user/collect/item_list/?aid=1988",
+            Duration::from_secs(45),
+            Duration::from_secs(30),
+            Duration::from_secs(45),
+        );
+        assert!(message.contains("卡在等待响应"), "{message}");
+    }
+
+    #[test]
+    fn ca_error_does_not_blame_proxy() {
+        let message = describe_curl_failure(
+            "请求",
+            60,
+            "SSL certificate problem",
+            "https://www.tiktok.com/api/user/list/?aid=1988",
+            Duration::from_secs(2),
+            Duration::from_secs(30),
+            Duration::from_secs(45),
+        );
+        assert!(message.contains("CA 证书"), "{message}");
+        assert!(!message.contains("proxy/youtube_proxy"), "{message}");
+    }
 }

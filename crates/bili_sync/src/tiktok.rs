@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -842,6 +843,100 @@ fn tiktok_risk_status_hint(status: u16) -> &'static str {
     }
 }
 
+/// 是否为「出口网络/代理层」失败（连不上、超时、TLS 握手失败、DNS 失败）。
+///
+/// 与「接口返回 4xx/5xx 或空正文」不同：换一个接口（公开播放列表 → 全部收藏）
+/// 走的还是同一个 host、同一条代理，网络层失败时换接口必然同样失败，重试/兜底
+/// 只会让用户多白等一轮 30~45 秒。错误文案来自 `tiktok_impersonate` 的
+/// `describe_curl_failure`，这里按其中的中文原因与退出码识别。
+pub(crate) fn is_tiktok_network_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    [
+        "连接或读取超时",
+        "TLS 握手失败",
+        "无法解析域名",
+        "无法连接目标服务器",
+        "代理地址无法解析",
+        "接收数据失败",
+        "服务器没有返回任何数据",
+        "curl-impersonate 请求超时",
+        "退出码 5)",
+        "退出码 6)",
+        "退出码 7)",
+        "退出码 28)",
+        "退出码 35)",
+        "退出码 52)",
+        "退出码 56)",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+/// TikTok 登录态探测结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TikTokSessionState {
+    Valid,
+    Expired,
+    Unknown,
+}
+
+/// 用 passport 接口探测当前 cookies 的登录态。
+///
+/// 未登录/会话过期时 TikTok 返回
+/// `{"data":{"error_code":13,"name":"session_expired"},"message":"error"}`。
+/// 会话失效后所有会话接口（我的喜欢/收藏/关注）都只回 200 + 空正文，
+/// 只看空正文会把「登录过期」误报成「IP 被风控」。
+pub(crate) async fn probe_tiktok_session() -> TikTokSessionState {
+    let Ok(cookie) = tiktok_cookie_header() else {
+        return TikTokSessionState::Unknown;
+    };
+    match tiktok_impersonated_get(
+        "https://www.tiktok.com/passport/web/account/info/?aid=1988",
+        &cookie,
+    )
+    .await
+    {
+        Ok((status, body, _)) if status == 200 => {
+            if body.contains("session_expired") || body.contains("\"error_code\":13") {
+                TikTokSessionState::Expired
+            } else if body.contains("\"user_id\"") || body.contains("\"username\"") {
+                TikTokSessionState::Valid
+            } else {
+                TikTokSessionState::Unknown
+            }
+        }
+        _ => TikTokSessionState::Unknown,
+    }
+}
+
+/// 会话接口返回空正文时的可操作提示：先判断是不是登录过期，再谈 IP 风控。
+pub(crate) async fn tiktok_empty_body_hint(label: &str) -> String {
+    format_empty_body_hint(label, probe_tiktok_session().await)
+}
+
+fn format_empty_body_hint(label: &str, state: TikTokSessionState) -> String {
+    match state {
+        TikTokSessionState::Expired => format!(
+            "TikTok「{label}」返回空正文，且服务器探测到 session_expired（passport 接口 error_code 13）。两种原因表现相同：① 当前出口 IP 被 TikTok 限流/软封；② 登录确实过期。建议先换外源代理节点（或停 30 分钟再试）；仍然失败再在浏览器里重新登录 TikTok，导出包含 HttpOnly 的 cookies.txt 后重新导入（保持与 bili-sync 使用同一出口节点）"
+        ),
+        _ => format!(
+            "TikTok「{label}」返回空响应：当前出口 IP 可能被 TikTok 限流/风控（连公开的 item_list 接口也返回空就是这种情况）。请先在设置页更换外源代理（proxy/youtube_proxy）节点，或停 30 分钟后再试"
+        ),
+    }
+}
+
+/// 缺少账号 ID（multi_sids）时的提示：优先指出登录已过期。
+pub(crate) async fn tiktok_missing_account_id_hint() -> String {
+    format_missing_account_id_hint(probe_tiktok_session().await)
+}
+
+fn format_missing_account_id_hint(state: TikTokSessionState) -> String {
+    match state {
+        TikTokSessionState::Expired => "cookies 里没有账号 ID（multi_sids），且服务器探测到 session_expired：请先换出口节点/稍后重试，仍失败再在浏览器里重新登录 TikTok 并重新导出完整 cookies（保持与 bili-sync 同一出口节点）".to_string(),
+        _ => "cookies 里没有账号 ID（multi_sids，HttpOnly）：请用「电脑端登录助手」重新传输一次 TikTok 登录状态；若助手里也读不到该 cookie，说明当前会话没有下发它，可先用作者主页链接的方式添加源".to_string(),
+    }
+}
+
 /// 带风控退避重试的 TikTok 会话接口请求（我的喜欢/收藏等极简参数接口）。
 ///
 /// 对 403/429/5xx 记录风控事件并按 3 秒 × 尝试次数退避重试；重试耗尽后把
@@ -991,6 +1086,14 @@ pub(crate) fn tiktok_cookie_header() -> Result<String> {
         .join("; "))
 }
 
+/// 是否已导入 TikTok 登录凭证。
+///
+/// 官方详情/收藏等会话接口都以 Cookie 为前提；没有 Cookie 时直接跳过这些
+/// 请求、只走 yt-dlp 的公开解析，避免每次都白跑一次必然失败的请求。
+pub(crate) fn has_tiktok_login() -> bool {
+    tiktok_cookie_text().is_some_and(|text| !text.trim().is_empty())
+}
+
 /// TikTok 登录 verifyFp（来自 s_v_web_id cookie）。
 fn tiktok_login_verify_fp() -> Option<String> {
     tiktok_cookie_values()
@@ -1131,6 +1234,9 @@ async fn tiktok_login_sec_uid_with_source() -> Result<(String, bool)> {
             Ok((status, body, _)) => {
                 if status == 200 {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        // 顺手缓存数字账号 ID：部分会话不下发 multi_sids cookie，
+                        // 关注列表接口需要的 odinId 就在这里拿到。
+                        remember_tiktok_odin_id(&json).await;
                         sec_uid = json
                             .pointer("/data/sec_user_id")
                             .and_then(serde_json::Value::as_str)
@@ -1352,7 +1458,8 @@ async fn fetch_tiktok_favorites(
         }
         if body.trim().is_empty() {
             bail!(
-                "TikTok 我的喜欢返回空响应：当前出口 IP 可能被 TikTok 风控。请在设置页配置外源代理（proxy/youtube_proxy）后重试"
+                "{}",
+                tiktok_empty_body_hint("我的喜欢").await
             );
         }
         let payload = decode_tiktok_body(&body)?;
@@ -1428,6 +1535,36 @@ pub async fn scan_tiktok_user_source(
     persist_tiktok_posts(db, source, posts).await
 }
 
+/// 本地缓存：`@用户名 → secUid`。
+///
+/// 关注列表与作者搜索接口本身就会返回 secUid；缓存下来后，添加作者源时就不必
+/// 再去抓 `@用户名` 主页——那个页面在我们的出口上稳定返回 SlardarWAF 验证页，
+/// 也正是 yt-dlp 报 “Unable to extract secondary user ID” 的直接原因。
+fn tiktok_cached_user_secuid(unique_id: &str) -> Option<String> {
+    let handle = unique_id.trim().trim_start_matches('@').to_ascii_lowercase();
+    if handle.is_empty() {
+        return None;
+    }
+    crate::credential_store::get(&format!("tiktok.user_secuid.{handle}"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 记住某个作者的 secUid，供后续解析/添加源直接复用。
+async fn remember_tiktok_user_secuid(unique_id: &str, sec_uid: &str) {
+    let handle = unique_id.trim().trim_start_matches('@').to_ascii_lowercase();
+    if handle.is_empty() || !sec_uid.starts_with("MS4wLjAB") {
+        return;
+    }
+    let key = format!("tiktok.user_secuid.{handle}");
+    if crate::credential_store::get(&key).as_deref() == Some(sec_uid) {
+        return;
+    }
+    if let Err(error) = crate::credential_store::set(&key, sec_uid).await {
+        debug!(error = %error, handle = %handle, "缓存 TikTok 作者 secUid 失败");
+    }
+}
+
 /// 解析 TikTok 作者 secUid（公开作者优先，无需登录）。
 ///
 /// 公开内容依次尝试，全部失败才报错：
@@ -1436,6 +1573,11 @@ pub async fn scan_tiktok_user_source(
 ///  3. `resolve_tiktok_sec_uid`（官方 user/detail + 主页 HTML 兜底，需要登录态）。
 async fn resolve_tiktok_sec_uid_public(url: &str) -> Result<String> {
     if let Some(unique_id) = tiktok_unique_id_from_url(url) {
+        // 0) 本地缓存：关注列表/搜索接口已经返回过该作者的 secUid 时直接复用，
+        //    不必再去抓那个 100% 被 SlardarWAF 打回的 `@用户名` 主页。
+        if let Some(sec_uid) = tiktok_cached_user_secuid(&unique_id) {
+            return Ok(sec_uid);
+        }
         if let Ok(Some(user)) = fetch_tiktok_ssr_profile(&unique_id).await {
             if let Some(sec_uid) = user
                 .get("secUid")
@@ -1706,15 +1848,41 @@ async fn fetch_tiktok_author_videos(
     append_ytdlp_runtime(&mut command);
     append_tiktok_cookies(&mut command);
     append_youtube_proxy(&mut command);
-    command.arg(raw_url);
+    // yt-dlp 直接吃 `@用户名` 主页时经常报 “Unable to extract secondary user ID”：
+    // 它要去主页 HTML 里找 secUid，而那个页面在我们这条出口上会被 WAF 打回。
+    // 先用项目自己的解析（SSR / TikWM 搜索 / 官方 user/detail）拿到 secUid，
+    // 再喂 yt-dlp 官方支持的 `tiktokuser:<secUid>` 形式。
+    let ytdlp_target = match resolve_tiktok_sec_uid_public(raw_url).await {
+        Ok(sec_uid) => {
+            if let Some(unique_id) = tiktok_unique_id_from_url(raw_url) {
+                remember_tiktok_user_secuid(&unique_id, &sec_uid).await;
+            }
+            format!("tiktokuser:{sec_uid}")
+        }
+        Err(error) => {
+            debug!(
+                error = %error,
+                url = %raw_url,
+                "解析 TikTok 作者 secUid 失败，回退原始主页链接交给 yt-dlp"
+            );
+            raw_url.to_string()
+        }
+    };
+    command.arg(&ytdlp_target);
     let output = tokio::time::timeout(Duration::from_secs(10 * 60), command.output())
         .await
         .map_err(|_| anyhow!("加载 TikTok 历史视频超时"))??;
     if !output.status.success() {
-        return Err(ApiError::from(anyhow!(
-            "加载 TikTok 历史视频失败：{}",
-            command_error(&output)
-        )));
+        let detail = command_error(&output);
+        // 这类失败以前只回给前端、不写日志，事后完全无法判断是 WAF、代理还是
+        // yt-dlp 版本问题。这里补一条 warn，把真正喂给 yt-dlp 的 target 记下来。
+        warn!(
+            url = %raw_url,
+            target = %ytdlp_target,
+            error = %detail,
+            "加载 TikTok 作者历史视频失败（yt-dlp）"
+        );
+        return Err(ApiError::from(anyhow!("加载 TikTok 历史视频失败：{detail}")));
     }
     let mut videos = Vec::new();
     let mut seen = HashSet::new();
@@ -2004,13 +2172,54 @@ async fn sign_tiktok_url_with_sdk(url: &str, sdk: Option<&str>) -> Result<String
 
 const TIKTOK_USER_LIST_API: &str = "https://www.tiktok.com/api/user/list/";
 
-/// 当前登录账号的 odinId（来自 multi_sids cookie 的第一段）。
+/// 当前登录账号的 odinId（数字 ID）。
+///
+/// 首选 `multi_sids` cookie 的第一段；但这个 cookie 并非所有会话都会下发
+/// （实测某些登录态里根本没有它），此时回退到 passport 接口反查并缓存的值
+/// （`tiktok.odin_id`），避免「能正常登录却因为缺一个 cookie 用不了关注列表」。
 fn tiktok_login_odin_id() -> Option<String> {
-    tiktok_cookie_values()
+    if let Some(value) = tiktok_cookie_values()
         .get("multi_sids")
         .and_then(|value| value.split('%').next())
         .map(str::to_string)
         .filter(|value| !value.is_empty())
+    {
+        return Some(value);
+    }
+    crate::credential_store::get(crate::credential_store::keys::TIKTOK_ODIN_ID)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// 记录 passport 接口返回的账号数字 ID，供缺少 multi_sids 的会话复用。
+async fn remember_tiktok_odin_id(payload: &serde_json::Value) {
+    let value = payload
+        .pointer("/data/user_id")
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_i64().map(|number| number.to_string()))
+        })
+        .or_else(|| {
+            payload
+                .pointer("/data/user_id_str")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()));
+    let Some(value) = value else {
+        return;
+    };
+    if crate::credential_store::get(crate::credential_store::keys::TIKTOK_ODIN_ID).as_deref() == Some(&value) {
+        return;
+    }
+    if let Err(error) = crate::credential_store::set(crate::credential_store::keys::TIKTOK_ODIN_ID, &value).await {
+        debug!(error = %error, "缓存 TikTok 账号 ID 失败");
+    } else {
+        debug!("已缓存 TikTok 账号 ID（odinId）");
+    }
 }
 
 /// 获取当前登录账号已关注的 TikTok 作者列表。
@@ -2027,15 +2236,16 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
     // 自动翻页，避免关注超过单页数量（count=30）时被截断。
     let cookie = tiktok_cookie_header()?;
     let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
-    let odin_id = tiktok_login_odin_id().ok_or_else(|| {
-        anyhow!("无法从 TikTok cookies.txt 解析账号 ID（缺少 multi_sids），请重新导入登录状态")
-    })?;
+    // 关注列表按目标账号的 secUid 定位：`multi_sids` 这个 cookie 并非所有会话都会
+    // 下发，缺它时用已保存的 secUid 就够，不再强制要求 odinId（数字 ID）。
+    let target_sec_uid = tiktok_login_sec_uid().await?;
+    let odin_id = tiktok_login_odin_id().unwrap_or_default();
     let device_id = tiktok_web_device_id().to_string();
     let mut cursor = "0".to_string();
     let mut results = Vec::new();
     let mut seen = HashSet::new();
     for _ in 0..50 {
-        let params: Vec<(&str, String)> = vec![
+        let mut params: Vec<(&str, String)> = vec![
             ("aid", "1988".to_string()),
             ("app_language", "zh-Hans".to_string()),
             ("app_name", "tiktok_web".to_string()),
@@ -2058,7 +2268,6 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
             ("is_page_visible", "true".to_string()),
             ("maxCursor", cursor.clone()),
             ("minCursor", "0".to_string()),
-            ("odinId", odin_id.clone()),
             ("os", "windows".to_string()),
             ("priority_region", String::new()),
             ("referer", "https://www.tiktok.com/".to_string()),
@@ -2067,7 +2276,7 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
             ("scene", "21".to_string()),
             ("screen_height", "1440".to_string()),
             ("screen_width", "2560".to_string()),
-            ("targetUserId", odin_id.clone()),
+            ("secUid", target_sec_uid.clone()),
             ("tz_name", "Asia/Shanghai".to_string()),
             ("user_is_login", "true".to_string()),
             ("WebIdLastTime", (std::time::SystemTime::now()
@@ -2080,6 +2289,12 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
             ("msToken", ms_token.clone()),
             ("X-Bogus", "1".to_string()),
         ];
+        // 有 odinId 时一并带上（部分版本接口仍读这两个参数）；缺 multi_sids 时不发空值，
+        // 避免 "err input"。
+        if !odin_id.is_empty() {
+            params.push(("odinId", odin_id.clone()));
+            params.push(("targetUserId", odin_id.clone()));
+        }
         let (status, body) = tiktok_signed_get_with_retry(
             TIKTOK_USER_LIST_API,
             &params,
@@ -2133,6 +2348,13 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
         }
         cursor = next;
         tokio::time::sleep(tiktok_page_delay().await).await;
+    }
+    // 顺手把「用户名 → secUid」缓存起来：随后添加作者源、加载该作者历史视频时
+    // 直接命中缓存，不用再去抓被 WAF 打回的主页。
+    for result in &results {
+        if let Some(sec_uid) = result.channel_id.as_deref() {
+            remember_tiktok_user_secuid(&result.author, sec_uid).await;
+        }
     }
     let total = results.len();
     Ok(ApiResponse::ok(YouTubeSearchResponse {
@@ -2471,6 +2693,15 @@ async fn fetch_tiktok_playlists(sec_uid: &str, own: bool) -> anyhow::Result<ApiR
     // 接口被风控打回不影响“全部收藏”兜底）。
     let mut results = match fetch_tiktok_public_playlists(sec_uid).await {
         Ok(results) => results,
+        // 出口网络/代理不通时，「全部收藏」兜底走的是同一个 host 和同一条代理，
+        // 必然同样失败：直接返回原始错误，别让用户再白等一轮 30~45 秒。
+        Err(error) if own && is_tiktok_network_error(&error) => {
+            warn!(
+                error = %error,
+                "TikTok 公开播放列表获取失败（网络/代理不可用），跳过「全部收藏」兜底"
+            );
+            return Err(error);
+        }
         Err(error) if own => {
             warn!(error = %error, "TikTok 公开播放列表获取失败，回退“全部收藏”");
             Vec::new()
@@ -2552,7 +2783,14 @@ async fn fetch_tiktok_collect_videos(
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
+    // 空正文（TikTok 软风控）时会通过 x-ms-token / Set-Cookie 下发新的 msToken，
+    // `tiktok_impersonated_get` 已经把它合并回 cookies.txt。这里重试同一页即可
+    // 用新 token 再要一次——实测经常第一次空、第二次就正常返回。
+    let mut empty_retries = 0u32;
     for _ in 0..500 {
+        // 注：这里刻意用不签名的极简参数。实测同一时刻给这个接口加完整
+        // webmssdk 签名（X-Dynosaur/X-Gnarly）也一样只回 200 + 空正文，
+        // 说明空正文是出口 IP 的软风控而不是缺签名；走签名反而多花 2 秒签一次。
         let (status, body) =
             tiktok_impersonated_get_with_retry(TIKTOK_USER_COLLECT_API, &sec_uid, cursor, 30).await?;
         if status != 200 {
@@ -2563,10 +2801,22 @@ async fn fetch_tiktok_collect_videos(
             );
         }
         if body.trim().is_empty() {
+            if empty_retries < 2 {
+                empty_retries += 1;
+                debug!(
+                    attempt = empty_retries,
+                    cursor,
+                    "TikTok 收藏返回空正文，已合并新下发的 msToken，重试同一页"
+                );
+                tokio::time::sleep(tiktok_page_delay().await).await;
+                continue;
+            }
             bail!(
-                "TikTok 收藏返回空响应：当前出口 IP 可能被 TikTok 风控。请在设置页配置外源代理（proxy/youtube_proxy）后重试"
+                "{}",
+                tiktok_empty_body_hint("收藏").await
             );
         }
+        empty_retries = 0;
         let payload = decode_tiktok_body(&body)?;
         let mut page_posts = Vec::new();
         if let Some(items) = payload.get("itemList").and_then(serde_json::Value::as_array) {
@@ -3147,11 +3397,10 @@ async fn tiktok_sdk_canary(sdk_id: &str) -> Result<usize> {
         .get("msToken")
         .cloned()
         .unwrap_or_default();
-    let odin_id = tiktok_login_odin_id().ok_or_else(|| {
-        anyhow!(
-            "无法从 TikTok cookies.txt 解析账号 ID（缺少 multi_sids），请重新导入登录状态"
-        )
-    })?;
+    let odin_id = match tiktok_login_odin_id() {
+        Some(id) => id,
+        None => bail!("{}", tiktok_missing_account_id_hint().await),
+    };
     let device_id = tiktok_web_device_id().to_string();
     let params: Vec<(&str, String)> = vec![
         ("aid", "1988".to_string()),
@@ -3250,6 +3499,22 @@ pub async fn tiktok_sdk_scheduler() {
     }
 }
 
+/// 是否存在启用的 TikTok 视频源。
+async fn has_enabled_tiktok_sources() -> bool {
+    let Some(db) = crate::database::get_global_db() else {
+        // 数据库还没就绪时按「有」处理，避免启动早期误跳过。
+        return true;
+    };
+    use sea_orm::PaginatorTrait;
+    youtube_source::Entity::find()
+        .filter(youtube_source::Column::Enabled.eq(true))
+        .filter(youtube_source::Column::SourceType.like("tiktok%"))
+        .count(db.as_ref())
+        .await
+        .map(|count| count > 0)
+        .unwrap_or(true)
+}
+
 /// 单轮 TikTok webmssdk SDK 自动更新。
 async fn refresh_tiktok_sdk_runtime() -> Result<()> {
     if !tiktok_sdk_autoupdate_enabled() {
@@ -3259,6 +3524,12 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
     // Canary 需要登录 Cookie；未导入时跳过自动更新。
     if !tiktok_cookie_values().contains_key("sessionid") {
         debug!("未导入 TikTok 登录 Cookie，跳过 webmssdk SDK 自动更新");
+        return Ok(());
+    }
+    // 没有启用的 TikTok 源时没必要跑：discover 要拉 Node 管理器、canary 还会打真实
+    // 关注接口（网络不通时会连续失败重试），白占 CPU/网络，拖慢同一进程里的扫描。
+    if !has_enabled_tiktok_sources().await {
+        debug!("没有启用的 TikTok 视频源，跳过 webmssdk SDK 自动更新");
         return Ok(());
     }
     let manager = ensure_tiktok_sdk_manager().await?;
@@ -3396,6 +3667,74 @@ fn tiktok_video_id(url: &str) -> Option<String> {
 /// 空响应时 TikTok 会下发新的 msToken（x-ms-token / Set-Cookie），
 /// `tiktok_impersonated_get` 已自动合并回 cookies.txt，这里最多重试 2 次。
 pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMediaMetadata> {
+    extract_tiktok_media_detail_attempts(url, 3).await
+}
+
+/// 「详情接口优先」路径的降级状态。
+///
+/// 我们这台机器上 `/api/item/detail/` 多数时候返回 200 空正文（TikTok 的 BotGuard
+/// 软门槛）。空响应时再按「优先」去试，每个视频都要白等一次签名 + 请求，批量下载
+/// 会被拖慢。这里连续失败若干次就进入冷却，冷却期内直接跳过、用 yt-dlp 解析；
+/// 一旦某次成功就立刻恢复优先顺序。
+static TIKTOK_DETAIL_FAILURE_STREAK: AtomicU32 = AtomicU32::new(0);
+static TIKTOK_DETAIL_SKIP_UNTIL: AtomicI64 = AtomicI64::new(0);
+/// 连续失败多少次后进入冷却。
+const TIKTOK_DETAIL_FAILURE_THRESHOLD: u32 = 2;
+/// 冷却时长（秒）。
+const TIKTOK_DETAIL_COOLDOWN_SECONDS: i64 = 1800;
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 详情接口是否处于冷却期（近期连续拿不到直链）。
+pub(crate) fn tiktok_detail_api_in_cooldown() -> bool {
+    unix_now() < TIKTOK_DETAIL_SKIP_UNTIL.load(Ordering::Relaxed)
+}
+
+fn record_tiktok_detail_outcome(succeeded: bool) {
+    if succeeded {
+        TIKTOK_DETAIL_FAILURE_STREAK.store(0, Ordering::Relaxed);
+        TIKTOK_DETAIL_SKIP_UNTIL.store(0, Ordering::Relaxed);
+        return;
+    }
+    let streak = TIKTOK_DETAIL_FAILURE_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+    if streak >= TIKTOK_DETAIL_FAILURE_THRESHOLD {
+        TIKTOK_DETAIL_SKIP_UNTIL.store(unix_now() + TIKTOK_DETAIL_COOLDOWN_SECONDS, Ordering::Relaxed);
+        warn!(
+            failures = streak,
+            cooldown_secs = TIKTOK_DETAIL_COOLDOWN_SECONDS,
+            "TikTok 官方详情接口连续拿不到直链，{} 秒内改为只走 yt-dlp 网页解析",
+            TIKTOK_DETAIL_COOLDOWN_SECONDS
+        );
+    }
+}
+
+/// 一次尝试版本，供「详情接口优先」路径使用。
+///
+/// 空响应（BotGuard 门槛）时不再重签重试：重签要再起一次 Node 签名器，三个视频
+/// 就是十几秒白等。优先路径失败后直接交给 yt-dlp，等其它路径都失败时再用
+/// [`extract_tiktok_media_detail`] 走完整的重签重试。
+pub(crate) async fn extract_tiktok_media_detail_quick(url: &str) -> Result<ExternalMediaMetadata> {
+    extract_tiktok_media_detail_attempts(url, 1).await
+}
+
+async fn extract_tiktok_media_detail_attempts(
+    url: &str,
+    attempts: usize,
+) -> Result<ExternalMediaMetadata> {
+    let result = extract_tiktok_media_detail_inner(url, attempts).await;
+    record_tiktok_detail_outcome(result.is_ok());
+    result
+}
+
+async fn extract_tiktok_media_detail_inner(
+    url: &str,
+    attempts: usize,
+) -> Result<ExternalMediaMetadata> {
     let item_id =
         tiktok_video_id(url).ok_or_else(|| anyhow!("无法从 TikTok 链接识别视频 ID：{url}"))?;
     let cookie = tiktok_cookie_header()?;
@@ -3460,7 +3799,7 @@ pub(crate) async fn extract_tiktok_media_detail(url: &str) -> Result<ExternalMed
         reqwest::Url::parse_with_params("https://www.tiktok.com/api/item/detail/", &params)?;
 
     let mut last_body = String::new();
-    for attempt in 0..3 {
+    for attempt in 0..attempts.max(1) {
         let current_cookie = if attempt == 0 {
             cookie.clone()
         } else {
@@ -4005,6 +4344,148 @@ pub(crate) async fn fetch_tiktok_photo_via_tikwm(
     }))
 }
 
+/// 通过 TikWM 解析 TikTok 普通视频的媒体直链。
+///
+/// 这条路径**完全不经过 TikTok 的 API**：官方 `item/detail` 需要浏览器 BotGuard，
+/// 网页解析又经常被 WAF 打回 403，而 TikWM 由它的服务端代拉作品，回给我们的是
+/// 可直接下载的 CDN 直链（`hdplay` 无水印高清、`play` 无水印标清）。所以它对
+/// 出口 IP 信誉、签名、msToken 都不敏感，是目前最稳的 TikTok 媒体来源。
+///
+/// 图片贴（`data.images` 非空）返回 `Ok(None)`，交给图片贴分支处理。
+pub(crate) async fn fetch_tiktok_video_via_tikwm(
+    video_url: &str,
+) -> Result<Option<ExternalMediaMetadata>> {
+    let Some(payload) = request_tiktok_tikwm(video_url).await? else {
+        return Ok(None);
+    };
+    Ok(tikwm_video_metadata_from_payload(&payload, video_url))
+}
+
+/// 把 TikWM 的作品载荷转换成统一下载器需要的元数据；图片贴或没有直链时返回 None。
+fn tikwm_video_metadata_from_payload(
+    payload: &serde_json::Value,
+    video_url: &str,
+) -> Option<ExternalMediaMetadata> {
+    let data = payload
+        .get("data")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if data
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+    {
+        return None;
+    }
+    let http_url = |key: &str| {
+        data.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.starts_with("http"))
+            .map(str::to_string)
+    };
+    let hd = http_url("hdplay");
+    let sd = http_url("play").or_else(|| http_url("wmplay"));
+    if hd.is_none() && sd.is_none() {
+        return None;
+    }
+    let make_format = |format_id: &str, url: String, is_original: bool| ExternalMediaFormat {
+        format_id: Some(format_id.to_string()),
+        url: Some(url),
+        protocol: Some("https".to_string()),
+        ext: Some("mp4".to_string()),
+        vcodec: Some("h264".to_string()),
+        acodec: Some("aac".to_string()),
+        width: None,
+        height: None,
+        fps: None,
+        tbr: None,
+        vbr: None,
+        abr: None,
+        dynamic_range: None,
+        is_original,
+        decryption_key: None,
+        fallback_urls: Vec::new(),
+    };
+    let mut formats = Vec::new();
+    if let Some(url) = hd {
+        formats.push(make_format("tikwm-hd", url, true));
+    }
+    if let Some(url) = sd {
+        formats.push(make_format("tikwm", url, false));
+    }
+    let author = data.get("author");
+    let unique_id = author
+        .and_then(|author| author.get("unique_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+    let nickname = author
+        .and_then(|author| author.get("nickname"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+    let id = data
+        .get("id")
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_i64().map(|number| number.to_string()))
+        })
+        .or_else(|| tiktok_video_id(video_url))
+        .unwrap_or_default();
+    let title = data
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            data.get("content_desc")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    let thumbnail = data
+        .get("origin_cover")
+        .or_else(|| data.get("cover"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+    let duration = data.get("duration").and_then(|value| value.as_f64());
+    let upload_date = data
+        .get("create_time")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
+        .map(|moment| moment.format("%Y%m%d").to_string());
+    Some(ExternalMediaMetadata {
+        id,
+        title,
+        uploader: unique_id.clone().or_else(|| nickname.clone()),
+        uploader_url: unique_id
+            .as_deref()
+            .map(|value| format!("https://www.tiktok.com/@{value}")),
+        channel: nickname,
+        channel_id: None,
+        channel_url: None,
+        thumbnail,
+        fanart: None,
+        description: None,
+        language: None,
+        upload_date,
+        duration,
+        formats,
+        subtitles: HashMap::new(),
+        automatic_captions: HashMap::new(),
+        images: Vec::new(),
+        slides: Vec::new(),
+        music_urls: Vec::new(),
+        creators: None,
+    })
+}
+
 // ---------- TikTok 官方 embed 接口（图片作品解析 / 内容可用性判定） ----------
 
 /// TikTok 官方 embed 接口（`/embed/v2/{id}`）反映的作品媒体情况。
@@ -4351,6 +4832,99 @@ pub(crate) async fn migrate_legacy_tiktok_credentials() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_network_failures_from_curl_messages() {
+        for message in [
+            "curl-impersonate 请求失败（退出码 28）：连接或读取超时（已等待 30.0 秒；建连上限 30 秒、总上限 45 秒），卡在建连/握手阶段；目标：https://www.tiktok.com/api/user/playlist/",
+            "curl-impersonate 请求失败（退出码 35）：TLS 握手失败（代理节点不稳定时常出现，可换节点后重试）；目标：https://www.tiktok.com/api/user/collect/item_list/",
+            "curl-impersonate 请求失败（退出码 7）：无法连接目标服务器（网络不可达或被拒绝）",
+            "curl-impersonate 请求超时（超过 55 秒无结果）",
+        ] {
+            assert!(
+                is_tiktok_network_error(&anyhow::anyhow!(message.to_string())),
+                "should classify as network error: {message}"
+            );
+        }
+        for message in [
+            "TikTok 播放列表返回 HTTP 403（疑似触发 TikTok 风控，请稍后重试或更换外源代理）",
+            "TikTok 收藏返回空响应：当前出口 IP 可能被 TikTok 风控",
+            "curl-impersonate 请求失败（退出码 60）：CA 证书校验失败，请检查 curl-impersonate 的 cacert.pem",
+        ] {
+            assert!(
+                !is_tiktok_network_error(&anyhow::anyhow!(message.to_string())),
+                "should NOT classify as network error: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_body_hint_blames_login_when_session_expired() {
+        let expired = format_empty_body_hint("我的喜欢", TikTokSessionState::Expired);
+        assert!(expired.contains("session_expired"), "{expired}");
+        assert!(expired.contains("换外源代理节点"), "{expired}");
+        assert!(expired.contains("重新登录"), "{expired}");
+
+        let unknown = format_empty_body_hint("我的喜欢", TikTokSessionState::Unknown);
+        assert!(unknown.contains("item_list"), "{unknown}");
+        assert!(unknown.contains("更换外源代理"), "{unknown}");
+    }
+
+    #[test]
+    fn missing_account_id_hint_prefers_session_expired() {
+        let expired = format_missing_account_id_hint(TikTokSessionState::Expired);
+        assert!(expired.contains("session_expired"), "{expired}");
+        assert!(expired.contains("multi_sids"), "{expired}");
+
+        let valid = format_missing_account_id_hint(TikTokSessionState::Valid);
+        assert!(valid.contains("multi_sids"), "{valid}");
+        assert!(valid.contains("登录助手"), "{valid}");
+    }
+
+    #[test]
+    fn tikwm_video_payload_becomes_downloadable_metadata() {
+        let payload = serde_json::json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "id": "7671281631168138514",
+                "title": "わたしのいとしいにゃんこ🐾オフすぎかも",
+                "duration": 11,
+                "hdplay": "https://v16-notes.tiktokcdn-us.com/a/video.mp4",
+                "play": "https://v19.tiktokcdn-us.com/b/video.mp4",
+                "origin_cover": "https://p16-common-sign.tiktokcdn-us.com/c.jpeg",
+                "create_time": 1763000000,
+                "author": { "unique_id": "ice_icol", "nickname": "あいす" }
+            }
+        });
+        let metadata =
+            tikwm_video_metadata_from_payload(&payload, "https://www.tiktok.com/@ice_icol/video/7671281631168138514")
+                .expect("video payload should convert");
+        assert_eq!(metadata.id, "7671281631168138514");
+        assert_eq!(metadata.uploader.as_deref(), Some("ice_icol"));
+        assert_eq!(metadata.formats.len(), 2, "hd + sd");
+        assert_eq!(
+            metadata.formats[0].url.as_deref(),
+            Some("https://v16-notes.tiktokcdn-us.com/a/video.mp4")
+        );
+        assert_eq!(metadata.formats[0].vcodec.as_deref(), Some("h264"));
+        assert_eq!(metadata.formats[0].acodec.as_deref(), Some("aac"));
+        assert!(metadata.upload_date.is_some());
+    }
+
+    #[test]
+    fn tikwm_image_post_and_empty_payload_are_rejected() {
+        let photo = serde_json::json!({
+            "code": 0,
+            "data": { "images": ["https://x/1.jpeg"], "play": "https://v19.tiktokcdn-us.com/b.mp4" }
+        });
+        assert!(
+            tikwm_video_metadata_from_payload(&photo, "https://www.tiktok.com/@a/video/1").is_none(),
+            "image post must be handled by the photo branch"
+        );
+        let no_play = serde_json::json!({ "code": 0, "data": { "id": "1" } });
+        assert!(tikwm_video_metadata_from_payload(&no_play, "https://www.tiktok.com/@a/video/1").is_none());
+    }
 
     /// 图片贴的原图直链来自 `imagePost.images[].imageURL.urlList`，部分接口
     /// 版本用 `displayImage`；只保留 http(s) 地址，取不到地址的图片项直接丢弃。

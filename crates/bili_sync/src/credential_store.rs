@@ -40,6 +40,8 @@ pub mod keys {
     pub const TIKTOK_LOCALSTORAGE: &str = "tiktok.localstorage";
     /// TikTok 手动设置的账号 secUid
     pub const TIKTOK_SECUID: &str = "tiktok.secuid";
+    /// TikTok 账号数字 ID（odinId）：multi_sids 缺失时由 passport 接口反查并缓存
+    pub const TIKTOK_ODIN_ID: &str = "tiktok.odin_id";
     /// TikTok 手动设置的设备 ID（webid）
     pub const TIKTOK_WEBID: &str = "tiktok.webid";
 
@@ -54,6 +56,7 @@ pub mod keys {
         TIKTOK_COOKIES,
         TIKTOK_LOCALSTORAGE,
         TIKTOK_SECUID,
+        TIKTOK_ODIN_ID,
         TIKTOK_WEBID,
     ];
 }
