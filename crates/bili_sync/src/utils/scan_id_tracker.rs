@@ -39,9 +39,39 @@ pub struct LastScannedIds {
     pub last_processed_pugv: Option<i32>,
     #[serde(default)]
     pub last_processed_manga: Option<i32>,
+
+    /// 合集/收藏夹的最近扫描状态。
+    ///
+    /// 这两类源没有独立的数据库状态列，因此与源扫描游标一起保存在配置 JSON 中。
+    /// key 形如 `Collection:123` / `Favorite:456`，旧版本缺少该字段时会自动使用空表。
+    #[serde(default)]
+    pub source_scan_states: HashMap<String, SourceScanState>,
 }
 
 const CONFIG_KEY: &str = "last_scanned_ids";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SourceScanState {
+    #[serde(default)]
+    pub last_scan_at: Option<String>,
+    #[serde(default)]
+    pub next_scan_at: Option<String>,
+    #[serde(default)]
+    pub no_update_streak: i32,
+}
+
+fn source_scan_state_key(source_type: SourceType, id: i32) -> String {
+    let source_type = match source_type {
+        SourceType::Collection => "Collection",
+        SourceType::Favorite => "Favorite",
+        SourceType::Submission => "Submission",
+        SourceType::WatchLater => "WatchLater",
+        SourceType::Bangumi => "Bangumi",
+        SourceType::Pugv => "Pugv",
+        SourceType::Manga => "Manga",
+    };
+    format!("{source_type}:{id}")
+}
 
 /// 从数据库获取最后扫描的ID记录
 pub async fn get_last_scanned_ids(db: &Arc<DatabaseConnection>) -> Result<LastScannedIds> {
@@ -106,6 +136,8 @@ pub struct VideoSourceWithId {
     pub args: crate::adapter::Args,
     pub path: std::path::PathBuf,
     pub source_type: SourceType,
+    /// 该源上次被扫描的时间；用于分批扫描时按最久未扫描优先轮转。
+    pub last_scan_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -271,6 +303,15 @@ impl MaxIdRecorder {
 }
 
 impl LastScannedIds {
+    pub fn source_scan_state(&self, source_type: SourceType, id: i32) -> Option<&SourceScanState> {
+        self.source_scan_states.get(&source_scan_state_key(source_type, id))
+    }
+
+    pub fn set_source_scan_state(&mut self, source_type: SourceType, id: i32, state: SourceScanState) {
+        self.source_scan_states
+            .insert(source_scan_state_key(source_type, id), state);
+    }
+
     /// 重置所有last_processed_id，使下次扫描从头开始
     pub fn reset_all_processed_ids(&mut self) {
         self.last_processed_collection = None;
@@ -280,5 +321,39 @@ impl LastScannedIds {
         self.last_processed_bangumi = None;
         self.last_processed_pugv = None;
         self.last_processed_manga = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LastScannedIds, SourceScanState, SourceType};
+
+    #[test]
+    fn legacy_last_scanned_ids_without_scan_states_deserializes() {
+        let ids: LastScannedIds = serde_json::from_str(r#"{"collection":1190,"favorite":9}"#)
+            .expect("旧版扫描游标 JSON 应能兼容");
+
+        assert_eq!(ids.collection, Some(1190));
+        assert_eq!(ids.favorite, Some(9));
+        assert!(ids.source_scan_states.is_empty());
+    }
+
+    #[test]
+    fn collection_and_favorite_scan_states_use_distinct_keys() {
+        let mut ids = LastScannedIds::default();
+        let state = SourceScanState {
+            last_scan_at: Some("2026-11-04 10:00:00".to_string()),
+            next_scan_at: None,
+            no_update_streak: 2,
+        };
+
+        ids.set_source_scan_state(SourceType::Collection, 1, state.clone());
+
+        assert_eq!(
+            ids.source_scan_state(SourceType::Collection, 1)
+                .map(|value| value.last_scan_at.as_deref()),
+            Some(Some("2026-11-04 10:00:00"))
+        );
+        assert!(ids.source_scan_state(SourceType::Favorite, 1).is_none());
     }
 }

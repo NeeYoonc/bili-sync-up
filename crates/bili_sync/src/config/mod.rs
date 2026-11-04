@@ -229,7 +229,7 @@ pub struct Config {
     pub cdn_sorting: bool,
     #[serde(default)]
     pub submission_risk_control: crate::config::item::SubmissionRiskControlConfig,
-    /// UP主投稿源扫描策略（分批/自适应）
+    /// B站合集/收藏夹/UP主投稿源扫描策略（分批/自适应）
     #[serde(default)]
     pub submission_scan_strategy: SubmissionScanStrategyConfig,
     #[serde(default)]

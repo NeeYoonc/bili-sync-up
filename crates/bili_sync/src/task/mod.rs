@@ -142,7 +142,7 @@ pub struct UpdateConfigTask {
     pub large_source_playurl_limit: Option<usize>,
     pub large_source_playurl_duration_ms: Option<u64>,
     pub audio_only_use_low_qn_for_playurl: Option<bool>,
-    // UP主投稿源扫描策略
+    // B站合集/收藏夹/投稿源扫描策略
     pub submission_scan_batch_size: Option<usize>,
     pub submission_adaptive_scan: Option<bool>,
     pub submission_adaptive_max_hours: Option<u64>,

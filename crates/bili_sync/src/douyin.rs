@@ -78,6 +78,18 @@ const DOUYIN_PUBLIC_SEARCH_API: &str = "https://www.sogou.com/web";
 const DOUYIN_MSTOKEN_API: &str = "https://mssdk.bytedance.com/web/r/token?ms_appid=6383&msToken=T4bNG9W2rKF7hBNwaYssDErnJEobDAk641DFaOn4hcsfAM8slpbZeKPM4Ml4rhDQq18iY8nQ0JR3J87SLZtDiDqtZdZawfBjCWAgtolQsoEtG6MLETvo4fwr7F28zGJUFDdJgKEZHibNR0QshVBv28ygsQsJDzerKAtsgj9Pn5WsxyS1vfkiX3I%3D";
 const DOUYIN_MSTOKEN_STR_DATA: &str = include_str!("douyin_mstoken_strdata.txt");
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+/// 抖音长列表每隔多少页输出一次进度，避免只在开始/结束时各打一条日志。
+const DOUYIN_SCAN_PROGRESS_LOG_EVERY: usize = 10;
+
+fn log_douyin_scan_progress(kind: &str, source_id: &str, page: usize, loaded: usize, has_more: bool) {
+    if page == 1 || page % DOUYIN_SCAN_PROGRESS_LOG_EVERY == 0 || !has_more {
+        info!(
+            "抖音{}扫描进度: source_id={}, 第 {} 页, 已获取 {} 条, 还有更多={}",
+            kind, source_id, page, loaded, has_more
+        );
+    }
+}
+
 /// 抖音 Web 翻页请求之间的人工延迟，避免短时间连续请求触发频率风控（HTTP 403）。
 /// 默认取全局风控配置的 base_request_delay（毫秒），最小不低于 800ms；
 /// 自动退避开启且处于风控保持窗口内时，放大到 auto_backoff_base_seconds × 连续次数。
@@ -1753,7 +1765,8 @@ async fn fetch_liked_posts(
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
-    for _ in 0..1000 {
+    for page_index in 0..1000 {
+        let page_number = page_index + 1;
         let page_size = page_size_for(limit, posts.len());
         let mut pairs = common_query_pairs();
         pairs.extend([
@@ -1769,6 +1782,14 @@ async fn fetch_liked_posts(
         let mut page_posts = Vec::new();
         let mut page_seen = HashSet::new();
         append_awemes(&response, "aweme_list", &mut page_posts, &mut page_seen);
+        let has_more = response.get("has_more").and_then(value_as_bool).unwrap_or(false);
+        log_douyin_scan_progress(
+            "我的喜欢",
+            &sec_uid,
+            page_number,
+            posts.len() + page_posts.len(),
+            has_more,
+        );
         // 增量优先：整页都是已知视频时提前停止翻页（与作者源一致），
         // 避免我的喜欢上千条时每轮全量翻页、拖慢扫描并触发限流。
         if all_posts_known(&page_posts, stop_when_known) {
@@ -1779,7 +1800,7 @@ async fn fetch_liked_posts(
                 posts.push(post);
             }
         }
-        if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+        if posts.len() >= limit || !has_more {
             break;
         }
         let next = response.get("max_cursor").and_then(value_as_i64).unwrap_or(cursor);
@@ -1838,7 +1859,8 @@ async fn fetch_collection_posts_inner(
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
-    for _ in 0..1000 {
+    for page_index in 0..1000 {
+        let page_number = page_index + 1;
         let page_size = page_size_for(limit, posts.len());
         let mut pairs = mobile_device_params();
         pairs.extend([
@@ -1876,6 +1898,14 @@ async fn fetch_collection_posts_inner(
                 page_posts.push(post);
             }
         }
+        let has_more = response.get("has_more").and_then(value_as_bool).unwrap_or(false);
+        log_douyin_scan_progress(
+            "收藏夹作品",
+            id,
+            page_number,
+            posts.len() + page_posts.len(),
+            has_more,
+        );
         // 增量优先：整页都是已知视频时提前停止翻页
         if all_posts_known(&page_posts, stop_when_known) {
             break;
@@ -1887,7 +1917,7 @@ async fn fetch_collection_posts_inner(
                 posts.push(post);
             }
         }
-        if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+        if posts.len() >= limit || !has_more {
             break;
         }
         let next = response.get("cursor").and_then(value_as_i64).unwrap_or(cursor);
@@ -1947,7 +1977,8 @@ async fn fetch_story_items(sec_uid: &str, limit: usize) -> Result<Vec<serde_json
     let mut offset = 0i64;
     let mut items = Vec::new();
     let mut seen = HashSet::new();
-    for _ in 0..100 {
+    for page_index in 0..100 {
+        let page_number = page_index + 1;
         let page_size = page_size_for(limit, items.len());
         let mut pairs = mobile_device_params();
         pairs.extend([
@@ -1982,11 +2013,13 @@ async fn fetch_story_items(sec_uid: &str, limit: usize) -> Result<Vec<serde_json
                 }
             }
         }
+        let has_more = json.get("has_more").and_then(value_as_bool).unwrap_or(false);
+        log_douyin_scan_progress("日常作品", sec_uid, page_number, items.len(), has_more);
         if items.len() >= limit {
             break;
         }
         let next = json.get("next_offset").and_then(value_as_i64).unwrap_or(offset);
-        if next == offset || !json.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+        if next == offset || !has_more {
             break;
         }
         offset = next;
@@ -2041,7 +2074,8 @@ async fn fetch_watch_later_posts(
     let mut offset = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
-    for _ in 0..1000 {
+    for page_index in 0..1000 {
+        let page_number = page_index + 1;
         let page_size = page_size_for(limit, posts.len());
         let mut pairs = common_query_pairs();
         pairs.extend([
@@ -2055,6 +2089,14 @@ async fn fetch_watch_later_posts(
         let mut page_posts = Vec::new();
         let mut page_seen = HashSet::new();
         append_awemes(&response, "items", &mut page_posts, &mut page_seen);
+        let has_more = response.get("has_more").and_then(value_as_bool).unwrap_or(false);
+        log_douyin_scan_progress(
+            "稍后再看",
+            "watch_later",
+            page_number,
+            posts.len() + page_posts.len(),
+            has_more,
+        );
         // 增量优先：整页都是已知视频时提前停止翻页
         if all_posts_known(&page_posts, stop_when_known) {
             break;
@@ -2064,7 +2106,7 @@ async fn fetch_watch_later_posts(
                 posts.push(post);
             }
         }
-        if posts.len() >= limit || !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+        if posts.len() >= limit || !has_more {
             break;
         }
         let next = response.get("offset").and_then(value_as_i64).unwrap_or(offset);
@@ -2145,7 +2187,8 @@ async fn fetch_series_items(series_id: &str) -> Result<Vec<serde_json::Value>> {
     let mut items = Vec::new();
     let mut seen = HashSet::new();
     let mut cursor = 0i64;
-    for _ in 0..1000 {
+    for page_index in 0..1000 {
+        let page_number = page_index + 1;
         let mut pairs = common_query_pairs();
         pairs.extend([
             ("series_id", series_id.to_string()),
@@ -2168,7 +2211,9 @@ async fn fetch_series_items(series_id: &str) -> Result<Vec<serde_json::Value>> {
                 }
             }
         }
-        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+        let has_more = response.get("has_more").and_then(value_as_bool).unwrap_or(false);
+        log_douyin_scan_progress("短剧剧集", series_id, page_number, items.len(), has_more);
+        if !has_more {
             break;
         }
         let next = response.get("max_cursor").and_then(value_as_i64).unwrap_or(cursor);
@@ -2414,7 +2459,8 @@ async fn fetch_mix_items(mix_id: &str, limit: usize) -> Result<Vec<DouyinMixItem
     let mut items: Vec<DouyinMixItem> = Vec::new();
     let mut seen = HashSet::new();
     let mut complete = true;
-    for _ in 0..1000 {
+    for page_index in 0..1000 {
+        let page_number = page_index + 1;
         let mut pairs = common_query_pairs();
         pairs.extend([
             ("mix_id", mix_id.to_string()),
@@ -2450,11 +2496,13 @@ async fn fetch_mix_items(mix_id: &str, limit: usize) -> Result<Vec<DouyinMixItem
                 episode,
             });
         }
+        let has_more = response.get("has_more").and_then(value_as_bool).unwrap_or(false);
+        log_douyin_scan_progress("合集作品", mix_id, page_number, items.len(), has_more);
         if items.len() >= limit {
             complete = false;
             break;
         }
-        if !response.get("has_more").and_then(value_as_bool).unwrap_or(false) {
+        if !has_more {
             break;
         }
         let next = response.get("cursor").and_then(value_as_i64).unwrap_or(cursor);
@@ -2735,11 +2783,15 @@ async fn fetch_posts_until(
     let mut cursor = 0i64;
     let mut posts = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut page_number = 0usize;
     loop {
+        page_number += 1;
         let page = fetch_post_page(sec_uid, cursor, 18).await?;
+        let has_more = page.has_more;
         // 作品按发布时间倒序返回：整页都是已知视频时，后续页面必然也已收录，
         // 提前停止翻页，避免每轮全量枚举几十页触发 aweme/post 限流。
         if all_posts_known(&page.posts, stop_when_known) {
+            log_douyin_scan_progress("作者作品", sec_uid, page_number, posts.len(), has_more);
             break;
         }
         for post in page.posts {
@@ -2747,7 +2799,8 @@ async fn fetch_posts_until(
                 posts.push(post);
             }
         }
-        if posts.len() >= limit || !page.has_more || page.cursor == cursor {
+        log_douyin_scan_progress("作者作品", sec_uid, page_number, posts.len(), has_more);
+        if posts.len() >= limit || !has_more || page.cursor == cursor {
             break;
         }
         cursor = page.cursor;

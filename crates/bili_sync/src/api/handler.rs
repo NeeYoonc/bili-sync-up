@@ -11276,7 +11276,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         large_source_playurl_limit: config.submission_risk_control.large_source_playurl_limit,
         large_source_playurl_duration_ms: config.submission_risk_control.large_source_playurl_duration_ms,
         audio_only_use_low_qn_for_playurl: config.submission_risk_control.audio_only_use_low_qn_for_playurl,
-        // UP主投稿源扫描策略
+        // B站合集/收藏夹/投稿源扫描策略
         submission_scan_batch_size: config.submission_scan_strategy.batch_size,
         submission_adaptive_scan: config.submission_scan_strategy.adaptive_enabled,
         submission_adaptive_max_hours: config.submission_scan_strategy.adaptive_max_hours,
@@ -11887,7 +11887,7 @@ pub async fn update_config(
             large_source_playurl_limit: params.large_source_playurl_limit,
             large_source_playurl_duration_ms: params.large_source_playurl_duration_ms,
             audio_only_use_low_qn_for_playurl: params.audio_only_use_low_qn_for_playurl,
-            // UP主投稿源扫描策略
+            // B站合集/收藏夹/投稿源扫描策略
             submission_scan_batch_size: params.submission_scan_batch_size,
             submission_adaptive_scan: params.submission_adaptive_scan,
             submission_adaptive_max_hours: params.submission_adaptive_max_hours,
@@ -12016,9 +12016,9 @@ fn config_update_field_display_name(field: &str) -> String {
         "large_source_playurl_limit" => Some("大源playurl请求限制"),
         "large_source_playurl_duration_ms" => Some("大源playurl限制窗口"),
         "audio_only_use_low_qn_for_playurl" => Some("音频源低清晰度取流"),
-        "submission_scan_batch_size" => Some("投稿每轮扫描上限"),
-        "submission_adaptive_scan" => Some("投稿自适应扫描开关"),
-        "submission_adaptive_max_hours" => Some("投稿自适应最大间隔"),
+        "submission_scan_batch_size" => Some("B站源每轮扫描上限"),
+        "submission_adaptive_scan" => Some("B站源自适应扫描开关"),
+        "submission_adaptive_max_hours" => Some("B站源自适应最大间隔"),
         "multi_page_use_season_structure" => Some("多P使用Season目录"),
         "collection_use_season_structure" => Some("合集使用Season目录"),
         "bangumi_use_season_structure" => Some("番剧使用Season目录"),
@@ -13024,7 +13024,7 @@ pub async fn update_config_internal(
         }
     }
 
-    // UP主投稿源扫描策略
+    // B站合集/收藏夹/投稿源扫描策略
     if let Some(size) = params.submission_scan_batch_size {
         if size != config.submission_scan_strategy.batch_size {
             config.submission_scan_strategy.batch_size = size;

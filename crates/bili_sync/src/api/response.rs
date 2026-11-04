@@ -582,7 +582,7 @@ pub struct ConfigResponse {
     pub large_source_playurl_limit: usize,
     pub large_source_playurl_duration_ms: u64,
     pub audio_only_use_low_qn_for_playurl: bool,
-    // UP主投稿源扫描策略
+    // B站合集/收藏夹/投稿源扫描策略
     pub submission_scan_batch_size: usize,
     pub submission_adaptive_scan: bool,
     pub submission_adaptive_max_hours: u64,
