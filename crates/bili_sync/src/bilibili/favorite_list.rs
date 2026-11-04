@@ -5,6 +5,17 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::bilibili::{BiliClient, Validate, VideoInfo};
+
+const FAVORITE_MEDIA_TYPE_VIDEO_COLLECTION: i64 = 21;
+const FAVORITE_MEDIA_TYPE_PGC: i64 = 24;
+
+fn should_skip_favorite_media_type(media_type: i64) -> bool {
+    matches!(
+        media_type,
+        FAVORITE_MEDIA_TYPE_VIDEO_COLLECTION | FAVORITE_MEDIA_TYPE_PGC
+    )
+}
+
 pub struct FavoriteList<'a> {
     client: &'a BiliClient,
     fid: String,
@@ -95,15 +106,22 @@ impl<'a> FavoriteList<'a> {
                 }
                 let medias = medias.as_array_mut().context("medias is not an array")?;
                 for media in medias.iter_mut() {
-                    // 视频合集（type=21）条目本身没有 bvid，不是「收藏的视频」。
-                    // 收藏源只同步收藏的视频，合集分集请单独添加合集源，这里直接跳过。
-                    if media["type"].as_i64() == Some(21) {
-                        let title = media["title"].as_str().unwrap_or("未知名合集");
-                        debug!(
-                            "收藏夹 {} 中的视频合集「{}」(type=21) 不展开下载，跳过该条目",
-                            self.fid, title
-                        );
-                        continue;
+                    // type=21 是视频合集，type=24 是番剧/PGC/国创等 OGV 条目。
+                    // 收藏源只同步普通视频，二者都直接跳过。
+                    if let Some(media_type) = media["type"].as_i64() {
+                        if should_skip_favorite_media_type(media_type) {
+                            let title = media["title"].as_str().unwrap_or("未知条目");
+                            let kind = if media_type == FAVORITE_MEDIA_TYPE_PGC {
+                                "番剧/PGC"
+                            } else {
+                                "视频合集"
+                            };
+                            debug!(
+                                "收藏夹 {} 中的{}「{}」(type={}) 不下载，跳过该条目",
+                                self.fid, kind, title, media_type
+                            );
+                            continue;
+                        }
                     }
                     let video_info: VideoInfo = serde_json::from_value(media.take()).with_context(|| {
                         format!("failed to parse videos of favorite {} page {}", self.fid, page)
@@ -122,6 +140,18 @@ impl<'a> FavoriteList<'a> {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_favorite_media_type;
+
+    #[test]
+    fn favorite_skips_ugc_collection_and_pgc_items() {
+        assert!(should_skip_favorite_media_type(21));
+        assert!(should_skip_favorite_media_type(24));
+        assert!(!should_skip_favorite_media_type(2));
     }
 }
 

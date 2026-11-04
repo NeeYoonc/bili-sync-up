@@ -8997,7 +8997,8 @@ async fn download_page_video_from_streams(
     let start_time = std::time::Instant::now();
 
     // 根据流类型进行不同处理
-    let best_stream_result = match streams.best_stream(filter_option) {
+    let stream_filter_option = stream_filter_for_download(filter_option, audio_only);
+    let best_stream_result = match streams.best_stream(&stream_filter_option) {
         Ok(result) => result,
         Err(err) => {
             // 视频源存在，但最高可用画质仍低于设定的最低分辨率时，按“跳过/警告”处理，
@@ -9356,6 +9357,16 @@ async fn download_page_video_from_streams(
         audio_stream_size_bytes,
         skip_reason: None,
     })
+}
+
+/// 纯音频下载只使用视频流作为音频载体，不能套用视频源的“最低分辨率”。
+/// 否则只有 360P/480P 的 MV 会因为最低 720P 设置而连音频一起失败。
+fn stream_filter_for_download(filter_option: &FilterOption, audio_only: bool) -> FilterOption {
+    let mut effective = filter_option.clone();
+    if audio_only {
+        effective.video_min_quality = crate::bilibili::VideoQuality::Quality360p;
+    }
+    effective
 }
 
 async fn fetch_page_video(
@@ -16102,6 +16113,26 @@ mod tests {
         assert_eq!(
             pending_page_large.trigger_reasons,
             vec![LargeSourceDownloadTrigger::PendingPageCount]
+        );
+    }
+
+    #[test]
+    fn audio_only_stream_filter_relaxes_video_min_quality() {
+        let video_filter = FilterOption {
+            video_min_quality: crate::bilibili::VideoQuality::Quality720p,
+            ..FilterOption::default()
+        };
+
+        let audio_filter = stream_filter_for_download(&video_filter, true);
+        assert_eq!(
+            audio_filter.video_min_quality,
+            crate::bilibili::VideoQuality::Quality360p
+        );
+
+        let normal_filter = stream_filter_for_download(&video_filter, false);
+        assert_eq!(
+            normal_filter.video_min_quality,
+            crate::bilibili::VideoQuality::Quality720p
         );
     }
 
