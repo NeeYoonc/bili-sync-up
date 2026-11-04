@@ -988,8 +988,9 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
         let deferred_sources_count = enabled_sources_total.saturating_sub(due_sources_count);
         let disabled_sources_count = total_sources_count.saturating_sub(enabled_sources_total);
 
-        // 外源（YouTube/抖音/TikTok）不在 `video_source` 表里，按平台分别统计并带上源名，
+        // 外源（YouTube/抖音/TikTok）不在 `video_source` 表里，按平台分别统计。
         // 否则只挂外源的部署会看到「共 7 个视频源（启用: 0，禁用: 7）」，像是所有源都被禁用了。
+        // 只报平台维度的数量，不列具体源名（源名在各自平台的扫描日志里已经有了）。
         let external_sources = bili_sync_entity::youtube_source::Entity::find()
             .all(optimized_connection.as_ref())
             .await
@@ -1001,37 +1002,21 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                 .filter(|source| crate::youtube::source_platform_label(source) == label)
                 .collect();
             if group.is_empty() {
+                external_parts.push(format!("{label} 0 个"));
                 continue;
             }
-            let enabled: Vec<&str> = group
-                .iter()
-                .filter(|source| source.enabled)
-                .map(|source| source.name.as_str())
-                .collect();
-            let mut part = format!(
+            let enabled = group.iter().filter(|source| source.enabled).count();
+            external_parts.push(format!(
                 "{} {} 个（启用 {}，禁用 {}）",
                 label,
                 group.len(),
-                enabled.len(),
-                group.len().saturating_sub(enabled.len())
-            );
-            if !enabled.is_empty() {
-                let shown: Vec<&str> = enabled.iter().copied().take(6).collect();
-                part.push_str(&format!(
-                    "：{}{}",
-                    shown.join("、"),
-                    if enabled.len() > shown.len() { "…" } else { "" }
-                ));
-            }
-            external_parts.push(part);
+                enabled,
+                group.len().saturating_sub(enabled)
+            ));
         }
 
-        if deferred_sources_count > 0 || disabled_sources_count > 0 || !external_parts.is_empty() {
-            let external_part = if external_parts.is_empty() {
-                "外源 0 个".to_string()
-            } else {
-                external_parts.join("；")
-            };
+        if deferred_sources_count > 0 || disabled_sources_count > 0 || !external_sources.is_empty() {
+            let external_part = external_parts.join("；");
             info!(
                 "开始执行本轮视频下载任务：B站视频源 {} 个（启用 {}，暂缓 {}，禁用 {}）；{}",
                 total_sources_count,
