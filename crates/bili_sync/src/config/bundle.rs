@@ -190,6 +190,14 @@ impl ConfigBundle {
         handlebars.register_helper("truncate", Box::new(truncate));
         debug!("Handlebars helper 'truncate' 已注册");
 
+        // 按 UTF-8 字节截取：中文一个字算 3 个字节，用于精确控制文件名不超过
+        // 255 字节上限（例如 {{truncate_bytes title 200}}）。截断保证落在字符边界上。
+        handlebars_helper!(truncate_bytes: |s: String, len: usize| {
+            crate::utils::filenamify::truncate_utf8_bytes(&s, len)
+        });
+        handlebars.register_helper("truncate_bytes", Box::new(truncate_bytes));
+        debug!("Handlebars helper 'truncate_bytes' 已注册");
+
         // 注册所有必需的模板（路径分隔符仅替换标签外文本，避免破坏 {{/if}} 等语法）。
         // 坏模板只回退自身一条：严格模式（预览/保存校验）直接报错，宽容模式
         // （启动加载数据库配置）回退默认模板并告警，不让整份配置失效。

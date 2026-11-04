@@ -222,6 +222,12 @@ pub static TEMPLATE: Lazy<handlebars::Handlebars<'static>> = Lazy::new(|| {
     });
     handlebars.register_helper("truncate", Box::new(truncate));
 
+    // 按 UTF-8 字节截取（中文约 3 字节/字），与下载引擎保持一致。
+    handlebars_helper!(truncate_bytes: |s: String, len: usize| {
+        crate::utils::filenamify::truncate_utf8_bytes(&s, len)
+    });
+    handlebars.register_helper("truncate_bytes", Box::new(truncate_bytes));
+
     // 注册所有必需的模板
     let video_name = Box::leak(config.video_name.to_string().into_boxed_str());
     let page_name = Box::leak(config.page_name.to_string().into_boxed_str());

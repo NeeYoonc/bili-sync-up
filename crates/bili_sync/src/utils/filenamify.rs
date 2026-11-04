@@ -6,6 +6,14 @@ macro_rules! regex {
 }
 
 const MAX_FILENAME_BYTES: usize = 200;
+
+/// 文件名“基名”（不含扩展名与附属后缀）的字节预算。
+///
+/// 多数文件系统（NAS 的 ext4/btrfs、Windows、SMB）对单个文件名（一个路径段）
+/// 的限制是 255 字节，中文按 UTF-8 每字 3 字节计算。这里预留 20 字节给各种
+/// 后缀，避免基名刚好卡线：`.zh-CN.default.ass`=18、`.mp4.tmp_video`=14、
+/// `-fanart.jpg`=11、`.srt`=4。
+pub const MAX_BASENAME_BYTES: usize = 235;
 const UNIX_SEP_PLACEHOLDER: &str = "🔒UNIX_SEP_PROTECTED🔒";
 const WIN_SEP_PLACEHOLDER: &str = "🔒WIN_SEP_PROTECTED🔒";
 
@@ -13,7 +21,9 @@ pub fn filenamify<S: AsRef<str>>(input: S) -> String {
     filenamify_with_options(input, false)
 }
 
-fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
+/// 按 UTF-8 字节数截断字符串（保证不会截断字符），并清理截断后残留的
+/// 尾部分隔符/标点（空格、下划线、连字符、全角竖线、句点）。
+pub fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
     if input.len() <= max_bytes {
         return input.to_string();
     }
@@ -27,7 +37,7 @@ fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
         end = next;
     }
 
-    replace_outer_periods(input[..end].trim_matches(|c| c == ' ' || c == '_'))
+    replace_outer_periods(input[..end].trim_matches(|c| c == ' ' || c == '_' || c == '-' || c == '｜'))
 }
 
 fn replace_outer_periods(input: &str) -> String {
@@ -79,6 +89,42 @@ fn truncate_filename_segments(input: &str, preserve_template_separators: bool) -
     }
 
     result
+}
+
+/// 对可能包含路径分隔符的名称逐段做字节级限长（智能截断兜底）。
+///
+/// - 按 `/`、`\` 分段，每段独立限制在 `max_bytes` 字节内；
+/// - 只在 UTF-8 字符边界截断，不会把中文/emoji 截坏；
+/// - 保留原有分隔符与目录结构（空段原样保留）；
+/// - 截断后清理段尾残留的空格/下划线/连字符等噪声。
+///
+/// 用于给“由多个变量拼接出来”的最终文件名兜底：此前各变量分别限长，
+/// 但拼接后的整体仍可能超过文件系统单段 255 字节上限，导致下载器
+/// 建临时文件时报 `Filename too long (os error 36)`。
+pub fn cap_path_segments_bytes(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+
+    let mut result = String::with_capacity(input.len());
+    let mut segment_start = 0usize;
+    for (idx, ch) in input.char_indices() {
+        if ch == '/' || ch == '\\' {
+            result.push_str(&truncate_segment_bytes(&input[segment_start..idx], max_bytes));
+            result.push(ch);
+            segment_start = idx + ch.len_utf8();
+        }
+    }
+    result.push_str(&truncate_segment_bytes(&input[segment_start..], max_bytes));
+    result
+}
+
+fn truncate_segment_bytes(segment: &str, max_bytes: usize) -> String {
+    if segment.len() <= max_bytes {
+        segment.to_string()
+    } else {
+        truncate_utf8_bytes(segment, max_bytes)
+    }
 }
 
 /// 带选项的文件名安全化函数
@@ -306,5 +352,69 @@ mod tests {
         assert_eq!(parts[0], "UP主名");
         assert!(parts[1].len() <= super::MAX_FILENAME_BYTES);
         assert!(!parts[1].ends_with('.'));
+    }
+
+    #[test]
+    fn test_cap_path_segments_bytes_truncates_long_compound_name() {
+        // 模拟合集场景：视频标题 + 分P标题都很长的中文名拼接出 300+ 字节
+        let video_title = "【一小时高效英语听力磨耳朵】发音+听力飞速提升｜从听不懂到秒懂".repeat(3);
+        let page_title = "懶人必備_幫你搞定餐廳英語｜從點餐到結帳，最常用對話".repeat(3);
+        let name = format!("S339E005 - {} - {}", video_title, page_title);
+        assert!(name.len() > 255);
+
+        let capped = super::cap_path_segments_bytes(&name, super::MAX_BASENAME_BYTES);
+
+        assert!(capped.len() <= super::MAX_BASENAME_BYTES);
+        assert!(capped.is_char_boundary(capped.len()));
+        assert!(capped.starts_with("S339E005 - "));
+        // 加上最长的附属后缀后仍在文件系统单段 255 字节上限内
+        assert!(capped.len() + ".zh-CN.default.ass".len() <= 255);
+        assert!(capped.len() + ".mp4.tmp_video".len() <= 255);
+    }
+
+    #[test]
+    fn test_cap_path_segments_bytes_keeps_directory_structure() {
+        let long = "长".repeat(300); // 900 字节
+        let input = format!("{}/sub/{}", long, long);
+
+        let capped = super::cap_path_segments_bytes(&input, 120);
+        let parts: Vec<&str> = capped.split('/').collect();
+
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1], "sub");
+        assert!(parts[0].len() <= 120);
+        assert!(parts[2].len() <= 120);
+        assert!(parts[0].is_char_boundary(parts[0].len()));
+        assert!(parts[2].is_char_boundary(parts[2].len()));
+    }
+
+    #[test]
+    fn test_truncate_utf8_bytes_cuts_on_char_boundary() {
+        assert_eq!(super::truncate_utf8_bytes("中文标题abc", 7), "中文");
+        assert_eq!(super::truncate_utf8_bytes("abc", 7), "abc");
+        // 截断后残留的连字符会被清理，避免出现 "标题 - " 这类尾巴
+        assert_eq!(super::truncate_utf8_bytes("中文标题 - 很长的标题", 14), "中文标题");
+    }
+
+    #[test]
+    fn test_cap_path_segments_bytes_on_real_problem_title() {
+        // 来自用户现场日志的真实失败案例：拼接后 348 字节，导致所有直链报
+        // `Filename too long (os error 36)`（S339E006 - 视频标题 - 分P标题）。
+        let video_title = "【一小时高效英语听力磨耳朵】发音+听力飞速提升｜从听不懂到秒懂，让英文听力爆发式成长";
+        let page_title = "懶人必備_搞懂超市英語｜從選購到結帳｜最常用對話＋地道表達｜搞定購物、問價、結帳、退換貨｜英語磨耳朵｜無痛學習聽懂｜零基礎也能學會｜English Listening Practice";
+        let raw = format!(
+            "S339E006 - {} - {}",
+            filenamify(video_title),
+            filenamify(page_title)
+        );
+        assert!(raw.len() > 255, "原始拼接名应当超过 255 字节");
+
+        let capped = super::cap_path_segments_bytes(&raw, super::MAX_BASENAME_BYTES);
+
+        assert!(capped.len() <= super::MAX_BASENAME_BYTES);
+        assert!(capped.is_char_boundary(capped.len()));
+        assert!(capped.len() + ".mp4.tmp_video".len() <= 255);
+        assert!(capped.starts_with("S339E006 - "));
+        assert!(capped.contains("【一小时高效英语听力磨耳朵】"));
     }
 }
