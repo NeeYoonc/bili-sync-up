@@ -121,7 +121,7 @@ impl Client {
 
     // a wrapper of reqwest::Client::request to add credential to the request
     pub fn request(&self, method: Method, url: &str, credential: Option<&Credential>) -> reqwest::RequestBuilder {
-        self.request_with_gaia_vtoken(method, url, credential, None)
+        self.request_with_gaia_vtoken_and_buvid3(method, url, credential, None, true)
     }
 
     // a wrapper of reqwest::Client::request to add credential and gaia_vtoken to the request
@@ -132,31 +132,26 @@ impl Client {
         credential: Option<&Credential>,
         gaia_vtoken: Option<&str>,
     ) -> reqwest::RequestBuilder {
+        self.request_with_gaia_vtoken_and_buvid3(method, url, credential, gaia_vtoken, true)
+    }
+
+    fn request_with_gaia_vtoken_and_buvid3(
+        &self,
+        method: Method,
+        url: &str,
+        credential: Option<&Credential>,
+        gaia_vtoken: Option<&str>,
+        include_buvid3: bool,
+    ) -> reqwest::RequestBuilder {
         let mut req = self.api.request(method, url);
         // 如果有 credential，会将其转换成 cookie 添加到请求的 header 中
         if let Some(credential) = credential {
-            let mut cookie_parts = vec![
-                format!("SESSDATA={}", credential.sessdata),
-                format!("bili_jct={}", credential.bili_jct),
-                format!("buvid3={}", credential.buvid3),
-                format!("DedeUserID={}", credential.dedeuserid),
-                format!("ac_time_value={}", credential.ac_time_value),
-            ];
-
-            if let Some(buvid4) = &credential.buvid4 {
-                cookie_parts.push(format!("buvid4={}", buvid4));
-            }
-
-            if let Some(ckmd5) = &credential.dedeuserid_ckmd5 {
-                cookie_parts.push(format!("DedeUserID__ckMd5={}", ckmd5));
-            }
-
-            let cookie_str = cookie_parts.join("; ");
+            let cookie_str = build_cookie_header(credential, include_buvid3);
 
             // 调试日志：不要输出敏感Cookie内容（SESSDATA/bili_jct等）
             tracing::debug!(
-                "发送Cookie字段: count={}, has_buvid4={}, has_ckmd5={}, sessdata_len={}, bili_jct_len={}, buvid3_len={}, dedeuserid_len={}, ac_time_value_len={}",
-                cookie_parts.len(),
+                "发送Cookie字段: include_buvid3={}, has_buvid4={}, has_ckmd5={}, sessdata_len={}, bili_jct_len={}, buvid3_len={}, dedeuserid_len={}, ac_time_value_len={}",
+                include_buvid3,
                 credential.buvid4.is_some(),
                 credential.dedeuserid_ckmd5.is_some(),
                 credential.sessdata.len(),
@@ -214,6 +209,30 @@ impl Client {
             media,
         })
     }
+}
+
+fn build_cookie_header(credential: &Credential, include_buvid3: bool) -> String {
+    let mut cookie_parts = vec![
+        format!("SESSDATA={}", credential.sessdata),
+        format!("bili_jct={}", credential.bili_jct),
+    ];
+
+    if include_buvid3 {
+        cookie_parts.push(format!("buvid3={}", credential.buvid3));
+    }
+
+    cookie_parts.push(format!("DedeUserID={}", credential.dedeuserid));
+    cookie_parts.push(format!("ac_time_value={}", credential.ac_time_value));
+
+    if let Some(buvid4) = &credential.buvid4 {
+        cookie_parts.push(format!("buvid4={}", buvid4));
+    }
+
+    if let Some(ckmd5) = &credential.dedeuserid_ckmd5 {
+        cookie_parts.push(format!("DedeUserID__ckMd5={}", ckmd5));
+    }
+
+    cookie_parts.join("; ")
 }
 
 // clippy 建议实现 Default trait
@@ -357,6 +376,23 @@ impl BiliClient {
         let gaia_vtoken = self.get_gaia_vtoken();
         self.client
             .request_with_gaia_vtoken(method, url, credential.as_deref(), gaia_vtoken.as_deref())
+    }
+
+    /// 获取播放地址时使用不带 buvid3 的登录凭据。
+    pub async fn playurl_request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
+        if let Some(limiter) = &self.limiter {
+            limiter.acquire_one().await;
+        }
+        let config = crate::config::reload_config();
+        let credential = config.credential.load();
+        let gaia_vtoken = self.get_gaia_vtoken();
+        self.client.request_with_gaia_vtoken_and_buvid3(
+            method,
+            url,
+            credential.as_deref(),
+            gaia_vtoken.as_deref(),
+            false,
+        )
     }
 
     /// 获取一个不附带登录凭证的公开请求
@@ -1484,5 +1520,57 @@ impl BiliClient {
         let config = crate::config::reload_config();
         let credential = config.credential.load();
         credential.as_ref().map(|cred| cred.bili_jct.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn credential() -> Credential {
+        Credential {
+            sessdata: "sessdata".to_string(),
+            bili_jct: "bili_jct".to_string(),
+            buvid3: "buvid3-value".to_string(),
+            dedeuserid: "123".to_string(),
+            ac_time_value: "refresh".to_string(),
+            buvid4: Some("buvid4-value".to_string()),
+            dedeuserid_ckmd5: Some("ckmd5".to_string()),
+        }
+    }
+
+    #[test]
+    fn cookie_header_can_omit_buvid3_for_playurl_only() {
+        let credential = credential();
+
+        let with_buvid3 = build_cookie_header(&credential, true);
+        assert!(with_buvid3.contains("; buvid3=buvid3-value"));
+        assert!(with_buvid3.contains("; buvid4=buvid4-value"));
+
+        let without_buvid3 = build_cookie_header(&credential, false);
+        assert!(!without_buvid3.contains("buvid3="));
+        assert!(without_buvid3.contains("; buvid4=buvid4-value"));
+        assert!(without_buvid3.starts_with("SESSDATA=sessdata;"));
+        assert!(without_buvid3.contains("; DedeUserID=123"));
+    }
+
+    #[test]
+    fn playurl_request_header_omits_buvid3() {
+        let client = Client::new();
+        let credential = credential();
+        let request = client
+            .request_with_gaia_vtoken_and_buvid3(
+                Method::GET,
+                "https://api.bilibili.com/x/player/wbi/playurl",
+                Some(&credential),
+                None,
+                false,
+            )
+            .build()
+            .expect("request should build");
+        let cookie = request.headers().get(header::COOKIE).unwrap().to_str().unwrap();
+
+        assert!(!cookie.contains("buvid3="));
+        assert!(cookie.contains("buvid4=buvid4-value"));
     }
 }

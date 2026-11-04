@@ -5,7 +5,7 @@ use prost::Message;
 use reqwest::{Method, StatusCode};
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -30,6 +30,12 @@ static DATA: &[char] = &[
 ];
 
 const PLAYURL_QUALITY_LEVELS: [u32; 10] = [127, 126, 125, 120, 116, 112, 80, 64, 32, 16];
+const PLAYURL_RISK_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// 播放请求在批量重置/下载时可能短时间触发 B 站出口 IP 风控。
+/// 一旦收到 v_voucher，所有待发起的 playurl 请求统一静默一段时间，
+/// 避免并发任务继续放大风控并刷出成百上千条失败。
+static PLAYURL_RISK_COOLDOWN_UNTIL: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayurlRateLimitConfig {
@@ -90,8 +96,40 @@ pub async fn with_playurl_rate_limit<T>(config: Option<PlayurlRateLimitConfig>, 
 }
 
 async fn wait_for_scoped_playurl_rate_limit() {
+    wait_for_playurl_risk_cooldown().await;
     if let Ok(Some(limiter)) = PLAYURL_RATE_LIMITER.try_with(Clone::clone) {
         limiter.acquire().await;
+    }
+}
+
+async fn wait_for_playurl_risk_cooldown() {
+    loop {
+        let remaining = {
+            let cooldown_until = PLAYURL_RISK_COOLDOWN_UNTIL.lock().await;
+            cooldown_until
+                .as_ref()
+                .and_then(|until| until.checked_duration_since(Instant::now()))
+        };
+
+        match remaining {
+            Some(remaining) if !remaining.is_zero() => {
+                tracing::debug!("playurl 风控冷却中，等待 {:?} 后继续", remaining);
+                tokio::time::sleep(remaining).await;
+            }
+            _ => break,
+        }
+    }
+}
+
+async fn activate_playurl_risk_cooldown() {
+    let next_until = Instant::now() + PLAYURL_RISK_COOLDOWN;
+    let mut cooldown_until = PLAYURL_RISK_COOLDOWN_UNTIL.lock().await;
+    if cooldown_until.is_none_or(|until| until < next_until) {
+        *cooldown_until = Some(next_until);
+        tracing::warn!(
+            "playurl 已触发 v_voucher，全局暂停播放请求 {} 秒",
+            PLAYURL_RISK_COOLDOWN.as_secs()
+        );
     }
 }
 
@@ -1132,7 +1170,6 @@ impl<'a> Video<'a> {
             ("fnval", "4048"),                               // 恢复原始fnval值
             ("fourk", "1"),                                  // 启用4K支持
             ("voice_balance", "1"),                          // 音频平衡
-            ("gaia_source", "pre-load"),                     // Gaia预加载
             ("isGaiaAvoided", "true"),                       // Gaia避免策略
             ("web_location", "1315873"),                     // 网页位置标识
             ("dm_img_str", dm_img_str.as_str()),             // WebGL信息
@@ -1159,7 +1196,7 @@ impl<'a> Video<'a> {
         let res = loop {
             let request = self
                 .client
-                .request(Method::GET, request_url)
+                .playurl_request(Method::GET, request_url)
                 .await
                 .query(&encoded_params)
                 .headers(create_api_headers());
@@ -1261,6 +1298,7 @@ impl<'a> Video<'a> {
                     "v_voucher响应详情: {}",
                     serde_json::to_string_pretty(&res["data"]).unwrap_or_else(|_| "无法序列化".to_string())
                 );
+                activate_playurl_risk_cooldown().await;
                 return Err(crate::bilibili::BiliError::RiskControlVerificationRequired(v_voucher.to_string()).into());
             }
         }
@@ -1525,7 +1563,6 @@ impl<'a> Video<'a> {
             ("fnval", "4048"),                               // 恢复原始fnval值
             ("fourk", "1"),                                  // 启用4K支持
             ("voice_balance", "1"),                          // 音频平衡
-            ("gaia_source", "pre-load"),                     // Gaia预加载
             ("isGaiaAvoided", "true"),                       // Gaia避免策略
             ("web_location", "1315873"),                     // 网页位置标识
             ("dm_img_str", dm_img_str.as_str()),             // WebGL信息
@@ -1547,7 +1584,7 @@ impl<'a> Video<'a> {
 
         let request = self
             .client
-            .request(Method::GET, request_url)
+            .playurl_request(Method::GET, request_url)
             .await
             .query(&params)
             .headers(create_api_headers());
@@ -1706,7 +1743,6 @@ impl<'a> Video<'a> {
             ("fnval", "4048"),
             ("fourk", "1"),
             ("voice_balance", "1"),
-            ("gaia_source", "pre-load"),
             ("isGaiaAvoided", "true"),
             ("web_location", "1315873"),
             ("dm_img_str", dm_img_str.as_str()),
@@ -1727,7 +1763,7 @@ impl<'a> Video<'a> {
 
         let request = self
             .client
-            .request(Method::GET, request_url)
+            .playurl_request(Method::GET, request_url)
             .await
             .query(&params)
             .headers(create_api_headers());
@@ -2018,6 +2054,27 @@ mod tests {
         assert_eq!(effective_playurl_qn_range(127, 16, true, true), (16, 16));
         assert_eq!(effective_playurl_qn_range(127, 16, true, false), (127, 16));
         assert_eq!(effective_playurl_qn_range(127, 16, false, true), (127, 16));
+    }
+
+    #[tokio::test]
+    async fn playurl_risk_cooldown_sets_and_blocks_until_deadline() {
+        *PLAYURL_RISK_COOLDOWN_UNTIL.lock().await = None;
+        activate_playurl_risk_cooldown().await;
+
+        let cooldown_until = PLAYURL_RISK_COOLDOWN_UNTIL
+            .lock()
+            .await
+            .expect("cooldown deadline should be set");
+        assert!(cooldown_until > Instant::now());
+
+        *PLAYURL_RISK_COOLDOWN_UNTIL.lock().await = None;
+        *PLAYURL_RISK_COOLDOWN_UNTIL.lock().await = Some(Instant::now() + Duration::from_millis(50));
+
+        let started = Instant::now();
+        wait_for_playurl_risk_cooldown().await;
+        assert!(started.elapsed() >= Duration::from_millis(40));
+
+        *PLAYURL_RISK_COOLDOWN_UNTIL.lock().await = None;
     }
 }
 
