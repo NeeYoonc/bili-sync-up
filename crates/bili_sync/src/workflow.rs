@@ -16136,6 +16136,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn audio_only_low_quality_video_still_selects_audio_stream() {
+        let payload = serde_json::json!({
+            "dash": {
+                "video": [
+                    { "base_url": "https://example.com/480p.m4s", "id": 32, "codecid": 7 }
+                ],
+                "audio": [
+                    { "base_url": "https://example.com/192k.m4s", "id": 30280 }
+                ]
+            }
+        });
+        let video_filter = FilterOption {
+            video_min_quality: crate::bilibili::VideoQuality::Quality720p,
+            ..FilterOption::default()
+        };
+
+        let mut normal_analyzer = PageAnalyzer::new(payload.clone());
+        assert!(
+            normal_analyzer.best_stream(&video_filter).is_err(),
+            "普通视频模式仍应拒绝低于 720P 的视频"
+        );
+
+        let mut audio_analyzer = PageAnalyzer::new(payload);
+        let audio_filter = stream_filter_for_download(&video_filter, true);
+        match audio_analyzer
+            .best_stream(&audio_filter)
+            .expect("纯音频模式应允许 480P 视频作为音频载体")
+        {
+            BestStream::VideoAudio { audio: Some(VideoStream::DashAudio { .. }), .. } => {}
+            other => panic!("应选择独立音频流，实际: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_large_source_page_count_for_source_uses_join_filter() {
         let db = create_test_db("large-source-page-count").await;
