@@ -2124,7 +2124,7 @@ fn source_platform(source: &youtube_source::Model) -> &'static str {
     }
 }
 
-fn source_platform_label(source: &youtube_source::Model) -> &'static str {
+pub(crate) fn source_platform_label(source: &youtube_source::Model) -> &'static str {
     if is_douyin_source(source) {
         "抖音"
     } else if crate::tiktok::is_tiktok_source(source) {

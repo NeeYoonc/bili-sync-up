@@ -988,29 +988,57 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
         let deferred_sources_count = enabled_sources_total.saturating_sub(due_sources_count);
         let disabled_sources_count = total_sources_count.saturating_sub(enabled_sources_total);
 
-        // 外源（YouTube/抖音/TikTok）不在 `video_source` 表里，这里单独统计。
-        // 否则只挂外源的部署会看到「共 7 个视频源（启用: 0，禁用: 7）」，像是所有源都被
-        // 禁用了——实际上下面的外源扫描照常进行。
-        let external_total = bili_sync_entity::youtube_source::Entity::find()
-            .count(optimized_connection.as_ref())
+        // 外源（YouTube/抖音/TikTok）不在 `video_source` 表里，按平台分别统计并带上源名，
+        // 否则只挂外源的部署会看到「共 7 个视频源（启用: 0，禁用: 7）」，像是所有源都被禁用了。
+        let external_sources = bili_sync_entity::youtube_source::Entity::find()
+            .all(optimized_connection.as_ref())
             .await
-            .unwrap_or(0);
-        let external_enabled = bili_sync_entity::youtube_source::Entity::find()
-            .filter(bili_sync_entity::youtube_source::Column::Enabled.eq(true))
-            .count(optimized_connection.as_ref())
-            .await
-            .unwrap_or(0);
+            .unwrap_or_default();
+        let mut external_parts: Vec<String> = Vec::new();
+        for label in ["YouTube", "抖音", "TikTok"] {
+            let group: Vec<&bili_sync_entity::youtube_source::Model> = external_sources
+                .iter()
+                .filter(|source| crate::youtube::source_platform_label(source) == label)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            let enabled: Vec<&str> = group
+                .iter()
+                .filter(|source| source.enabled)
+                .map(|source| source.name.as_str())
+                .collect();
+            let mut part = format!(
+                "{} {} 个（启用 {}，禁用 {}）",
+                label,
+                group.len(),
+                enabled.len(),
+                group.len().saturating_sub(enabled.len())
+            );
+            if !enabled.is_empty() {
+                let shown: Vec<&str> = enabled.iter().copied().take(6).collect();
+                part.push_str(&format!(
+                    "：{}{}",
+                    shown.join("、"),
+                    if enabled.len() > shown.len() { "…" } else { "" }
+                ));
+            }
+            external_parts.push(part);
+        }
 
-        if deferred_sources_count > 0 || disabled_sources_count > 0 || external_total > 0 {
+        if deferred_sources_count > 0 || disabled_sources_count > 0 || !external_parts.is_empty() {
+            let external_part = if external_parts.is_empty() {
+                "外源 0 个".to_string()
+            } else {
+                external_parts.join("；")
+            };
             info!(
-                "开始执行本轮视频下载任务：B站视频源 {} 个（启用 {}，暂缓 {}，禁用 {}），外源 {} 个（启用 {}，禁用 {}）",
+                "开始执行本轮视频下载任务：B站视频源 {} 个（启用 {}，暂缓 {}，禁用 {}）；{}",
                 total_sources_count,
                 due_sources_count,
                 deferred_sources_count,
                 disabled_sources_count,
-                external_total,
-                external_enabled,
-                external_total.saturating_sub(external_enabled)
+                external_part
             );
         } else {
             info!("开始执行本轮视频下载任务，共 {} 个启用的视频源", due_sources_count);
