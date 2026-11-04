@@ -988,10 +988,42 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
         let deferred_sources_count = enabled_sources_total.saturating_sub(due_sources_count);
         let disabled_sources_count = total_sources_count.saturating_sub(enabled_sources_total);
 
-        if deferred_sources_count > 0 || disabled_sources_count > 0 {
+        // 外源（YouTube/抖音/TikTok）不在 `video_source` 表里，按平台分别统计。
+        // 否则只挂外源的部署会看到「共 7 个视频源（启用: 0，禁用: 7）」，像是所有源都被禁用了。
+        // 只报平台维度的数量，不列具体源名（源名在各自平台的扫描日志里已经有了）。
+        let external_sources = bili_sync_entity::youtube_source::Entity::find()
+            .all(optimized_connection.as_ref())
+            .await
+            .unwrap_or_default();
+        let mut external_parts: Vec<String> = Vec::new();
+        for label in ["YouTube", "抖音", "TikTok"] {
+            let group: Vec<&bili_sync_entity::youtube_source::Model> = external_sources
+                .iter()
+                .filter(|source| crate::youtube::source_platform_label(source) == label)
+                .collect();
+            if group.is_empty() {
+                external_parts.push(format!("{label} 0 个"));
+                continue;
+            }
+            let enabled = group.iter().filter(|source| source.enabled).count();
+            external_parts.push(format!(
+                "{} {} 个（启用 {}，禁用 {}）",
+                label,
+                group.len(),
+                enabled,
+                group.len().saturating_sub(enabled)
+            ));
+        }
+
+        if deferred_sources_count > 0 || disabled_sources_count > 0 || !external_sources.is_empty() {
+            let external_part = external_parts.join("；");
             info!(
-                "开始执行本轮视频下载任务，共 {} 个视频源（启用: {}，暂缓: {}，禁用: {}）",
-                total_sources_count, due_sources_count, deferred_sources_count, disabled_sources_count
+                "开始执行本轮视频下载任务：B站视频源 {} 个（启用 {}，暂缓 {}，禁用 {}）；{}",
+                total_sources_count,
+                due_sources_count,
+                deferred_sources_count,
+                disabled_sources_count,
+                external_part
             );
         } else {
             info!("开始执行本轮视频下载任务，共 {} 个启用的视频源", due_sources_count);

@@ -14050,6 +14050,12 @@ async fn rename_existing_files(
     });
     handlebars.register_helper("truncate", Box::new(truncate));
 
+    // 与下载引擎保持一致：按 UTF-8 字节截取（中文约 3 字节/字）
+    handlebars_helper!(truncate_bytes: |s: String, len: usize| {
+        crate::utils::filenamify::truncate_utf8_bytes(&s, len)
+    });
+    handlebars.register_helper("truncate_bytes", Box::new(truncate_bytes));
+
     // 使用register_template_string而不是path_safe_register来避免生命周期问题
     // 同时处理正斜杠和反斜杠，确保跨平台兼容性
     // **修复：使用更唯一的分隔符标记，避免与文件名中的下划线冲突**

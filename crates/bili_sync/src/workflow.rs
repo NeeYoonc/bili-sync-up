@@ -301,7 +301,9 @@ use crate::bilibili::{
     SubtitleDownloadOptions, Video, VideoChapter, VideoInfo,
 };
 use crate::config::ARGS;
-use crate::error::{DownloadAbortError, DownloadAbortReason, ExecutionStatus, ProcessPageError};
+use crate::error::{
+    describe_subtask_status, DownloadAbortError, DownloadAbortReason, ExecutionStatus, ProcessPageError,
+};
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
@@ -6562,6 +6564,61 @@ struct PageDownloadOutcome {
     video_total_file_size_bytes_override: Option<i64>,
     split_chapters: bool,
     skip_reason: Option<String>,
+    /// 本页未完成（失败/被忽略/被取消）的子任务说明，用于视频级失败汇总里写明具体原因，
+    /// 避免只留下「分页下载失败，状态码: 0」这种没有信息量的报错。
+    subtask_notes: Vec<String>,
+}
+
+/// 汇总单页中“未完成”的子任务说明：哪些子任务为什么没完成（失败原因 / 被忽略原因）。
+fn incomplete_subtask_notes(results: &[ExecutionStatus], status_offsets: &[u32; 5]) -> Vec<String> {
+    const TASK_NAMES: [&str; 5] = ["封面", "视频", "详情", "弹幕", "字幕"];
+
+    let mut notes = Vec::new();
+    for (index, result) in results.iter().enumerate() {
+        let Some(status) = status_offsets.get(index).copied() else {
+            continue;
+        };
+        if status == STATUS_OK {
+            continue;
+        }
+
+        let task_name = TASK_NAMES[index];
+        let note = match result {
+            ExecutionStatus::ClassifiedFailed(classified) => format!(
+                "{}失败({}): {}",
+                task_name,
+                classified.error_type,
+                summarize_message(&classified.message, 90)
+            ),
+            ExecutionStatus::Failed(err) | ExecutionStatus::FixedFailed(_, err) => {
+                format!("{}失败: {}", task_name, summarize_message(&format!("{:#}", err), 90))
+            }
+            ExecutionStatus::Ignored(err) => format!(
+                "{}被忽略(状态未推进): {}",
+                task_name,
+                summarize_message(&format!("{:#}", err), 90)
+            ),
+            ExecutionStatus::Cancelled => format!("{}因暂停被取消，未完成", task_name),
+            _ => format!("{}未完成({})", task_name, describe_subtask_status(status)),
+        };
+        notes.push(note);
+    }
+    notes
+}
+
+/// 取错误文本第一行并按字符数截短，用于拼进汇总信息（保持单行、别撑爆日志）。
+fn summarize_message(message: &str, max_chars: usize) -> String {
+    let first_line = message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+
+    let mut summary: String = first_line.chars().take(max_chars).collect();
+    if first_line.chars().count() > max_chars {
+        summary.push('…');
+    }
+    summary
 }
 
 fn active_value_matches<T>(value: &sea_orm::ActiveValue<T>, original: &T) -> bool
@@ -6682,6 +6739,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
     let (mut download_abort_reason, mut target_status) = (None, STATUS_OK);
     let mut cancelled_by_user = false;
     let mut failed_pages: Vec<String> = Vec::new(); // 收集失败的分页信息
+    let mut incomplete_pages: Vec<String> = Vec::new(); // 收集未完成分页的具体原因（含被忽略的子任务）
     let mut changed_pages: Vec<page::ActiveModel> = Vec::new();
     let mut should_recompute_video_total_size = false;
     let mut video_total_file_size_bytes_override: Option<i64> = None;
@@ -6703,6 +6761,19 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                 let separate_status: [u32; 5] = PageStatus::from(page_download_status).into();
                 for status in separate_status {
                     target_status = target_status.min(status);
+                }
+                // 记录本页未完成的子任务及原因（例如「视频失败(文件系统错误): 文件名过长…」），
+                // 让视频级错误信息能指出具体是哪一页、哪个子任务、为什么，而不是只有一个状态数字。
+                if separate_status.iter().any(|status| *status != STATUS_OK) {
+                    let detail = outcome.subtask_notes.join("；");
+                    if !detail.is_empty() {
+                        incomplete_pages.push(format!(
+                            "第{}页 {}: {}",
+                            page_pid,
+                            summarize_message(&page_name, 40),
+                            detail
+                        ));
+                    }
                 }
                 if outcome.persistence.should_persist {
                     changed_pages.push(model);
@@ -6849,9 +6920,17 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
             &args.video_model.name, target_status
         );
 
-        // 构建详细的错误信息
-        let details = if !failed_pages.is_empty() {
-            format!("失败的分页: {}", failed_pages.join("; "))
+        // 构建详细的错误信息：既包含直接失败的分页，也包含“没报错但没完成”的分页
+        //（例如子任务被当成可忽略错误、或状态卡在 0 的情况），并写明具体原因。
+        let details = if !failed_pages.is_empty() || !incomplete_pages.is_empty() {
+            let mut parts: Vec<String> = Vec::new();
+            if !failed_pages.is_empty() {
+                parts.push(format!("失败的分页: {}", failed_pages.join("; ")));
+            }
+            if !incomplete_pages.is_empty() {
+                parts.push(format!("未完成的分页: {}", incomplete_pages.join("; ")));
+            }
+            parts.join("；")
         } else {
             "请检查网络连接、文件系统权限或重试下载。".to_string()
         };
@@ -7323,6 +7402,15 @@ async fn download_page(
         // 单P视频使用最新配置的page_name模板
         render_single_page_base_name_from_config(video_model, &page_model)?
     };
+
+    // 智能截断（字节级兜底）：无论命名来自模板还是内置拼接，基名的每一段都限制在
+    // MAX_BASENAME_BYTES 字节内，为 `.mp4.tmp_video`、`.zh-CN.default.ass` 等后缀
+    // 预留空间，避免超过文件系统单段 255 字节上限后，所有直链在建临时文件时
+    // 统一报 `Filename too long (os error 36)` 导致整页下载失败。
+    let base_name = crate::utils::filenamify::cap_path_segments_bytes(
+        &base_name,
+        crate::utils::filenamify::MAX_BASENAME_BYTES,
+    );
 
     // 根据audio_only设置选择文件扩展名
     let media_ext = if audio_only { "m4a" } else { "mp4" };
@@ -8061,8 +8149,13 @@ async fn download_page(
         );
     }
 
+    // 固定最终状态值：既写入数据库，也用于汇总“本页哪些子任务没完成、为什么”。
+    let final_status: u32 = status.into();
+    let final_status_offsets: [u32; 5] = PageStatus::from(final_status).into();
+    let subtask_notes = incomplete_subtask_notes(&results, &final_status_offsets);
+
     let mut page_active_model: page::ActiveModel = page_model.into();
-    page_active_model.download_status = Set(status.into());
+    page_active_model.download_status = Set(final_status);
     page_active_model.path = Set(final_page_path);
     if let Some(sync_update) = danmaku_sync_update.as_ref() {
         sync_update.apply_to_active_model(&mut page_active_model);
@@ -8083,6 +8176,7 @@ async fn download_page(
         video_total_file_size_bytes_override: chapter_total_file_size_bytes,
         split_chapters,
         skip_reason: media_skip_reason,
+        subtask_notes,
     })
 }
 
@@ -9572,7 +9666,7 @@ fn render_collection_absolute_page_base_name(
         clean_video_name
     };
     let clean_page_name = crate::utils::filenamify::filenamify(page_title.trim());
-    if !clean_page_name.is_empty() && clean_page_name != clean_video_name {
+    let raw = if !clean_page_name.is_empty() && clean_page_name != clean_video_name {
         format!(
             "S{:02}E{:03} - {} - {}",
             season_number.max(1),
@@ -9587,7 +9681,12 @@ fn render_collection_absolute_page_base_name(
             episode_number.max(1),
             clean_video_name
         )
-    }
+    };
+
+    // 上面两个标题各自只按 200 字节限长，拼接后整体仍可能达到 400+ 字节。
+    // 这里对最终结果再做一次字节级智能截断（优先截掉靠后的分P标题），
+    // 保证基名 + 附属后缀不超过文件系统单段 255 字节上限。
+    crate::utils::filenamify::cap_path_segments_bytes(&raw, crate::utils::filenamify::MAX_BASENAME_BYTES)
 }
 
 fn valid_chapters_from_chapters(chapters: Vec<VideoChapter>, bvid: &str, page: i32) -> Result<Vec<ValidChapter>> {

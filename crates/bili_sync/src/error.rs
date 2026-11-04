@@ -69,16 +69,33 @@ impl std::fmt::Display for ProcessPageError {
         if let Some(ref details) = self.details {
             write!(
                 f,
-                "视频「{}」分页下载失败，状态码: {}。{}",
-                self.video_name, self.status_code, details
+                "视频「{}」分页下载失败，状态码: {}（{}）。{}",
+                self.video_name,
+                self.status_code,
+                describe_subtask_status(self.status_code),
+                details
             )
         } else {
             write!(
                 f,
-                "视频「{}」分页下载失败，状态码: {}。请检查网络连接、文件系统权限或重试下载。",
-                self.video_name, self.status_code
+                "视频「{}」分页下载失败，状态码: {}（{}）。请检查网络连接、文件系统权限或重试下载。",
+                self.video_name,
+                self.status_code,
+                describe_subtask_status(self.status_code)
             )
         }
+    }
+}
+
+/// 把视频/分页“子任务状态码”（各子任务独立 3bit，打包在 u32 里；这里展示的是
+/// 所有分页子任务状态的最小值）翻译成人话，避免日志里只有一个裸数字看不出原因。
+pub(crate) fn describe_subtask_status(status: u32) -> &'static str {
+    match status {
+        0 => "未开始或此前被忽略",
+        1..=3 => "存在失败子任务，可重试",
+        4 => "已达最大重试次数",
+        7 => "已完成",
+        _ => "未知状态",
     }
 }
 
@@ -196,6 +213,18 @@ impl ErrorClassifier {
         // 首先检查是否为用户主动暂停相关错误
         if Self::is_user_cancellation(&error_msg) {
             return ClassifiedError::new(ErrorType::UserCancelled, "用户主动暂停任务".to_string());
+        }
+
+        // 文件名过长（ENAMETOOLONG）是确定性错误：命名规则修好之前重试多少次都一样。
+        // 提前识别并给出明确原因，避免被“文件系统错误 = 可忽略”的默认策略吞掉后，
+        // 用户只看到一句看不懂的「分页下载失败，状态码: 0」。
+        // 注意：这里不忽略、不重试，让它按失败计数并在日志里输出具体原因。
+        if error_msg.contains("Filename too long") || error_msg.contains("File name too long") {
+            return ClassifiedError::new(
+                ErrorType::FileSystem,
+                "文件名过长，超过文件系统单段 255 字节上限（可缩短命名模板，或依赖自动智能截断）".to_string(),
+            )
+            .with_retry_policy(false, false);
         }
 
         // 检查是否为充电专享视频相关错误（扩展检测，优先级最高）
@@ -317,6 +346,16 @@ impl ErrorClassifier {
     }
 
     fn classify_io_error(err: &io::Error) -> ClassifiedError {
+        if is_filename_too_long_error(err) {
+            return ClassifiedError::new(
+                ErrorType::FileSystem,
+                format!(
+                    "文件名过长，超过文件系统单段 255 字节上限（可缩短命名模板，或依赖自动智能截断）: {}",
+                    err
+                ),
+            )
+            .with_retry_policy(false, false);
+        }
         match err.kind() {
             io::ErrorKind::PermissionDenied => ClassifiedError::new(ErrorType::Permission, "文件权限不足".to_string()),
             io::ErrorKind::NotFound => ClassifiedError::new(ErrorType::FileSystem, "文件或目录不存在".to_string()),
@@ -405,6 +444,15 @@ impl ErrorClassifier {
 
         false
     }
+}
+
+/// 判断是否为“文件名过长”（ENAMETOOLONG）错误。
+///
+/// Linux/macOS 的原始错误码是 36，Windows 是 206；部分封装可能丢掉错误码，
+/// 因此再对错误文本做一次兜底匹配。
+fn is_filename_too_long_error(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(36) | Some(206))
+        || err.to_string().to_ascii_lowercase().contains("filename too long")
 }
 
 pub enum ExecutionStatus {
@@ -497,5 +545,33 @@ mod tests {
         assert_eq!(classified.error_type, ErrorType::RiskControl);
         assert!(classified.should_ignore);
         assert!(classified.message.contains("验证"));
+    }
+
+    #[test]
+    fn filename_too_long_error_is_not_ignored_and_explains_cause() {
+        let err = anyhow::Error::new(io::Error::from_raw_os_error(36));
+        let classified = ErrorClassifier::classify_error(&err);
+
+        assert_eq!(classified.error_type, ErrorType::FileSystem);
+        assert!(!classified.should_ignore, "文件名过长不能被当成可忽略错误");
+        assert!(classified.message.contains("文件名过长"));
+    }
+
+    #[test]
+    fn filename_too_long_message_is_detected_in_wrapped_error() {
+        let err = anyhow::anyhow!("failed to download from [\"https://example.com\"]: 所有URL尝试失败: Filename too long (os error 36)");
+        let classified = ErrorClassifier::classify_error(&err);
+
+        assert_eq!(classified.error_type, ErrorType::FileSystem);
+        assert!(!classified.should_ignore);
+    }
+
+    #[test]
+    fn process_page_error_display_describes_status_code() {
+        let error = ProcessPageError::new("测试视频".to_string(), 0);
+        let text = error.to_string();
+
+        assert!(text.contains("状态码: 0"));
+        assert!(text.contains("未开始或此前被忽略"));
     }
 }

@@ -2124,7 +2124,7 @@ fn source_platform(source: &youtube_source::Model) -> &'static str {
     }
 }
 
-fn source_platform_label(source: &youtube_source::Model) -> &'static str {
+pub(crate) fn source_platform_label(source: &youtube_source::Model) -> &'static str {
     if is_douyin_source(source) {
         "抖音"
     } else if crate::tiktok::is_tiktok_source(source) {
@@ -9355,7 +9355,8 @@ mod tests {
         collect_youtube_channel_renderers, current_ytdlp_package,
         extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
         has_youtube_session_value,
-        is_jpeg_header, needs_jpeg_conversion, episodic_series_dir,
+        is_jpeg_header, needs_jpeg_conversion,
+        episodic_series_dir,
         is_partial_download_artifact, remove_partial_download_artifacts,
         normalize_source_type, normalize_youtube_playlist_url, parse_youtube_live_chat, resolve_source_url,
         should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
