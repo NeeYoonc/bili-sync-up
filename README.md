@@ -9,7 +9,7 @@
 
 专为 NAS 用户打造的哔哩哔哩同步工具，基于 Rust & Tokio 构建。
 
-📚 [在线文档](https://NeeYoonc.github.io/bili-sync-up/) | 🚀 [快速开始](#快速开始) | 📝 [更新日志](./docs/changelog.md) | 💬 [QQ群交流](https://qm.qq.com/q/144RN3oaLM)
+📚 [在线文档](https://NeeYoonc.github.io/bili-sync-up/) | 🚀 [快速开始](#快速开始) | 📝 [更新日志](./docs/changelog.md) | 💬 [QQ群交流](https://qm.qq.com/q/144RN3oaLM) | 📦 [群晖套件源](https://ssp.dnof.net/)
 
 ## ✨ 核心特性
 
@@ -35,6 +35,27 @@
 - **自动重试** - 智能错误处理和重试机制
 
 ## 🚀 快速开始
+
+### 群晖 NAS 套件安装（推荐）
+
+**方式一：添加套件源（可在套件中心直接安装 / 升级）**
+
+1. DSM → **套件中心** → **设置** → **套件来源** → **新增**
+2. 名称随意（如 `dnof`），位置填：`https://ssp.dnof.net/`
+3. 保存后回到「套件中心 → **社群**」，找到 **Bili Sync Up** → 安装
+
+**方式二：手动安装 `.spk`**
+
+1. 到 [Releases](https://github.com/NeeYoonc/bili-sync-up/releases/latest) 下载对应架构：
+   - x86_64 机型：`bili-sync-up_x86_64-<版本>.spk`
+   - ARM 机型：`bili-sync-up_armv8-<版本>.spk`
+2. 套件中心 → **手动安装** → 选择下载的 `.spk`
+
+安装向导可设置 **Web 访问端口**（默认 12345）、**访问 Token**、是否放行防火墙。
+装完点套件中心「打开」，或访问 `http://<NAS-IP>:<端口>`（填了 Token 会先要求输入）。
+
+> 套件以专用用户 `bili-sync-up` 运行（DSM 7 套件规范）。下载目录建议用安装时自动创建的共享文件夹 `bili-sync-up`；
+> 若要指向其它共享文件夹，需在「控制面板 → 共享文件夹 → 权限」中给 `bili-sync-up` 用户读写权限。
 
 ### 使用 Docker（推荐）
 
