@@ -1,0 +1,8 @@
+#!/bin/sh
+# postupgrade —— 升级后：修复数据目录属主（升级会重建 target，var 保留）
+PKG_NAME="@APP@"
+VAR_DIR="/var/packages/$PKG_NAME/var"
+
+mkdir -p "$VAR_DIR/home"
+chown -R "$PKG_NAME:$PKG_NAME" "$VAR_DIR" 2>/dev/null || true
+exit 0

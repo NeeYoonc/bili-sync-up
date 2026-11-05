@@ -1,0 +1,82 @@
+#!/bin/sh
+# start-stop-status —— DSM 7 服务控制
+#   start | stop | status | restart
+# 退出码约定：status 0=运行中，3=未运行；其它动作 0=成功
+PKG_NAME="@APP@"
+PKG_DIR="/var/packages/$PKG_NAME/target"
+VAR_DIR="/var/packages/$PKG_NAME/var"
+PKG_USER="$PKG_NAME"
+HOME_DIR="$VAR_DIR/home"
+LOG="$VAR_DIR/bili-sync.log"
+PIDFILE="$VAR_DIR/bili-sync.pid"
+PORT=12345
+
+[ -d "$PKG_DIR" ] || { echo "未安装: $PKG_DIR 不存在"; exit 4; }
+
+is_running() {
+  [ -f "$PIDFILE" ] || return 1
+  _pid="$(cat "$PIDFILE" 2>/dev/null)"
+  [ -n "$_pid" ] || return 1
+  kill -0 "$_pid" 2>/dev/null
+}
+
+port_open() {
+  # DSM 没有 ss 时退回 /proc/net/tcp（不依赖 netstat 是否安装）
+  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if netstat -ltn 2>/dev/null | grep -q ":$PORT "; then return 0; fi
+    if awk -v p="$(printf '%04X' "$PORT")" 'NR>1 && $2 ~ ":"p"$" {found=1} END{exit !found}' /proc/net/tcp 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+as_user() {
+  if [ "$(id -u)" = "0" ]; then
+    su -s /bin/sh "$PKG_USER" -c "$1"
+  else
+    sh -c "$1"
+  fi
+}
+
+do_start() {
+  if is_running; then echo "已在运行（pid $(cat "$PIDFILE")）"; return 0; fi
+  mkdir -p "$HOME_DIR"
+  chown "$PKG_USER:$PKG_USER" "$VAR_DIR" "$HOME_DIR" 2>/dev/null || true
+  as_user "cd '$PKG_DIR' && HOME='$HOME_DIR' nohup '$PKG_DIR/bin/start.sh' >> '$LOG' 2>&1 & echo \$! > '$PIDFILE'" \
+    || { echo "启动失败"; return 1; }
+  if port_open; then
+    echo "已启动（pid $(cat "$PIDFILE" 2>/dev/null)，端口 $PORT）"
+    return 0
+  fi
+  echo "进程已拉起但端口 $PORT 未就绪，日志尾部："
+  tail -n 20 "$LOG" 2>/dev/null || true
+  return 0
+}
+
+do_stop() {
+  if ! is_running; then rm -f "$PIDFILE"; echo "未运行"; return 0; fi
+  _pid="$(cat "$PIDFILE")"
+  kill "$_pid" 2>/dev/null || true
+  _n=0
+  while kill -0 "$_pid" 2>/dev/null; do
+    _n=$((_n + 1))
+    [ "$_n" -ge 20 ] && { kill -9 "$_pid" 2>/dev/null || true; break; }
+    sleep 1
+  done
+  rm -f "$PIDFILE"
+  echo "已停止"
+  return 0
+}
+
+case "$1" in
+  start)   do_start ;;
+  stop)    do_stop ;;
+  restart) do_stop; do_start ;;
+  status)
+    if is_running; then echo "运行中（pid $(cat "$PIDFILE")）"; exit 0; fi
+    echo "未运行"; exit 3 ;;
+  *)
+    echo "用法: $0 {start|stop|status|restart}" >&2; exit 1 ;;
+esac

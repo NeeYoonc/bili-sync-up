@@ -1,0 +1,7 @@
+#!/bin/sh
+# preupgrade —— 升级前：先停服务，避免二进制被替换时进程仍在跑
+PKG_NAME="@APP@"
+if [ -x "/var/packages/$PKG_NAME/scripts/start-stop-status" ]; then
+  /var/packages/$PKG_NAME/scripts/start-stop-status stop >/dev/null 2>&1 || true
+fi
+exit 0

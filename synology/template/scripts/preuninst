@@ -1,0 +1,7 @@
+#!/bin/sh
+# preuninst —— 卸载前：停服务（卸载流程下输出「已卸载」由平台负责展示）
+PKG_NAME="@APP@"
+if [ -x "/var/packages/$PKG_NAME/scripts/start-stop-status" ]; then
+  /var/packages/$PKG_NAME/scripts/start-stop-status stop >/dev/null 2>&1 || true
+fi
+exit 0

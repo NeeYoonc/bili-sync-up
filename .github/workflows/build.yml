@@ -221,3 +221,53 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+
+
+  # ── 群晖 SPK：从本次 Release 的 Linux 静态二进制打 DSM 7 套件 ──────────────
+  # 不编译 Rust：直接消费上面 build job 产出的 musl 二进制 + 静态 ffmpeg。
+  # 只在打 v* tag 时跑，产物上传到同一个 Release。
+  spk:
+    name: Build SPK (${{ matrix.arch }})
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            asset: bili-sync-rs-Linux-x86_64-musl.tar.gz
+          - arch: armv8
+            asset: bili-sync-rs-Linux-aarch64-musl.tar.gz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download Linux binary artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.asset }}
+          path: dist
+
+      - name: Build SPK
+        run: |
+          chmod +x synology/build-spk.sh
+          ./synology/build-spk.sh \
+            --tag "$GITHUB_REF_NAME" \
+            --arch "${{ matrix.arch }}" \
+            --binary "dist/${{ matrix.asset }}" \
+            --outdir dist/spk
+
+      - name: Upload SPK to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/spk/*.spk --clobber
+
+      - name: Upload SPK as workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: spk-${{ matrix.arch }}
+          path: dist/spk/*.spk
+          if-no-files-found: error
