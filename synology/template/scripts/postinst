@@ -20,16 +20,31 @@ case "$PORT" in ''|*[!0-9]*) PORT=12345 ;; esac
 if [ "$PORT" -lt 100 ] 2>/dev/null || [ "$PORT" -gt 65535 ] 2>/dev/null; then PORT=12345; fi
 printf '%s\n' "$PORT" > "$VAR_DIR/port"
 
-# ── 1) 预置配置（只在首次安装、且还没有数据库时） ────────────────────────
-if [ ! -f "$CONFIG_DIR/data.sqlite" ] && command -v sqlite3 >/dev/null 2>&1; then
-  if [ -n "$TOKEN" ]; then
-    _json="{\"bind_address\":\"0.0.0.0:$PORT\",\"auth_token\":\"$TOKEN\"}"
+# ── 1) 预置配置（端口 / Token） ──────────────────────────────────────────
+# 应用配置存 SQLite：
+#   · 首次安装：库里还没有配置 → 造 legacy `config` 表，应用首启 migrate_config_schema 自动迁移
+#   · 重装/升级（保留数据）：直接 upsert 正式表 config_items(key_name, value_json, updated_at)
+if command -v sqlite3 >/dev/null 2>&1; then
+  if [ ! -f "$CONFIG_DIR/data.sqlite" ]; then
+    if [ -n "$TOKEN" ]; then
+      _json="{\"bind_address\":\"0.0.0.0:$PORT\",\"auth_token\":\"$TOKEN\"}"
+    else
+      _json="{\"bind_address\":\"0.0.0.0:$PORT\"}"
+    fi
+    sqlite3 "$CONFIG_DIR/data.sqlite" \
+      "CREATE TABLE config (data TEXT); INSERT INTO config (data) VALUES ('$_json');" >/dev/null 2>&1 \
+      && echo "[postinst] 已预置 legacy 配置（首启自动迁移）: 0.0.0.0:$PORT"
   else
-    _json="{\"bind_address\":\"0.0.0.0:$PORT\"}"
+    if sqlite3 "$CONFIG_DIR/data.sqlite" "SELECT 1 FROM config_items LIMIT 1;" >/dev/null 2>&1; then
+      sqlite3 "$CONFIG_DIR/data.sqlite" \
+        "INSERT OR REPLACE INTO config_items (key_name,value_json,updated_at) VALUES ('bind_address','\"0.0.0.0:$PORT\"',datetime('now'));" >/dev/null 2>&1 || true
+      if [ -n "$TOKEN" ]; then
+        sqlite3 "$CONFIG_DIR/data.sqlite" \
+          "INSERT OR REPLACE INTO config_items (key_name,value_json,updated_at) VALUES ('auth_token','\"$TOKEN\"',datetime('now'));" >/dev/null 2>&1 || true
+      fi
+      echo "[postinst] 已更新现有数据库配置: 0.0.0.0:$PORT${TOKEN:+ auth_token=***}"
+    fi
   fi
-  sqlite3 "$CONFIG_DIR/data.sqlite" \
-    "CREATE TABLE config (data TEXT); INSERT INTO config (data) VALUES ('$_json');" >/dev/null 2>&1 \
-    && echo "[postinst] 已预置配置: bind_address=0.0.0.0:$PORT${TOKEN:+ auth_token=***}"
 fi
 
 # ── 2) DSM 门户「打开」按钮 ───────────────────────────────────────────────

@@ -33,7 +33,7 @@ port_in_use() {
 
 wait_port() {
   _n=0
-  while [ "$_n" -lt 20 ]; do
+  while [ "$_n" -lt "${WAIT_SECS:-60}" ]; do
     if netstat -ltn 2>/dev/null | grep -q ":$PORT "; then return 0; fi
     if awk -v p="$(printf '%04X' "$PORT")" 'NR>1 && $2 ~ ":"p"$" {f=1} END{exit !f}' /proc/net/tcp 2>/dev/null; then
       return 0
@@ -41,6 +41,20 @@ wait_port() {
     sleep 1; _n=$((_n + 1))
   done
   return 1
+}
+
+# 启动前把环境快照写进 start.log —— 真机出问题时一眼能看出卡在哪
+diag() {
+  log "--- 环境快照 ---"
+  log "  id=$(id -un 2>/dev/null) uid=$(id -u 2>/dev/null)"
+  log "  PORT=$PORT  PKG_DIR=$PKG_DIR"
+  log "  var:      $(ls -ld "$VAR_DIR" 2>&1)"
+  log "  config:   $(ls -ld "$CONFIG_DIR" 2>&1)"
+  log "  config.toml: $(ls -l "$CONFIG_DIR/config.toml" 2>&1)"
+  log "  port file:   $(cat "$VAR_DIR/port" 2>/dev/null)"
+  log "  netstat:  $(command -v netstat 2>/dev/null || echo '(无，改用 /proc/net/tcp)')"
+  log "  binary:   $(ls -l "$PKG_DIR/bin/bili-sync-rs" 2>&1)"
+  log "  占用 $PORT 的进程: $(netstat -ltnp 2>/dev/null | grep ":$PORT " | head -3 | tr '\n' ' ')"
 }
 
 # 优先以包用户运行；DSM 已把脚本降权到包用户时直接跑；su 失败则退回 root 并记录
@@ -59,26 +73,49 @@ run_as_pkg() {
   sh -c "$_cmd"
 }
 
+# 应用启动后会 fork（父进程写 pid、子进程监听），按 PID 停不干净 → 按二进制路径兜底
+kill_leftovers() {
+  pkill -f "$PKG_DIR/bin/bili-sync-rs" 2>/dev/null || true
+  sleep 1
+  pkill -9 -f "$PKG_DIR/bin/bili-sync-rs" 2>/dev/null || true
+}
+
 do_start() {
   log "===== start（端口 $PORT，用户 $(id -un)）====="
+  diag
   if is_running; then echo "已在运行（pid $(cat "$PIDFILE")）"; return 0; fi
   mkdir -p "$VAR_DIR" "$HOME_DIR" "$CONFIG_DIR" 2>/dev/null || true
   chown -R "$PKG_USER:$PKG_USER" "$VAR_DIR" 2>/dev/null || true
   if port_in_use; then
-    log "✗ 端口 $PORT 已被其它进程占用"
-    echo "端口 $PORT 已被占用，请改端口后重启（var/port 与 var/config/config.toml 的 bind_address）"
-    return 1
+    log "端口 $PORT 被占用 → 尝试清理本包残留进程"
+    kill_leftovers
+    sleep 1
+    if port_in_use; then
+      log "✗ 端口 $PORT 仍被其它进程占用"
+      echo "端口 $PORT 已被占用，请改端口后重启（var/port 与数据库里的 bind_address）"
+      return 1
+    fi
   fi
   : > "$LOG" 2>/dev/null || true
   run_as_pkg "cd '$PKG_DIR' && HOME='$HOME_DIR' BILI_SYNC_CONFIG_DIR='$CONFIG_DIR' nohup '$PKG_DIR/bin/start.sh' >> '$LOG' 2>&1 & echo \$! > '$PIDFILE'"
-  log "拉起返回码 $?"
+  log "拉起返回码 $?，pid=$(cat "$PIDFILE" 2>/dev/null)"
+
   if wait_port; then
     log "✓ 端口 $PORT 就绪"
     echo "已启动（端口 $PORT）"
     return 0
   fi
-  log "✗ 端口 $PORT 未就绪，bili-sync.log 尾部："
-  tail -n 30 "$LOG" 2>/dev/null | while IFS= read -r l; do log "  $l"; done
+
+  # 端口没就绪：先看进程是否还活着。活着就按「已启动」返回（可能只是慢/端口探测不到），
+  # 让 DSM 不要弹「无法启动」，用户可以直接去访问页面。
+  if is_running; then
+    log "⚠ 端口 $PORT 在 ${WAIT_SECS:-60}s 内未探测到，但进程 $(cat "$PIDFILE") 仍存活 → 按已启动处理"
+    echo "已启动（进程存活，端口探测未就绪，请直接访问 http://<NAS-IP>:$PORT 确认）"
+    return 0
+  fi
+
+  log "✗ 进程已退出，bili-sync.log 尾部："
+  tail -n 40 "$LOG" 2>/dev/null | while IFS= read -r l; do log "  $l"; done
   echo "启动失败：详见 $STARTLOG 与 $LOG"
   return 1
 }
@@ -95,6 +132,7 @@ do_stop() {
     sleep 1
   done
   rm -f "$PIDFILE"
+  kill_leftovers
   echo "已停止"
   return 0
 }
