@@ -6,6 +6,8 @@
 - **内置 ffmpeg**：B 站基本是 DASH 分离流，没有 ffmpeg 下载出来没声音/合不了；包内自带 `ffmpeg`/`ffprobe`，启动时通过 `PATH` 优先命中。
 - **自动构建**：`.github/workflows/build.yml` 里追加了 `spk` job —— 打 `v*` tag 发版时，Release 发布成功后自动产出两个架构的 SPK 并上传到同一个 Release。
 
+> 📘 完整打包规范（SPK 格式、生命周期脚本、踩坑清单、移植步骤）见 [PACKAGING-GUIDE.md](PACKAGING-GUIDE.md)。
+
 ## 产物
 
 ```
