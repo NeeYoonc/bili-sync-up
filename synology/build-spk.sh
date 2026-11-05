@@ -137,8 +137,15 @@ exec "$BIN_DIR/bili-sync-rs" "$@"
 START
 chmod +x "$WORK/app/bin/start.sh"
 
+# ── 3b. DSM 门户图标（套件中心「打开」按钮用；ui/config 由 postinst 按实际端口生成）
+mkdir -p "$WORK/app/ui/images"
+cp "$SCRIPT_DIR/template/PACKAGE_ICON_64.png"  "$WORK/app/ui/images/icon_64.png"
+cp "$SCRIPT_DIR/template/PACKAGE_ICON_256.PNG" "$WORK/app/ui/images/icon_256.png"
+
 # ── 4. package.tgz（装到 /var/packages/<pkg>/target） ─────────────────────────
-tar -czf "$WORK/package.tgz" -C "$WORK/app" .
+# ★ 必须用 --mode 强制 755：在 Windows(MSYS) 上构建时，chmod +x 不会写进 tar，
+#   产物里 bili-sync-rs/ffmpeg 会变成 644 → 群晖上「无法启动」（2026-11-05 真机踩过）。
+tar -czf "$WORK/package.tgz" --mode='u+rwx,go+rx' -C "$WORK/app" .
 log "package.tgz: $(du -h "$WORK/package.tgz" | cut -f1)"
 
 # ── 5. SPK 骨架：INFO / scripts / conf ───────────────────────────────────────

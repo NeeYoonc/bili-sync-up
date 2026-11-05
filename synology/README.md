@@ -47,21 +47,40 @@ bili-sync-up_armv8-<version>.spk      # 群晖 armv8（对应上游 aarch64 产�
 
 安装后首次打开会进入设置向导：配置 B 站 Cookie、下载路径、视频源。
 
-## 安装向导（端口 / Token / 防火墙）
+## 安装 / 卸载向导
 
-安装时会多出一步「Bili Sync Up 基础设置」：
+**安装**（`WIZARD_UIFILES/install_uifile`）：
 
 | 项 | 作用 |
 |---|---|
-| **Web 访问端口** | 默认 `12345`；写入 `var/port` 和 `config.toml` 的 `bind_address` |
-| **访问 Token** | 写入 `config.toml` 的 `auth_token`；留空 = 不启用鉴权（局域网可直连） |
-| **防火墙放行** | 勾选后安装脚本用 `synofirewall --add-rule` 放行该端口 |
+| **Web 访问端口** | 默认 `12345`；写入 `var/port`，并预置到应用配置的 `bind_address` |
+| **访问 Token** | 预置到应用配置的 `auth_token`；留空 = 不启用鉴权 |
+| **防火墙放行** | 勾选后用 `synofirewall --add-rule` 放行该端口 |
 
-原理：上游支持 `BILI_SYNC_CONFIG_DIR`，且首次启动会把 `config.toml` **自动迁移进数据库**，
-所以安装时预置的端口/Token 会直接生效，不需要进 Web 界面再设一遍。
+**端口/Token 是怎么写进去的**：应用把配置存在 SQLite（`var/config/data.sqlite`），
+且启动时会把「legacy `config` 表」自动迁移成正式配置（`migrate_config_schema`）。
+所以 `postinst` 直接用 `sqlite3` 造这张表并塞入 JSON：
 
-安装信息落盘在 `/var/packages/bili-sync-up/var/access-info.txt`（端口 / 访问地址 / Token）。
-装完再改端口或 Token：改 `config.toml` 后 `synopkg restart bili-sync-up`，或在 Web 设置里改。
+```sql
+CREATE TABLE config (data TEXT);
+INSERT INTO config (data) VALUES ('{"bind_address":"0.0.0.0:22345","auth_token":"..."}');
+```
+
+首次启动日志会出现 `legacy_detected=true` 与
+`配置迁移报告：已映射字段(2) = bind_address(...), auth_token(...)`，随即生效。
+
+**卸载**（`WIZARD_UIFILES/uninstall_uifile`）：
+
+| 选项 | 行为 |
+|---|---|
+| 仅卸载 | 保留 `var`（配置/数据库/日志），重装直接恢复 |
+| 删除套件所有数据文件 | `preuninst`/`postuninst` 删 `var` 并清理包用户 |
+
+## 套件中心「打开」按钮
+
+`INFO` 带 `dsmuidir="ui"` + `dsmappname="SYNO.SDS.BiliSyncUp.Application"`，
+`postinst` 按实际端口生成 `target/ui/config` 门户配置，图标在 `target/ui/images/`。
+所以套件中心会出现「打开」，点击直达 `http://<NAS-IP>:<端口>/`。
 
 ## 已知限制
 

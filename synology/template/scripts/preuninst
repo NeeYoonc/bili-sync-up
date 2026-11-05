@@ -1,7 +1,16 @@
 #!/bin/sh
-# preuninst —— 卸载前：停服务（卸载流程下输出「已卸载」由平台负责展示）
+# preuninst —— 卸载前：停服务；按卸载向导选择决定是否删除数据
 PKG_NAME="@APP@"
-if [ -x "/var/packages/$PKG_NAME/scripts/start-stop-status" ]; then
-  /var/packages/$PKG_NAME/scripts/start-stop-status stop >/dev/null 2>&1 || true
+VAR_DIR="/var/packages/$PKG_NAME/var"
+SSS="/var/packages/$PKG_NAME/scripts/start-stop-status"
+
+# DSM 卸载前会先停服务；这里显式再停一次，保证数据删除时进程已退出
+[ -x "$SSS" ] && "$SSS" stop >/dev/null 2>&1 || true
+
+if [ "${wizard_delete_data:-false}" = "true" ]; then
+  echo "[uninstall] 按向导选择删除数据: $VAR_DIR" >&2
+  rm -rf "$VAR_DIR" 2>/dev/null || true
+else
+  echo "[uninstall] 保留数据（wizard_delete_data=${wizard_delete_data:-false}）: $VAR_DIR" >&2
 fi
 exit 0

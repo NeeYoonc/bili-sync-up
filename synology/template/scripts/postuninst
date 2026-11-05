@@ -1,4 +1,13 @@
 #!/bin/sh
-# postuninst —— 卸载后：默认保留用户数据（配置/数据库/下载目录都不动）
-# 需要彻底清理时由用户在卸载向导里勾选「删除数据」，DSM 会自行清理 var。
+# postuninst —— 卸载后：兜底删数据 + 清理包用户（DSM 不会自动删第三方包用户）
+PKG_NAME="@APP@"
+VAR_DIR="/var/packages/$PKG_NAME/var"
+
+if [ "${wizard_delete_data:-false}" = "true" ]; then
+  rm -rf "$VAR_DIR" 2>/dev/null || true
+  /usr/syno/sbin/synouser --del "$PKG_NAME" >/dev/null 2>&1 \
+    || userdel -r "$PKG_NAME" 2>/dev/null || true
+else
+  echo "[uninstall] 数据已保留，重装可直接恢复" >&2
+fi
 exit 0

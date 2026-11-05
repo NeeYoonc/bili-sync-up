@@ -1,44 +1,64 @@
 #!/bin/sh
 # postinst —— 安装后：
-#   1) 准备数据目录与权限
-#   2) 把安装向导填的端口 / Token 预置成 config.toml
-#      （应用首次启动会自动把 config.toml 迁移进数据库，因此端口与鉴权直接生效）
+#   1) 目录与权限
+#   2) 用向导里的端口/Token 预置应用配置（应用把配置存 SQLite，启动时会把
+#      「legacy config 表」自动迁移成正式配置 —— 见 manager.rs 的 migrate_config_schema）
+#   3) 生成 DSM 门户 ui/config，让套件中心出现「打开」按钮
 PKG_NAME="@APP@"
+APP_ID="BiliSyncUp"
+PKG_DIR="/var/packages/$PKG_NAME/target"
 VAR_DIR="/var/packages/$PKG_NAME/var"
 CONFIG_DIR="$VAR_DIR/config"
 
 mkdir -p "$VAR_DIR/home" "$CONFIG_DIR"
-chown -R "$PKG_NAME:$PKG_NAME" "$VAR_DIR" 2>/dev/null || true
-chmod 750 "$VAR_DIR" 2>/dev/null || true
+chmod 755 "$PKG_DIR/bin/"* 2>/dev/null || true
 
-# 向导值（DSM 把 install_uifile 的 key 作为环境变量传给安装脚本）
+# ── 向导值 ────────────────────────────────────────────────────────────────
 PORT="${wizard_port:-12345}"
 TOKEN="${wizard_token:-}"
-case "$PORT" in
-  ''|*[!0-9]*) PORT=12345 ;;
-esac
-if [ "$PORT" -lt 100 ] || [ "$PORT" -gt 65535 ] 2>/dev/null; then PORT=12345; fi
-
+case "$PORT" in ''|*[!0-9]*) PORT=12345 ;; esac
+if [ "$PORT" -lt 100 ] 2>/dev/null || [ "$PORT" -gt 65535 ] 2>/dev/null; then PORT=12345; fi
 printf '%s\n' "$PORT" > "$VAR_DIR/port"
 
-# 只在首次安装时预置，升级不覆盖用户已有配置
-if [ ! -f "$CONFIG_DIR/config.toml" ]; then
-  {
-    printf 'bind_address = "0.0.0.0:%s"\n' "$PORT"
-    if [ -n "$TOKEN" ]; then
-      printf 'auth_token = "%s"\n' "$TOKEN"
-    fi
-  } > "$CONFIG_DIR/config.toml"
+# ── 1) 预置配置（只在首次安装、且还没有数据库时） ────────────────────────
+if [ ! -f "$CONFIG_DIR/data.sqlite" ] && command -v sqlite3 >/dev/null 2>&1; then
+  if [ -n "$TOKEN" ]; then
+    _json="{\"bind_address\":\"0.0.0.0:$PORT\",\"auth_token\":\"$TOKEN\"}"
+  else
+    _json="{\"bind_address\":\"0.0.0.0:$PORT\"}"
+  fi
+  sqlite3 "$CONFIG_DIR/data.sqlite" \
+    "CREATE TABLE config (data TEXT); INSERT INTO config (data) VALUES ('$_json');" >/dev/null 2>&1 \
+    && echo "[postinst] 已预置配置: bind_address=0.0.0.0:$PORT${TOKEN:+ auth_token=***}"
 fi
 
-# 安装信息落盘，方便 SSH 查看（也写进日志）
+# ── 2) DSM 门户「打开」按钮 ───────────────────────────────────────────────
+mkdir -p "$PKG_DIR/ui/images"
+cat > "$PKG_DIR/ui/config" <<PORTAL
+{
+    ".url": {
+        "SYNO.SDS.${APP_ID}.Application": {
+            "type": "url",
+            "icon": "images/icon_{0}.png",
+            "title": "Bili Sync Up",
+            "desc": "哔哩哔哩同步工具（Rust + Tokio）",
+            "protocol": "http",
+            "port": "${PORT}",
+            "allUsers": false
+        }
+    }
+}
+PORTAL
+
+# ── 3) 安装信息 ──────────────────────────────────────────────────────────
 {
   echo "端口: $PORT"
   echo "访问: http://<NAS-IP>:$PORT"
   if [ -n "$TOKEN" ]; then echo "Token: $TOKEN"; else echo "Token: （未启用鉴权）"; fi
+  echo "配置目录: $CONFIG_DIR"
 } > "$VAR_DIR/access-info.txt"
 
-# 防火墙放行（DSM 7 用 synofirewall；失败不阻断安装）
+# ── 4) 防火墙放行 ────────────────────────────────────────────────────────
 if [ "${wizard_open_firewall:-yes}" = "yes" ]; then
   synofirewall --add-rule --name="$PKG_NAME" --protocol=tcp --port="$PORT" >/dev/null 2>&1 || true
 fi
