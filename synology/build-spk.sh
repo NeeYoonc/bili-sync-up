@@ -147,10 +147,12 @@ cp "$SCRIPT_DIR/template/INFO.in" "$SPK/INFO"
 cp "$SCRIPT_DIR/template/scripts/"* "$SPK/scripts/"
 cp "$SCRIPT_DIR/template/conf/privilege" "$SPK/conf/privilege"
 cp "$SCRIPT_DIR/template/conf/resource"  "$SPK/conf/resource"
-cp "$SCRIPT_DIR/template/conf/PACKAGE_ICON.PNG" "$SPK/conf/PACKAGE_ICON.PNG" 2>/dev/null || true
-cp "$SCRIPT_DIR/template/conf/PACKAGE_ICON_256.PNG" "$SPK/conf/PACKAGE_ICON_256.PNG" 2>/dev/null || true
+# 图标放【包根】而非 conf/ —— 与 DSM 规范及已验证可装的 dsh 包一致
+cp "$SCRIPT_DIR/template/PACKAGE_ICON.PNG"     "$SPK/PACKAGE_ICON.PNG"
+cp "$SCRIPT_DIR/template/PACKAGE_ICON_256.PNG" "$SPK/PACKAGE_ICON_256.PNG"
 cp "$WORK/package.tgz" "$SPK/package.tgz"
 chmod 755 "$SPK/scripts/"*
+chmod 644 "$SPK/INFO" "$SPK/conf/privilege" "$SPK/conf/resource"
 
 # INFO 占位符替换
 sed -i \
@@ -166,18 +168,24 @@ for f in "$SPK/scripts/"*; do
   sed -i -e "s|@APP@|$APP|g" -e "s|@VERSION@|$VERSION|g" "$f"
 done
 
-# ── 6. 打��� SPK（SPK 本身是未压缩 tar） ──────────────────────────────────────
+# ── 6. 打 SPK ────────────────────────────────────────────────────────────────
+# ★ 外层必须是【未压缩 tar】且【条目不带 ./ 前缀】（DSM 规范）。
+#   写成 `tar -cf x.spk .` 会得到 ./INFO、./conf/... → DSM 直接判
+#   「套件文件格式不正确。请联系套件开发人员。」（2026-11-05 实测踩过）
 OUT="$OUTDIR/${APP}_${ARCH}-${VERSION}.spk"
-( cd "$SPK" && tar --owner=0 --group=0 -cf "$WORK/out.spk" . )
+( cd "$SPK" && tar --owner=0 --group=0 -cf "$WORK/out.spk" \
+    INFO PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG conf scripts package.tgz )
 mv "$WORK/out.spk" "$OUT"
 
 # ── 7. 自检 ─────────────────────────────────────────────────────────────────
 log "自检"
 _refs="$(tar -tf "$OUT")"
-for f in INFO package.tgz scripts/start-stop-status scripts/postinst conf/privilege conf/resource; do
-  printf '%s\n' "$_refs" | grep -qx "./$f" || die "SPK 缺少 ./$f"
+for f in INFO PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG package.tgz \
+         scripts/start-stop-status scripts/postinst conf/privilege conf/resource; do
+  printf '%s\n' "$_refs" | grep -qx "$f" || die "SPK 缺少 $f"
 done
-_pkg="$(tar -xOf "$OUT" ./package.tgz | tar -tzf -)"
+printf '%s\n' "$_refs" | grep -q '^\./' && die "SPK 条目带了 ./ 前缀（DSM 会判格式错误）"
+_pkg="$(tar -xOf "$OUT" package.tgz | tar -tzf -)"
 printf '%s\n' "$_pkg" | grep -qx "./bin/bili-sync-rs" || die "package.tgz 里没有 bin/bili-sync-rs"
 printf '%s\n' "$_pkg" | grep -qx "./bin/ffmpeg"      || die "package.tgz 里没有 bin/ffmpeg"
 

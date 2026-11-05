@@ -52,8 +52,21 @@ bili-sync-up_armv8-<version>.spk      # 群晖 armv8（对应上游 aarch64 产�
 1. **端口固定 12345**：上游二进制没有 CLI / 环境变量可以改端口（只有 `--scan-only` / `--log-level`）。若 NAS 上 12345 已被占用，需要先腾出端口。
 2. **ffmpeg 为 GPL 静态构建**（johnvansickle），随包分发属 GPL 再分发：源码见 <https://johnvansickle.com/ffmpeg/>。如不希望引入 GPL，可把 `build-spk.sh` 里的 `FFMPEG_*_URL` 换成 LGPL 构建（如 BtbN 的 lgpl 变体），或在套件里改为依赖系统 ffmpeg。
 3. **四段版本号**（如 `v3.1.4.1`）会转成 DSM 的 build 形式 `3.1.4-1`，因为 INFO 的 `version` 不接受四段点分。
-4. **包体较大**：内置 ffmpeg 后 x86_64 约 73 MB、armv8 约 70 MB（未含图标）。
-5. **未含套件图标**：`conf/PACKAGE_ICON.PNG` / `PACKAGE_ICON_256.PNG` 目前缺省，DSM 会用默认图标；需要时把两张图放进 `synology/template/conf/` 即可被自动打入。
+4. **包体较大**：内置 ffmpeg 后 x86_64 约 73 MB、armv8 约 64 MB。
+
+## 打包规范（踩过的坑）
+
+外层 `.spk` 必须是**未压缩 tar**、且条目**不能带 `./` 前缀**，否则 DSM 安装时报
+「套件文件格式不正确。请联系套件开发人员。」
+
+```bash
+# ✅ 正确
+( cd "$SPK" && tar -cf out.spk INFO PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG conf scripts package.tgz )
+# ❌ 错误（条目变成 ./INFO、./conf/... → DSM 直接拒收）
+( cd "$SPK" && tar -cf out.spk . )
+```
+
+图标 `PACKAGE_ICON.PNG`（72×72）/ `PACKAGE_ICON_256.PNG`（256×256）放**包根**，不是 `conf/`。
 
 ## 排障
 
