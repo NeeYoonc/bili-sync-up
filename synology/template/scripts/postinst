@@ -1,9 +1,48 @@
 #!/bin/sh
-# postinst —— 安装后：准备数据目录与权限（DSM 以 root 执行）
+# postinst —— 安装后：
+#   1) 准备数据目录与权限
+#   2) 把安装向导填的端口 / Token 预置成 config.toml
+#      （应用首次启动会自动把 config.toml 迁移进数据库，因此端口与鉴权直接生效）
 PKG_NAME="@APP@"
 VAR_DIR="/var/packages/$PKG_NAME/var"
+CONFIG_DIR="$VAR_DIR/config"
 
-mkdir -p "$VAR_DIR/home"
+mkdir -p "$VAR_DIR/home" "$CONFIG_DIR"
 chown -R "$PKG_NAME:$PKG_NAME" "$VAR_DIR" 2>/dev/null || true
 chmod 750 "$VAR_DIR" 2>/dev/null || true
+
+# 向导值（DSM 把 install_uifile 的 key 作为环境变量传给安装脚本）
+PORT="${wizard_port:-12345}"
+TOKEN="${wizard_token:-}"
+case "$PORT" in
+  ''|*[!0-9]*) PORT=12345 ;;
+esac
+if [ "$PORT" -lt 100 ] || [ "$PORT" -gt 65535 ] 2>/dev/null; then PORT=12345; fi
+
+printf '%s\n' "$PORT" > "$VAR_DIR/port"
+
+# 只在首次安装时预置，升级不覆盖用户已有配置
+if [ ! -f "$CONFIG_DIR/config.toml" ]; then
+  {
+    printf 'bind_address = "0.0.0.0:%s"\n' "$PORT"
+    if [ -n "$TOKEN" ]; then
+      printf 'auth_token = "%s"\n' "$TOKEN"
+    fi
+  } > "$CONFIG_DIR/config.toml"
+fi
+
+# 安装信息落盘，方便 SSH 查看（也写进日志）
+{
+  echo "端口: $PORT"
+  echo "访问: http://<NAS-IP>:$PORT"
+  if [ -n "$TOKEN" ]; then echo "Token: $TOKEN"; else echo "Token: （未启用鉴权）"; fi
+} > "$VAR_DIR/access-info.txt"
+
+# 防火墙放行（DSM 7 用 synofirewall；失败不阻断安装）
+if [ "${wizard_open_firewall:-yes}" = "yes" ]; then
+  synofirewall --add-rule --name="$PKG_NAME" --protocol=tcp --port="$PORT" >/dev/null 2>&1 || true
+fi
+
+chown -R "$PKG_NAME:$PKG_NAME" "$VAR_DIR" 2>/dev/null || true
+cat "$VAR_DIR/access-info.txt"
 exit 0

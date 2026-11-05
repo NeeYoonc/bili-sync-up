@@ -124,14 +124,15 @@ log "ffmpeg: $(du -h "$WORK/app/bin/ffmpeg" | cut -f1)"
 # ── 3. 应用体内的启动包装（供 start-stop-status 与 SSH 手动启动复用） ────────
 cat > "$WORK/app/bin/start.sh" <<'START'
 #!/bin/sh
-# 手动/服务启动统一入口：ffmpeg 走包内 bin，配置走 $HOME/.config/bili-sync
+# 手动/服务启动统一入口：ffmpeg 走包内 bin，配置走 $BILI_SYNC_CONFIG_DIR
 set -e
 BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$BIN_DIR:$PATH"
 export HOME="${HOME:-/var/packages/bili-sync-up/var/home}"
+export BILI_SYNC_CONFIG_DIR="${BILI_SYNC_CONFIG_DIR:-$HOME/.config/bili-sync}"
 export TZ="${TZ:-Asia/Shanghai}"
 export RUST_LOG="${RUST_LOG:-None,bili_sync=info}"
-mkdir -p "$HOME"
+mkdir -p "$HOME" "$BILI_SYNC_CONFIG_DIR"
 exec "$BIN_DIR/bili-sync-rs" "$@"
 START
 chmod +x "$WORK/app/bin/start.sh"
@@ -147,12 +148,14 @@ cp "$SCRIPT_DIR/template/INFO.in" "$SPK/INFO"
 cp "$SCRIPT_DIR/template/scripts/"* "$SPK/scripts/"
 cp "$SCRIPT_DIR/template/conf/privilege" "$SPK/conf/privilege"
 cp "$SCRIPT_DIR/template/conf/resource"  "$SPK/conf/resource"
+# 安装向导（端口 / Token / 防火墙）
+cp -r "$SCRIPT_DIR/template/WIZARD_UIFILES" "$SPK/WIZARD_UIFILES"
 # 图标放【包根】而非 conf/ —— 与 DSM 规范及已验证可装的 dsh 包一致
 cp "$SCRIPT_DIR/template/PACKAGE_ICON.PNG"     "$SPK/PACKAGE_ICON.PNG"
 cp "$SCRIPT_DIR/template/PACKAGE_ICON_256.PNG" "$SPK/PACKAGE_ICON_256.PNG"
 cp "$WORK/package.tgz" "$SPK/package.tgz"
 chmod 755 "$SPK/scripts/"*
-chmod 644 "$SPK/INFO" "$SPK/conf/privilege" "$SPK/conf/resource"
+chmod 644 "$SPK/INFO" "$SPK/conf/privilege" "$SPK/conf/resource" "$SPK/WIZARD_UIFILES/install_uifile"
 
 # INFO 占位符替换
 sed -i \
@@ -174,14 +177,15 @@ done
 #   「套件文件格式不正确。请联系套件开发人员。」（2026-11-05 实测踩过）
 OUT="$OUTDIR/${APP}_${ARCH}-${VERSION}.spk"
 ( cd "$SPK" && tar --owner=0 --group=0 -cf "$WORK/out.spk" \
-    INFO PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG conf scripts package.tgz )
+    INFO PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG conf scripts WIZARD_UIFILES package.tgz )
 mv "$WORK/out.spk" "$OUT"
 
 # ── 7. 自检 ─────────────────────────────────────────────────────────────────
 log "自检"
 _refs="$(tar -tf "$OUT")"
 for f in INFO PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG package.tgz \
-         scripts/start-stop-status scripts/postinst conf/privilege conf/resource; do
+         scripts/start-stop-status scripts/postinst conf/privilege conf/resource \
+         WIZARD_UIFILES/install_uifile; do
   printf '%s\n' "$_refs" | grep -qx "$f" || die "SPK 缺少 $f"
 done
 printf '%s\n' "$_refs" | grep -q '^\./' && die "SPK 条目带了 ./ 前缀（DSM 会判格式错误）"

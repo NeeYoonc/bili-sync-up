@@ -38,7 +38,7 @@ bili-sync-up_armv8-<version>.spk      # 群晖 armv8（对应上游 aarch64 产�
 | 项 | 值 |
 |---|---|
 | 套件名 / 包名 | `bili-sync-up`（DSM 显示名 `Bili Sync Up`） |
-| 访问入口 | `http://<NAS-IP>:12345`（程序端口固定 12345） |
+| 访问入口 | `http://<NAS-IP>:<安装向导里填的端口>`（默认 12345） |
 | 配置 / 数据库 | `/var/packages/bili-sync-up/var/home/.config/bili-sync`（`HOME` 指向包数据目录） |
 | 运行日志 | `/var/packages/bili-sync-up/var/bili-sync.log` |
 | 下载目录 | 由 `conf/resource` 自动创建共享文件夹 `bili-sync-up`（`/volumeX/bili-sync-up`），也可在 Web 界面改成任意有权限的路径 |
@@ -47,9 +47,25 @@ bili-sync-up_armv8-<version>.spk      # 群晖 armv8（对应上游 aarch64 产�
 
 安装后首次打开会进入设置向导：配置 B 站 Cookie、下载路径、视频源。
 
+## 安装向导（端口 / Token / 防火墙）
+
+安装时会多出一步「Bili Sync Up 基础设置」：
+
+| 项 | 作用 |
+|---|---|
+| **Web 访问端口** | 默认 `12345`；写入 `var/port` 和 `config.toml` 的 `bind_address` |
+| **访问 Token** | 写入 `config.toml` 的 `auth_token`；留空 = 不启用鉴权（局域网可直连） |
+| **防火墙放行** | 勾选后安装脚本用 `synofirewall --add-rule` 放行该端口 |
+
+原理：上游支持 `BILI_SYNC_CONFIG_DIR`，且首次启动会把 `config.toml` **自动迁移进数据库**，
+所以安装时预置的端口/Token 会直接生效，不需要进 Web 界面再设一遍。
+
+安装信息落盘在 `/var/packages/bili-sync-up/var/access-info.txt`（端口 / 访问地址 / Token）。
+装完再改端口或 Token：改 `config.toml` 后 `synopkg restart bili-sync-up`，或在 Web 设置里改。
+
 ## 已知限制
 
-1. **端口固定 12345**：上游二进制没有 CLI / 环境变量可以改端口（只有 `--scan-only` / `--log-level`）。若 NAS 上 12345 已被占用，需要先腾出端口。
+1. **端口只能在安装时/配置文件里改**：上游二进制没有 CLI 参数可改端口（只有 `--scan-only` / `--log-level`），端口来自配置项 `bind_address`。安装向导只在安装时出现一次，之后要改就改 `config.toml` 再重启服务。
 2. **ffmpeg 为 GPL 静态构建**（johnvansickle），随包分发属 GPL 再分发：源码见 <https://johnvansickle.com/ffmpeg/>。如不希望引入 GPL，可把 `build-spk.sh` 里的 `FFMPEG_*_URL` 换成 LGPL 构建（如 BtbN 的 lgpl 变体），或在套件里改为依赖系统 ffmpeg。
 3. **四段版本号**（如 `v3.1.4.1`）会转成 DSM 的 build 形式 `3.1.4-1`，因为 INFO 的 `version` 不接受四段点分。
 4. **包体较大**：内置 ffmpeg 后 x86_64 约 73 MB、armv8 约 64 MB。

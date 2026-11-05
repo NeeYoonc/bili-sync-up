@@ -7,9 +7,14 @@ PKG_DIR="/var/packages/$PKG_NAME/target"
 VAR_DIR="/var/packages/$PKG_NAME/var"
 PKG_USER="$PKG_NAME"
 HOME_DIR="$VAR_DIR/home"
+CONFIG_DIR="$VAR_DIR/config"
 LOG="$VAR_DIR/bili-sync.log"
 PIDFILE="$VAR_DIR/bili-sync.pid"
-PORT=12345
+# 端口由安装向导写入 var/port（应用侧 bind_address 也来自同一份配置）
+PORT="$(cat "$VAR_DIR/port" 2>/dev/null)"
+case "$PORT" in
+  ''|*[!0-9]*) PORT=12345 ;;
+esac
 
 [ -d "$PKG_DIR" ] || { echo "未安装: $PKG_DIR 不存在"; exit 4; }
 
@@ -42,9 +47,9 @@ as_user() {
 
 do_start() {
   if is_running; then echo "已在运行（pid $(cat "$PIDFILE")）"; return 0; fi
-  mkdir -p "$HOME_DIR"
-  chown "$PKG_USER:$PKG_USER" "$VAR_DIR" "$HOME_DIR" 2>/dev/null || true
-  as_user "cd '$PKG_DIR' && HOME='$HOME_DIR' nohup '$PKG_DIR/bin/start.sh' >> '$LOG' 2>&1 & echo \$! > '$PIDFILE'" \
+  mkdir -p "$HOME_DIR" "$CONFIG_DIR"
+  chown "$PKG_USER:$PKG_USER" "$VAR_DIR" "$HOME_DIR" "$CONFIG_DIR" 2>/dev/null || true
+  as_user "cd '$PKG_DIR' && HOME='$HOME_DIR' BILI_SYNC_CONFIG_DIR='$CONFIG_DIR' nohup '$PKG_DIR/bin/start.sh' >> '$LOG' 2>&1 & echo \$! > '$PIDFILE'" \
     || { echo "启动失败"; return 1; }
   if port_open; then
     echo "已启动（pid $(cat "$PIDFILE" 2>/dev/null)，端口 $PORT）"
