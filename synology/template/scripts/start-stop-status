@@ -1,7 +1,6 @@
 #!/bin/sh
-# start-stop-status —— DSM 7 服务控制
-#   start | stop | status | restart
-# 退出码约定：status 0=运行中，3=未运行；其它动作 0=成功
+# start-stop-status —— DSM 7 服务控制（start | stop | status | restart）
+# 退出码：status 0=运行中 / 3=未运行；start/stop 非 0 = 失败（DSM 会提示）
 PKG_NAME="@APP@"
 PKG_DIR="/var/packages/$PKG_NAME/target"
 VAR_DIR="/var/packages/$PKG_NAME/var"
@@ -9,14 +8,16 @@ PKG_USER="$PKG_NAME"
 HOME_DIR="$VAR_DIR/home"
 CONFIG_DIR="$VAR_DIR/config"
 LOG="$VAR_DIR/bili-sync.log"
+STARTLOG="$VAR_DIR/start.log"
 PIDFILE="$VAR_DIR/bili-sync.pid"
-# 端口由安装向导写入 var/port（应用侧 bind_address 也来自同一份配置）
 PORT="$(cat "$VAR_DIR/port" 2>/dev/null)"
 case "$PORT" in
   ''|*[!0-9]*) PORT=12345 ;;
 esac
 
 [ -d "$PKG_DIR" ] || { echo "未安装: $PKG_DIR 不存在"; exit 4; }
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$STARTLOG" 2>/dev/null || true; }
 
 is_running() {
   [ -f "$PIDFILE" ] || return 1
@@ -25,49 +26,72 @@ is_running() {
   kill -0 "$_pid" 2>/dev/null
 }
 
-port_open() {
-  # DSM 没有 ss 时退回 /proc/net/tcp（不依赖 netstat 是否安装）
-  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+port_in_use() {
+  netstat -ltn 2>/dev/null | grep -q ":$PORT " && return 0
+  awk -v p="$(printf '%04X' "$PORT")" 'NR>1 && $2 ~ ":"p"$" {f=1} END{exit !f}' /proc/net/tcp 2>/dev/null
+}
+
+wait_port() {
+  _n=0
+  while [ "$_n" -lt 20 ]; do
     if netstat -ltn 2>/dev/null | grep -q ":$PORT "; then return 0; fi
-    if awk -v p="$(printf '%04X' "$PORT")" 'NR>1 && $2 ~ ":"p"$" {found=1} END{exit !found}' /proc/net/tcp 2>/dev/null; then
+    if awk -v p="$(printf '%04X' "$PORT")" 'NR>1 && $2 ~ ":"p"$" {f=1} END{exit !f}' /proc/net/tcp 2>/dev/null; then
       return 0
     fi
-    sleep 1
+    sleep 1; _n=$((_n + 1))
   done
   return 1
 }
 
-as_user() {
-  if [ "$(id -u)" = "0" ]; then
-    su -s /bin/sh "$PKG_USER" -c "$1"
-  else
-    sh -c "$1"
+# 优先以包用户运行；DSM 已把脚本降权到包用户时直接跑；su 失败则退回 root 并记录
+run_as_pkg() {
+  _cmd="$1"
+  if [ "$(id -u)" != "0" ]; then
+    log "当前用户 $(id -un)（非 root）→ 直接运行"
+    sh -c "$_cmd"
+    return $?
   fi
+  log "以包用户 $PKG_USER 运行（su）"
+  if su -s /bin/sh "$PKG_USER" -c "$_cmd" 2>>"$STARTLOG"; then
+    return 0
+  fi
+  log "⚠ su 到 $PKG_USER 失败 → 退回 root 运行"
+  sh -c "$_cmd"
 }
 
 do_start() {
+  log "===== start（端口 $PORT，用户 $(id -un)）====="
   if is_running; then echo "已在运行（pid $(cat "$PIDFILE")）"; return 0; fi
-  mkdir -p "$HOME_DIR" "$CONFIG_DIR"
-  chown "$PKG_USER:$PKG_USER" "$VAR_DIR" "$HOME_DIR" "$CONFIG_DIR" 2>/dev/null || true
-  as_user "cd '$PKG_DIR' && HOME='$HOME_DIR' BILI_SYNC_CONFIG_DIR='$CONFIG_DIR' nohup '$PKG_DIR/bin/start.sh' >> '$LOG' 2>&1 & echo \$! > '$PIDFILE'" \
-    || { echo "启动失败"; return 1; }
-  if port_open; then
-    echo "已启动（pid $(cat "$PIDFILE" 2>/dev/null)，端口 $PORT）"
+  mkdir -p "$VAR_DIR" "$HOME_DIR" "$CONFIG_DIR" 2>/dev/null || true
+  chown -R "$PKG_USER:$PKG_USER" "$VAR_DIR" 2>/dev/null || true
+  if port_in_use; then
+    log "✗ 端口 $PORT 已被其它进程占用"
+    echo "端口 $PORT 已被占用，请改端口后重启（var/port 与 var/config/config.toml 的 bind_address）"
+    return 1
+  fi
+  : > "$LOG" 2>/dev/null || true
+  run_as_pkg "cd '$PKG_DIR' && HOME='$HOME_DIR' BILI_SYNC_CONFIG_DIR='$CONFIG_DIR' nohup '$PKG_DIR/bin/start.sh' >> '$LOG' 2>&1 & echo \$! > '$PIDFILE'"
+  log "拉起返回码 $?"
+  if wait_port; then
+    log "✓ 端口 $PORT 就绪"
+    echo "已启动（端口 $PORT）"
     return 0
   fi
-  echo "进程已拉起但端口 $PORT 未就绪，日志尾部："
-  tail -n 20 "$LOG" 2>/dev/null || true
-  return 0
+  log "✗ 端口 $PORT 未就绪，bili-sync.log 尾部："
+  tail -n 30 "$LOG" 2>/dev/null | while IFS= read -r l; do log "  $l"; done
+  echo "启动失败：详见 $STARTLOG 与 $LOG"
+  return 1
 }
 
 do_stop() {
+  log "===== stop ====="
   if ! is_running; then rm -f "$PIDFILE"; echo "未运行"; return 0; fi
   _pid="$(cat "$PIDFILE")"
   kill "$_pid" 2>/dev/null || true
   _n=0
   while kill -0 "$_pid" 2>/dev/null; do
     _n=$((_n + 1))
-    [ "$_n" -ge 20 ] && { kill -9 "$_pid" 2>/dev/null || true; break; }
+    if [ "$_n" -ge 20 ]; then kill -9 "$_pid" 2>/dev/null || true; break; fi
     sleep 1
   done
   rm -f "$PIDFILE"
@@ -82,6 +106,5 @@ case "$1" in
   status)
     if is_running; then echo "运行中（pid $(cat "$PIDFILE")）"; exit 0; fi
     echo "未运行"; exit 3 ;;
-  *)
-    echo "用法: $0 {start|stop|status|restart}" >&2; exit 1 ;;
+  *) echo "用法: $0 {start|stop|status|restart}" >&2; exit 1 ;;
 esac
