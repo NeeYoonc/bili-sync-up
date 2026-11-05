@@ -1,12 +1,21 @@
 #!/bin/sh
-# postuninst —— 卸载后：兜底删数据 + 清理包用户（DSM 不会自动删第三方包用户）
+# postuninst —— 卸载后兜底：若向导选了删除数据，再清一遍真实目录 + 包用户
 PKG_NAME="@APP@"
-VAR_DIR="/var/packages/$PKG_NAME/var"
 
-if [ "${wizard_delete_data:-false}" = "true" ]; then
-  rm -rf "$VAR_DIR" 2>/dev/null || true
+DELETE="${wizard_delete_data:-false}"
+[ "${wizard_keep_data:-true}" = "false" ] && DELETE="true"
+
+if [ "$DELETE" = "true" ]; then
+  for base in /volume[0-9]*; do
+    rm -rf "$base/@appdata/$PKG_NAME" \
+           "$base/@appconf/$PKG_NAME" \
+           "$base/@appshare/$PKG_NAME" \
+           "$base/@appstore/$PKG_NAME" \
+           "$base/@apptemp/$PKG_NAME" 2>/dev/null || true
+  done
   /usr/syno/sbin/synouser --del "$PKG_NAME" >/dev/null 2>&1 \
     || userdel -r "$PKG_NAME" 2>/dev/null || true
+  echo "[uninstall] 数据与包用户已清理" >&2
 else
   echo "[uninstall] 数据已保留，重装可直接恢复" >&2
 fi

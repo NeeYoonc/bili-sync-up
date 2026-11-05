@@ -1,16 +1,42 @@
 #!/bin/sh
 # preuninst —— 卸载前：停服务；按卸载向导选择决定是否删除数据
+#   ★ 注意：/var/packages/<pkg>/var 等是指向 /volumeX/@appdata/<pkg> 的【软链接】，
+#     rm -rf 软链只会删链接、不删目标 —— 必须先解析出真实目录再删
+#     （2026-11-05 真机踩过：选「删除所有数据」后 @appdata 目录仍在）
+#   解析方式用 cd + pwd -P（POSIX，不依赖 readlink -f）
 PKG_NAME="@APP@"
-VAR_DIR="/var/packages/$PKG_NAME/var"
-SSS="/var/packages/$PKG_NAME/scripts/start-stop-status"
+PKG_ROOT="/var/packages/$PKG_NAME"
 
-# DSM 卸载前会先停服务；这里显式再停一次，保证数据删除时进程已退出
-[ -x "$SSS" ] && "$SSS" stop >/dev/null 2>&1 || true
+[ -x "$PKG_ROOT/scripts/start-stop-status" ] && "$PKG_ROOT/scripts/start-stop-status" stop >/dev/null 2>&1 || true
 
-if [ "${wizard_delete_data:-false}" = "true" ]; then
-  echo "[uninstall] 按向导选择删除数据: $VAR_DIR" >&2
-  rm -rf "$VAR_DIR" 2>/dev/null || true
+real_path() {
+  # 输出物理路径；不是目录或不存在则输出空
+  ( cd "$1" 2>/dev/null && pwd -P ) 2>/dev/null || true
+}
+
+DELETE="${wizard_delete_data:-false}"
+[ "${wizard_keep_data:-true}" = "false" ] && DELETE="true"
+
+if [ "$DELETE" = "true" ]; then
+  echo "[uninstall] 按向导选择删除套件数据" >&2
+  # 1) 解析包内软链的真实目录
+  for sub in var target etc share tmp; do
+    [ -e "$PKG_ROOT/$sub" ] || continue
+    real="$(real_path "$PKG_ROOT/$sub")"
+    case "$real" in
+      /volume[0-9]*/*) rm -rf "$real" 2>/dev/null || true ;;
+    esac
+  done
+  # 2) 兜底：按包名直接扫各存储卷（软链已失效时也能清）
+  for base in /volume[0-9]*; do
+    rm -rf "$base/@appdata/$PKG_NAME" \
+           "$base/@appconf/$PKG_NAME" \
+           "$base/@appshare/$PKG_NAME" \
+           "$base/@appstore/$PKG_NAME" \
+           "$base/@apptemp/$PKG_NAME" 2>/dev/null || true
+  done
+  echo "[uninstall] 已删除套件数据（下载目录/共享文件夹保留）" >&2
 else
-  echo "[uninstall] 保留数据（wizard_delete_data=${wizard_delete_data:-false}）: $VAR_DIR" >&2
+  echo "[uninstall] 保留数据（wizard_delete_data=${wizard_delete_data:-false}）" >&2
 fi
 exit 0
