@@ -1,0 +1,86 @@
+name: Publish package source index
+
+# 把本仓 Release 里的 .spk 解析成 sspks-index.json（内嵌图标 + 精确 md5），
+# 作为 Release 资产挂回去。sspks-cf 的 Cloudflare Worker 会拉取该资产并同步到 R2，
+# DSM 套件中心（https://ssp.dnof.net/）即可自动看到新版本。
+#
+# 触发：
+#   1. Build bili-sync 工作流结束（SPK job 把 .spk 传上 Release 之后）
+#   2. Release 发布
+#   3. 手动（可指定 tag）
+#
+# 幂等：每次重新生成并覆盖同名资产。
+# 依赖：.sspks/tools/index.py（从 sspks-cf 复制的索引器，纯标准库）
+
+on:
+  workflow_run:
+    workflows: ["Build bili-sync"]
+    types: [completed]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag（留空 = 最近一次 Release；用于补全历史版本）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-sspks-index
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # 构建失败/取消时不发布
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve Release tag
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ] && [ -n "${{ github.event.release.tag_name }}" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="$(gh api "repos/${{ github.repository }}/releases?per_page=1" --jq '.[0].tag_name')"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "✗ 找不到可用的 Release"
+            exit 1
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "使用 tag: $TAG"
+
+      - name: Download SPKs from the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          rm -rf /tmp/sspks-packages
+          mkdir -p /tmp/sspks-packages
+          gh release download "${{ steps.rel.outputs.TAG }}" -p '*.spk' -D /tmp/sspks-packages --clobber
+          ls -lh /tmp/sspks-packages
+
+      - name: Build index bundle
+        run: |
+          set -e
+          python3 .sspks/tools/index.py \
+            --packages /tmp/sspks-packages \
+            --bundle /tmp/sspks-index.json \
+            --repo "${{ github.repository }}" \
+            --tag "${{ steps.rel.outputs.TAG }}"
+          ls -lh /tmp/sspks-index.json
+
+      - name: Upload bundle to the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ steps.rel.outputs.TAG }}" /tmp/sspks-index.json --clobber
