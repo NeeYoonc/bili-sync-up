@@ -7,11 +7,11 @@
         "subitems": [
           {
             "key": "wizard_port",
-            "desc": "Web 访问端口（默认 12345）",
-            "defaultValue": "12345",
+            "desc": "Web 访问端口（留空 = 保持当前设置；全新安装默认 12345）",
+            "defaultValue": "",
             "validator": {
-              "regexp": "/^([1-9][0-9]{2,4})$/",
-              "message": "请输入 100-65535 之间的端口号"
+              "regexp": "/^([1-9][0-9]{2,4})?$/",
+              "message": "留空或填 100-65535 的端口号"
             }
           }
         ]
@@ -21,7 +21,7 @@
         "subitems": [
           {
             "key": "wizard_token",
-            "desc": "访问 Token（留空 = 不启用鉴权；填了以后打开网页要输入它）",
+            "desc": "访问 Token（留空 = 保持当前设置；全新安装留空则不启用鉴权）",
             "defaultValue": ""
           }
         ]

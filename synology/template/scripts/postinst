@@ -1,53 +1,76 @@
 #!/bin/sh
-# postinst —— 安装后：
+# postinst —— 安装/重装后：
 #   1) 目录与权限
-#   2) 用向导里的端口/Token 预置应用配置（应用把配置存 SQLite，启动时会把
-#      「legacy config 表」自动迁移成正式配置 —— 见 manager.rs 的 migrate_config_schema）
+#   2) 预置应用配置（端口 / Token）—— 只在「向导确实填了值」或「全新安装」时写入，
+#      升级/重装保留数据时【绝不覆盖】用户已有配置（2026-11-05 真机 bug：升级后端口被重置成 12345）
 #   3) 生成 DSM 门户 ui/config，让套件中心出现「打开」按钮
 PKG_NAME="@APP@"
 APP_ID="BiliSyncUp"
 PKG_DIR="/var/packages/$PKG_NAME/target"
 VAR_DIR="/var/packages/$PKG_NAME/var"
 CONFIG_DIR="$VAR_DIR/config"
+DB="$CONFIG_DIR/data.sqlite"
 
 mkdir -p "$VAR_DIR/home" "$CONFIG_DIR"
 chmod 755 "$PKG_DIR/bin/"* 2>/dev/null || true
 
-# ── 向导值 ────────────────────────────────────────────────────────────────
-PORT="${wizard_port:-12345}"
-TOKEN="${wizard_token:-}"
+WIZ_PORT="${wizard_port:-}"
+WIZ_TOKEN="${wizard_token:-}"
+
+have_sqlite=no
+command -v sqlite3 >/dev/null 2>&1 && have_sqlite=yes
+
+# ── 1) 判定：全新安装 vs 升级/重装（库已存在） ───────────────────────────
+EXIST_DB=no
+[ -f "$DB" ] && EXIST_DB=yes
+
+# 现有端口（库已存在时）
+CUR_PORT=""
+if [ "$EXIST_DB" = "yes" ] && [ "$have_sqlite" = "yes" ]; then
+  CUR_PORT="$(sqlite3 "$DB" "SELECT value_json FROM config_items WHERE key_name='bind_address';" 2>/dev/null \
+              | tr -d '\"' | sed 's/.*://')"
+  case "$CUR_PORT" in ''|*[!0-9]*) CUR_PORT="" ;; esac
+fi
+
+# ── 2) 决定生效端口 ──────────────────────────────────────────────────────
+if [ -n "$WIZ_PORT" ]; then
+  PORT="$WIZ_PORT"                 # 向导明确填了 → 用它
+elif [ -n "$CUR_PORT" ]; then
+  PORT="$CUR_PORT"                 # 升级/重装且向导留空 → 保持现有端口
+else
+  PORT=12345                       # 全新安装且留空 → 默认
+fi
 case "$PORT" in ''|*[!0-9]*) PORT=12345 ;; esac
 if [ "$PORT" -lt 100 ] 2>/dev/null || [ "$PORT" -gt 65535 ] 2>/dev/null; then PORT=12345; fi
 printf '%s\n' "$PORT" > "$VAR_DIR/port"
 
-# ── 1) 预置配置（端口 / Token） ──────────────────────────────────────────
-# 应用配置存 SQLite：
-#   · 首次安装：库里还没有配置 → 造 legacy `config` 表，应用首启 migrate_config_schema 自动迁移
-#   · 重装/升级（保留数据）：直接 upsert 正式表 config_items(key_name, value_json, updated_at)
-if command -v sqlite3 >/dev/null 2>&1; then
-  if [ ! -f "$CONFIG_DIR/data.sqlite" ]; then
-    if [ -n "$TOKEN" ]; then
-      _json="{\"bind_address\":\"0.0.0.0:$PORT\",\"auth_token\":\"$TOKEN\"}"
+# ── 3) 写应用配置 ────────────────────────────────────────────────────────
+if [ "$have_sqlite" = "yes" ]; then
+  if [ "$EXIST_DB" = "no" ]; then
+    # 全新安装：造 legacy `config` 表，应用首启自动迁移成正式配置
+    if [ -n "$WIZ_TOKEN" ]; then
+      _json="{\"bind_address\":\"0.0.0.0:$PORT\",\"auth_token\":\"$WIZ_TOKEN\"}"
     else
       _json="{\"bind_address\":\"0.0.0.0:$PORT\"}"
     fi
-    sqlite3 "$CONFIG_DIR/data.sqlite" \
-      "CREATE TABLE config (data TEXT); INSERT INTO config (data) VALUES ('$_json');" >/dev/null 2>&1 \
-      && echo "[postinst] 已预置 legacy 配置（首启自动迁移）: 0.0.0.0:$PORT"
+    sqlite3 "$DB" "CREATE TABLE config (data TEXT); INSERT INTO config (data) VALUES ('$_json');" >/dev/null 2>&1 \
+      && echo "[postinst] 全新安装：已预置配置 0.0.0.0:$PORT"
   else
-    if sqlite3 "$CONFIG_DIR/data.sqlite" "SELECT 1 FROM config_items LIMIT 1;" >/dev/null 2>&1; then
-      sqlite3 "$CONFIG_DIR/data.sqlite" \
-        "INSERT OR REPLACE INTO config_items (key_name,value_json,updated_at) VALUES ('bind_address','\"0.0.0.0:$PORT\"',datetime('now'));" >/dev/null 2>&1 || true
-      if [ -n "$TOKEN" ]; then
-        sqlite3 "$CONFIG_DIR/data.sqlite" \
-          "INSERT OR REPLACE INTO config_items (key_name,value_json,updated_at) VALUES ('auth_token','\"$TOKEN\"',datetime('now'));" >/dev/null 2>&1 || true
-      fi
-      echo "[postinst] 已更新现有数据库配置: 0.0.0.0:$PORT${TOKEN:+ auth_token=***}"
+    # 升级/重装：只更新向导里真的填了的项，其它保持原值
+    if [ -n "$WIZ_PORT" ]; then
+      sqlite3 "$DB" "INSERT OR REPLACE INTO config_items (key_name,value_json,updated_at) VALUES ('bind_address','\"0.0.0.0:$PORT\"',datetime('now'));" >/dev/null 2>&1 || true
+      echo "[postinst] 向导指定端口 → 更新为 $PORT"
+    else
+      echo "[postinst] 向导未填端口 → 保持现有端口 $PORT"
+    fi
+    if [ -n "$WIZ_TOKEN" ]; then
+      sqlite3 "$DB" "INSERT OR REPLACE INTO config_items (key_name,value_json,updated_at) VALUES ('auth_token','\"$WIZ_TOKEN\"',datetime('now'));" >/dev/null 2>&1 || true
+      echo "[postinst] 向导指定 Token → 已更新"
     fi
   fi
 fi
 
-# ── 2) DSM 门户「打开」按钮 ───────────────────────────────────────────────
+# ── 4) DSM 门户「打开」按钮 ──────────────────────────────────────────────
 mkdir -p "$PKG_DIR/ui/images"
 cat > "$PKG_DIR/ui/config" <<PORTAL
 {
@@ -65,15 +88,19 @@ cat > "$PKG_DIR/ui/config" <<PORTAL
 }
 PORTAL
 
-# ── 3) 安装信息 ──────────────────────────────────────────────────────────
+# ── 5) 安装信息（保留原 Token 提示，不打印 Token 明文以外的敏感信息） ────
 {
   echo "端口: $PORT"
   echo "访问: http://<NAS-IP>:$PORT"
-  if [ -n "$TOKEN" ]; then echo "Token: $TOKEN"; else echo "Token: （未启用鉴权）"; fi
+  if [ -n "$WIZ_TOKEN" ]; then
+    echo "Token: $WIZ_TOKEN"
+  else
+    echo "Token: 沿用原有设置（本次未修改）"
+  fi
   echo "配置目录: $CONFIG_DIR"
 } > "$VAR_DIR/access-info.txt"
 
-# ── 4) 防火墙放行 ────────────────────────────────────────────────────────
+# ── 6) 防火墙放行 ────────────────────────────────────────────────────────
 if [ "${wizard_open_firewall:-yes}" = "yes" ]; then
   synofirewall --add-rule --name="$PKG_NAME" --protocol=tcp --port="$PORT" >/dev/null 2>&1 || true
 fi
