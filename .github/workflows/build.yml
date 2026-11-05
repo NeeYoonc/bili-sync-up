@@ -4,6 +4,11 @@ on:
   push:
     branches: [main, master]
     tags: ['v*']
+    # 文档 / 打包脚本改动不触发完整 Rust 编译（GitHub 的 path filters 对 tag 推送不生效，发版不受影响）
+    paths-ignore:
+      - 'synology/**'
+      - 'docs/**'
+      - '**.md'
   pull_request:
     branches: [main, master]
   workflow_dispatch:

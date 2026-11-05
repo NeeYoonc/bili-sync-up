@@ -1,0 +1,76 @@
+name: Build Synology SPK (manual)
+
+# 手动为「已有 Release」重打群晖套件（不需要重新打 tag / 重编 Rust）。
+# 日常发版由 build.yml 的 spk job 自动完成；本工作流用于：
+#   · 补包：Release 里只有二进制、想补上 SPK
+#   · 重打：SPK 构建失败后单独重跑
+#   · 试跑：只出 workflow artifact 不上传（upload=false）
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '目标 Release tag（如 v3.1.5）；留空 = 最新 Release'
+        required: false
+        default: ''
+      upload:
+        description: '上传 SPK 到该 Release（false = 只出 workflow artifact）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  spk:
+    name: Build SPK (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, armv8]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve target tag
+        id: t
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+            echo "未指定 tag → 取最新 Release: $TAG"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) echo "✗ tag 必须以 v 开头: $TAG"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build SPK
+        run: |
+          set -e
+          chmod +x synology/build-spk.sh
+          ./synology/build-spk.sh \
+            --tag "${{ steps.t.outputs.tag }}" \
+            --arch "${{ matrix.arch }}" \
+            --outdir dist/spk
+
+      - name: Upload SPK to the release
+        if: inputs.upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh release upload "${{ steps.t.outputs.tag }}" dist/spk/*.spk --clobber
+          gh release view "${{ steps.t.outputs.tag }}" --json assets --jq '.assets[].name' | sed 's/^/  asset: /'
+
+      - name: Upload SPK as workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: spk-${{ matrix.arch }}
+          path: dist/spk/*.spk
+          if-no-files-found: error

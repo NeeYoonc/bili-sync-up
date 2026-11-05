@@ -47,6 +47,14 @@ bili-sync-up_armv8-<version>.spk      # 群晖 armv8（对应上游 aarch64 产�
 
 安装后首次打开会进入设置向导：配置 B 站 Cookie、下载路径、视频源。
 
+## CI 自动构建 / 手动补包
+
+| 场景 | 做法 |
+|---|---|
+| 发新版 | 推 `v*` tag → `build.yml` 编译二进制 → 建 Release → `spk` job 自动出 x86_64/armv8 两个 SPK 并上传到同一个 Release |
+| 补包 / 重打 | Actions → **Build Synology SPK (manual)** → Run workflow：填目标 tag（留空=最新 Release），可选只出 artifact 不上传 |
+| 改文档/打包脚本 | `build.yml` 的 `paths-ignore` 已排除 `synology/**`、`docs/**`、`**.md`，不会触发完整编译（path filters 对 tag 推送不生效，发版不受影响） |
+
 ## 安装 / 卸载向导
 
 **安装**（`WIZARD_UIFILES/install_uifile`）：
