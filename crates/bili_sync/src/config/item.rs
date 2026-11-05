@@ -287,10 +287,13 @@ pub struct SubmissionRiskControlConfig {
     pub audio_only_use_low_qn_for_playurl: bool,
 }
 
-/// UP主投稿源扫描优化配置
+/// B站合集/收藏夹/UP主投稿源扫描优化配置。
+///
+/// 字段名保留 `submission_*` 是为了兼容已有配置和 API；实际分批扫描覆盖三类源，
+/// 自适应扫描也会对合集和收藏夹生效。
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubmissionScanStrategyConfig {
-    /// 每轮最多扫描的投稿源数量；0 表示不限制（保持旧行为）
+    /// 每轮最多扫描的合集/收藏夹/投稿源总数；0 表示不限制（保持旧行为）
     #[serde(default = "default_submission_scan_batch_size")]
     pub batch_size: usize,
     /// 是否启用自适应扫描频率（无更新的源自动降频）

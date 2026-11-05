@@ -478,7 +478,7 @@
 		});
 	}
 
-	// 投稿源扫描策略配置（分批/自适应）
+	// B站合集/收藏夹/投稿源扫描策略配置（分批/自适应）
 	let submissionScanBatchSize = '0';
 	let submissionAdaptiveScan = false;
 	let submissionAdaptiveMaxHours = '24';
@@ -489,7 +489,7 @@
 	async function loadSubmissionScanConfig() {
 		const response = await runRequest(() => api.getConfig(), {
 			setLoading: (value) => (submissionScanConfigLoading = value),
-			context: '加载投稿源扫描策略失败'
+			context: '加载B站源扫描策略失败'
 		});
 		if (!response) return;
 
@@ -520,7 +520,7 @@
 					submission_adaptive_scan: submissionAdaptiveScan,
 					submission_adaptive_max_hours: maxHours
 				}),
-			{ context: '保存投稿源扫描策略失败' }
+			{ context: '保存B站源扫描策略失败' }
 		);
 		submissionScanConfigSaving = false;
 		if (!result) return;
@@ -1687,6 +1687,50 @@
 			{#if loading}
 				<Loading />
 			{:else}
+				{#if platformTab === 'bilibili'}
+					<Card class="mb-6">
+						<CardContent class="pt-6">
+							<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+								<div class="space-y-1">
+									<div
+										class="text-sm font-semibold"
+										title="配置合集、收藏夹和UP主投稿源的分批扫描与自适应扫描策略"
+									>
+										B站源扫描优化
+									</div>
+									<div class="text-muted-foreground text-xs">
+										分批扫描覆盖合集、收藏夹和UP主投稿源；新源优先，其余按最久未扫描顺序轮转。自适应会对长期无更新的源逐步降频。
+									</div>
+									<div class="text-muted-foreground text-xs">
+										当前：每轮 {Number(submissionScanBatchSize) === 0
+											? '不限'
+											: submissionScanBatchSize} 个 ·
+										自适应 {submissionAdaptiveScan ? '已开启' : '已关闭'}
+										· 最大间隔 {submissionAdaptiveMaxHours || '24'} 小时
+									</div>
+								</div>
+
+								<div class="flex items-center gap-2 md:justify-end">
+									<Button
+										size="sm"
+										variant="outline"
+										disabled={submissionScanConfigSaving}
+										onclick={loadSubmissionScanConfig}
+									>
+										刷新
+									</Button>
+									<Button
+										size="sm"
+										disabled={submissionScanConfigSaving}
+										onclick={openSubmissionScanConfigDialog}
+									>
+										弹窗配置
+									</Button>
+								</div>
+							</div>
+						</CardContent>
+					</Card>
+				{/if}
 				<div class="grid gap-6">
 			{#each sourceEntriesForPlatform() as [sourceKey, sourceConfig] (sourceKey)}
 				{@const sources = getSourcesForSection(sourceConfig)}
@@ -1710,48 +1754,6 @@
 					</CardHeader>
 					{#if collapsedSections[sourceKey] === false}
 						<CardContent>
-							{#if sourceKey === 'SUBMISSION'}
-								<div class="mb-4 rounded-lg border p-4">
-									<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-										<div class="space-y-1">
-											<div
-												class="text-sm font-semibold"
-												title="配置投稿源的分批扫描和自适应扫描策略"
-											>
-												投稿源扫描优化
-											</div>
-											<div class="text-muted-foreground text-xs">
-												分批扫描可降低单轮请求量；自适应可对长期无更新的UP自动降频，减少风控概率。
-											</div>
-											<div class="text-muted-foreground text-xs">
-												当前：每轮 {submissionScanBatchSize || '0'} 个 · 自适应 {submissionAdaptiveScan
-													? '已开启'
-													: '已关闭'}
-												· 最大间隔 {submissionAdaptiveMaxHours || '24'} 小时
-											</div>
-										</div>
-
-										<div class="flex items-center gap-2 md:justify-end">
-											<Button
-												size="sm"
-												variant="outline"
-												disabled={submissionScanConfigSaving}
-												onclick={loadSubmissionScanConfig}
-											>
-												刷新
-											</Button>
-											<Button
-												size="sm"
-												disabled={submissionScanConfigSaving}
-												onclick={openSubmissionScanConfigDialog}
-											>
-												弹窗配置
-											</Button>
-										</div>
-									</div>
-								</div>
-							{/if}
-
 							{#if sources && sources.length > 0}
 								{@const bulkMode = bulkModeSections[sourceKey] === true}
 								{@const selectedSet = bulkSelectedIds[sourceKey] ?? new SvelteSet<number>()}
@@ -2456,13 +2458,15 @@
 	</Tabs.Root>
 </div>
 
-<!-- 投稿源扫描优化弹窗 -->
+<!-- B站源扫描优化弹窗 -->
 <AlertDialog.Root bind:open={showSubmissionScanConfigDialog}>
 	<AlertDialog.Content class="max-w-2xl">
 		<AlertDialog.Header>
-			<AlertDialog.Title title="配置投稿源扫描优化策略">投稿源扫描优化</AlertDialog.Title>
+			<AlertDialog.Title title="配置合集、收藏夹和UP主投稿源的扫描优化策略">
+				B站源扫描优化
+			</AlertDialog.Title>
 			<AlertDialog.Description>
-				分批扫描可降低单轮请求量；自适应会对长期无更新的UP自动降频，减少风控概率。
+				分批扫描覆盖合集、收藏夹和UP主投稿源；自适应会对长期无更新的源自动降频，减少风控概率。
 			</AlertDialog.Description>
 		</AlertDialog.Header>
 
@@ -2476,7 +2480,9 @@
 					disabled={submissionScanConfigLoading || submissionScanConfigSaving}
 					bind:value={submissionScanBatchSize}
 				/>
-				<div class="text-muted-foreground text-xs">0 表示不限制（保持旧行为），建议 30~80。</div>
+				<div class="text-muted-foreground text-xs">
+					0 表示不限制；统计合集、收藏夹和投稿源总数。源多时建议从 20~40 开始。
+				</div>
 			</div>
 
 			<div class="flex items-center gap-3 md:pt-7">
@@ -2486,7 +2492,9 @@
 				/>
 				<div class="space-y-0.5">
 					<Label>自适应扫描频率</Label>
-					<div class="text-muted-foreground text-xs">连续无更新会逐步延长扫描间隔。</div>
+					<div class="text-muted-foreground text-xs">
+						合集、收藏夹和投稿源连续无更新时都会逐步延长扫描间隔。
+					</div>
 				</div>
 			</div>
 

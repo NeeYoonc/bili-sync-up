@@ -19,7 +19,7 @@ use crate::utils::notification::SourceScanResult;
 use crate::utils::scan_collector::ScanCollector;
 use crate::utils::scan_id_tracker::{
     get_last_scanned_ids, group_sources_by_new_old, update_last_scanned_ids, LastScannedIds, MaxIdRecorder, SourceType,
-    VideoSourceWithId,
+    SourceScanState, VideoSourceWithId,
 };
 use crate::utils::time_format::{now_naive, now_standard_string, parse_time_string, STANDARD_TIME_FORMAT};
 use crate::workflow::process_video_source;
@@ -41,8 +41,27 @@ fn is_submission_lookup_retryable_error(err: &anyhow::Error) -> bool {
     )
 }
 
-fn submission_scan_strategy_enabled(config: &Config) -> bool {
+fn scan_strategy_enabled(config: &Config) -> bool {
     config.submission_scan_strategy.batch_size > 0 || config.submission_scan_strategy.adaptive_enabled
+}
+
+fn scan_strategy_applies_to(source_type: SourceType) -> bool {
+    matches!(
+        source_type,
+        SourceType::Collection | SourceType::Favorite | SourceType::Submission
+    )
+}
+
+fn source_type_label(source_type: SourceType) -> &'static str {
+    match source_type {
+        SourceType::Collection => "合集",
+        SourceType::Favorite => "收藏夹",
+        SourceType::Submission => "UP主投稿",
+        SourceType::WatchLater => "稍后再看",
+        SourceType::Bangumi => "番剧",
+        SourceType::Pugv => "课程",
+        SourceType::Manga => "漫画",
+    }
 }
 
 fn parse_time_or_min(time_str: Option<&str>) -> NaiveDateTime {
@@ -139,6 +158,125 @@ fn calc_submission_next_delay_secs(base_interval_secs: u64, streak: i32, max_hou
     let delay = base_interval_secs.saturating_mul(multipliers[idx]);
     let cap = max_hours.max(1).min(168).saturating_mul(3600);
     delay.min(cap).max(base_interval_secs)
+}
+
+fn calc_scan_state(
+    current_streak: i32,
+    new_video_count: Option<usize>,
+    is_risk_control: bool,
+    config: &Config,
+) -> (String, i32) {
+    let now = now_naive();
+    let base_interval_secs = config.interval;
+    let max_hours = config.submission_scan_strategy.adaptive_max_hours;
+
+    let (next_dt, new_streak) = if is_risk_control {
+        let delay = calc_submission_next_delay_secs(base_interval_secs, 1, max_hours);
+        (now + Duration::seconds(delay as i64), current_streak)
+    } else if let Some(new_video_count) = new_video_count {
+        if new_video_count > 0 {
+            (now + Duration::seconds(base_interval_secs as i64), 0)
+        } else {
+            let streak = current_streak.saturating_add(1);
+            let delay = calc_submission_next_delay_secs(base_interval_secs, streak, max_hours);
+            (now + Duration::seconds(delay as i64), streak)
+        }
+    } else {
+        (now + Duration::seconds(base_interval_secs as i64), current_streak)
+    };
+
+    (next_dt.format(STANDARD_TIME_FORMAT).to_string(), new_streak)
+}
+
+fn update_collection_or_favorite_scan_state(
+    last_scanned_ids: &mut LastScannedIds,
+    source: &VideoSourceWithId,
+    new_video_count: Option<usize>,
+    is_risk_control: bool,
+    config: &Config,
+) {
+    if !scan_strategy_enabled(config)
+        || !matches!(
+            source.source_type,
+            SourceType::Collection | SourceType::Favorite
+        )
+    {
+        return;
+    }
+
+    let current = last_scanned_ids
+        .source_scan_state(source.source_type, source.id)
+        .cloned()
+        .unwrap_or_default();
+    let (next_scan_at, no_update_streak) = calc_scan_state(
+        current.no_update_streak,
+        new_video_count,
+        is_risk_control,
+        config,
+    );
+
+    last_scanned_ids.set_source_scan_state(
+        source.source_type,
+        source.id,
+        SourceScanState {
+            last_scan_at: Some(now_standard_string()),
+            next_scan_at: Some(next_scan_at),
+            no_update_streak,
+        },
+    );
+}
+
+struct RoundSourceSelection {
+    sources: Vec<VideoSourceWithId>,
+    eligible_total: usize,
+    eligible_selected: usize,
+}
+
+fn select_sources_for_round(
+    new_sources: Vec<VideoSourceWithId>,
+    old_sources: Vec<VideoSourceWithId>,
+    batch_size: usize,
+) -> RoundSourceSelection {
+    let mut new_eligible = Vec::new();
+    let mut new_regular = Vec::new();
+    let mut old_eligible = Vec::new();
+    let mut old_regular = Vec::new();
+
+    for source in new_sources {
+        if scan_strategy_applies_to(source.source_type) {
+            new_eligible.push(source);
+        } else {
+            new_regular.push(source);
+        }
+    }
+    for source in old_sources {
+        if scan_strategy_applies_to(source.source_type) {
+            old_eligible.push(source);
+        } else {
+            old_regular.push(source);
+        }
+    }
+
+    new_eligible.sort_by_key(|source| source.id);
+    // 最久未扫描的源优先。新源没有 last_scan_at，已在上面单独优先。
+    old_eligible.sort_by_key(|source| (parse_time_or_min(source.last_scan_at.as_deref()), source.id));
+
+    let eligible_total = new_eligible.len() + old_eligible.len();
+    let mut selected = new_eligible;
+    selected.extend(old_eligible);
+    if batch_size > 0 {
+        selected.truncate(batch_size);
+    }
+    let eligible_selected = selected.len();
+
+    selected.extend(new_regular);
+    selected.extend(old_regular);
+
+    RoundSourceSelection {
+        sources: selected,
+        eligible_total,
+        eligible_selected,
+    }
 }
 
 async fn update_submission_scan_state_success(
@@ -447,14 +585,39 @@ async fn try_disable_empty_watch_later_source(
 async fn load_video_sources_from_db(
     config: &Config,
     connection: &Arc<DatabaseConnection>,
+    last_scanned_ids: &LastScannedIds,
 ) -> Result<Vec<VideoSourceWithId>, Box<dyn std::error::Error + Send + Sync>> {
     let mut video_sources = Vec::new();
+    let strategy_enabled = scan_strategy_enabled(config);
 
     // 加载合集源（只加载启用的）
-    let collections = entities::collection::Entity::find()
+    let mut collections = entities::collection::Entity::find()
         .filter(entities::collection::Column::Enabled.eq(true))
         .all(connection.as_ref())
         .await?;
+
+    if strategy_enabled {
+        let now = now_naive();
+        if config.submission_scan_strategy.adaptive_enabled {
+            collections.retain(|collection| {
+                last_scanned_ids
+                    .source_scan_state(SourceType::Collection, collection.id)
+                    .and_then(|state| state.next_scan_at.as_deref())
+                    .and_then(parse_time_string)
+                    .map(|next_scan_at| next_scan_at <= now)
+                    .unwrap_or(true)
+            });
+        }
+        collections.sort_by_key(|collection| {
+            let state = last_scanned_ids.source_scan_state(SourceType::Collection, collection.id);
+            let scan_time = if config.submission_scan_strategy.adaptive_enabled {
+                state.and_then(|state| state.next_scan_at.as_deref())
+            } else {
+                state.and_then(|state| state.last_scan_at.as_deref())
+            };
+            (parse_time_or_min(scan_time), collection.id)
+        });
+    }
 
     for collection in collections {
         // 创建拥有的CollectionItem来匹配现有的Args结构
@@ -475,14 +638,40 @@ async fn load_video_sources_from_db(
             args: Args::Collection { collection_item },
             path: PathBuf::from(collection.path),
             source_type: SourceType::Collection,
+            last_scan_at: last_scanned_ids
+                .source_scan_state(SourceType::Collection, collection.id)
+                .and_then(|state| state.last_scan_at.clone()),
         });
     }
 
     // 加载收藏夹源（只加载启用的）
-    let favorites = entities::favorite::Entity::find()
+    let mut favorites = entities::favorite::Entity::find()
         .filter(entities::favorite::Column::Enabled.eq(true))
         .all(connection.as_ref())
         .await?;
+
+    if strategy_enabled {
+        let now = now_naive();
+        if config.submission_scan_strategy.adaptive_enabled {
+            favorites.retain(|favorite| {
+                last_scanned_ids
+                    .source_scan_state(SourceType::Favorite, favorite.id)
+                    .and_then(|state| state.next_scan_at.as_deref())
+                    .and_then(parse_time_string)
+                    .map(|next_scan_at| next_scan_at <= now)
+                    .unwrap_or(true)
+            });
+        }
+        favorites.sort_by_key(|favorite| {
+            let state = last_scanned_ids.source_scan_state(SourceType::Favorite, favorite.id);
+            let scan_time = if config.submission_scan_strategy.adaptive_enabled {
+                state.and_then(|state| state.next_scan_at.as_deref())
+            } else {
+                state.and_then(|state| state.last_scan_at.as_deref())
+            };
+            (parse_time_or_min(scan_time), favorite.id)
+        });
+    }
 
     for favorite in favorites {
         let fid = favorite.f_id.to_string();
@@ -491,6 +680,9 @@ async fn load_video_sources_from_db(
             args: Args::Favorite { fid },
             path: PathBuf::from(favorite.path),
             source_type: SourceType::Favorite,
+            last_scan_at: last_scanned_ids
+                .source_scan_state(SourceType::Favorite, favorite.id)
+                .and_then(|state| state.last_scan_at.clone()),
         });
     }
 
@@ -500,8 +692,7 @@ async fn load_video_sources_from_db(
         .all(connection.as_ref())
         .await?;
 
-    if submission_scan_strategy_enabled(config) && !submissions.is_empty() {
-        let total_enabled_submissions = submissions.len();
+    if strategy_enabled && !submissions.is_empty() {
         let now = now_naive();
         let tracker = crate::bilibili::submission::SUBMISSION_PAGE_TRACKER.read().unwrap();
 
@@ -517,7 +708,11 @@ async fn load_video_sources_from_db(
             }
 
             if config.submission_scan_strategy.adaptive_enabled {
-                if let Some(next_scan_at) = submission.next_scan_at.as_deref() {
+                let next_scan_at = last_scanned_ids
+                    .source_scan_state(SourceType::Submission, submission.id)
+                    .and_then(|state| state.next_scan_at.as_deref())
+                    .or(submission.next_scan_at.as_deref());
+                if let Some(next_scan_at) = next_scan_at {
                     if let Some(next_dt) = parse_time_string(next_scan_at) {
                         if next_dt > now {
                             continue;
@@ -530,46 +725,40 @@ async fn load_video_sources_from_db(
         }
 
         if config.submission_scan_strategy.adaptive_enabled {
-            due.sort_by_key(|s| (parse_time_or_min(s.next_scan_at.as_deref()), s.id));
+            due.sort_by_key(|submission| {
+                let next_scan_at = last_scanned_ids
+                    .source_scan_state(SourceType::Submission, submission.id)
+                    .and_then(|state| state.next_scan_at.as_deref())
+                    .or(submission.next_scan_at.as_deref());
+                (parse_time_or_min(next_scan_at), submission.id)
+            });
         } else {
-            due.sort_by_key(|s| (parse_time_or_min(s.last_scan_at.as_deref()), s.id));
+            due.sort_by_key(|submission| {
+                let last_scan_at = last_scanned_ids
+                    .source_scan_state(SourceType::Submission, submission.id)
+                    .and_then(|state| state.last_scan_at.as_deref())
+                    .or(submission.last_scan_at.as_deref());
+                (parse_time_or_min(last_scan_at), submission.id)
+            });
         }
         checkpoint.sort_by_key(|s| s.id);
 
-        let mut selected = checkpoint;
-        selected.extend(due);
-
-        let batch_size = config.submission_scan_strategy.batch_size;
-        if batch_size > 0 && selected.len() > batch_size {
-            selected.truncate(batch_size);
-        }
-
-        let selected_count = selected.len();
-        submissions = selected;
-
-        if selected_count < total_enabled_submissions {
-            let batch_size_desc = if config.submission_scan_strategy.batch_size == 0 {
-                "不限".to_string()
-            } else {
-                config.submission_scan_strategy.batch_size.to_string()
-            };
-            info!(
-                "投稿源扫描策略生效：本轮扫描 {}/{} 个投稿源（每轮上限: {}，自适应: {}）",
-                selected_count,
-                total_enabled_submissions,
-                batch_size_desc,
-                config.submission_scan_strategy.adaptive_enabled
-            );
-        }
+        checkpoint.extend(due);
+        submissions = checkpoint;
     }
 
     for submission in submissions {
         let upper_id = submission.upper_id.to_string();
+        let last_scan_at = last_scanned_ids
+            .source_scan_state(SourceType::Submission, submission.id)
+            .and_then(|state| state.last_scan_at.clone())
+            .or(submission.last_scan_at);
         video_sources.push(VideoSourceWithId {
             id: submission.id,
             args: Args::Submission { upper_id },
             path: PathBuf::from(submission.path),
             source_type: SourceType::Submission,
+            last_scan_at,
         });
     }
 
@@ -585,6 +774,7 @@ async fn load_video_sources_from_db(
             args: Args::WatchLater,
             path: PathBuf::from(watch_later.path),
             source_type: SourceType::WatchLater,
+            last_scan_at: None,
         });
     }
 
@@ -605,6 +795,7 @@ async fn load_video_sources_from_db(
             },
             path: PathBuf::from(bangumi.path),
             source_type: SourceType::Bangumi,
+            last_scan_at: None,
         });
     }
 
@@ -624,6 +815,7 @@ async fn load_video_sources_from_db(
             },
             path: PathBuf::from(pugv.path),
             source_type: SourceType::Pugv,
+            last_scan_at: None,
         });
     }
 
@@ -644,6 +836,7 @@ async fn load_video_sources_from_db(
             args: Args::Manga { media_id },
             path: PathBuf::from(manga.path),
             source_type: SourceType::Manga,
+            last_scan_at: None,
         });
     }
 
@@ -959,14 +1152,34 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             // 即使初始化失败，也继续使用现有配置进行下载
         }
 
-        // 从数据库加载视频源，而不是从配置文件
-        let enabled_sources = match load_video_sources_from_db(&config, &optimized_connection).await {
-            Ok(sources) => sources,
+        // 扫描游标同时保存合集/收藏夹的轮转和自适应状态，必须先于源加载读取。
+        let mut last_scanned_ids = match get_last_scanned_ids(&optimized_connection).await {
+            Ok(ids) => ids,
             Err(e) => {
-                error!("从数据库加载视频源失败: {}", e);
-                continue;
+                warn!("获取最后扫描ID记录失败，将所有源视为旧源: {}", e);
+                LastScannedIds::default()
             }
         };
+
+        // 从数据库加载视频源，而不是从配置文件
+        let enabled_sources =
+            match load_video_sources_from_db(&config, &optimized_connection, &last_scanned_ids).await {
+                Ok(sources) => sources,
+                Err(e) => {
+                    error!("从数据库加载视频源失败: {}", e);
+                    continue;
+                }
+            };
+        let strategy_candidate_count = enabled_sources
+            .iter()
+            .filter(|source| scan_strategy_applies_to(source.source_type))
+            .count();
+        if !scan_strategy_enabled(&config) && strategy_candidate_count >= 40 {
+            warn!(
+                "检测到 {} 个合集/收藏夹/投稿源，但扫描优化未启用；源多时建议在视频源页设置每轮扫描上限（可从 20~40 开始），否则容易触发 B站 -352 风控",
+                strategy_candidate_count
+            );
+        }
 
         // 统计总的视频源数量（包括禁用的）
         let total_sources_count = match count_all_video_sources(&optimized_connection).await {
@@ -1138,17 +1351,16 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                 arc
             };
 
-            // 获取最后扫描的ID记录
-            let mut last_scanned_ids = match get_last_scanned_ids(&optimized_connection).await {
-                Ok(ids) => ids,
-                Err(e) => {
-                    warn!("获取最后扫描ID记录失败，将所有源视为旧源: {}", e);
-                    LastScannedIds::default()
-                }
-            };
-
             // 将视频源按新旧分组
-            let (new_sources, mut old_sources) = group_sources_by_new_old(enabled_sources.clone(), &last_scanned_ids);
+            let mut grouping_last_scanned_ids = last_scanned_ids.clone();
+            if scan_strategy_enabled(&config) {
+                // 分批扫描依赖 last_scan_at 轮转，不能再用旧的顺序游标跳过 ID 较小的源。
+                grouping_last_scanned_ids.last_processed_collection = None;
+                grouping_last_scanned_ids.last_processed_favorite = None;
+                grouping_last_scanned_ids.last_processed_submission = None;
+            }
+            let (new_sources, mut old_sources) =
+                group_sources_by_new_old(enabled_sources.clone(), &grouping_last_scanned_ids);
 
             // 兜底：如果由于扫描进度记录导致本轮“没有任何可扫描源”，自动重置 last_processed_* 并改为扫描全部源。
             // 典型场景：用户在“新源优先扫描”阶段暂停/恢复，多次切换后 last_processed_* 被推进到较大的 ID，
@@ -1165,7 +1377,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             }
 
             if !new_sources.is_empty() {
-                info!("检测到 {} 个新添加的视频源，将优先扫描这些新源", new_sources.len());
+                info!("检测到 {} 个新添加的视频源，将优先纳入本轮扫描", new_sources.len());
 
                 // 显示新源的详细信息
                 for source in &new_sources {
@@ -1181,11 +1393,30 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                     debug!("  - {} (ID: {})", source_name, source.id);
                 }
             } else {
-                info!("未检测到新添加的视频源，将按顺序扫描所有 {} 个源", old_sources.len());
+                info!("未检测到新添加的视频源，本轮候选旧源 {} 个", old_sources.len());
             }
 
-            // 合并新旧源，新源在前
-            let ordered_sources = [new_sources, old_sources].concat();
+            let ordered_sources = if scan_strategy_enabled(&config) {
+                let selection = select_sources_for_round(
+                    new_sources,
+                    old_sources,
+                    config.submission_scan_strategy.batch_size,
+                );
+                info!(
+                    "B站源扫描策略生效：本轮扫描 {}/{} 个合集/收藏夹/投稿源（每轮上限: {}，自适应: {}）",
+                    selection.eligible_selected,
+                    selection.eligible_total,
+                    if config.submission_scan_strategy.batch_size == 0 {
+                        "不限".to_string()
+                    } else {
+                        config.submission_scan_strategy.batch_size.to_string()
+                    },
+                    config.submission_scan_strategy.adaptive_enabled
+                );
+                selection.sources
+            } else {
+                [new_sources, old_sources].concat()
+            };
 
             // 初始化ID记录器
             let mut max_id_recorder = MaxIdRecorder::new();
@@ -1199,9 +1430,19 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             // 定期同步相关变量
             let mut _videos_since_last_sync = 0; // 自上次同步以来处理的视频数（保留以备将来使用）
 
-            for source in &ordered_sources {
+            for (source_index, source) in ordered_sources.iter().enumerate() {
                 let args = &source.args;
                 let path = &source.path;
+
+                info!(
+                    "开始扫描第 {}/{} 个视频源：{}（ID: {}，路径: {}，上次扫描: {}）",
+                    source_index + 1,
+                    ordered_sources.len(),
+                    source_type_label(source.source_type),
+                    source.id,
+                    source.path.display(),
+                    source.last_scan_at.as_deref().unwrap_or("从未")
+                );
 
                 // 在开始扫描当前源之前，保存上一个成功处理的源ID
                 if let Some(prev_source) = last_successful_source {
@@ -1299,16 +1540,30 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             sources_with_new_content += 1;
                         }
 
-                        if submission_scan_strategy_enabled(&config) && source.source_type == SourceType::Submission {
-                            if let Err(e) = update_submission_scan_state_success(
-                                &optimized_connection,
-                                source.id,
-                                new_video_count,
-                                &config,
-                            )
-                            .await
-                            {
-                                warn!("更新投稿源扫描状态失败 (ID: {}): {}", source.id, e);
+                        if scan_strategy_enabled(&config) {
+                            match source.source_type {
+                                SourceType::Submission => {
+                                    if let Err(e) = update_submission_scan_state_success(
+                                        &optimized_connection,
+                                        source.id,
+                                        new_video_count,
+                                        &config,
+                                    )
+                                    .await
+                                    {
+                                        warn!("更新投稿源扫描状态失败 (ID: {}): {}", source.id, e);
+                                    }
+                                }
+                                SourceType::Collection | SourceType::Favorite => {
+                                    update_collection_or_favorite_scan_state(
+                                        &mut last_scanned_ids,
+                                        source,
+                                        Some(new_video_count),
+                                        false,
+                                        &config,
+                                    );
+                                }
+                                _ => {}
                             }
                         }
 
@@ -1450,22 +1705,47 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             }
                         }
 
-                        if submission_scan_strategy_enabled(&config) && source.source_type == SourceType::Submission {
+                        if scan_strategy_enabled(&config) {
                             let is_risk_control = classified_error.error_type == crate::error::ErrorType::RiskControl;
-                            if let Err(err) = update_submission_scan_state_error(
-                                &optimized_connection,
-                                source.id,
-                                is_risk_control,
-                                &config,
-                            )
-                            .await
-                            {
-                                warn!("更新投稿源扫描状态失败 (ID: {}): {}", source.id, err);
+                            match source.source_type {
+                                SourceType::Submission => {
+                                    if let Err(err) = update_submission_scan_state_error(
+                                        &optimized_connection,
+                                        source.id,
+                                        is_risk_control,
+                                        &config,
+                                    )
+                                    .await
+                                    {
+                                        warn!("更新投稿源扫描状态失败 (ID: {}): {}", source.id, err);
+                                    }
+                                }
+                                SourceType::Collection | SourceType::Favorite => {
+                                    update_collection_or_favorite_scan_state(
+                                        &mut last_scanned_ids,
+                                        source,
+                                        None,
+                                        is_risk_control,
+                                        &config,
+                                    );
+                                }
+                                _ => {}
                             }
                         }
                         if classified_error.error_type == crate::error::ErrorType::RiskControl {
-                            error!("检测到风控，停止所有后续视频源的扫描: {}", classified_error.message);
-                            info!("触发风控的源(ID: {})未完成处理，下次扫描将重新处理该源", source.id);
+                            error!(
+                                "检测到风控，停止所有后续视频源的扫描: {}（触发源 ID: {}，类型: {}，路径: {}）",
+                                classified_error.message,
+                                source.id,
+                                source_type_label(source.source_type),
+                                source.path.display()
+                            );
+                            info!(
+                                "触发风控的源(ID: {}, 类型: {}, 路径: {})未完成处理，下一轮会按最久未扫描优先重新排队",
+                                source.id,
+                                source_type_label(source.source_type),
+                                source.path.display()
+                            );
                             is_interrupted = true;
                             break; // 跳出循环，停止处理剩余的视频源
                         }
@@ -1491,7 +1771,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             // 标记扫描结束
             TASK_CONTROLLER.set_scanning(false);
 
-            // 保存最后一个成功处理的源ID
+            // 保存最后一个成功处理的源ID和本轮合集/收藏夹扫描状态
             if let Some(final_source) = last_successful_source {
                 max_id_recorder.record(final_source.source_type, final_source.id);
                 max_id_recorder.merge_into(&mut last_scanned_ids);
@@ -1501,15 +1781,12 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                     debug!("本轮扫描完成所有源，重置处理ID以便下次从头开始循环");
                     last_scanned_ids.reset_all_processed_ids();
                 }
+            }
 
-                if let Err(e) = update_last_scanned_ids(&optimized_connection, &last_scanned_ids).await {
-                    warn!("保存最后源的扫描进度失败 (源ID: {}): {}", final_source.id, e);
-                } else {
-                    debug!(
-                        "已保存最后源的扫描进度 (源ID: {}, 类型: {:?})",
-                        final_source.id, final_source.source_type
-                    );
-                }
+            if let Err(e) = update_last_scanned_ids(&optimized_connection, &last_scanned_ids).await {
+                warn!("保存本轮扫描进度失败: {}", e);
+            } else {
+                debug!("已保存本轮扫描进度");
             }
 
             debug!("扫描完成，所有进度已保存");
@@ -1710,6 +1987,105 @@ mod tests {
         db
     }
 
+    fn test_source(id: i32, source_type: SourceType, last_scan_at: Option<&str>) -> VideoSourceWithId {
+        let args = match source_type {
+            SourceType::Collection => Args::Collection {
+                collection_item: CollectionItem {
+                    mid: "1".to_string(),
+                    sid: id.to_string(),
+                    collection_type: CollectionType::Season,
+                },
+            },
+            SourceType::Favorite => Args::Favorite { fid: id.to_string() },
+            SourceType::Submission => Args::Submission {
+                upper_id: id.to_string(),
+            },
+            SourceType::WatchLater => Args::WatchLater,
+            SourceType::Bangumi | SourceType::Pugv | SourceType::Manga => {
+                panic!("测试辅助函数仅覆盖合集、收藏夹、投稿和稍后再看")
+            }
+        };
+
+        VideoSourceWithId {
+            id,
+            args,
+            path: PathBuf::from(format!("/tmp/test-source-{id}")),
+            source_type,
+            last_scan_at: last_scan_at.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn round_selection_caps_collections_favorites_and_submissions_together() {
+        let old_sources = vec![
+            test_source(1, SourceType::Collection, Some("2026-11-01 10:00:00")),
+            test_source(2, SourceType::Collection, Some("2026-10-30 10:00:00")),
+            test_source(1, SourceType::Favorite, Some("2026-10-31 10:00:00")),
+            test_source(1, SourceType::Submission, Some("2026-11-02 10:00:00")),
+            test_source(1, SourceType::WatchLater, None),
+        ];
+
+        let selection = select_sources_for_round(Vec::new(), old_sources, 3);
+        let selected_types_and_ids = selection
+            .sources
+            .iter()
+            .map(|source| (source.source_type, source.id))
+            .collect::<Vec<_>>();
+
+        assert_eq!(selection.eligible_total, 4);
+        assert_eq!(selection.eligible_selected, 3);
+        assert_eq!(
+            selected_types_and_ids,
+            vec![
+                (SourceType::Collection, 2),
+                (SourceType::Favorite, 1),
+                (SourceType::Collection, 1),
+                (SourceType::WatchLater, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn round_selection_keeps_new_sources_ahead_of_older_ones() {
+        let new_sources = vec![test_source(99, SourceType::Collection, None)];
+        let old_sources = vec![
+            test_source(1, SourceType::Collection, Some("2026-10-01 10:00:00")),
+            test_source(2, SourceType::Collection, Some("2026-10-02 10:00:00")),
+        ];
+
+        let selection = select_sources_for_round(new_sources, old_sources, 2);
+        let selected_ids = selection
+            .sources
+            .iter()
+            .map(|source| source.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(selected_ids, vec![99, 1]);
+    }
+
+    #[test]
+    fn collection_scan_state_updates_rotation_timestamp_and_backoff() {
+        let mut config = Config::default();
+        config.submission_scan_strategy.batch_size = 1;
+        let source = test_source(12, SourceType::Collection, None);
+        let mut last_scanned_ids = LastScannedIds::default();
+
+        update_collection_or_favorite_scan_state(&mut last_scanned_ids, &source, Some(0), false, &config);
+        let success_state = last_scanned_ids
+            .source_scan_state(SourceType::Collection, 12)
+            .expect("成功扫描后应写入状态");
+        assert!(success_state.last_scan_at.is_some());
+        assert!(success_state.next_scan_at.is_some());
+        assert_eq!(success_state.no_update_streak, 1);
+
+        update_collection_or_favorite_scan_state(&mut last_scanned_ids, &source, None, true, &config);
+        let risk_state = last_scanned_ids
+            .source_scan_state(SourceType::Collection, 12)
+            .expect("风控后应保留状态");
+        assert!(risk_state.last_scan_at.is_some());
+        assert!(risk_state.next_scan_at.is_some());
+    }
+
     /// 每轮扫描日志与「扫描完成」推送共用外源汇总：源数量、有新内容的源数量、
     /// 新增作品数量都必须覆盖外源，否则日志会出现「均无新内容」的假象。
     #[test]
@@ -1864,6 +2240,7 @@ mod tests {
             args: Args::WatchLater,
             path: PathBuf::from("/tmp/watch-later-1"),
             source_type: SourceType::WatchLater,
+            last_scan_at: None,
         };
         let err = anyhow::anyhow!("No videos found in watch later list");
 

@@ -81,7 +81,7 @@ pub(crate) fn describe_config_key(key: &str) -> &'static str {
         "time_format" => "时间格式",
         "cdn_sorting" => "CDN优先级排序",
         "submission_risk_control" => "UP主投稿风控配置",
-        "submission_scan_strategy" => "UP主投稿源扫描策略（分批/自适应）",
+        "submission_scan_strategy" => "B站合集/收藏夹/投稿源扫描策略（分批/自适应）",
         "scan_deleted_videos" => "扫描已删除视频",
         "enable_aria2_health_check" => "aria2健康检查",
         "enable_aria2_auto_restart" => "aria2自动重启",
