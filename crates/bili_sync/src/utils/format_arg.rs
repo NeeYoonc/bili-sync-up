@@ -421,6 +421,7 @@ mod tests {
             charge_can_play: false,
             total_file_size_bytes: None,
             skip_reason: None,
+            metadata_refresh_pending: false,
         };
 
         // 测试使用API标题的情况
