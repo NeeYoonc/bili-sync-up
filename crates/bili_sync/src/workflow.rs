@@ -2493,6 +2493,14 @@ pub async fn fetch_video_details(
                             video_source.set_relation_id(&mut video_active_model);
                             video_active_model.single_page = Set(Some(pages_len == 1));
                             video_active_model.tags = Set(Some(serde_json::to_value(tags)?));
+                            video_active_model.metadata_refresh_pending = Set(false);
+
+                            if video_model_mut.metadata_refresh_pending {
+                                info!(
+                                    "视频「{}」({}) 已完成详情刷新，将按最新联合投稿/UP 信息重新生成 NFO",
+                                    &video_model_mut.name, &video_model_mut.bvid
+                                );
+                            }
 
                             // 投稿合集/系列兜底：详情接口未返回season_id时，尝试用lists归属回填。
                             // 这样可避免“本应属于合集/系列的视频”落到单独视频目录。
@@ -15809,6 +15817,7 @@ mod tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(db)
         .await
@@ -16525,6 +16534,7 @@ mod tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(Some("未达到设定的最低分辨率（最低 Quality720p，实际最高 Quality480p），已跳过下载".to_string())),
+            metadata_refresh_pending: Set(false),
         }
         .insert(&db)
         .await
@@ -17000,6 +17010,7 @@ mod tests {
             charge_can_play: false,
             total_file_size_bytes: None,
             skip_reason: None,
+            metadata_refresh_pending: false,
         };
 
         let resolved = resolve_final_video_path("/videos/new-path", "/videos/old-path", Some(&latest_video));

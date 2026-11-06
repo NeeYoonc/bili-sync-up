@@ -780,6 +780,7 @@ mod tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(db)
         .await

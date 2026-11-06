@@ -1201,6 +1201,7 @@ mod rename_tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(db.as_ref())
         .await
@@ -1581,6 +1582,7 @@ mod reset_path_tests {
             charge_can_play: false,
             total_file_size_bytes: None,
             skip_reason: None,
+            metadata_refresh_pending: false,
         }
     }
 
@@ -1986,6 +1988,7 @@ mod queue_sse_tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(db)
         .await
@@ -2038,6 +2041,7 @@ mod queue_sse_tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(db)
         .await
@@ -2167,6 +2171,7 @@ mod queue_sse_tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(db)
         .await
@@ -2660,6 +2665,194 @@ mod queue_sse_tests {
             PageStatus::from(not_auto_charge_page.download_status).get(PAGE_STATUS_VIDEO_INDEX),
             STATUS_OK
         );
+    }
+
+    #[tokio::test]
+    async fn reset_specific_nfo_marks_metadata_refresh_pending_without_touching_single_page() {
+        let db = create_test_db("metadata-refresh-reset").await;
+        insert_test_submission(db.as_ref(), 1, "测试投稿源").await;
+        insert_test_video(db.as_ref(), 1, "联合投稿视频").await;
+
+        let all_ok: u32 = VideoStatus::from([STATUS_OK; 5]).into();
+        video::Entity::update(video::ActiveModel {
+            id: Set(1),
+            category: Set(2),
+            download_status: Set(all_ok),
+            auto_download: Set(true),
+            ..Default::default()
+        })
+        .exec(db.as_ref())
+        .await
+        .expect("应能更新视频状态");
+
+        page::ActiveModel {
+            id: Set(1),
+            video_id: Set(1),
+            cid: Set(10001),
+            pid: Set(1),
+            name: Set("P1".to_string()),
+            width: Set(Some(1920)),
+            height: Set(Some(1080)),
+            duration: Set(60),
+            path: Set(Some("/tmp/video-1.mp4".to_string())),
+            file_size_bytes: Set(None),
+            video_stream_size_bytes: Set(None),
+            audio_stream_size_bytes: Set(None),
+            image: Set(None),
+            download_status: Set(all_ok),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            play_video_streams: Set(None),
+            play_audio_streams: Set(None),
+            play_subtitle_streams: Set(None),
+            play_streams_updated_at: Set(None),
+            danmaku_last_synced_at: Set(None),
+            danmaku_sync_generation: Set(0),
+            danmaku_cid_snapshot: Set(None),
+            danmaku_last_write_count: Set(0),
+            ai_renamed: sea_orm::ActiveValue::NotSet,
+        }
+        .insert(db.as_ref())
+        .await
+        .expect("应能插入分页");
+
+        reset_specific_tasks(
+            Extension(db.clone()),
+            Json(ResetSpecificTasksRequest {
+                task_indexes: Vec::new(),
+                video_task_indexes: vec![VIDEO_STATUS_NFO_INDEX],
+                page_task_indexes: vec![PAGE_STATUS_NFO_INDEX],
+                collection: None,
+                favorite: None,
+                submission: Some(1),
+                watch_later: None,
+                bangumi: None,
+                pugv: None,
+                manga: None,
+                platform: None,
+                youtube: None,
+                query: None,
+                show_failed_only: None,
+                min_height: None,
+                max_height: None,
+                resolution: None,
+                force: Some(true),
+            }),
+        )
+        .await
+        .expect("重置视频信息应成功");
+
+        let video = video::Entity::find_by_id(1)
+            .one(db.as_ref())
+            .await
+            .expect("查询应成功")
+            .expect("视频应存在");
+        assert!(video.metadata_refresh_pending, "重置 NFO 后应标记详情待刷新");
+        assert_eq!(video.single_page, Some(true), "不应通过清空 single_page 来触发刷新");
+        assert_eq!(
+            VideoStatus::from(video.download_status).get(VIDEO_STATUS_NFO_INDEX),
+            0,
+            "视频级 NFO 应回到未开始"
+        );
+
+        let page = page::Entity::find_by_id(1)
+            .one(db.as_ref())
+            .await
+            .expect("查询应成功")
+            .expect("分页应存在");
+        assert_eq!(
+            PageStatus::from(page.download_status).get(PAGE_STATUS_NFO_INDEX),
+            0,
+            "分页 NFO 应回到未开始"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_page_nfo_status_marks_metadata_refresh_pending() {
+        use crate::api::request::{PageStatusUpdate, StatusUpdate};
+
+        let db = create_test_db("metadata-refresh-update-status").await;
+        insert_test_submission(db.as_ref(), 1, "测试投稿源").await;
+        insert_test_video(db.as_ref(), 1, "联合投稿视频").await;
+        insert_test_page_with_file(db.as_ref(), 1, 1, 1).await;
+
+        let all_ok: u32 = VideoStatus::from([STATUS_OK; 5]).into();
+        video::Entity::update(video::ActiveModel {
+            id: Set(1),
+            category: Set(2),
+            download_status: Set(all_ok),
+            auto_download: Set(true),
+            ..Default::default()
+        })
+        .exec(db.as_ref())
+        .await
+        .expect("应能更新视频状态");
+        page::Entity::update(page::ActiveModel {
+            id: Set(1),
+            download_status: Set(all_ok),
+            ..Default::default()
+        })
+        .exec(db.as_ref())
+        .await
+        .expect("应能更新分页状态");
+
+        update_video_status(
+            Path("1".to_string()),
+            Extension(db.clone()),
+            Json(UpdateVideoStatusRequest {
+                video_updates: Vec::new(),
+                page_updates: vec![PageStatusUpdate {
+                    page_id: 1,
+                    updates: vec![StatusUpdate {
+                        status_index: PAGE_STATUS_NFO_INDEX,
+                        status_value: 0,
+                    }],
+                }],
+            }),
+        )
+        .await
+        .expect("更新分页状态应成功");
+
+        let video = video::Entity::find_by_id(1)
+            .one(db.as_ref())
+            .await
+            .expect("查询应成功")
+            .expect("视频应存在");
+        assert!(video.metadata_refresh_pending, "只重置分页 NFO 也应触发详情刷新");
+        assert_eq!(video.single_page, Some(true), "不应改变单P/多P判定");
+        assert_eq!(video.download_status, all_ok, "未改视频级状态时不应重写下载状态");
+    }
+
+    #[tokio::test]
+    async fn force_reset_video_marks_metadata_refresh_pending() {
+        let db = create_test_db("metadata-refresh-force-reset").await;
+        insert_test_submission(db.as_ref(), 1, "测试投稿源").await;
+        insert_test_video(db.as_ref(), 1, "联合投稿视频").await;
+
+        let all_ok: u32 = VideoStatus::from([STATUS_OK; 5]).into();
+        video::Entity::update(video::ActiveModel {
+            id: Set(1),
+            category: Set(2),
+            download_status: Set(all_ok),
+            auto_download: Set(true),
+            ..Default::default()
+        })
+        .exec(db.as_ref())
+        .await
+        .expect("应能更新视频状态");
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("force".to_string(), "true".to_string());
+        reset_video(Path("1".to_string()), Query(params), Extension(db.clone()))
+            .await
+            .expect("强制重置视频应成功");
+
+        let video = video::Entity::find_by_id(1)
+            .one(db.as_ref())
+            .await
+            .expect("查询应成功")
+            .expect("视频应存在");
+        assert!(video.metadata_refresh_pending, "强制重置后应重新拉取详情");
+        assert_eq!(video.single_page, Some(true), "不应改变单P/多P判定");
     }
 
     #[tokio::test]
@@ -4317,6 +4510,9 @@ pub async fn reset_video(
     };
 
     let mut video_info = VideoInfo::from(video_info);
+    let page_nfo_pending = pages_info
+        .iter()
+        .any(|(_, _, _, status)| PageStatus::from(*status).get(PAGE_STATUS_NFO_INDEX) == 0);
     let resetted_pages_info = pages_info
         .into_iter()
         .filter_map(|(page_id, pid, name, download_status)| {
@@ -4346,6 +4542,14 @@ pub async fn reset_video(
         video_resetted = true;
     }
 
+    // 重置 NFO 时，数据库里的 staff_info 可能已经落后于 B 站最新联合投稿名单。
+    // 标记为待刷新，让下一轮扫描重新拉取详情后再生成 NFO。
+    let needs_metadata_refresh = video_info.category == 2
+        && (video_status.get(VIDEO_STATUS_NFO_INDEX) == 0 || page_nfo_pending);
+    if needs_metadata_refresh {
+        video_resetted = true;
+    }
+
     if video_resetted {
         video_info.download_status = video_status.into();
     }
@@ -4356,14 +4560,17 @@ pub async fn reset_video(
         let txn = crate::database::begin_traced_transaction(&db, "api.handler.reset_video_status_by_id").await?;
 
         if video_resetted {
-            video::Entity::update(video::ActiveModel {
+            let mut video_active_model = video::ActiveModel {
                 id: Unchanged(id),
                 download_status: Set(VideoStatus::from(video_info.download_status).into()),
                 valid: Set(true),
                 ..Default::default()
-            })
-            .exec(&txn)
-            .await?;
+            };
+            if needs_metadata_refresh {
+                video_active_model.metadata_refresh_pending = Set(true);
+                video_active_model.auto_download = Set(true);
+            }
+            video::Entity::update(video_active_model).exec(&txn).await?;
         }
 
         if !resetted_pages_info.is_empty() {
@@ -4580,6 +4787,12 @@ pub async fn reset_all_videos(
     // 获取force参数，默认为false
     let force_reset = params.force.unwrap_or(false);
 
+    let page_nfo_pending_video_ids: HashSet<i32> = all_pages
+        .iter()
+        .filter(|(_, _, _, status, _)| PageStatus::from(*status).get(PAGE_STATUS_NFO_INDEX) == 0)
+        .map(|(_, _, _, _, video_id)| *video_id)
+        .collect();
+
     // 处理页面重置
     let resetted_pages_info = all_pages
         .into_iter()
@@ -4622,9 +4835,15 @@ pub async fn reset_all_videos(
                 video_status.set(4, 0); // 将"分P下载"重置为 0
                 video_resetted = true;
             }
-            if video_resetted {
-                video_info.download_status = video_status.into();
-                Some(video_info)
+            let needs_metadata_refresh = video_info.category == 2
+                && (video_status.get(VIDEO_STATUS_NFO_INDEX) == 0
+                    || page_nfo_pending_video_ids.contains(&video_info.id));
+
+            if video_resetted || needs_metadata_refresh {
+                if video_resetted {
+                    video_info.download_status = video_status.into();
+                }
+                Some((video_info, needs_metadata_refresh))
             } else {
                 None
             }
@@ -4638,16 +4857,18 @@ pub async fn reset_all_videos(
 
         // 批量更新视频状态 + 开启自动下载
         if !resetted_videos_info.is_empty() {
-            for video in &resetted_videos_info {
-                video::Entity::update(video::ActiveModel {
+            for (video, needs_metadata_refresh) in &resetted_videos_info {
+                let mut video_active_model = video::ActiveModel {
                     id: sea_orm::ActiveValue::Unchanged(video.id),
                     download_status: sea_orm::Set(VideoStatus::from(video.download_status).into()),
                     auto_download: sea_orm::Set(true),
                     valid: sea_orm::Set(true),
                     ..Default::default()
-                })
-                .exec(&txn)
-                .await?;
+                };
+                if *needs_metadata_refresh {
+                    video_active_model.metadata_refresh_pending = sea_orm::Set(true);
+                }
+                video::Entity::update(video_active_model).exec(&txn).await?;
             }
         }
 
@@ -4669,7 +4890,7 @@ pub async fn reset_all_videos(
 
         // 开启这些视频的自动下载，避免被过滤（与 scan 流程对齐）
         if !resetted_videos_info.is_empty() {
-            for video in &resetted_videos_info {
+            for (video, _) in &resetted_videos_info {
                 video::Entity::update(video::ActiveModel {
                     id: sea_orm::ActiveValue::Unchanged(video.id),
                     auto_download: sea_orm::Set(true),
@@ -4889,6 +5110,13 @@ pub async fn reset_specific_tasks(
         .await?;
 
     let force_reset = request.force.unwrap_or(false);
+    let nfo_targeted =
+        video_task_indexes.contains(&VIDEO_STATUS_NFO_INDEX) || page_task_indexes.contains(&PAGE_STATUS_NFO_INDEX);
+    let page_nfo_pending_video_ids: HashSet<i32> = all_pages
+        .iter()
+        .filter(|(_, _, _, status, _)| PageStatus::from(*status).get(PAGE_STATUS_NFO_INDEX) == 0)
+        .map(|(_, _, _, _, video_id)| *video_id)
+        .collect();
 
     // 处理页面重置 - 强制重置指定任务（不管当前状态）
     let resetted_pages_info = all_pages
@@ -4978,9 +5206,16 @@ pub async fn reset_specific_tasks(
                 video_resetted = true;
             }
 
-            if video_resetted {
-                video_info.download_status = video_status.into();
-                Some(video_info)
+            let needs_metadata_refresh = video_info.category == 2
+                && nfo_targeted
+                && (video_status.get(VIDEO_STATUS_NFO_INDEX) == 0
+                    || page_nfo_pending_video_ids.contains(&video_info.id));
+
+            if video_resetted || needs_metadata_refresh {
+                if video_resetted {
+                    video_info.download_status = video_status.into();
+                }
+                Some((video_info, needs_metadata_refresh))
             } else {
                 None
             }
@@ -4994,15 +5229,18 @@ pub async fn reset_specific_tasks(
 
         // 批量更新视频状态
         if !resetted_videos_info.is_empty() {
-            for video in &resetted_videos_info {
-                video::Entity::update(video::ActiveModel {
+            for (video, needs_metadata_refresh) in &resetted_videos_info {
+                let mut video_active_model = video::ActiveModel {
                     id: sea_orm::ActiveValue::Unchanged(video.id),
                     download_status: sea_orm::Set(VideoStatus::from(video.download_status).into()),
                     valid: sea_orm::Set(true),
                     ..Default::default()
-                })
-                .exec(&txn)
-                .await?;
+                };
+                if *needs_metadata_refresh {
+                    video_active_model.metadata_refresh_pending = sea_orm::Set(true);
+                    video_active_model.auto_download = sea_orm::Set(true);
+                }
+                video::Entity::update(video_active_model).exec(&txn).await?;
             }
         }
 
@@ -5245,6 +5483,7 @@ pub async fn update_video_status(
             video_status.set(update.status_index, update.status_value);
         }
     }
+    let video_nfo_pending = video_status.get(VIDEO_STATUS_NFO_INDEX) == 0;
     video_info.download_status = video_status.into();
 
     let mut pages_info: Vec<PageInfo> = pages_info.into_iter().map(PageInfo::from).collect();
@@ -5271,20 +5510,30 @@ pub async fn update_video_status(
 
     let has_video_updates = !request.video_updates.is_empty();
     let has_page_updates = !updated_pages_info.is_empty();
+    let needs_metadata_refresh = video_info.category == 2
+        && (video_nfo_pending
+            || updated_pages_info
+                .iter()
+                .any(|page| PageStatus::from(page.download_status).get(PAGE_STATUS_NFO_INDEX) == 0));
 
     if has_video_updates || has_page_updates {
         let txn = crate::database::begin_traced_transaction(&db, "api.handler.update_video_status").await?;
 
-        if has_video_updates {
-            video::Entity::update(video::ActiveModel {
+        if has_video_updates || needs_metadata_refresh {
+            let mut video_active_model = video::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(video_info.id),
-                download_status: sea_orm::Set(VideoStatus::from(video_info.download_status).into()),
                 auto_download: sea_orm::Set(true),
                 valid: sea_orm::Set(true),
                 ..Default::default()
-            })
-            .exec(&txn)
-            .await?;
+            };
+            if has_video_updates {
+                video_active_model.download_status =
+                    sea_orm::Set(VideoStatus::from(video_info.download_status).into());
+            }
+            if needs_metadata_refresh {
+                video_active_model.metadata_refresh_pending = sea_orm::Set(true);
+            }
+            video::Entity::update(video_active_model).exec(&txn).await?;
         }
 
         if has_page_updates {
