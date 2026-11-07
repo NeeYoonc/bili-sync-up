@@ -1,84 +1,49 @@
-# TikTok 登录状态与浏览器会话模拟
+# TikTok 登录状态
 
-TikTok 的“我的喜欢/关注列表”依赖真实浏览器会话（webmssdk 的 msToken、
-security-sdk 等 localStorage 状态）。仅导入 cookies.txt 会被服务端判定为
-非登录环境，因此项目提供两套浏览器会话方案。
+TikTok 作者主页的公开内容通常无需登录；“我的喜欢”“收藏夹/播放列表”和受限
+内容需要有效的登录 Cookie。当前版本由服务端直接请求 TikTok，不会启动本机
+Chrome，也不需要远程 Chromium、CDP、socat 或额外容器。
 
-## 方案一：本机 Chrome（Windows / macOS / 有 Chrome 的 Linux）
+## 推荐：电脑端登录助手
 
-1. 使用浏览器扩展（电脑端登录助手）同步 TikTok Cookie 与页面会话状态
-   （localStorage）。
-2. 服务端在获取“我的喜欢/关注列表”时自动启动本机 Chrome 完成会话模拟。
+1. 打开 **设置 → TikTok 登录状态**。
+2. 下载并解压 `youtube-login-helper.zip`。
+3. Chrome 打开 `chrome://extensions`，Edge 打开 `edge://extensions`。
+4. 开启开发者模式，选择“加载已解压的扩展程序”，加载
+   `youtube-login-extension` 文件夹。
+5. 回到 Bili Sync 设置页，打开扩展并点击“连接当前页面”。
+6. 点击“打开 TikTok”，在这个电脑浏览器中正常登录 TikTok。
+7. 再次打开扩展，点击“传输 TikTok 登录状态”。
+8. 回到设置页刷新，状态显示“已导入”即完成。
 
-需要本机安装 Google Chrome / Chromium。
-
-## 方案二：远程 Chromium（Docker / 群晖等无本机 Chrome 的环境，推荐）
-
-在 Docker 中运行 `linuxserver/chromium` 容器并开启远程调试端口，服务端通过
-CDP（Chrome DevTools Protocol）连接该远程浏览器完成会话模拟，不需要在
-bili-sync 容器内安装 Chrome。
-
-> 注意：Chromium M113+ 移除了 `--remote-debugging-address`，CDP 固定只监听
-> 容器内的 `127.0.0.1:9222`，即使做了端口映射外部也无法访问（连接会被直接
-> RST）。因此需要挂载仓库里的 `docker/tiktok-chrome-init/10-cdp-socat.sh`：
-> linuxserver 镜像每次启动时会自动执行 `/custom-cont-init.d` 下的脚本，用
-> socat 把 CDP 转发到 `0.0.0.0:9223`，再映射 `9223:9223` 即可从外部访问。
-
-### 1. 启动远程 Chromium 容器
-
-```yaml
-chromium:
-  image: lscr.io/linuxserver/chromium:latest
-  container_name: chromium
-  environment:
-    - PUID=1000
-    - PGID=1000
-    - TZ=Asia/Shanghai
-    - CHROME_CLI=--remote-debugging-port=9222 --remote-allow-origins=*
-  ports:
-    - "9223:9223"
-  volumes:
-    - ./config/chromium:/config
-    - ./docker/tiktok-chrome-init:/custom-cont-init.d
-  shm_size: "1gb"
-  restart: unless-stopped
-```
-
-或者使用 docker run：
-
-```bash
-docker run -d --name chromium --restart unless-stopped \
-  -e CHROME_CLI="--remote-debugging-port=9222 --remote-allow-origins=*" \
-  -p 9223:9223 \
-  -v /path/to/chromium-config:/config \
-  -v /path/to/bili-sync/docker/tiktok-chrome-init:/custom-cont-init.d \
-  --shm-size 1gb \
-  lscr.io/linuxserver/chromium:latest
-```
-
-> 说明：
-> - `--remote-allow-origins=*` 必须保留，否则服务端 WebSocket 连接会被
->   Chromium 以 Origin 校验拒绝。
-> - 验证方式：`curl http://<群晖或宿主IP>:9223/json/version` 应返回浏览器的
->   版本信息 JSON。
-
-### 2. 在设置页填写地址
-
-打开 **设置 → TikTok 登录状态 → 远程 Chromium 浏览器模拟**，填写：
+助手只读取 `tiktok.com`、`tiktokcdn.com` 的 Cookie，并调用：
 
 ```text
-http://<群晖或宿主IP>:9223
+POST /api/tiktok/cookies
 ```
 
-点击“测试远程浏览器连接”确认可达，再点击“保存远程浏览器地址”。
+它不会读取或传输账号密码。
 
-- bili-sync 与 chromium 在同一 Docker 网络时可填容器名 + socat 端口，如
-  `http://chromium:9223`。
-- 与 bili-sync 分开部署时可填宿主 IP。
-- 留空则回退使用方案一的本机 Chrome。
+## 手动导入
 
-### 3. 使用
+如果不安装助手，也可以：
 
-保存后，导入 cookies.txt 并同步浏览器会话（localStorage）即可。获取“我的
-喜欢/关注列表”时服务端会连接远程 Chromium 创建临时标签页执行会话模拟，
-完成后自动关闭标签页。
+1. 在电脑浏览器中正常登录 TikTok。
+2. 使用 Cookie 导出扩展导出包含 HttpOnly Cookie 的 **Netscape** 格式
+   `cookies.txt`。
+3. 在 **设置 → TikTok 登录状态** 点击“手动导入 cookies.txt”。
+
+导入后，“我的喜欢”和收藏夹会直接携带该 Cookie 请求 TikTok。若服务端无法
+验证账号 secUid，可在设置页按提示从浏览器控制台取得 secUid 后手动保存。
+
+## Docker
+
+Docker 部署只需保留原有配置目录卷映射，不需要额外端口、浏览器卷或第二个
+容器。登录凭证保存在数据库中，重启后不会丢失；给签名器和 yt-dlp 使用的
+临时文件由程序自动维护。
+
+## 返回空列表或登录异常
+
+TikTok 会按出口 IP 风控。出现空响应时，优先让浏览器与 Bili Sync 使用相同的
+干净出口节点，或在设置页配置外源代理后重试。当前版本不提供远程 Chromium
+浏览器会话模拟。
