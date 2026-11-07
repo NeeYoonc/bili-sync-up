@@ -78,6 +78,7 @@ pub struct UpdateConfigTask {
     pub parallel_download_enabled: Option<bool>,
     pub parallel_download_threads: Option<usize>,
     pub parallel_download_use_aria2: Option<bool>,
+    pub parallel_download_googlevideo_max_connections: Option<usize>,
     // 视频质量设置
     pub video_max_quality: Option<String>,
     pub video_min_quality: Option<String>,
@@ -2362,6 +2363,8 @@ impl ConfigTaskQueue {
                 parallel_download_enabled: task.parallel_download_enabled,
                 parallel_download_threads: task.parallel_download_threads,
                 parallel_download_use_aria2: task.parallel_download_use_aria2,
+                parallel_download_googlevideo_max_connections: task
+                    .parallel_download_googlevideo_max_connections,
                 // 视频质量设置
                 video_max_quality: task.video_max_quality.clone(),
                 video_min_quality: task.video_min_quality.clone(),
