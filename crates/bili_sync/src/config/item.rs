@@ -146,6 +146,9 @@ pub struct ParallelDownloadConfig {
     /// 是否优先使用 aria2（关闭后将使用原生多线程分片下载）
     #[serde(default = "default_parallel_download_use_aria2")]
     pub use_aria2: bool,
+    /// YouTube/GoogleVideo 单文件最大并发连接数（实际取下载线程数与上限的较小值）
+    #[serde(default = "default_googlevideo_max_connections")]
+    pub googlevideo_max_connections: usize,
 }
 
 fn default_parallel_download_enabled() -> bool {
@@ -160,12 +163,17 @@ fn default_parallel_download_use_aria2() -> bool {
     false
 }
 
+fn default_googlevideo_max_connections() -> usize {
+    16
+}
+
 impl Default for ParallelDownloadConfig {
     fn default() -> Self {
         Self {
             enabled: default_parallel_download_enabled(),
             threads: default_parallel_download_threads(),
             use_aria2: default_parallel_download_use_aria2(),
+            googlevideo_max_connections: default_googlevideo_max_connections(),
         }
     }
 }

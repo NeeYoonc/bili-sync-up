@@ -11459,6 +11459,10 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         parallel_download_enabled: config.concurrent_limit.parallel_download.enabled,
         parallel_download_threads: config.concurrent_limit.parallel_download.threads,
         parallel_download_use_aria2: config.concurrent_limit.parallel_download.use_aria2,
+        parallel_download_googlevideo_max_connections: config
+            .concurrent_limit
+            .parallel_download
+            .googlevideo_max_connections,
         // 视频质量设置
         video_max_quality: format!("{:?}", config.filter_option.video_max_quality),
         video_min_quality: format!("{:?}", config.filter_option.video_min_quality),
@@ -12072,6 +12076,8 @@ pub async fn update_config(
             parallel_download_enabled: params.parallel_download_enabled,
             parallel_download_threads: params.parallel_download_threads,
             parallel_download_use_aria2: params.parallel_download_use_aria2,
+            parallel_download_googlevideo_max_connections: params
+                .parallel_download_googlevideo_max_connections,
             // 视频质量设置
             video_max_quality: params.video_max_quality.clone(),
             video_min_quality: params.video_min_quality.clone(),
@@ -12200,6 +12206,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "parallel_download_enabled" => Some("多线程下载开关"),
         "parallel_download_threads" => Some("下载线程数"),
         "parallel_download_use_aria2" => Some("优先使用aria2"),
+        "parallel_download_googlevideo_max_connections" => Some("YouTube 并发连接上限"),
         "video_max_quality" => Some("视频最高画质"),
         "video_min_quality" => Some("视频最低画质"),
         "audio_max_quality" => Some("音频最高音质"),
@@ -12725,6 +12732,14 @@ pub async fn update_config_internal(
         if use_aria2 != config.concurrent_limit.parallel_download.use_aria2 {
             config.concurrent_limit.parallel_download.use_aria2 = use_aria2;
             updated_fields.push("parallel_download_use_aria2");
+        }
+    }
+
+    if let Some(max_connections) = params.parallel_download_googlevideo_max_connections {
+        let max_connections = max_connections.clamp(1, 32);
+        if max_connections != config.concurrent_limit.parallel_download.googlevideo_max_connections {
+            config.concurrent_limit.parallel_download.googlevideo_max_connections = max_connections;
+            updated_fields.push("parallel_download_googlevideo_max_connections");
         }
     }
 
@@ -13856,6 +13871,7 @@ pub async fn update_config_internal(
                 | "parallel_download_enabled"
                 | "parallel_download_threads"
                 | "parallel_download_use_aria2"
+                | "parallel_download_googlevideo_max_connections"
                 | "concurrent_video"
                 | "concurrent_page" => {
                     manager
