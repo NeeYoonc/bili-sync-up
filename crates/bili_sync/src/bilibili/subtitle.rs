@@ -66,7 +66,8 @@ impl SubTitlesInfo {
         }
 
         if options.download_ai_subtitle {
-            let requested_language = options.ai_subtitle_language.trim();
+            // B 站字幕接口只认单一语言码，双语设置（如 `zh-CN+en`）要先剥成目标语言。
+            let requested_language = crate::utils::subtitle::primary_language(&options.ai_subtitle_language);
             let selected_ai_subtitle = find_ai_subtitle_by_language(&ai_subtitles, requested_language)
                 .or_else(|| find_ai_subtitle_by_language(&ai_subtitles, DEFAULT_AI_SUBTITLE_LANGUAGE));
 
