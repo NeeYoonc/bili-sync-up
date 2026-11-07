@@ -516,6 +516,7 @@ pub struct ConfigResponse {
     pub parallel_download_enabled: bool,
     pub parallel_download_threads: usize,
     pub parallel_download_use_aria2: bool,
+    pub parallel_download_googlevideo_max_connections: usize,
     // 视频质量设置
     pub video_max_quality: String,
     pub video_min_quality: String,
