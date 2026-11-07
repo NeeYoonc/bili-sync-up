@@ -351,6 +351,11 @@ impl VideoInfo {
     /// 填充视频详情时调用，该方法会将视频详情附加到原有的 Model 上
     /// 特殊地，如果在检测视频更新时记录了 favtime，那么 favtime 会维持原样，否则会使用 pubtime 填充
     pub fn into_detail_model(self, base_model: bili_sync_entity::video::Model) -> bili_sync_entity::video::ActiveModel {
+        // 已下载视频的“详情刷新”只更新元数据，不能把已有子任务状态打回 0，
+        // 否则重置 NFO 会连带重新下载媒体。
+        let preserved_download_status = base_model.download_status;
+        let is_metadata_refresh = base_model.metadata_refresh_pending;
+
         match self {
             VideoInfo::Detail {
                 title,
@@ -434,7 +439,11 @@ impl VideoInfo {
                             .with_timezone(&crate::utils::time_format::beijing_timezone())
                             .naive_local()) // 未设置过 favtime，使用 pubtime 填充
                     },
-                    download_status: Set(0),
+                    download_status: Set(if is_metadata_refresh {
+                        preserved_download_status
+                    } else {
+                        0
+                    }),
                     valid: Set(state == 0),
                     upper_id: Set(upper.mid),
                     upper_name: Set(upper.name),
@@ -508,6 +517,80 @@ impl PageInfo {
             download_status: Set(0),
             created_at: Set(crate::utils::time_format::now_standard_string()),
             ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::ActiveValue::Set;
+    use serde_json::json;
+
+    fn detail_info() -> VideoInfo {
+        serde_json::from_value(json!({
+            "title": "联合投稿视频",
+            "bvid": "BV1xx411c7mD",
+            "desc": "简介",
+            "pic": "https://example.com/cover.jpg",
+            "owner": {
+                "mid": 1000,
+                "name": "主UP",
+                "face": "https://example.com/face.jpg"
+            },
+            "ctime": 1640995200,
+            "pubdate": 1640995200,
+            "duration": 60,
+            "pages": [],
+            "state": 0,
+            "show_title": null,
+            "staff": [
+                {
+                    "mid": 1000,
+                    "title": "UP主",
+                    "name": "主UP",
+                    "face": "https://example.com/face.jpg"
+                },
+                {
+                    "mid": 2000,
+                    "title": "参演",
+                    "name": "合作UP",
+                    "face": "https://example.com/coface.jpg"
+                }
+            ],
+            "is_upower_exclusive": false,
+            "is_upower_play": false,
+            "ugc_season": null
+        }))
+        .expect("详情 JSON 应能解析")
+    }
+
+    #[test]
+    fn metadata_refresh_preserves_download_status() {
+        let status = 0x8000_0FFF;
+        let base = bili_sync_entity::video::Model {
+            id: 1,
+            download_status: status,
+            metadata_refresh_pending: true,
+            ..Default::default()
+        };
+
+        let active = detail_info().into_detail_model(base);
+        match active.download_status {
+            Set(value) => assert_eq!(value, status, "详情刷新不应重置已完成任务状态"),
+            other => panic!("download_status 应被显式写入，实际为 {other:?}"),
+        }
+
+        let base = bili_sync_entity::video::Model {
+            id: 1,
+            download_status: status,
+            metadata_refresh_pending: false,
+            ..Default::default()
+        };
+        let active = detail_info().into_detail_model(base);
+        match active.download_status {
+            Set(value) => assert_eq!(value, 0, "首次填充详情仍应从 0 开始"),
+            other => panic!("download_status 应被显式写入，实际为 {other:?}"),
         }
     }
 }

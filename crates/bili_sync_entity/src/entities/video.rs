@@ -50,6 +50,8 @@ pub struct Model {
     pub charge_can_play: bool,
     pub total_file_size_bytes: Option<i64>,
     pub skip_reason: Option<String>,
+    #[sea_orm(default_value = "false")]
+    pub metadata_refresh_pending: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -177,9 +177,17 @@ pub async fn filter_unfilled_videos(
         .filter(
             video::Column::Valid
                 .eq(true)
-                .and(video::Column::DownloadStatus.eq(0))
                 .and(video::Column::Category.is_in([1, 2]))
-                .and(video::Column::SinglePage.is_null())
+                .and(
+                    video::Column::SinglePage
+                        .is_null()
+                        .or(video::Column::MetadataRefreshPending.eq(true)),
+                )
+                .and(
+                    video::Column::DownloadStatus
+                        .eq(0)
+                        .or(video::Column::MetadataRefreshPending.eq(true)),
+                )
                 .and(video::Column::Deleted.eq(0))
                 .and(video::Column::AutoDownload.eq(true))  // 只处理设置为自动下载的视频
                 .and(additional_expr),
@@ -1907,6 +1915,7 @@ mod tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(&db)
         .await
@@ -1943,6 +1952,44 @@ mod tests {
             .expect("视频应存在");
         assert_eq!(after.single_page, None, "应重置 single_page 以重新拉取详情");
         assert_eq!(after.download_status, 0, "应重置下载状态");
+    }
+
+    /// 已下载完成的视频只有打上“详情待刷新”标记后，才会重新进入详情抓取阶段。
+    #[tokio::test]
+    async fn filter_unfilled_videos_includes_metadata_refresh_pending() {
+        let db = create_test_db("metadata-refresh-filter").await;
+        insert_test_video(&db, 9001, "联合投稿视频").await;
+
+        let all_ok: u32 = crate::utils::status::VideoStatus::from([crate::utils::status::STATUS_OK; 5]).into();
+        video::Entity::update(video::ActiveModel {
+            id: Set(9001),
+            download_status: Set(all_ok),
+            auto_download: Set(true),
+            ..Default::default()
+        })
+        .exec(&db)
+        .await
+        .expect("应能更新视频状态");
+
+        let filled = filter_unfilled_videos(video::Column::Id.eq(9001), &db)
+            .await
+            .expect("查询应成功");
+        assert!(filled.is_empty(), "已完成的普通视频不应进入详情抓取");
+
+        video::Entity::update(video::ActiveModel {
+            id: Set(9001),
+            metadata_refresh_pending: Set(true),
+            ..Default::default()
+        })
+        .exec(&db)
+        .await
+        .expect("应能标记详情待刷新");
+
+        let pending = filter_unfilled_videos(video::Column::Id.eq(9001), &db)
+            .await
+            .expect("查询应成功");
+        assert_eq!(pending.len(), 1, "打上详情待刷新标记后应重新进入详情抓取");
+        assert_eq!(pending[0].download_status, all_ok, "详情刷新不应重置原有下载状态");
     }
 
     /// Collection 变体经 into_simple_model 入库时应保留 season_id，
@@ -2116,6 +2163,7 @@ mod tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(db)
         .await
@@ -2271,6 +2319,7 @@ mod tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(db)
         .await
@@ -2407,6 +2456,7 @@ mod tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(&db)
         .await
