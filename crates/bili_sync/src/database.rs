@@ -933,6 +933,11 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
     use uuid::Uuid;
 
+    // ACTIVE_DB_OPERATIONS 是进程级全局状态；相关测试必须串行，
+    // 否则一个测试的 clear() 会把另一个测试正在持有的锁记录清掉。
+    static ACTIVE_DB_OPERATIONS_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     #[derive(Clone, Default)]
     struct SharedLogBuffer(Arc<StdMutex<Vec<u8>>>);
 
@@ -1007,6 +1012,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn traced_db_operation_skips_contention_warning_for_short_overlap() -> anyhow::Result<()> {
+        let _serial = ACTIVE_DB_OPERATIONS_TEST_LOCK.lock().await;
         ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 
         let logs = SharedLogBuffer::default();
@@ -1048,6 +1054,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn traced_db_operation_logs_active_lock_holder_on_sqlite_lock() -> anyhow::Result<()> {
+        let _serial = ACTIVE_DB_OPERATIONS_TEST_LOCK.lock().await;
         ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 
         let logs = SharedLogBuffer::default();
