@@ -721,40 +721,248 @@ fn build_batch_filenames_prompt(files: &[FileToRename], prompt_hint: &str) -> St
     )
 }
 
+/// AI 请求最大尝试次数（含首次请求）
+const AI_MAX_ATTEMPTS: usize = 3;
+/// 批量请求彻底失败、降级为逐个条目请求时，每个条目的最大尝试次数
+const AI_SINGLE_ATTEMPTS: usize = 2;
+/// 批量请求的最小超时（秒）：一次要输出多条文件名，比单文件慢得多
+const AI_BATCH_MIN_TIMEOUT_SECS: u64 = 60;
+/// 逐个降级请求之间的间隔，避免把接口打满
+const AI_SINGLE_REQUEST_GAP_MS: u64 = 300;
+/// 逐个降级时允许的连续失败次数，超过即判定 AI 服务不可用并停止降级
+const AI_FALLBACK_MAX_CONSECUTIVE_FAILURES: usize = 3;
+
+/// 判断 AI 错误是否值得重试
+///
+/// 配置缺失、凭据失效这类错误重试多少次结果都一样，直接放弃；
+/// 网络抖动、超时、5xx、429、返回内容不合法（空内容 / JSON 解析失败）都应当重试。
+fn is_retryable_ai_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    let lower = message.to_lowercase();
+    if lower.contains("api key missing")
+        || lower.contains("token 未配置")
+        || lower.contains("已过期或无效")
+        || lower.contains("数据库连接不可用")
+    {
+        return false;
+    }
+    match extract_http_status(&message) {
+        Some(status) => status == 408 || status == 429 || status >= 500,
+        None => true,
+    }
+}
+
+/// 从错误信息里提取 HTTP 状态码（400..600），取不到返回 None
+fn extract_http_status(message: &str) -> Option<u16> {
+    let bytes = message.as_bytes();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let left_boundary_ok = index == 0 || !bytes[index - 1].is_ascii_digit();
+        if left_boundary_ok && bytes[index].is_ascii_digit() {
+            let right_boundary_ok = bytes.get(index + 3).map(|b| !b.is_ascii_digit()).unwrap_or(true);
+            // 用 str::get 而不是直接切片：错误信息里可能夹着中文，
+            // 直接按字节切会落在多字节字符中间导致 panic
+            if right_boundary_ok {
+                if let Some(candidate) = message.get(index..index + 3) {
+                    if candidate.bytes().all(|b| b.is_ascii_digit()) {
+                        if let Ok(status) = candidate.parse::<u16>() {
+                            if (400..600).contains(&status) {
+                                return Some(status);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+/// 计算本次 AI 请求的超时时间
+///
+/// 批量请求一次要生成多条文件名，沿用单文件的小超时很容易直接把请求拖超时，
+/// 所以批量场景给一个更宽裕的下限。
+fn ai_request_timeout_secs(cfg: &AiRenameConfig, expected_count: usize) -> u64 {
+    if expected_count > 1 {
+        cfg.timeout_seconds.max(AI_BATCH_MIN_TIMEOUT_SECS)
+    } else {
+        cfg.timeout_seconds.max(30)
+    }
+}
+
+/// 单次 AI 请求（不带重试），按 provider 分发
+async fn request_ai_names_once(
+    cfg: &AiRenameConfig,
+    source_key: &str,
+    prompt: &str,
+    expected_count: usize,
+) -> Result<Vec<String>> {
+    let timeout_seconds = ai_request_timeout_secs(cfg, expected_count);
+    if cfg.provider == "deepseek-web" {
+        ai_generate_filenames_batch_deepseek_web(cfg, source_key, prompt, expected_count, timeout_seconds).await
+    } else {
+        ai_generate_filenames_batch_openai(cfg, source_key, prompt, expected_count, timeout_seconds).await
+    }
+}
+
+/// 带指数退避重试的 AI 请求
+///
+/// 只要错误属于「可重试」范畴（网络抖动 / 超时 / 5xx / 429 / 返回内容不合法），
+/// 就重试到 `max_attempts` 次，绝不因为一次抖动就丢掉整批文件名。
+async fn request_ai_names_with_retry(
+    cfg: &AiRenameConfig,
+    source_key: &str,
+    prompt: &str,
+    expected_count: usize,
+    kind: &str,
+    max_attempts: usize,
+) -> Result<Vec<String>> {
+    let max_attempts = max_attempts.max(1);
+    let mut last_error: Option<anyhow::Error> = None;
+    for attempt in 1..=max_attempts {
+        match request_ai_names_once(cfg, source_key, prompt, expected_count).await {
+            Ok(names) => return Ok(names),
+            Err(err) => {
+                let retryable = is_retryable_ai_error(&err);
+                if !retryable || attempt == max_attempts {
+                    last_error = Some(err);
+                    break;
+                }
+                let backoff = Duration::from_millis(1500 * (1u64 << (attempt - 1).min(3)));
+                warn!(
+                    "[{}] {}AI 请求第 {}/{} 次失败，{} 毫秒后重试: {:#}",
+                    source_key,
+                    kind,
+                    attempt,
+                    max_attempts,
+                    backoff.as_millis(),
+                    err
+                );
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("AI 请求失败")))
+}
+
+/// 先生成整批，失败后降级为逐条请求
+///
+/// 批量请求一旦失败，原来会把整批文件全部记为失败（用户看到的就是「AI 一报错就全废」）。
+/// 现在改为：批量失败后把批次拆开逐条单独请求，能救回几条就救回几条；
+/// 单条也失败时返回空文件名，由调用方保留原文件名并继续处理后面的文件。
+async fn generate_names_with_fallback<T, F>(
+    cfg: &AiRenameConfig,
+    source_key: &str,
+    items: &[T],
+    build_prompt: F,
+    kind: &str,
+) -> Result<Vec<String>>
+where
+    T: Sync,
+    F: Fn(&[T]) -> String + Send + Sync,
+{
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let batch_prompt = build_prompt(items);
+    match request_ai_names_with_retry(cfg, source_key, &batch_prompt, items.len(), kind, AI_MAX_ATTEMPTS).await {
+        Ok(names) => return Ok(names),
+        Err(err) => {
+            if items.len() <= 1 || !is_retryable_ai_error(&err) {
+                return Err(err);
+            }
+            warn!(
+                "[{}] {}批量 AI 请求重试 {} 次后仍失败，降级为逐个请求（共 {} 个）: {:#}",
+                source_key,
+                kind,
+                AI_MAX_ATTEMPTS,
+                items.len(),
+                err
+            );
+        }
+    }
+
+    let mut names_by_index: Vec<String> = vec![String::new(); items.len()];
+    let mut succeeded = 0usize;
+    let mut consecutive_failures = 0usize;
+    for (index, item) in items.iter().enumerate() {
+        let single = std::slice::from_ref(item);
+        let prompt = build_prompt(single);
+        match request_ai_names_with_retry(cfg, source_key, &prompt, 1, kind, AI_SINGLE_ATTEMPTS).await {
+            Ok(names) => match names.first() {
+                Some(name) if !name.trim().is_empty() => {
+                    names_by_index[index] = name.clone();
+                    succeeded += 1;
+                    consecutive_failures = 0;
+                }
+                _ => {
+                    consecutive_failures += 1;
+                    warn!(
+                        "[{}] {}第 {}/{} 个条目单独请求返回空文件名，保留原名",
+                        source_key,
+                        kind,
+                        index + 1,
+                        items.len()
+                    );
+                }
+            },
+            Err(err) => {
+                consecutive_failures += 1;
+                warn!(
+                    "[{}] {}第 {}/{} 个条目单独请求仍失败，保留原名: {:#}",
+                    source_key,
+                    kind,
+                    index + 1,
+                    items.len(),
+                    err
+                );
+            }
+        }
+        if consecutive_failures >= AI_FALLBACK_MAX_CONSECUTIVE_FAILURES {
+            warn!(
+                "[{}] {}逐个降级已连续失败 {} 次，判定 AI 服务当前不可用，剩余 {} 个保持原文件名",
+                source_key,
+                kind,
+                consecutive_failures,
+                items.len() - index - 1
+            );
+            break;
+        }
+        if index + 1 < items.len() {
+            tokio::time::sleep(Duration::from_millis(AI_SINGLE_REQUEST_GAP_MS)).await;
+        }
+    }
+
+    info!(
+        "[{}] {}降级逐个请求结束: 成功 {}/{}，其余保留原文件名",
+        source_key,
+        kind,
+        succeeded,
+        items.len()
+    );
+    Ok(names_by_index)
+}
+
 pub async fn ai_generate_filenames_batch(
     cfg: &AiRenameConfig,
     source_key: &str,
     files: &[FileToRename],
     prompt_hint: &str,
 ) -> Result<Vec<String>> {
-    if files.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let full_prompt = build_batch_filenames_prompt(files, prompt_hint);
-
-    // 根据 provider 选择实现
-    if cfg.provider == "deepseek-web" {
-        ai_generate_filenames_batch_deepseek_web(cfg, source_key, &full_prompt, files.len()).await
-    } else {
-        ai_generate_filenames_batch_openai(cfg, source_key, &full_prompt, files.len()).await
-    }
+    generate_names_with_fallback(
+        cfg,
+        source_key,
+        files,
+        |batch| build_batch_filenames_prompt(batch, prompt_hint),
+        "文件",
+    )
+    .await
 }
 
-/// 批量生成视频文件夹名（一次请求处理多个文件夹）
-///
-/// 用于多P视频独占文件夹的 AI 重命名：输入为视频级信息，
-/// 输出为新的文件夹名（不含扩展名、不含路径分隔符）。
-pub async fn ai_generate_folder_names_batch(
-    cfg: &AiRenameConfig,
-    source_key: &str,
-    folders: &[FolderToRename],
-    prompt_hint: &str,
-) -> Result<Vec<String>> {
-    if folders.is_empty() {
-        return Ok(Vec::new());
-    }
-
+/// 构建批量文件夹名的 AI prompt（纯函数，便于测试）
+fn build_batch_folder_names_prompt(folders: &[FolderToRename], prompt_hint: &str) -> String {
     let mut folder_list = String::new();
     for (i, folder) in folders.iter().enumerate() {
         let video_info = folder.ctx.to_json_string();
@@ -766,7 +974,7 @@ pub async fn ai_generate_folder_names_batch(
         ));
     }
 
-    let full_prompt = format!(
+    format!(
         "请为以下 {} 个视频的文件夹生成新的文件夹名（是整个视频的文件夹，不是单个文件）。\n\
         【重要】返回的文件夹名数量必须与文件夹数量完全一致（{} 个），第 N 个文件夹名必须与第 N 个文件夹一一对应，不得打乱顺序、不得遗漏任何一个文件夹！\n\
         【重要】多P/番剧等视频文件夹的命名，需要与内部分页/剧集文件配套，保留必要的序号语义。\n\
@@ -780,14 +988,27 @@ pub async fn ai_generate_folder_names_batch(
         folders.len(),
         prompt_hint,
         folder_list
-    );
+    )
+}
 
-    // 根据 provider 选择实现（复用文件名的生成逻辑，prompt 已按文件夹名构造）
-    if cfg.provider == "deepseek-web" {
-        ai_generate_filenames_batch_deepseek_web(cfg, source_key, &full_prompt, folders.len()).await
-    } else {
-        ai_generate_filenames_batch_openai(cfg, source_key, &full_prompt, folders.len()).await
-    }
+/// 批量生成视频文件夹名（一次请求处理多个文件夹）
+///
+/// 用于多P视频独占文件夹的 AI 重命名：输入为视频级信息，
+/// 输出为新的文件夹名（不含扩展名、不含路径分隔符）。
+pub async fn ai_generate_folder_names_batch(
+    cfg: &AiRenameConfig,
+    source_key: &str,
+    folders: &[FolderToRename],
+    prompt_hint: &str,
+) -> Result<Vec<String>> {
+    generate_names_with_fallback(
+        cfg,
+        source_key,
+        folders,
+        |batch| build_batch_folder_names_prompt(batch, prompt_hint),
+        "文件夹",
+    )
+    .await
 }
 
 /// DeepSeek Web 批量生成
@@ -796,6 +1017,7 @@ async fn ai_generate_filenames_batch_deepseek_web(
     source_key: &str,
     prompt: &str,
     expected_count: usize,
+    timeout_seconds: u64,
 ) -> Result<Vec<String>> {
     let _lock = AI_RENAME_LOCK.lock().await;
 
@@ -833,8 +1055,7 @@ async fn ai_generate_filenames_batch_deepseek_web(
     };
 
     // 调用 DeepSeek Web API（使用原始响应，不清洗）
-    let result =
-        super::deepseek_web::deepseek_web_generate_raw(&token, cached_session, prompt, cfg.timeout_seconds).await;
+    let result = super::deepseek_web::deepseek_web_generate_raw(&token, cached_session, prompt, timeout_seconds).await;
 
     // 检查是否是会话长度上限错误，需要重建会话
     let (response, new_session) = match result {
@@ -873,7 +1094,7 @@ async fn ai_generate_filenames_batch_deepseek_web(
                 &token,
                 None, // 创建新会话
                 &new_prompt,
-                cfg.timeout_seconds,
+                timeout_seconds,
             )
             .await?
         }
@@ -912,7 +1133,7 @@ async fn ai_generate_filenames_batch_deepseek_web(
                 source_key,
                 history.len()
             );
-            super::deepseek_web::deepseek_web_generate_raw(&token, None, &new_prompt, cfg.timeout_seconds).await?
+            super::deepseek_web::deepseek_web_generate_raw(&token, None, &new_prompt, timeout_seconds).await?
         }
         Err(e) => return Err(e),
     };
@@ -943,12 +1164,22 @@ async fn ai_generate_filenames_batch_deepseek_web(
     parsed_names
 }
 
+/// 批量请求的输出 token 上限
+///
+/// 以前固定 512：一批 10 个文件时模型很容易写到一半就被截断
+/// （finish_reason=length），只能返回半截 JSON 数组，解析必然失败，
+/// 整批文件因此全部放弃重命名。这里按条目数放宽上限。
+fn batch_max_tokens(expected_count: usize) -> u32 {
+    (512 + 160 * expected_count as u32).min(4096)
+}
+
 /// OpenAI 兼容 API 批量生成
 async fn ai_generate_filenames_batch_openai(
     cfg: &AiRenameConfig,
     source_key: &str,
     prompt: &str,
     expected_count: usize,
+    timeout_seconds: u64,
 ) -> Result<Vec<String>> {
     let api_key = cfg.api_key.clone().ok_or_else(|| anyhow!("API key missing"))?;
 
@@ -981,13 +1212,13 @@ async fn ai_generate_filenames_batch_openai(
     let req_body = ChatRequest {
         model: cfg.model.clone(),
         messages,
-        max_tokens: Some(512), // 批量需要更多 token
+        max_tokens: Some(batch_max_tokens(expected_count)),
         temperature: Some(0.1),
         thinking: deepseek_thinking_override(cfg),
     };
 
     let client = Client::builder()
-        .timeout(Duration::from_secs(cfg.timeout_seconds.max(30)))
+        .timeout(Duration::from_secs(timeout_seconds.max(30)))
         .build()?;
 
     let base = cfg.base_url.trim_end_matches('/');
@@ -1139,13 +1370,31 @@ fn parse_batch_response(response: &str, expected_count: usize) -> Result<Vec<Str
     let names: Vec<String> =
         serde_json::from_str(json_str).map_err(|e| anyhow!("解析 JSON 数组失败: {} - 原始响应: {}", e, response))?;
 
-    if names.len() != expected_count {
-        warn!("AI 返回数量不匹配: 期望 {}, 实际 {}", expected_count, names.len());
+    // 数量不足时不能"按顺序截断应用"：后面的文件会全部跳过，而且一旦 AI 少返回的
+    // 是中间某个条目，后面的文件名就会整体错位，把 A 的标题写到 B 的文件上。
+    // 这里直接判为失败，交给上层重试 / 降级为逐个请求。
+    if names.len() < expected_count {
+        return Err(anyhow!(
+            "AI 返回文件名数量不足: 期望 {} 个, 实际 {} 个 - 原始响应: {}",
+            expected_count,
+            names.len(),
+            response
+        ));
+    }
+    // 返回条数多于期望时按顺序保留前 expected_count 个（多余的通常是 AI 多写的说明项）
+    if names.len() > expected_count {
+        warn!(
+            "AI 返回数量多于期望: 期望 {}, 实际 {}，只取前 {} 个",
+            expected_count,
+            names.len(),
+            expected_count
+        );
     }
 
     // 清洗文件名
     let cleaned: Vec<String> = names
         .into_iter()
+        .take(expected_count)
         .map(|name| {
             let mut n = name.replace(['"', '\n', '\r'], "");
             n = normalize_ai_filename_punctuation(&n);
@@ -1170,6 +1419,60 @@ mod tests {
         deepseek_thinking_override, extract_chat_content, AiRenameConfig, AiRenameContext, ChatMessageResponse,
         ChatResponse, Choice, FileToRename,
     };
+
+    #[test]
+    fn retry_classification_distinguishes_transient_and_fatal_errors() {
+        use super::{extract_http_status, is_retryable_ai_error};
+        use anyhow::anyhow;
+
+        // 网络抖动 / 服务端 5xx / 限流 / 超时 / 返回内容不合法：应当重试
+        assert!(is_retryable_ai_error(&anyhow!("批量 AI 请求失败: 502 Bad Gateway")));
+        assert!(is_retryable_ai_error(&anyhow!("聊天请求失败: HTTP 503 - busy")));
+        assert!(is_retryable_ai_error(&anyhow!("读取响应体超时 (60秒)")));
+        assert!(is_retryable_ai_error(&anyhow!("解析 JSON 数组失败: EOF while parsing")));
+        assert!(is_retryable_ai_error(&anyhow!(
+            "批量 AI 请求失败: 429 Too Many Requests"
+        )));
+
+        // 配置缺失 / 凭据失效 / 请求本身不被接受：重试没有意义
+        assert!(!is_retryable_ai_error(&anyhow!("API key missing")));
+        assert!(!is_retryable_ai_error(&anyhow!("DeepSeek Web Token 未配置")));
+        assert!(!is_retryable_ai_error(&anyhow!(
+            "DeepSeek Web Token 已过期或无效，请重新获取 Token。"
+        )));
+        assert!(!is_retryable_ai_error(&anyhow!("批量 AI 请求失败: 400 Bad Request")));
+        assert!(!is_retryable_ai_error(&anyhow!("批量 AI 请求失败: 401 Unauthorized")));
+
+        assert_eq!(extract_http_status("批量 AI 请求失败: 502 Bad Gateway"), Some(502));
+        assert_eq!(extract_http_status("聊天请求失败: HTTP 429 - slow down"), Some(429));
+        assert_eq!(extract_http_status("读取响应体超时 (60秒)"), None);
+        assert_eq!(extract_http_status("解析失败 2026-11-07"), None);
+        // 中文夹在多字节字符之间时不能因为按字节切片而 panic
+        assert_eq!(extract_http_status("请求失败，状态码 502 服务不可用"), Some(502));
+        assert_eq!(extract_http_status("网络错误：连接被重置"), None);
+    }
+
+    #[test]
+    fn parse_batch_response_rejects_short_result_to_avoid_misalignment() {
+        let err = parse_batch_response(r#"["A","B"]"#, 3).expect_err("数量不足必须报错");
+        assert!(
+            err.to_string().contains("数量不足"),
+            "应提示数量不足，避免按顺序错位改名: {err}"
+        );
+
+        // 多返回时按顺序截断，不会写错文件
+        let names = parse_batch_response(r#"["A","B","C"]"#, 2).expect("多返回应可解析");
+        assert_eq!(names, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn batch_max_tokens_scales_with_batch_size() {
+        use super::batch_max_tokens;
+
+        assert_eq!(batch_max_tokens(1), 672);
+        assert_eq!(batch_max_tokens(10), 2112);
+        assert_eq!(batch_max_tokens(100), 4096);
+    }
 
     #[test]
     fn ai_context_json_marks_multi_page_and_bangumi() {
