@@ -1097,6 +1097,17 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
         // ========== 扫描任务阶段 ==========
         // 注意：在此阶段不应该中断任务，即使配置更新了也要等待当前扫描完成
 
+        // 队列中的配置操作优先于本轮扫描执行：
+        // - 扫描期间用户改配置会先入队，不能等到本轮扫描结束后才生效；
+        // - 停止/刷新时也可能留下 pending 配置任务，下一轮开始前必须先清掉。
+        match crate::task::process_config_tasks(connection.clone()).await {
+            Ok(count) if count > 0 => {
+                info!("扫描前优先执行了 {} 个暂存的配置任务", count);
+            }
+            Ok(_) => {}
+            Err(e) => error!("扫描前处理配置任务队列失败: {:#}", e),
+        }
+
         // 检查是否需要暂停扫描任务
         if TASK_CONTROLLER.is_paused() {
             debug!("定时扫描任务已暂停，等待恢复...");
