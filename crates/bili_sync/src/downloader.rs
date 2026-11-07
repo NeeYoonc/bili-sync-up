@@ -20,10 +20,20 @@ const BAD_CDN_HOST_TTL: Duration = Duration::from_secs(10 * 60);
 const MIN_PARALLEL_SIZE: u64 = 4 * 1024 * 1024;
 const MIN_SEGMENT_SIZE: u64 = 1024 * 1024;
 // GoogleVideo 的长连接通常在传输数 MiB 后开始明显限速。保持较小 Range
-// 分片并复用有限数量的连接槽，可以继续走项目原生下载器，同时避免一个
+// 分片并复用连接槽，可以继续走项目原生下载器，同时避免一个
 // 50~500MiB 大分片在限速连接上持续数十分钟。
 const GOOGLEVIDEO_SEGMENT_SIZE: u64 = 4 * 1024 * 1024;
-const GOOGLEVIDEO_MAX_CONNECTIONS: usize = 4;
+/// GoogleVideo 并发连接上限。
+///
+/// 单个 googlevideo 连接（尤其是经外源代理出境时）约 0.5~0.8MB/s 即饱和，
+/// 聚合吞吐基本随连接数线性增长，所以并发数就是唯一的提速杠杆。此前这里
+/// 被写死为 4，导致设置页的「下载线程数」对 YouTube 完全无效：用户按 FAQ
+/// 把它调到 8/16 之后，YouTube 仍然只有 4 条连接。
+///
+/// 现在改为跟随用户配置，只保留一个上限防止过度并发触发 googlevideo 限流。
+/// 默认线程数仍是 4（见 `default_parallel_download_threads`），因此不改设置的
+/// 用户行为与旧版完全一致。
+const GOOGLEVIDEO_MAX_CONNECTIONS: usize = 16;
 /// 普通 CDN（抖音/TikTok 等）的单分片上限。
 ///
 /// 以前非 googlevideo 的分片数就等于并发数：16 线程下 7GB 的抖音原画会被切成
@@ -1832,6 +1842,24 @@ mod tests {
         assert_eq!(ranges[0], (0, GOOGLEVIDEO_SEGMENT_SIZE - 1));
         assert_eq!(ranges[3], (12 * 1024 * 1024, 16 * 1024 * 1024 - 1));
         assert_eq!(ranges[4], (16 * 1024 * 1024, total_size - 1));
+    }
+
+    #[test]
+    fn googlevideo_concurrency_follows_configured_threads() {
+        let total_size = 64 * 1024 * 1024;
+        // 用户把「下载线程数」调到 8 时，YouTube 必须真的用 8 条连接
+        // （旧版一律砍到 4，调节线程数对 YouTube 无效）。
+        let (concurrency, _) = build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE);
+        assert_eq!(concurrency, 8);
+
+        // 默认线程数 4：与旧版行为保持一致
+        let (concurrency, _) = build_parallel_ranges(total_size, 4, true, GOOGLEVIDEO_SEGMENT_SIZE);
+        assert_eq!(concurrency, 4);
+
+        // 超过上限时仍要收敛，避免过度并发触发 googlevideo 限流
+        let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE);
+        assert_eq!(concurrency, GOOGLEVIDEO_MAX_CONNECTIONS);
+        assert_eq!(GOOGLEVIDEO_MAX_CONNECTIONS, 16);
     }
 
     #[test]
