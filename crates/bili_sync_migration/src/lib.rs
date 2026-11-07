@@ -88,6 +88,7 @@ mod m20260905_000001_backfill_external_moved_media_as_completed;
 mod m20260913_000001_retry_failed_tiktok_image_posts;
 mod m20261014_000001_fix_page_status_index;
 mod m20261102_000001_add_generate_image_post_video;
+mod m20261106_000001_add_video_metadata_refresh_pending;
 
 pub struct Migrator;
 
@@ -183,6 +184,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260913_000001_retry_failed_tiktok_image_posts::Migration),
             Box::new(m20261014_000001_fix_page_status_index::Migration),
             Box::new(m20261102_000001_add_generate_image_post_video::Migration),
+            Box::new(m20261106_000001_add_video_metadata_refresh_pending::Migration),
         ]
     }
 }

@@ -2493,6 +2493,14 @@ pub async fn fetch_video_details(
                             video_source.set_relation_id(&mut video_active_model);
                             video_active_model.single_page = Set(Some(pages_len == 1));
                             video_active_model.tags = Set(Some(serde_json::to_value(tags)?));
+                            video_active_model.metadata_refresh_pending = Set(false);
+
+                            if video_model_mut.metadata_refresh_pending {
+                                info!(
+                                    "视频「{}」({}) 已完成详情刷新，将按最新联合投稿/UP 信息重新生成 NFO",
+                                    &video_model_mut.name, &video_model_mut.bvid
+                                );
+                            }
 
                             // 投稿合集/系列兜底：详情接口未返回season_id时，尝试用lists归属回填。
                             // 这样可避免“本应属于合集/系列的视频”落到单独视频目录。
@@ -10802,6 +10810,8 @@ pub async fn fetch_page_subtitle(
         return Ok(ExecutionStatus::Skipped);
     }
     let bili_video = Video::new(bili_client, video_model.bvid.clone());
+    // 双语设置（`zh-CN+en`）需要在把语言码交给接口前先解析出来。
+    let bilingual_request = crate::utils::subtitle::parse_bilingual_language_pair(&ai_subtitle_language);
     let subtitle_options = SubtitleDownloadOptions {
         download_ai_subtitle,
         ai_subtitle_language,
@@ -10821,6 +10831,49 @@ pub async fn fetch_page_subtitle(
             }
         },
     };
+    // 双语设置：先从已下载的字幕轨里挑出目标语言与对照语言合并成一条，
+    // 无论是否启用 AI 字幕都生效（人工双语轨同样可以合并）。
+    let bilingual_subtitle = match bilingual_request {
+        Some((primary, secondary)) => {
+            match crate::bilibili::subtitle::merge_bilingual_subtitles(&subtitles, &primary, &secondary) {
+                crate::bilibili::subtitle::BilingualMerge::Merged(merged) => Some(merged),
+                crate::bilibili::subtitle::BilingualMerge::AlreadyBilingual { lan, ratio } => {
+                    tracing::info!(
+                        "双语字幕合并跳过：视频「{}」第 {} 页的「{}」轨本身已是双语（{:.0}% 的字幕行已含对照语言），保留原有文件即可",
+                        video_model.name,
+                        page_info.page,
+                        lan,
+                        ratio * 100.0
+                    );
+                    None
+                }
+                crate::bilibili::subtitle::BilingualMerge::Unavailable => {
+                    if !subtitles.is_empty() {
+                        let downloaded = subtitles
+                            .iter()
+                            .map(|item| item.lan.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        tracing::warn!(
+                            "双语字幕合并跳过：视频「{}」第 {} 页缺少「{}+{}」中的一条轨，已下载：{}",
+                            video_model.name,
+                            page_info.page,
+                            primary,
+                            secondary,
+                            downloaded
+                        );
+                    }
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    if let Some(merged) = bilingual_subtitle {
+        let path = subtitle_path.with_extension(format!("{}.srt", merged.lan));
+        ensure_parent_dir_for_file(&path).await.map_err(std::io::Error::other)?;
+        tokio::fs::write(path, merged.body).await?;
+    }
     let tasks = subtitles
         .into_iter()
         .map(|subtitle| async move {
@@ -15809,6 +15862,7 @@ mod tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(None),
+            metadata_refresh_pending: Set(false),
         }
         .insert(db)
         .await
@@ -16525,6 +16579,7 @@ mod tests {
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
             skip_reason: Set(Some("未达到设定的最低分辨率（最低 Quality720p，实际最高 Quality480p），已跳过下载".to_string())),
+            metadata_refresh_pending: Set(false),
         }
         .insert(&db)
         .await
@@ -17000,6 +17055,7 @@ mod tests {
             charge_can_play: false,
             total_file_size_bytes: None,
             skip_reason: None,
+            metadata_refresh_pending: false,
         };
 
         let resolved = resolve_final_video_path("/videos/new-path", "/videos/old-path", Some(&latest_video));

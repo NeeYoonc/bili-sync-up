@@ -67,6 +67,7 @@
 	const DEFAULT_AI_SUBTITLE_LANGUAGE = 'zh-CN';
 	const AI_SUBTITLE_LANGUAGE_OPTIONS = [
 		{ value: 'zh-CN', label: '中文' },
+		{ value: 'zh-CN+en', label: '中文 + 英语（双语）' },
 		{ value: 'en-US', label: '英语' },
 		{ value: 'ja-JP', label: '日语' },
 		{ value: 'ko-KR', label: '韩语' }

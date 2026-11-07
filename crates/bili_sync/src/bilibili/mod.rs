@@ -43,7 +43,7 @@ mod error;
 mod favorite_list;
 mod risk_control;
 pub mod submission;
-mod subtitle;
+pub(crate) mod subtitle;
 mod verification_coordinator;
 mod video;
 mod watch_later;

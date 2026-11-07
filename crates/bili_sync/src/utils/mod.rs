@@ -21,6 +21,7 @@ pub mod scan_id_tracker;
 pub mod signal;
 pub mod status;
 pub mod submission_checkpoint;
+pub mod subtitle;
 pub mod task_notifier;
 pub mod time_format;
 pub mod title_clean;
