@@ -18305,8 +18305,14 @@ pub async fn clear_credential() -> Result<ApiResponse<UpdateCredentialResponse>,
         (status = 500, description = "内部错误")
     )
 )]
-pub async fn pause_scanning_endpoint() -> Result<ApiResponse<crate::api::response::TaskControlResponse>, ApiError> {
+pub async fn pause_scanning_endpoint(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<crate::api::response::TaskControlResponse>, ApiError> {
     crate::task::pause_scanning().await;
+    // 停止任务后主动清空暂存配置队列，避免用户停止后仍看到“配置任务等待中”。
+    if let Err(e) = crate::task::process_config_tasks(db).await {
+        warn!("停止任务后处理配置任务队列失败: {:#}", e);
+    }
     Ok(ApiResponse::ok(crate::api::response::TaskControlResponse {
         success: true,
         message: "已暂停所有扫描和下载任务".to_string(),
@@ -18391,6 +18397,11 @@ pub async fn refresh_scanning_endpoint(
             // 不阻断刷新流程，避免用户侧“点了刷新却无响应”
             warn!("任务刷新时清空投稿源 next_scan_at 失败: {}", e);
         }
+    }
+
+    // 用户点“任务刷新”时优先执行暂存的配置任务，避免刷新后仍看到配置队列等待。
+    if let Err(e) = crate::task::process_config_tasks(db.clone()).await {
+        warn!("任务刷新时处理配置任务队列失败: {:#}", e);
     }
 
     // 若暂停中，则先恢复；无论是否暂停，都触发一次立即扫描
