@@ -579,6 +579,7 @@ export interface ConfigResponse {
 	parallel_download_enabled: boolean;
 	parallel_download_threads: number;
 	parallel_download_use_aria2: boolean;
+	parallel_download_googlevideo_max_connections?: number;
 	split_chapters_after_download?: boolean;
 	proxy?: string;
 	youtube_proxy?: string;
@@ -767,6 +768,7 @@ export interface UpdateConfigRequest {
 	parallel_download_enabled?: boolean;
 	parallel_download_threads?: number;
 	parallel_download_use_aria2?: boolean;
+	parallel_download_googlevideo_max_connections?: number;
 	split_chapters_after_download?: boolean;
 	proxy?: string;
 	youtube_proxy?: string;
