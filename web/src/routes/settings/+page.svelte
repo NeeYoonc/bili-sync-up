@@ -200,6 +200,7 @@
 		nfoIncludeGenre: true,
 		bindAddress: '0.0.0.0:12345',
 		parallelDownloadThreads: 4,
+		parallelDownloadGooglevideoMaxConnections: 16,
 		codecs: ['AVC', 'HEV', 'AV1'],
 		danmakuDuration: 15.0,
 		danmakuFontSize: 25,
@@ -284,6 +285,7 @@
 	let parallelDownloadEnabled = false;
 	let parallelDownloadThreads = 4;
 	let parallelDownloadUseAria2 = false;
+	let parallelDownloadGooglevideoMaxConnections = 16;
 
 	// 视频质量设置
 	let videoMaxQuality = 'Quality8k';
@@ -711,6 +713,8 @@
 		parallelDownloadEnabled = config.parallel_download_enabled || false;
 		parallelDownloadThreads = config.parallel_download_threads || 4;
 		parallelDownloadUseAria2 = config.parallel_download_use_aria2 ?? false;
+		parallelDownloadGooglevideoMaxConnections =
+			config.parallel_download_googlevideo_max_connections ?? 16;
 
 		// 视频质量设置
 		videoMaxQuality = config.video_max_quality || 'Quality8k';
@@ -1276,6 +1280,10 @@
 				DEFAULT_CONFIG_VALUES.parallelDownloadThreads
 			),
 			parallel_download_use_aria2: parallelDownloadUseAria2,
+			parallel_download_googlevideo_max_connections: normalizeNumberInput(
+				parallelDownloadGooglevideoMaxConnections,
+				DEFAULT_CONFIG_VALUES.parallelDownloadGooglevideoMaxConnections
+			),
 			// 视频质量设置
 			video_max_quality: videoMaxQuality,
 			video_min_quality: videoMinQuality,
@@ -2626,6 +2634,20 @@
 							max="16"
 							placeholder="4"
 						/>
+						<div class="space-y-2">
+							<Label for="googlevideo-max-connections">YouTube 并发连接上限</Label>
+							<Input
+								id="googlevideo-max-connections"
+								type="number"
+								bind:value={parallelDownloadGooglevideoMaxConnections}
+								min="1"
+								max="32"
+								placeholder="16"
+							/>
+							<p class="text-muted-foreground text-xs">
+								YouTube 实际连接数取「下载线程数」与此上限的较小值；修改只对后续新任务生效。
+							</p>
+						</div>
 
 						<div class="flex items-center space-x-2">
 							<input

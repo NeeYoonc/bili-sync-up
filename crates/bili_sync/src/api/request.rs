@@ -231,6 +231,7 @@ pub struct UpdateConfigRequest {
     pub parallel_download_enabled: Option<bool>,
     pub parallel_download_threads: Option<usize>,
     pub parallel_download_use_aria2: Option<bool>,
+    pub parallel_download_googlevideo_max_connections: Option<usize>,
     // 视频质量设置
     pub video_max_quality: Option<String>,
     pub video_min_quality: Option<String>,
