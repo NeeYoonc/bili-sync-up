@@ -7303,6 +7303,17 @@ async fn generate_youtube_nfo(
     Ok(())
 }
 
+/// 候选字幕轨之间的重试间隔：连续请求 YouTube 自动翻译端点（`tlang=`）容易 429。
+const SUBTITLE_CANDIDATE_GAP_MS: u64 = 400;
+
+/// 一条可下载的字幕轨候选。
+#[derive(Clone, Debug)]
+struct SubtitleCandidate {
+    language: String,
+    url: String,
+    ext: String,
+}
+
 async fn download_youtube_subtitle(
     downloader: &UnifiedDownloader,
     metadata: &ExternalMediaMetadata,
@@ -7310,54 +7321,287 @@ async fn download_youtube_subtitle(
     preferred_language: &str,
     source: &youtube_source::Model,
 ) -> Result<()> {
-    let platform = source_platform_label(source);
     if youtube_subtitle_exists(output_path).await? {
         return Ok(());
     }
-    let mut requested_order = youtube_subtitle_language_candidates(preferred_language);
-    requested_order.extend(["zh-Hans", "zh-CN", "zh", "en", "ja"].map(str::to_string));
-    requested_order.dedup();
-    let manual = requested_order.iter().find_map(|language| {
-        select_subtitle_item(&metadata.subtitles, language).map(|(item, url)| (language.clone(), item, url))
-    });
-    // 自动字幕优先原始语言，避免先请求 YouTube 的自动翻译字幕而快速触发 429。
-    let mut automatic_order = Vec::new();
-    if let Some(language) = metadata.language.as_deref() {
-        automatic_order.push(language);
+    // 语言设置写成 `zh-CN+en` 时走双语分支：中文为目标语言，英文作为上方对照行。
+    if let Some((primary_language, secondary_language)) =
+        crate::utils::subtitle::parse_bilingual_language_pair(preferred_language)
+    {
+        return download_youtube_bilingual_subtitle(
+            downloader,
+            metadata,
+            output_path,
+            &primary_language,
+            &secondary_language,
+            source,
+        )
+        .await;
     }
-    automatic_order.extend(requested_order.iter().map(String::as_str));
-    automatic_order.dedup();
-    let automatic = automatic_order.into_iter().find_map(|language| {
-        select_subtitle_item(&metadata.automatic_captions, language)
-            .and_then(|(item, url)| Some((language.to_string(), item, url)))
-    });
-    let selected = manual.or(automatic);
-    let Some((language, subtitle, url)) = selected else {
-        info!(youtube_id = %metadata.id, "{}视频源「{}」视频「{}」没有匹配的字幕，跳过字幕子任务", platform, source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
+    download_youtube_single_subtitle(downloader, metadata, output_path, preferred_language, source).await
+}
+
+async fn download_youtube_single_subtitle(
+    downloader: &UnifiedDownloader,
+    metadata: &ExternalMediaMetadata,
+    output_path: &Path,
+    preferred_language: &str,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    let platform = source_platform_label(source);
+    let title = metadata.title.as_deref().unwrap_or(&metadata.id);
+    let candidates = collect_youtube_subtitle_candidates(
+        metadata,
+        &youtube_subtitle_language_order(metadata, preferred_language),
+    );
+    if candidates.is_empty() {
+        info!(youtube_id = %metadata.id, "{}视频源「{}」视频「{}」没有匹配的字幕，跳过字幕子任务", platform, source.name, title);
+        return Ok(());
+    }
+    let mut last_error = None;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let subtitle_path = output_path.with_extension(format!("{}.{}", candidate.language, candidate.ext));
+        match fetch_platform_asset(downloader, source, &[candidate.url.as_str()], &subtitle_path).await {
+            Ok(()) => {
+                info!(platform, youtube_id = %metadata.id, language = %candidate.language, path = %subtitle_path.display(), "{}视频源「{}」视频「{}」字幕下载完成", platform, source.name, title);
+                return Ok(());
+            }
+            Err(error) => {
+                let _ = remove_file_if_exists(&subtitle_path).await;
+                warn!(
+                    platform,
+                    youtube_id = %metadata.id,
+                    language = %candidate.language,
+                    "{}视频源「{}」视频「{}」第 {}/{} 个候选字幕轨（{}）下载失败，改试下一个：{:#}",
+                    platform,
+                    source.name,
+                    title,
+                    index + 1,
+                    candidates.len(),
+                    candidate.language,
+                    error
+                );
+                last_error = Some(error);
+                if index + 1 < candidates.len() {
+                    tokio::time::sleep(Duration::from_millis(SUBTITLE_CANDIDATE_GAP_MS)).await;
+                }
+            }
+        }
+    }
+    let error = last_error.unwrap_or_else(|| anyhow!("没有可用的{platform}字幕轨"));
+    Err(error.context(format!("使用项目统一下载器下载{platform}字幕失败")))
+}
+
+/// 下载目标语言轨与对照语言轨，按时间轴重叠度合并成一条双语 VTT。
+///
+/// 对照语言轨缺失时降级为只保存目标语言轨（保持旧行为），不会让整个字幕子任务失败。
+async fn download_youtube_bilingual_subtitle(
+    downloader: &UnifiedDownloader,
+    metadata: &ExternalMediaMetadata,
+    output_path: &Path,
+    primary_language: &str,
+    secondary_language: &str,
+    source: &youtube_source::Model,
+) -> Result<()> {
+    let platform = source_platform_label(source);
+    let title = metadata.title.as_deref().unwrap_or(&metadata.id);
+    let primary_candidates = collect_youtube_subtitle_candidates(
+        metadata,
+        &youtube_subtitle_language_candidates(primary_language),
+    );
+    let secondary_candidates = collect_youtube_subtitle_candidates(
+        metadata,
+        &youtube_subtitle_language_candidates(secondary_language),
+    );
+    if primary_candidates.is_empty() {
+        info!(youtube_id = %metadata.id, "{}视频源「{}」视频「{}」没有 {} 字幕轨，跳过双语字幕子任务", platform, source.name, title, primary_language);
+        return Ok(());
+    }
+
+    let primary_tmp = output_path.with_extension("subtitle.primary.tmp");
+    let Some(primary) = fetch_first_youtube_subtitle(downloader, source, &primary_candidates, &primary_tmp).await?
+    else {
+        let _ = remove_file_if_exists(&primary_tmp).await;
+        info!(youtube_id = %metadata.id, "{}视频源「{}」视频「{}」目标语言字幕轨全部下载失败，跳过双语字幕子任务", platform, source.name, title);
         return Ok(());
     };
-    let extension = subtitle.ext.as_deref().unwrap_or("vtt");
-    let subtitle_path = output_path.with_extension(format!("{language}.{extension}"));
-    if let Err(error) = fetch_platform_asset(downloader, source, &[url], &subtitle_path)
-        .await
-        .with_context(|| format!("使用项目统一下载器下载{platform}字幕失败"))
-    {
-        let _ = remove_file_if_exists(&subtitle_path).await;
-        return Err(error);
+
+    let secondary_tmp = output_path.with_extension("subtitle.secondary.tmp");
+    let secondary = if secondary_candidates.is_empty() {
+        None
+    } else {
+        fetch_first_youtube_subtitle(downloader, source, &secondary_candidates, &secondary_tmp).await?
+    };
+
+    let primary_cues = read_youtube_subtitle_cues(&primary_tmp).await?;
+    let merged_cues = match secondary.as_ref() {
+        Some(secondary) => {
+            // 目标语言轨自己就带对照语言（人工双语轨）时，`merge_overlay` 会逐句跳过，
+            // 结果与目标轨一致，不必再写一份重复的双语文件。
+            if crate::utils::subtitle::bilingual_ratio(&primary_cues, &secondary.language) >= 0.9 {
+                let _ = remove_file_if_exists(&primary_tmp).await;
+                let _ = remove_file_if_exists(&secondary_tmp).await;
+                info!(
+                    youtube_id = %metadata.id,
+                    "{}视频源「{}」视频「{}」的 {} 字幕轨本身已是双语，跳过生成额外合并文件",
+                    platform,
+                    source.name,
+                    title,
+                    primary.language
+                );
+                return Ok(());
+            }
+            let secondary_cues = read_youtube_subtitle_cues(&secondary_tmp).await?;
+            crate::utils::subtitle::merge_overlay(&primary_cues, &secondary_cues, Some(&secondary.language))
+        }
+        None => primary_cues,
+    };
+    let _ = remove_file_if_exists(&primary_tmp).await;
+    let _ = remove_file_if_exists(&secondary_tmp).await;
+    if merged_cues.is_empty() {
+        bail!("双语字幕解析后没有任何字幕内容");
     }
-    info!(platform, youtube_id = %metadata.id, path = %subtitle_path.display(), "{}视频源「{}」视频「{}」字幕下载完成", platform, source.name, metadata.title.as_deref().unwrap_or(&metadata.id));
+    let final_path = match secondary.as_ref() {
+        Some(secondary) => output_path.with_extension(format!("{}-{}.vtt", primary.language, secondary.language)),
+        None => output_path.with_extension(format!("{}.vtt", primary.language)),
+    };
+    let temporary = output_path.with_extension("subtitle.bilingual.tmp");
+    let rendered = crate::utils::subtitle::render_vtt(&merged_cues);
+    tokio::fs::write(&temporary, rendered.as_bytes()).await?;
+    replace_file(&temporary, &final_path).await?;
+    match secondary.as_ref() {
+        Some(secondary) => info!(
+            platform,
+            youtube_id = %metadata.id,
+            path = %final_path.display(),
+            cues = merged_cues.len(),
+            "{}视频源「{}」视频「{}」双语字幕合并完成（{} + {}），共 {} 条",
+            platform,
+            source.name,
+            title,
+            primary.language,
+            secondary.language,
+            merged_cues.len()
+        ),
+        None => warn!(
+            platform,
+            youtube_id = %metadata.id,
+            path = %final_path.display(),
+            "{}视频源「{}」视频「{}」找不到 {} 字幕轨，已只保存 {} 单语字幕",
+            platform,
+            source.name,
+            title,
+            secondary_language,
+            primary.language
+        ),
+    }
     Ok(())
 }
 
-fn youtube_subtitle_language_candidates(language: &str) -> Vec<String> {
-    match language.trim() {
-        "zh-CN" | "zh" | "zh-Hans" => vec!["zh-Hans".into(), "zh-CN".into(), "zh".into()],
-        "en-US" | "en" => vec!["en-US".into(), "en".into()],
-        "ja-JP" | "ja" => vec!["ja-JP".into(), "ja".into()],
-        "ko-KR" | "ko" => vec!["ko-KR".into(), "ko".into()],
-        value if !value.is_empty() => vec![value.to_string()],
-        _ => vec!["zh-Hans".into(), "zh-CN".into(), "zh".into()],
+/// 依次尝试候选轨，返回第一个下载成功的候选。
+async fn fetch_first_youtube_subtitle(
+    downloader: &UnifiedDownloader,
+    source: &youtube_source::Model,
+    candidates: &[SubtitleCandidate],
+    path: &Path,
+) -> Result<Option<SubtitleCandidate>> {
+    for (index, candidate) in candidates.iter().enumerate() {
+        match fetch_platform_asset(downloader, source, &[candidate.url.as_str()], path).await {
+            Ok(()) => return Ok(Some(candidate.clone())),
+            Err(error) => {
+                let _ = remove_file_if_exists(path).await;
+                debug!(
+                    language = %candidate.language,
+                    "候选字幕轨（{}）第 {}/{} 个下载失败，改试下一个：{:#}",
+                    candidate.language,
+                    index + 1,
+                    candidates.len(),
+                    error
+                );
+                if index + 1 < candidates.len() {
+                    tokio::time::sleep(Duration::from_millis(SUBTITLE_CANDIDATE_GAP_MS)).await;
+                }
+            }
+        }
     }
+    Ok(None)
+}
+
+async fn read_youtube_subtitle_cues(path: &Path) -> Result<Vec<crate::utils::subtitle::SubtitleCue>> {
+    let bytes = tokio::fs::read(path).await.context("读取字幕临时文件失败")?;
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(crate::utils::subtitle::parse_cues(&text))
+}
+
+/// 按语言优先级展开候选字幕轨，顺序是「语言优先，其次人工优先」。
+///
+/// 用户把目标语言设成中文时，先试中文人工轨、再试中文自动翻译轨，最后才退到
+/// 原语言轨——这样「视频恰好有英文人工轨」不会再抢走中文自动轨。
+fn collect_youtube_subtitle_candidates(
+    metadata: &ExternalMediaMetadata,
+    order: &[String],
+) -> Vec<SubtitleCandidate> {
+    let mut candidates: Vec<SubtitleCandidate> = Vec::new();
+    let mut seen_urls: HashSet<String> = HashSet::new();
+    for language in order {
+        for subtitles in [&metadata.subtitles, &metadata.automatic_captions] {
+            let Some((item, url)) = select_subtitle_item(subtitles, language) else {
+                continue;
+            };
+            if !seen_urls.insert(url.to_string()) {
+                continue;
+            }
+            candidates.push(SubtitleCandidate {
+                language: language.clone(),
+                url: url.to_string(),
+                ext: item.ext.clone().unwrap_or_else(|| "vtt".to_string()),
+            });
+        }
+    }
+    candidates
+}
+
+/// 目标语言候选，末尾补上原语言与常见语言兜底。
+fn youtube_subtitle_language_order(metadata: &ExternalMediaMetadata, preferred_language: &str) -> Vec<String> {
+    let mut order = youtube_subtitle_language_candidates(preferred_language);
+    if let Some(language) = metadata.language.as_deref() {
+        let language = language.trim();
+        if !language.is_empty() && !order.iter().any(|value| value == language) {
+            order.push(language.to_string());
+        }
+    }
+    for fallback in ["zh-Hans", "zh-CN", "zh", "en", "ja"] {
+        if !order.iter().any(|value| value == fallback) {
+            order.push(fallback.to_string());
+        }
+    }
+    order
+}
+
+/// 单一语言码对应的候选语言列表：用户点名的语言码永远排第一位。
+fn youtube_subtitle_language_candidates(language: &str) -> Vec<String> {
+    let requested = language.trim();
+    let family: Vec<&str> = match requested {
+        value if value.starts_with("zh-Hant") || value == "zh-TW" || value == "zh-HK" => {
+            vec!["zh-Hant", "zh-TW", "zh"]
+        }
+        value if value.starts_with("zh") => vec!["zh-Hans", "zh-CN", "zh", "zh-Hant"],
+        "en-US" | "en-GB" | "en" => vec!["en-US", "en"],
+        "ja-JP" | "ja" => vec!["ja-JP", "ja"],
+        "ko-KR" | "ko" => vec!["ko-KR", "ko"],
+        _ => vec![requested],
+    };
+    if requested.is_empty() {
+        return family.into_iter().map(str::to_string).collect();
+    }
+    let mut order = Vec::with_capacity(family.len() + 1);
+    order.push(requested.to_string());
+    for value in family {
+        if value != requested {
+            order.push(value.to_string());
+        }
+    }
+    order
 }
 
 async fn write_external_danmaku_ass(
@@ -10856,6 +11100,79 @@ mod tests {
         assert_ne!(
             identity("douyin_collection", "https://www.douyin.com/collection/111"),
             identity("douyin_collection", "https://www.douyin.com/collection/222"),
+        );
+    }
+
+    /// 语言候选表的首项必须就是用户点名的语言码，不能被 `zh-Hans` 抢走。
+    #[test]
+    fn subtitle_language_candidates_keep_requested_language_first() {
+        let order = super::youtube_subtitle_language_candidates("zh-CN");
+        assert_eq!(order.first().map(String::as_str), Some("zh-CN"));
+        assert!(order.iter().any(|value| value == "zh-Hans"));
+        assert_eq!(
+            super::youtube_subtitle_language_candidates("en")
+                .first()
+                .map(String::as_str),
+            Some("en")
+        );
+        // 双语设置里的语言部分必须被单独解析，否则 `zh-CN+en` 会当成未知语言码。
+        assert_eq!(
+            super::youtube_subtitle_language_candidates("zh-CN")
+                .first()
+                .map(String::as_str),
+            crate::utils::subtitle::parse_bilingual_language_pair("zh-CN+en")
+                .map(|(primary, _)| primary)
+                .as_deref()
+        );
+    }
+
+    /// 英文视频把目标语言设成中文时，中文自动翻译轨要排在英文人工轨之前：
+    /// 旧实现「人工字幕整体优先于自动字幕」，只要有英文人工轨就永远拿不到中文。
+    #[test]
+    fn subtitle_candidates_prefer_requested_language_over_original() {
+        use crate::external_media::ExternalMediaMetadata;
+
+        let metadata: ExternalMediaMetadata = serde_json::from_value(serde_json::json!({
+            "id": "vid",
+            "language": "en",
+            "subtitles": { "en": [ { "url": "https://example.com/en.vtt", "ext": "vtt" } ] },
+            "automatic_captions": {
+                "en": [ { "url": "https://example.com/asr-en.vtt", "ext": "vtt" } ],
+                "zh-Hans": [ { "url": "https://example.com/zh.vtt?tlang=zh-Hans", "ext": "vtt" } ]
+            }
+        }))
+        .expect("元数据应能反序列化");
+
+        let order = super::youtube_subtitle_language_order(&metadata, "zh-CN");
+        let candidates = super::collect_youtube_subtitle_candidates(&metadata, &order);
+        assert_eq!(candidates.first().map(|value| value.language.as_str()), Some("zh-Hans"));
+        assert!(candidates[0].url.contains("tlang=zh-Hans"));
+        // 原语言轨仍留在后面兜底，中文轨下载失败（如 429）时可以退回去。
+        assert!(candidates.iter().any(|value| value.language == "en"));
+    }
+
+    /// 同一条语言下人工轨要排在自动轨前面，且 URL 相同的候选只保留一次。
+    #[test]
+    fn subtitle_candidates_put_manual_before_automatic_without_duplicates() {
+        use crate::external_media::ExternalMediaMetadata;
+
+        let metadata: ExternalMediaMetadata = serde_json::from_value(serde_json::json!({
+            "id": "vid",
+            "subtitles": { "zh-Hans": [ { "url": "https://example.com/manual-zh.vtt", "ext": "vtt" } ] },
+            "automatic_captions": {
+                "zh-Hans": [ { "url": "https://example.com/auto-zh.vtt?tlang=zh-Hans", "ext": "vtt" } ]
+            }
+        }))
+        .expect("元数据应能反序列化");
+
+        let candidates = super::collect_youtube_subtitle_candidates(
+            &metadata,
+            &super::youtube_subtitle_language_candidates("zh-Hans"),
+        );
+        let urls: Vec<&str> = candidates.iter().map(|value| value.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec!["https://example.com/manual-zh.vtt", "https://example.com/auto-zh.vtt?tlang=zh-Hans"]
         );
     }
 }

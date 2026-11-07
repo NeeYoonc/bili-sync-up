@@ -10802,6 +10802,8 @@ pub async fn fetch_page_subtitle(
         return Ok(ExecutionStatus::Skipped);
     }
     let bili_video = Video::new(bili_client, video_model.bvid.clone());
+    // 双语设置（`zh-CN+en`）需要在把语言码交给接口前先解析出来。
+    let bilingual_request = crate::utils::subtitle::parse_bilingual_language_pair(&ai_subtitle_language);
     let subtitle_options = SubtitleDownloadOptions {
         download_ai_subtitle,
         ai_subtitle_language,
@@ -10821,6 +10823,49 @@ pub async fn fetch_page_subtitle(
             }
         },
     };
+    // 双语设置：先从已下载的字幕轨里挑出目标语言与对照语言合并成一条，
+    // 无论是否启用 AI 字幕都生效（人工双语轨同样可以合并）。
+    let bilingual_subtitle = match bilingual_request {
+        Some((primary, secondary)) => {
+            match crate::bilibili::subtitle::merge_bilingual_subtitles(&subtitles, &primary, &secondary) {
+                crate::bilibili::subtitle::BilingualMerge::Merged(merged) => Some(merged),
+                crate::bilibili::subtitle::BilingualMerge::AlreadyBilingual { lan, ratio } => {
+                    tracing::info!(
+                        "双语字幕合并跳过：视频「{}」第 {} 页的「{}」轨本身已是双语（{:.0}% 的字幕行已含对照语言），保留原有文件即可",
+                        video_model.name,
+                        page_info.page,
+                        lan,
+                        ratio * 100.0
+                    );
+                    None
+                }
+                crate::bilibili::subtitle::BilingualMerge::Unavailable => {
+                    if !subtitles.is_empty() {
+                        let downloaded = subtitles
+                            .iter()
+                            .map(|item| item.lan.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        tracing::warn!(
+                            "双语字幕合并跳过：视频「{}」第 {} 页缺少「{}+{}」中的一条轨，已下载：{}",
+                            video_model.name,
+                            page_info.page,
+                            primary,
+                            secondary,
+                            downloaded
+                        );
+                    }
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    if let Some(merged) = bilingual_subtitle {
+        let path = subtitle_path.with_extension(format!("{}.srt", merged.lan));
+        ensure_parent_dir_for_file(&path).await.map_err(std::io::Error::other)?;
+        tokio::fs::write(path, merged.body).await?;
+    }
     let tasks = subtitles
         .into_iter()
         .map(|subtitle| async move {
