@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use axum::extract::{Extension, Json, Path as AxumPath, Query};
 use chrono::{Local, NaiveDate, TimeZone};
 use futures::{stream, StreamExt};
@@ -5094,7 +5094,7 @@ async fn download_youtube_media(
         source.name,
         title
     );
-    let mut media_exists = is_reusable_media_file(&output_path).await;
+    let mut media_exists = is_reusable_media_file(&output_path, metadata.duration).await;
     // 关闭图文视频后，重置/重新处理旧作品时应清掉上一版生成的幻灯片 MP4；
     // 混排作品含真实视频段，不走这里的清理。
     if media_exists
@@ -5278,7 +5278,7 @@ async fn download_youtube_media(
         // YouTube 的高画质通常是独立 DASH 音视频流。两条直链都交给项目
         // 原生统一下载器并行传输；音频失败时保留已下载的视频临时文件，
         // 下次重试只重新下载音频，避免大视频（数百 MB）整片重下。
-        let video_ready = is_reusable_media_file(&video_temporary).await;
+        let video_ready = is_reusable_media_file(&video_temporary, metadata.duration).await;
         let mut audio_error: Option<anyhow::Error> = None;
         if video_ready {
             info!(
@@ -5313,6 +5313,8 @@ async fn download_youtube_media(
             let _ = remove_file_if_exists(&audio_temporary).await;
             return Err(error);
         }
+        validate_media_duration(&video_temporary, metadata.duration, "视频流").await?;
+        validate_media_duration(&audio_temporary, metadata.duration, "音频流").await?;
         let merge_result = match (
             video_stream.decryption_key.as_deref(),
             audio_stream.decryption_key.as_deref(),
@@ -5338,6 +5340,10 @@ async fn download_youtube_media(
         if let Err(error) = merge_result {
             let _ = remove_file_if_exists(&video_temporary).await;
             let _ = remove_file_if_exists(&audio_temporary).await;
+            let _ = remove_file_if_exists(&merge_temporary).await;
+            return Err(error);
+        }
+        if let Err(error) = validate_media_duration(&merge_temporary, metadata.duration, "合并文件").await {
             let _ = remove_file_if_exists(&merge_temporary).await;
             return Err(error);
         }
@@ -5499,14 +5505,19 @@ async fn extract_audio_track(input: &Path, output: &Path, platform: &str) -> Res
     Ok(())
 }
 
-async fn is_reusable_media_file(path: &Path) -> bool {
-    if !tokio::fs::metadata(path)
-        .await
-        .is_ok_and(|metadata| metadata.len() >= 1024)
-    {
+fn media_duration_is_complete(actual: f64, expected: f64) -> bool {
+    if !expected.is_finite() || expected <= 0.0 {
+        return true;
+    }
+    if !actual.is_finite() || actual <= 0.0 {
         return false;
     }
-    crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffprobe"))
+    let tolerance = (expected * 0.02).max(2.0);
+    actual + tolerance >= expected
+}
+
+async fn probe_media_duration(path: &Path) -> Option<f64> {
+    let output = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffprobe"))
         .args([
             "-v",
             "error",
@@ -5518,7 +5529,55 @@ async fn is_reusable_media_file(path: &Path) -> bool {
         ])
         .output()
         .await
-        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().parse::<f64>().ok())
+}
+
+async fn validate_media_duration(path: &Path, expected_duration: Option<f64>, label: &str) -> Result<()> {
+    let Some(expected_duration) = expected_duration.filter(|duration| *duration > 0.0) else {
+        return Ok(());
+    };
+    let Some(actual_duration) = probe_media_duration(path).await else {
+        warn!(path = %path.display(), label, "无法读取媒体时长，跳过时长校验");
+        return Ok(());
+    };
+    ensure!(
+        media_duration_is_complete(actual_duration, expected_duration),
+        "{label}时长不完整: 实际 {:.1} 秒，预期 {:.1} 秒（{}）",
+        actual_duration,
+        expected_duration,
+        path.display()
+    );
+    Ok(())
+}
+
+async fn is_reusable_media_file(path: &Path, expected_duration: Option<f64>) -> bool {
+    if !tokio::fs::metadata(path)
+        .await
+        .is_ok_and(|metadata| metadata.len() >= 1024)
+    {
+        return false;
+    }
+    let Some(actual_duration) = probe_media_duration(path).await else {
+        return false;
+    };
+    if let Some(expected_duration) = expected_duration.filter(|duration| *duration > 0.0) {
+        if !media_duration_is_complete(actual_duration, expected_duration) {
+            warn!(
+                path = %path.display(),
+                actual_duration,
+                expected_duration,
+                "已有媒体文件时长明显短于平台元数据，判定为不完整并重新下载"
+            );
+            return false;
+        }
+    }
+    true
 }
 
 /// 判断解析结果里是否存在真正可下载的视频流。
@@ -9289,6 +9348,19 @@ mod tests {
         assert!(needs_jpeg_conversion(b"GIF89a......"));
         // 已经是 JPEG 的不再转（避免每轮扫描都空跑 ffmpeg）
         assert!(!needs_jpeg_conversion(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn truncated_reused_media_is_rejected_by_duration() {
+        // 平台元数据 3600 秒，旧文件只有 3000 秒（约 1.7GB vs 2GB），必须重下
+        assert!(!super::media_duration_is_complete(3000.0, 3600.0));
+        // 正常封装/探测误差允许 2 秒或 2%
+        assert!(super::media_duration_is_complete(3599.0, 3600.0));
+        assert!(super::media_duration_is_complete(3529.0, 3600.0));
+        // 元数据缺失或异常时不误判；实际时长无效则不能复用
+        assert!(super::media_duration_is_complete(0.0, 0.0));
+        assert!(super::media_duration_is_complete(123.0, f64::NAN));
+        assert!(!super::media_duration_is_complete(0.0, 3600.0));
     }
 
     #[test]

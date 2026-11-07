@@ -20,10 +20,9 @@ const BAD_CDN_HOST_TTL: Duration = Duration::from_secs(10 * 60);
 const MIN_PARALLEL_SIZE: u64 = 4 * 1024 * 1024;
 const MIN_SEGMENT_SIZE: u64 = 1024 * 1024;
 // GoogleVideo 的长连接通常在传输数 MiB 后开始明显限速。保持较小 Range
-// 分片并复用有限数量的连接槽，可以继续走项目原生下载器，同时避免一个
+// 分片并复用连接槽，可以继续走项目原生下载器，同时避免一个
 // 50~500MiB 大分片在限速连接上持续数十分钟。
 const GOOGLEVIDEO_SEGMENT_SIZE: u64 = 4 * 1024 * 1024;
-const GOOGLEVIDEO_MAX_CONNECTIONS: usize = 4;
 /// 普通 CDN（抖音/TikTok 等）的单分片上限。
 ///
 /// 以前非 googlevideo 的分片数就等于并发数：16 线程下 7GB 的抖音原画会被切成
@@ -269,7 +268,17 @@ impl Downloader {
         let parallel = &config.concurrent_limit.parallel_download;
 
         if parallel.enabled && parallel.threads > 1 {
-            match self.fetch_parallel(url, path, parallel.threads, referer, None).await {
+            match self
+                .fetch_parallel(
+                    url,
+                    path,
+                    parallel.threads,
+                    parallel.googlevideo_max_connections,
+                    referer,
+                    None,
+                )
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) if is_certificate_name_mismatch_error(&e) => return Err(e),
                 Err(e) => {
@@ -336,7 +345,7 @@ impl Downloader {
         } else {
             GOOGLEVIDEO_SEGMENT_SIZE
         };
-        let (_, ranges) = build_parallel_ranges(total_size, 1, true, segment);
+        let (_, ranges) = build_parallel_ranges(total_size, 1, true, segment, 1);
         for (start, end) in ranges {
             download_range_to_file_with_retry(
                 self.client.clone(),
@@ -374,7 +383,11 @@ impl Downloader {
         // 与并发分片使用相同的分片方式，保证断点状态中的分片能精确命中
         let config = crate::config::reload_config();
         let threads = config.concurrent_limit.parallel_download.threads.max(1);
-        let (_, ranges) = build_parallel_ranges(total_size, threads, false, 0);
+        let max_googlevideo_connections = config
+            .concurrent_limit
+            .parallel_download
+            .googlevideo_max_connections;
+        let (_, ranges) = build_parallel_ranges(total_size, threads, false, 0, max_googlevideo_connections);
         if ranges.is_empty() {
             return self.fetch_single(url, path, referer, cookie).await;
         }
@@ -561,6 +574,7 @@ impl Downloader {
         url: &str,
         path: &Path,
         threads: usize,
+        max_googlevideo_connections: usize,
         referer: Option<&str>,
         cookie: Option<&str>,
     ) -> Result<()> {
@@ -598,8 +612,13 @@ impl Downloader {
         );
         ensure!(range_supported, "服务器不支持Range分片下载");
 
-        let (concurrency, ranges) =
-            build_parallel_ranges(total_size, threads, is_googlevideo, googlevideo_segment);
+        let (concurrency, ranges) = build_parallel_ranges(
+            total_size,
+            threads,
+            is_googlevideo,
+            googlevideo_segment,
+            max_googlevideo_connections,
+        );
         if ranges.len() <= 1 {
             // googlevideo 小文件（短音频常见，如 2~3MB 的 m4a）只有一个分片时，
             // 不能跳过多线程后回退到无 Range 的完整 GET——googlevideo 对无 Range
@@ -943,7 +962,14 @@ impl Downloader {
         for url in urls {
             let result = if parallel.enabled && parallel.threads > 1 {
                 match self
-                    .fetch_parallel(url, path, parallel.threads, Some(referer), Some(cookie))
+                    .fetch_parallel(
+                        url,
+                        path,
+                        parallel.threads,
+                        parallel.googlevideo_max_connections,
+                        Some(referer),
+                        Some(cookie),
+                    )
                     .await
                 {
                     Ok(()) => Ok(()),
@@ -1090,6 +1116,36 @@ impl Downloader {
             bail!("ffmpeg error: {}", stderr);
         }
 
+        // `-c copy` 正常只增加少量封装开销；如果输出明显小于视频输入，
+        // 说明输入尾部没有被完整写入或 muxer 中途丢弃了数据。不能让这种文件
+        // 继续以「下载完成」落库（Issue #254 的 1.7GB vs 2GB 就是这种表现）。
+        let video_size = tokio::fs::metadata(video_path)
+            .await
+            .with_context(|| format!("无法读取合并前视频大小: {}", video_path.display()))?
+            .len();
+        let audio_size = tokio::fs::metadata(audio_path)
+            .await
+            .with_context(|| format!("无法读取合并前音频大小: {}", audio_path.display()))?
+            .len();
+        let output_size = tokio::fs::metadata(output_path)
+            .await
+            .with_context(|| format!("无法读取合并后文件大小: {}", output_path.display()))?
+            .len();
+        info!(
+            video_path = %video_path.display(),
+            video_size,
+            audio_size,
+            output_size,
+            "音视频合并完成，开始校验输出大小"
+        );
+        ensure!(
+            merged_output_size_is_complete(video_size, output_size),
+            "合并后文件异常偏小: 输出 {} bytes，视频流 {} bytes，音频流 {} bytes；可能是输入尾部缺失或 FFmpeg 只写入了部分数据",
+            output_size,
+            video_size,
+            audio_size
+        );
+
         Ok(())
     }
 
@@ -1159,6 +1215,10 @@ impl Downloader {
 fn is_media_stream_tmp_path(path: &Path) -> bool {
     let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
     name.ends_with(".tmp_video") || name.ends_with(".tmp_audio")
+}
+
+fn merged_output_size_is_complete(video_size: u64, output_size: u64) -> bool {
+    output_size as f64 >= video_size as f64 * 0.98
 }
 
 /// 断点续传状态文件路径：目标文件 + `.resume` 后缀。
@@ -1239,13 +1299,14 @@ fn build_parallel_ranges(
     threads: usize,
     is_googlevideo: bool,
     googlevideo_segment: u64,
+    max_googlevideo_connections: usize,
 ) -> (usize, Vec<(u64, u64)>) {
     if total_size == 0 {
         return (1, Vec::new());
     }
 
     let concurrency = if is_googlevideo {
-        threads.min(GOOGLEVIDEO_MAX_CONNECTIONS)
+        threads.min(max_googlevideo_connections.max(1))
     } else {
         threads
     }
@@ -1823,11 +1884,27 @@ mod tests {
     }
 
     #[test]
+    fn merged_output_must_keep_nearly_all_video_bytes() {
+        let video_size = 2_047 * 1024 * 1024;
+        assert!(merged_output_size_is_complete(video_size, video_size));
+        assert!(merged_output_size_is_complete(
+            video_size,
+            video_size.saturating_mul(99) / 100
+        ));
+        // Issue #254：2GB 视频流合并后只剩 1.7GB，不能被当作完成
+        assert!(!merged_output_size_is_complete(
+            video_size,
+            1700 * 1024 * 1024
+        ));
+    }
+
+    #[test]
     fn googlevideo_uses_small_ranges_with_bounded_native_concurrency() {
         let total_size = 18 * 1024 * 1024;
-        let (concurrency, ranges) = build_parallel_ranges(total_size, 16, true, GOOGLEVIDEO_SEGMENT_SIZE);
+        let (concurrency, ranges) =
+            build_parallel_ranges(total_size, 16, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
 
-        assert_eq!(concurrency, GOOGLEVIDEO_MAX_CONNECTIONS);
+        assert_eq!(concurrency, 16);
         assert_eq!(ranges.len(), 5);
         assert_eq!(ranges[0], (0, GOOGLEVIDEO_SEGMENT_SIZE - 1));
         assert_eq!(ranges[3], (12 * 1024 * 1024, 16 * 1024 * 1024 - 1));
@@ -1835,11 +1912,38 @@ mod tests {
     }
 
     #[test]
+    fn googlevideo_concurrency_follows_configured_threads() {
+        let total_size = 64 * 1024 * 1024;
+        // 用户把「下载线程数」调到 8 时，YouTube 必须真的用 8 条连接
+        // （旧版一律砍到 4，调节线程数对 YouTube 无效）。
+        let (concurrency, _) =
+            build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        assert_eq!(concurrency, 8);
+
+        // 配置上限低于线程数时，按配置上限收敛
+        let (concurrency, _) =
+            build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 4);
+        assert_eq!(concurrency, 4);
+
+        // 上限本身可配置，且不能被线程数反向放大
+        let (concurrency, _) =
+            build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        assert_eq!(concurrency, 16);
+        let (concurrency, _) =
+            build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 32);
+        assert_eq!(concurrency, 32);
+        // 非法 0 值也不能让并发变成 0
+        let (concurrency, _) =
+            build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 0);
+        assert_eq!(concurrency, 1);
+    }
+
+    #[test]
     fn googlevideo_audio_uses_1mib_ranges() {
         // 短音频（2.88MB）按音频 1MiB 分片应拆成 3 段有界 Range，而不是
         // 单个 4MiB 分片（部分节点音频 Range 上限 1MiB，超限 403）。
         let total_size = 2_884_577;
-        let (_, ranges) = build_parallel_ranges(total_size, 4, true, MIN_SEGMENT_SIZE);
+        let (_, ranges) = build_parallel_ranges(total_size, 4, true, MIN_SEGMENT_SIZE, 16);
 
         assert_eq!(ranges.len(), 3);
         assert_eq!(ranges[0], (0, MIN_SEGMENT_SIZE - 1));
@@ -1863,7 +1967,7 @@ mod tests {
     #[test]
     fn regular_cdn_keeps_configured_parallel_range_count() {
         let total_size = 64 * 1024 * 1024;
-        let (concurrency, ranges) = build_parallel_ranges(total_size, 8, false, 0);
+        let (concurrency, ranges) = build_parallel_ranges(total_size, 8, false, 0, 16);
 
         assert_eq!(concurrency, 8);
         assert_eq!(ranges.len(), 8);
@@ -1876,7 +1980,7 @@ mod tests {
         // 抖音 4K60 原画单集就有 7GB：按并发数均分会切出 ~460MB 的大分片，
         // 限速 CDN 上一个分片走不完就一直失败。分片必须限制在上限以内。
         let total_size = 7_375_161_692u64;
-        let (concurrency, ranges) = build_parallel_ranges(total_size, 16, false, 0);
+        let (concurrency, ranges) = build_parallel_ranges(total_size, 16, false, 0, 16);
 
         assert_eq!(concurrency, 16, "并发数不应被放大");
         let expected = ((total_size + DEFAULT_SEGMENT_SIZE - 1) / DEFAULT_SEGMENT_SIZE) as usize;
@@ -2109,7 +2213,7 @@ mod tests {
         // 让首个分片 (0..2MB) 持续失败：3 次重试均失败 → 并发下载整体失败
         fail_start.store(0, Ordering::SeqCst);
         fail_left.store(10, Ordering::SeqCst);
-        let first = downloader.fetch_parallel(&url, &path, 4, None, None).await;
+        let first = downloader.fetch_parallel(&url, &path, 4, 16, None, None).await;
         assert!(first.is_err(), "分片持续失败时并发下载应返回错误");
 
         // 断点状态应保留，且首个失败分片未被标记完成
@@ -2125,7 +2229,7 @@ mod tests {
         fail_start.store(usize::MAX, Ordering::SeqCst);
         let requested_before = requested.lock().unwrap().len();
         downloader
-            .fetch_parallel(&url, &path, 4, None, None)
+            .fetch_parallel(&url, &path, 4, 16, None, None)
             .await
             .expect("断点续传应成功");
 
@@ -2156,7 +2260,7 @@ mod tests {
         let downloader = Downloader::new(Client::new());
 
         downloader
-            .fetch_parallel(&url, &path, 4, None, None)
+            .fetch_parallel(&url, &path, 4, 16, None, None)
             .await
             .expect("正常下载应成功");
 
@@ -2191,7 +2295,7 @@ mod tests {
             data.len() / 1024 / 1024,
             url_a
         );
-        let first = downloader.fetch_parallel(&url_a, &path, 4, None, None).await;
+        let first = downloader.fetch_parallel(&url_a, &path, 4, 16, None, None).await;
         assert!(first.is_err(), "节点断开后并发下载应返回错误");
         let first_err = format!("{:#}", first.unwrap_err());
         assert!(
@@ -2218,7 +2322,7 @@ mod tests {
         let (url_b, requested_b, _fs, _fl) = spawn_range_test_server(data.clone(), None).await;
         println!("[4] 服务器 B(同内容同路径, 换节点) 就绪: {}", url_b);
         downloader
-            .fetch_parallel(&url_b, &path, 4, None, None)
+            .fetch_parallel(&url_b, &path, 4, 16, None, None)
             .await
             .expect("换节点重连续传应成功");
         println!(
@@ -2264,4 +2368,5 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir).await;
     }
+
 }
