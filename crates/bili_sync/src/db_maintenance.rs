@@ -112,7 +112,7 @@ pub async fn database_status(db: &DatabaseConnection) -> Result<DatabaseStatusRe
             label: table_label(table).to_string(),
         });
     }
-    tables.sort_by(|left, right| right.rows.cmp(&left.rows));
+    tables.sort_by_key(|table| std::cmp::Reverse(table.rows));
 
     let backend = db.get_database_backend();
     let youtube_video_status = db

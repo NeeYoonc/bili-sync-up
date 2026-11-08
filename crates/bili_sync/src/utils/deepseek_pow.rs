@@ -592,11 +592,7 @@ fn solve_pow_wasm(_challenge: &PowChallenge) -> Option<u64> {
 fn solve_pow_keccak(challenge: &PowChallenge) -> u64 {
     let prefix = format!("{}_{}_", challenge.salt, challenge.expire_at);
     let difficulty = challenge.difficulty;
-    let target_prefix: u64 = if difficulty > 0 {
-        u64::MAX / difficulty
-    } else {
-        u64::MAX
-    };
+    let target_prefix: u64 = u64::MAX.checked_div(difficulty).unwrap_or(u64::MAX);
 
     debug!(
         "使用 Keccak-256 求解 POW: prefix={}, target_prefix={:#018x}",

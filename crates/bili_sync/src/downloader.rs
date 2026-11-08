@@ -341,12 +341,12 @@ impl Downloader {
         for (start, end) in ranges {
             download_range_to_file_with_retry(DownloadRangeInput {
                 client: self.client.clone(),
-                url: url,
-                path: path,
-                start: start,
-                end: end,
+                url,
+                path,
+                start,
+                end,
                 attempts: RANGE_DOWNLOAD_ATTEMPTS,
-                referer: referer,
+                referer,
                 cookie: None,
             })
             .await?;
@@ -421,13 +421,13 @@ impl Downloader {
         for (start, end) in pending {
             download_range_to_file_with_retry(DownloadRangeInput {
                 client: self.client.clone(),
-                url: url,
-                path: path,
-                start: start,
-                end: end,
+                url,
+                path,
+                start,
+                end,
                 attempts: RANGE_DOWNLOAD_ATTEMPTS,
-                referer: referer,
-                cookie: cookie,
+                referer,
+                cookie,
             })
             .await?;
             append_completed_range(&sidecar, start, end).await;
@@ -620,13 +620,13 @@ impl Downloader {
             let (part_start, part_end) = ranges[0];
             download_range_to_file_with_retry(DownloadRangeInput {
                 client: self.client.clone(),
-                url: url,
-                path: path,
+                url,
+                path,
                 start: part_start,
                 end: part_end,
                 attempts: RANGE_DOWNLOAD_ATTEMPTS,
-                referer: referer,
-                cookie: cookie,
+                referer,
+                cookie,
             })
             .await?;
             crate::download_progress::DOWNLOAD_PROGRESS
@@ -720,7 +720,7 @@ impl Downloader {
             let progress_path = progress_path.clone();
             async move {
                 let result = download_range_to_file_with_retry(DownloadRangeInput {
-                    client: client,
+                    client,
                     url: &url,
                     path: &path,
                     start: part_start,
@@ -769,13 +769,13 @@ impl Downloader {
             for (start, end) in failed_ranges {
                 let bytes = download_range_to_file_with_retry(DownloadRangeInput {
                     client: self.client.clone(),
-                    url: url,
-                    path: path,
-                    start: start,
-                    end: end,
+                    url,
+                    path,
+                    start,
+                    end,
                     attempts: RANGE_DOWNLOAD_ATTEMPTS,
-                    referer: referer,
-                    cookie: cookie,
+                    referer,
+                    cookie,
                 })
                 .await
                 .with_context(|| format!("Range 分片补下仍失败: bytes={start}-{end}"))?;
@@ -2211,6 +2211,7 @@ mod tests {
             "续传应只请求缺失的首个分片，实际请求: {:?}",
             second_round
         );
+        drop(reqs);
 
         let _ = fs::remove_dir_all(&dir).await;
     }
@@ -2306,6 +2307,7 @@ mod tests {
             "重连应只请求缺失的首个分片，实际请求: {:?}",
             reqs
         );
+        drop(reqs);
 
         let _ = fs::remove_dir_all(&dir).await;
     }

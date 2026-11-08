@@ -470,7 +470,9 @@ pub struct MangaSearchItem {
 
 /// 搜索结果缓存：B 漫搜索有风控，短时间连续请求会被要求人机验证，
 /// 因此同一个「关键词 + 页码 + 每页数量」在短时间内直接复用结果。
-static SEARCH_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>, bool)>>> = OnceLock::new();
+type SearchCacheEntry = (Instant, Vec<MangaSearchItem>, bool);
+type SearchCache = Mutex<HashMap<String, SearchCacheEntry>>;
+static SEARCH_CACHE: OnceLock<SearchCache> = OnceLock::new();
 /// 搜索缓存有效期。搜索结果本身是低频且稳定的，缓存主要用来挡掉重复点击与连续搜索。
 const SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
 /// 两次「真正打站点」的搜索之间的最小间隔：连续点击 / 连续换词时自动排队，
@@ -479,7 +481,7 @@ const SEARCH_MIN_INTERVAL: Duration = Duration::from_secs(2);
 /// 触发风控后的冷却时长：冷却期内直接返回提示，不再去打站点（否则会不断续期封禁）。
 const SEARCH_COOLDOWN: Duration = Duration::from_secs(120);
 
-fn search_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<MangaSearchItem>, bool)>> {
+fn search_cache() -> &'static SearchCache {
     SEARCH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

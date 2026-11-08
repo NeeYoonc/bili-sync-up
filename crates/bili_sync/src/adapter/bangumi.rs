@@ -333,10 +333,9 @@ impl BangumiSource {
             false
         };
 
-        if use_cache && source_model.cached_episodes.is_some() {
+        if let (true, Some(cached_data)) = (use_cache, source_model.cached_episodes.as_ref()) {
             // 使用缓存数据
-            let cached_data = source_model.cached_episodes.unwrap();
-            match self.video_stream_from_cache(&cached_data, latest_row_at).await {
+            match self.video_stream_from_cache(cached_data, latest_row_at).await {
                 Ok(stream) => {
                     info!("成功从缓存加载番剧数据");
                     return Ok(stream);

@@ -462,6 +462,7 @@ enum Favorite {
 }
 
 #[derive(Iden)]
+#[allow(clippy::enum_variant_names, reason = "Iden 变体名即数据库列名，不能改名")]
 enum Collection {
     Table,
     AiRenameEnableMultiPage,

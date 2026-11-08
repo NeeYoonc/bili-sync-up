@@ -689,6 +689,7 @@ pub struct FolderToRename {
 ///
 /// # 返回
 /// - 新文件名列表（与输入顺序对应）
+///
 /// 构建批量文件名的 AI prompt（纯函数，便于测试）
 ///
 /// 每个文件条目包含序号、当前文件名和带类型/结构标记的视频信息，
@@ -2304,14 +2305,12 @@ async fn apply_rename(
 
     // 更新数据库中的 page.path 和 ai_renamed 标记
     let new_path_str = final_path.to_string_lossy().to_string();
-    if let Ok(page_model) = page::Entity::find_by_id(file.page_id).one(connection).await {
-        if let Some(page_model) = page_model {
-            let mut active_page: page::ActiveModel = page_model.into();
-            active_page.path = Set(Some(new_path_str));
-            active_page.ai_renamed = Set(Some(1)); // 标记为已 AI 重命名，防止重复处理
-            if let Err(e) = active_page.update(connection).await {
-                warn!("[{}] 更新数据库 page.path 失败: {}", source_key, e);
-            }
+    if let Ok(Some(page_model)) = page::Entity::find_by_id(file.page_id).one(connection).await {
+        let mut active_page: page::ActiveModel = page_model.into();
+        active_page.path = Set(Some(new_path_str));
+        active_page.ai_renamed = Set(Some(1)); // 标记为已 AI 重命名，防止重复处理
+        if let Err(e) = active_page.update(connection).await {
+            warn!("[{}] 更新数据库 page.path 失败: {}", source_key, e);
         }
     }
 

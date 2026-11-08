@@ -1612,6 +1612,7 @@ pub async fn fetch_source_posts(
 /// 移动端/网页分享链接常见两种形态：
 ///   - https://www.douyin.com/collection/{id}（可带 ?modal_id=... 等参数）
 ///   - https://v.douyin.com/xxxxx/（短链，需跟随跳转后再解析）
+///
 /// 优先精确匹配 path 中的 /collection/{数字id}，避免被 modal_id 等 query 参数误导；
 /// 短链先跟随重定向拿到最终链接再解析。
 async fn resolve_collection_id(source_url: &str) -> Result<String> {

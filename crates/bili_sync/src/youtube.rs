@@ -2156,7 +2156,6 @@ fn youtube_upper_paths(uploader: &str) -> (PathBuf, PathBuf) {
 /// 视频级：[视频封面, 视频信息(NFO), UP头像, UP主信息, 分P下载]；
 /// 分页级：[视频封面, 视频内容, 单集NFO, 弹幕/直播, 字幕]。
 /// 数值 0=未开始，1..=4=失败次数，7(STATUS_OK)=已完成。
-
 fn youtube_video_status(video: &youtube_video::Model) -> VideoStatus {
     VideoStatus::from(video.video_task_status)
 }
@@ -2580,6 +2579,7 @@ async fn prune_empty_external_dirs(source: &youtube_source::Model, output_path: 
 ///
 /// - force=true：重置所有非 0 状态（含已完成）；
 /// - force=false：只重置失败状态；文本 failed/付费不可播的旧任务也视为需要重置。
+///
 /// 返回是否发生了重置。
 async fn reset_youtube_video_task_bits(
     db: &DatabaseConnection,
@@ -5334,13 +5334,13 @@ async fn download_youtube_media(
         YoutubeSidecarOutcome::default()
     } else {
         ensure_youtube_sidecars(YoutubeSidecarInput {
-            downloader: downloader,
+            downloader,
             metadata: &metadata,
             output_path: &output_path,
             video_url: &video.url,
             title: &title,
             uploader: &uploader,
-            source: source,
+            source,
             episode_number: video.episode_number,
         })
         .await
@@ -7158,6 +7158,7 @@ struct YoutubeMovieNfoInput<'a> {
 /// - `uploader`：主频道，写入 `<director>` 并作为第一个 `<actor>`；
 /// - `co_creators`：联合投稿的合作频道名，逐个补写 `<actor>`；
 /// - `avatar_url`：主频道头像地址，写进 `<actor><thumb>`，媒体库里才有作者头像。
+///
 /// 注意 `<aired>` 与 `<studio>` 两个标签的参数顺序不能写反，
 /// 否则会出现"工作室=日期、首播=平台名"的错位。
 fn build_youtube_movie_nfo_xml(p: YoutubeMovieNfoInput<'_>) -> String {
@@ -7268,17 +7269,17 @@ async fn generate_youtube_nfo(
     let studio = source_platform_label(source);
     let co_creators = youtube_co_creators(metadata, uploader);
     let xml = build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
-        title: title,
-        description: description,
-        platform: platform,
-        studio: studio,
+        title,
+        description,
+        platform,
+        studio,
         id: &metadata.id,
-        aired: aired,
-        uploader: uploader,
+        aired,
+        uploader,
         co_creators: &co_creators,
-        thumbnail: thumbnail,
-        video_url: video_url,
-        avatar_url: avatar_url,
+        thumbnail,
+        video_url,
+        avatar_url,
     });
     let temporary = nfo_path.with_extension("nfo.download");
     tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
@@ -9366,6 +9367,7 @@ pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[allow(clippy::invalid_from_utf8, reason = "测试故意用 GBK 字节序列验证非 UTF-8 解码路径")]
     fn decodes_gbk_command_error_text() {
         // GBK 编码的“远程主机强迫关闭了一个现有的连接”（Windows 10054 错误文本）
         let gbk: &[u8] = &[
@@ -10165,7 +10167,7 @@ mod tests {
             platform: "YouTube",
             studio: "YouTube",
             id: "dQw4w9WgXcQ",
-            aired: aired,
+            aired,
             uploader: "测试频道",
             co_creators: &[],
             thumbnail: "https://example.com/thumb.jpg",
@@ -10200,7 +10202,7 @@ mod tests {
             platform: "YouTube",
             studio: "YouTube",
             id: "vid123",
-            aired: aired,
+            aired,
             uploader: "主频道",
             co_creators: &["合作频道A".to_string(), "合作频道B".to_string()],
             thumbnail: "https://example.com/thumb.jpg",
@@ -10249,7 +10251,7 @@ mod tests {
             platform: "douyin",
             studio: "抖音",
             id: "7515762262805777727",
-            aired: aired,
+            aired,
             uploader: "古德末泥(高智版)",
             co_creators: &[],
             thumbnail: "https://example.com/cover.jpg",
@@ -10281,7 +10283,7 @@ mod tests {
             platform: "douyin",
             studio: "抖音",
             id: "7515762262805777727",
-            aired: aired,
+            aired,
             uploader: "古德末泥(高智版)",
             co_creators: &[],
             thumbnail: "https://example.com/cover.jpg",
@@ -10345,8 +10347,10 @@ mod tests {
     async fn youtube_artifact_status_reads_task_bits_not_files() {
         // 已下载完成的外源视频：即使媒体文件被移走，任务位仍是完成，
         // 卡片状态保持“全部完成”（与 B 站一致），不会重新显示“未下载”。
-        let mut video = super::youtube_video::Model::default();
-        video.download_status = "completed".to_string();
+        let mut video = super::youtube_video::Model {
+            download_status: "completed".to_string(),
+            ..Default::default()
+        };
         video.output_path = Some("Z:/__not_exists__/abc123.mp4".to_string());
         let ok = super::youtube_all_tasks_ok_bits();
         video.video_task_status = ok;
@@ -10357,7 +10361,6 @@ mod tests {
         assert_eq!(page_status, [7, 7, 7, 7, 7], "分页状态同样应保持全部完成");
 
         // 只重置“视频信息”(视频1/分页2) → 仅该任务回到未开始，媒体(视频4)仍完成。
-        let mut video = video;
         let mut vstatus = super::VideoStatus::from(video.video_task_status);
         let mut pstatus = super::PageStatus::from(video.page_task_status);
         vstatus.set(1, 0);
@@ -10687,8 +10690,10 @@ mod tests {
         use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
-        let mut source = youtube_source::Model::default();
-        source.id = 42;
+        let mut source = youtube_source::Model {
+            id: 42,
+            ..Default::default()
+        };
         source.source_type = "douyin_series".to_string();
         source.name = "测试短剧/带斜杠".to_string();
         source.path = "F:/Downloads/测试".to_string();
@@ -10733,14 +10738,18 @@ mod tests {
         use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
-        let mut source = youtube_source::Model::default();
-        source.id = 9;
+        let mut source = youtube_source::Model {
+            id: 9,
+            ..Default::default()
+        };
         source.source_type = "douyin_mix".to_string();
         source.name = "传奇剧场（剧情）".to_string();
         source.path = "F:/Downloads/测试".to_string();
 
-        let mut video = youtube_video::Model::default();
-        video.episode_number = Some(12);
+        let mut video = youtube_video::Model {
+            episode_number: Some(12),
+            ..Default::default()
+        };
 
         let metadata = ExternalMediaMetadata {
             id: "7604472777650785551".to_string(),
@@ -10786,8 +10795,10 @@ mod tests {
         use crate::external_media::ExternalMediaMetadata;
         use bili_sync_entity::{youtube_source, youtube_video};
 
-        let mut source = youtube_source::Model::default();
-        source.id = 9;
+        let mut source = youtube_source::Model {
+            id: 9,
+            ..Default::default()
+        };
         source.source_type = "douyin_mix".to_string();
         source.name = "外卖小哥修仙记".to_string();
         source.path = "J:/EMBY/DY收藏夹合集/外卖小哥修仙记".to_string();
@@ -10810,8 +10821,10 @@ mod tests {
         use crate::external_media::ExternalMediaMetadata;
         use bili_sync_entity::{youtube_source, youtube_video};
 
-        let mut collection_source = youtube_source::Model::default();
-        collection_source.id = 6;
+        let mut collection_source = youtube_source::Model {
+            id: 6,
+            ..Default::default()
+        };
         collection_source.source_type = "douyin_collection".to_string();
         collection_source.name = "收藏夹".to_string();
         collection_source.path = "F:/Downloads/收藏夹douyin".to_string();
@@ -10851,8 +10864,10 @@ mod tests {
         use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
-        let mut source = youtube_source::Model::default();
-        source.id = 7;
+        let mut source = youtube_source::Model {
+            id: 7,
+            ..Default::default()
+        };
         source.source_type = "douyin_user".to_string();
         source.name = "白铭(想接正片)".to_string();
         source.path = "F:/Downloads/关注douyin".to_string();
@@ -10897,8 +10912,10 @@ mod tests {
         use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
-        let mut source = youtube_source::Model::default();
-        source.id = 8;
+        let mut source = youtube_source::Model {
+            id: 8,
+            ..Default::default()
+        };
         source.source_type = "douyin_user".to_string();
         source.name = "作者".to_string();
         source.path = "F:/Downloads/关注douyin".to_string();
@@ -10952,8 +10969,10 @@ mod tests {
         let media = root.join("20260101000000-7573135187270192425.mp4");
         tokio::fs::write(&media, vec![0u8; 4096]).await.unwrap();
 
-        let mut video = super::youtube_video::Model::default();
-        video.output_path = Some(media.display().to_string());
+        let mut video = super::youtube_video::Model {
+            output_path: Some(media.display().to_string()),
+            ..Default::default()
+        };
         let source = super::youtube_source::Model::default();
 
         // 视频子任务 4 = 分P下载
@@ -10986,8 +11005,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let mut video = super::youtube_video::Model::default();
-        video.output_path = Some(output.display().to_string());
+        let mut video = super::youtube_video::Model {
+            output_path: Some(output.display().to_string()),
+            ..Default::default()
+        };
         video.episode_number = Some(1);
         let mut source = sample_external_source("douyin_mix");
         source.path = root.display().to_string();

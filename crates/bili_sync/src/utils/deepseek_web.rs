@@ -468,8 +468,8 @@ impl DeepSeekWebClient {
 
         for line in body.lines() {
             // 解析 event 类型行
-            if line.starts_with("event:") {
-                current_event_type = Some(line[6..].trim().to_string());
+            if let Some(event) = line.strip_prefix("event:") {
+                current_event_type = Some(event.trim().to_string());
                 continue;
             }
 

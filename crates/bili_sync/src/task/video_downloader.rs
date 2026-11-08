@@ -156,7 +156,7 @@ fn calc_submission_next_delay_secs(base_interval_secs: u64, streak: i32, max_hou
     let multipliers: [u64; 5] = [1, 3, 9, 36, 72];
     let idx = (streak.max(0) as usize).min(multipliers.len() - 1);
     let delay = base_interval_secs.saturating_mul(multipliers[idx]);
-    let cap = max_hours.max(1).min(168).saturating_mul(3600);
+    let cap = max_hours.clamp(1, 168).saturating_mul(3600);
     delay.min(cap).max(base_interval_secs)
 }
 

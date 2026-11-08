@@ -112,50 +112,10 @@ jobs:
           shared-key: clippy
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: 占位前端产物目录（rust-embed 的 #[folder = "../../web/build"] 缺目录会编译失败）
-        run: mkdir -p web/build
-      # 先以「不开启 -D warnings」的方式采集完整告警清单，清零后再改成 -- -D warnings。
+        # index.html 一起补上：build.rs 检查前端产物时会打印 cargo:warning，避免日志出现噪音。
+        run: mkdir -p web/build && touch web/build/index.html
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets
-
-  clippy-fix:
-    name: Rust Clippy 自动修复（临时，仅手动触发）
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v6
-      - name: 读取 rust-toolchain.toml 里的工具链版本
-        id: toolchain
-        run: |
-          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | head -n 1)"
-          if [ -z "$channel" ]; then
-            echo "读不到 rust-toolchain.toml 里的 channel" >&2
-            exit 1
-          fi
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - name: 安装 Rust 工具链（clippy + rustfmt）
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: clippy, rustfmt
-      - name: 缓存 cargo 编译产物
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: clippy
-          save-if: false
-      - name: 占位前端产物目录
-        run: mkdir -p web/build
-      - name: cargo clippy --fix（机械建议批量应用，仅用于本地取材）
-        run: cargo clippy --fix --allow-dirty --workspace --all-targets || true
-      - name: cargo fmt（统一格式，避免 patch 里混入空格噪音）
-        run: cargo fmt --all || true
-      - name: 输出补丁（base64 打进日志，便于本地还原）
-        run: |
-          git diff -- '*.rs' > /tmp/clippy-fix.patch || true
-          git diff --stat | tail -n 5 || true
-          echo "PATCH_B64_BEGIN"
-          base64 -w 200 /tmp/clippy-fix.patch || true
-          echo "PATCH_B64_END"
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
 # ---------------------------------------------------------------------------
 # 暂未启用的一关：test（等测试基线建立后启用）
