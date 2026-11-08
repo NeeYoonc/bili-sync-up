@@ -14,7 +14,7 @@
 
 ```bash
 # Docker 一键启动
-docker run -d -p 12345:12345 -v /path/to/data:/app/.config/bili-sync qq1582185982/bili-sync
+docker run -d -p 12345:12345 -v /path/to/data:/app/.config/bili-sync -v /path/to/videos:/Downloads qq1582185982/bili-sync
 
 # 或下载二进制文件直接运行
 ./bili-sync-rs

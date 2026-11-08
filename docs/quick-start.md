@@ -9,7 +9,7 @@ docker run -d \
   --name bili-sync \
   -p 12345:12345 \
   -v /path/to/data:/app/.config/bili-sync \
-  -v /path/to/videos:/app/videos \
+  -v /path/to/videos:/Downloads \
   qq1582185982/bili-sync:latest
 ```
 
@@ -66,9 +66,9 @@ Netscape `cookies.txt` 导入。Docker 不需要内嵌浏览器或额外登录�
 ## 常用配置
 
 ### 基础设置
-- **扫描间隔**：默认 10 分钟
-- **下载线程数**：默认 16
-- **视频质量**：默认最高画质
+- **扫描间隔**：默认 1200 秒（20 分钟）
+- **下载线程数**：默认 4（另有「YouTube 并发连接上限」默认 16，实际连接数取两者较小值）
+- **视频质量**：默认最高画质（上限 8K，实际受账号权限限制）
 
 ### 过滤规则
 - **时间过滤**：只下载指定时间后的视频

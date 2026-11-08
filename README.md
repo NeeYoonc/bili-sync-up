@@ -64,6 +64,7 @@ docker run -d \
   --name bili-sync \
   -p 12345:12345 \
   -v ./config:/app/.config/bili-sync \
+  -v ./Downloads:/Downloads \
   qq1582185982/bili-sync:latest
 ```
 
@@ -90,8 +91,8 @@ services:
     ports:
       - 12345:12345
     volumes:
-      - /volume1/Cloudreve/OD/20/config:/app/.config/bili-sync
-      - /volume1/Cloudreve/OD/20:/Downloads #下载目录 在前端直接/Downloads就是下载到/volume1/Cloudreve/OD/20
+      - ./config:/app/.config/bili-sync
+      - ./Downloads:/Downloads # 下载目录：程序默认下载到容器内 /Downloads，这里映射到宿主机 ./Downloads
 
     environment:
       - TZ=Asia/Shanghai
