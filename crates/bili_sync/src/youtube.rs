@@ -1092,6 +1092,7 @@ async fn probe_youtube_subscription_channels() -> std::result::Result<serde_json
     Ok(initial_data)
 }
 
+#[cfg(test)]
 fn youtube_cookie_jar(path: &Path) -> Result<Arc<reqwest::cookie::Jar>> {
     let contents =
         std::fs::read_to_string(path).with_context(|| format!("读取 YouTube Cookie 失败：{}", path.display()))?;
@@ -5687,7 +5688,7 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
     // visionos 提供 4K 直链），取分辨率上限更高的一份，避免“设置 4K 却只能
     // 下到 1080p”。仅对最高不足 4K 的情况触发。
     if is_youtube {
-        let mut best = metadata;
+        let best = metadata;
         let best_max = youtube_max_format_height(&best.formats);
         // web_embedded 对部分视频（尤其需要 PO Token/登录会话的高码率源）只返回
         // ≤1080p 格式。用 tv_embedded/tv/visionos 再解析一次取分辨率更高的一份。
@@ -8630,9 +8631,6 @@ fn ytdlp_executable() -> PathBuf {
     }
     PathBuf::from("yt-dlp")
 }
-fn cookie_path() -> PathBuf {
-    CONFIG_DIR.join("youtube-cookies.txt")
-}
 
 /// YouTube 凭证当前内容：优先数据库，回退旧版 cookies.txt 文件（启动迁移会搬进数据库）。
 fn youtube_cookie_text() -> Option<String> {
@@ -9117,12 +9115,6 @@ async fn validate_youtube_login_cookie() -> Result<()> {
     Ok(())
 }
 
-async fn prepare_parent(path: &Path) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| anyhow!("无效的 Cookie 文件路径"))?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .with_context(|| format!("无法创建配置目录: {}", parent.display()))
-}
 fn append_cookies(command: &mut Command) {
     if let Some(path) = youtube_cookie_file() {
         command.arg("--cookies").arg(path);
@@ -9270,37 +9262,6 @@ fn is_container_runtime() -> bool {
         .ok()
         .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         || Path::new("/.dockerenv").exists()
-}
-
-async fn replace_cookie_file(temporary: &Path, target: &Path) -> Result<()> {
-    let backup = target.with_extension("txt.backup");
-    let had_target = tokio::fs::try_exists(target).await?;
-    if tokio::fs::try_exists(&backup).await? {
-        tokio::fs::remove_file(&backup).await?;
-    }
-    if had_target {
-        tokio::fs::rename(target, &backup)
-            .await
-            .context("备份旧 YouTube Cookie 失败")?;
-    }
-    match tokio::fs::rename(temporary, target).await {
-        Ok(()) => {
-            if had_target {
-                let _ = tokio::fs::remove_file(&backup).await;
-            }
-            Ok(())
-        }
-        Err(error) => {
-            if had_target {
-                let _ = tokio::fs::rename(&backup, target).await;
-            }
-            Err(error).context("保存 YouTube Cookie 失败")
-        }
-    }
-}
-
-fn has_youtube_session(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|contents| has_youtube_session_value(&contents))
 }
 
 fn is_netscape_youtube_cookie_file(contents: &str) -> bool {

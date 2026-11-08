@@ -310,7 +310,6 @@ impl Pugv {
                     season_id: season_id_value.clone(),
                     ep_id: ep_id_value.to_string(),
                     bvid: format!("av{}", aid),
-                    aid: aid.to_string(),
                     cid: cid.to_string(),
                     cover: episode_cover,
                     intro: intro.clone(),

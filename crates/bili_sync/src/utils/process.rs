@@ -16,17 +16,9 @@ use std::os::windows::process::CommandExt as _;
 
 /// `tokio::process::Command::new` 的替代品：Windows 下顺带隐藏子进程控制台窗口。
 pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(program);
+    let command = tokio::process::Command::new(program);
     #[cfg(windows)]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
-}
-
-/// `std::process::Command::new` 的替代品，行为同上。
-pub fn std_command(program: impl AsRef<OsStr>) -> std::process::Command {
-    let mut command = std::process::Command::new(program);
+    let mut command = command;
     #[cfg(windows)]
     {
         command.creation_flags(CREATE_NO_WINDOW);

@@ -23,8 +23,8 @@ pub(crate) use subtitle::{SubtitleDownloadOptions, DEFAULT_AI_SUBTITLE_LANGUAGE}
 pub use verification_coordinator::{VerificationRequest, VERIFICATION_COORDINATOR};
 pub(crate) use video::effective_playurl_qn_range;
 pub use video::{
-    aid_from_bvid_or_av, bvid_to_aid, is_av_id, is_bvid, with_playurl_rate_limit, Dimension, PageInfo,
-    PlayurlRateLimitConfig, Video, VideoChapter,
+    aid_from_bvid_or_av, is_av_id, with_playurl_rate_limit, Dimension, PageInfo, PlayurlRateLimitConfig, Video,
+    VideoChapter,
 };
 pub use watch_later::WatchLater;
 pub mod bangumi;
@@ -310,7 +310,6 @@ pub enum VideoInfo {
         ep_id: String,
         /// 课程没有 bvid，使用 `av<aid>` 形式占位
         bvid: String,
-        aid: String,
         cid: String,
         cover: String,
         intro: String,
@@ -335,8 +334,6 @@ pub enum VideoInfo {
     Manga {
         /// 作品名
         title: String,
-        /// 作品 ID（`comic_id`），落库到 `video_source.media_id`
-        media_id: String,
         ep_id: String,
         /// 漫画没有 bvid，用 `ep_id` 占位，保证同一作品内唯一
         bvid: String,
@@ -351,15 +348,6 @@ pub enum VideoInfo {
         share_copy: Option<String>,
         /// 作者（B 漫 `author_name` 数组拼接）
         author: Option<String>,
-        /// 特典 / 番外 / 公告
-        #[serde(default)]
-        is_special: bool,
-        /// 该话的页面数量（B 漫 `image_count`）
-        #[serde(default)]
-        page_count: Option<i32>,
-        /// 作品是否已完结
-        #[serde(default)]
-        is_finish: Option<bool>,
     },
 }
 
