@@ -10969,7 +10969,7 @@ mod tests {
         let media = root.join("20260101000000-7573135187270192425.mp4");
         tokio::fs::write(&media, vec![0u8; 4096]).await.unwrap();
 
-        let mut video = super::youtube_video::Model {
+        let video = super::youtube_video::Model {
             output_path: Some(media.display().to_string()),
             ..Default::default()
         };
