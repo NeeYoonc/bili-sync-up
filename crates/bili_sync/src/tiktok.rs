@@ -1351,7 +1351,7 @@ pub(crate) fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> 
             .map(|time| time.with_timezone(&Local).format("%Y-%m-%d").to_string())
             .unwrap_or_default()
     });
-    let is_image_post = item.as_object().is_some_and(|object| tiktok_item_is_image_post(object));
+    let is_image_post = item.as_object().is_some_and(tiktok_item_is_image_post);
     Some(TikTokPost {
         id: id.clone(),
         url: format!(
@@ -2086,8 +2086,7 @@ async fn sign_tiktok_url_with_sdk(url: &str, sdk: Option<&str>) -> Result<String
     let signed = stdout
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .last()
+        .rfind(|line| !line.is_empty())
         .unwrap_or("")
         .to_string();
     if !signed.starts_with("https://") {
@@ -3746,7 +3745,7 @@ async fn extract_tiktok_media_detail_inner(url: &str, attempts: usize) -> Result
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    (!urls.is_empty()).then(|| (bitrate, codec, urls))
+                    (!urls.is_empty()).then_some((bitrate, codec, urls))
                 })
                 .collect::<Vec<_>>();
             ranked.sort_by_key(|(bitrate, _, _)| *bitrate);

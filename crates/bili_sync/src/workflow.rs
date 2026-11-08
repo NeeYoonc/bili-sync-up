@@ -2273,7 +2273,7 @@ pub async fn fetch_video_details(
                                     use crate::utils::notification::send_error_notification;
                                     if let Err(notify_err) = send_error_notification(
                                         "API请求失败",
-                                        &format!("获取视频详细信息失败"),
+                                        "获取视频详细信息失败",
                                         Some(&format!("视频: {}\nBVID: {}\n错误: {}", video_name, bvid, error_msg)),
                                     )
                                     .await
@@ -3183,7 +3183,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
 
     for (video_model, pages) in &videos_with_pages {
         // 检查多P视频开关（使用视频源自己的配置）
-        let is_multi_page = video_model.single_page.unwrap_or(true) == false;
+        let is_multi_page = !video_model.single_page.unwrap_or(true);
         if is_multi_page && !video_source.ai_rename_enable_multi_page() {
             debug!(
                 "[{}] 跳过多P视频: {} (多P视频AI重命名已禁用)",
@@ -3361,7 +3361,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
             "[{}] 处理视频批次 {}/{}: {} 个文件",
             source_key,
             batch_idx + 1,
-            (video_files.len() + batch_size - 1) / batch_size,
+            video_files.len().div_ceil(batch_size),
             batch.len()
         );
 
@@ -3391,7 +3391,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
             "[{}] 处理音频批次 {}/{}: {} 个文件",
             source_key,
             batch_idx + 1,
-            (audio_files.len() + batch_size - 1) / batch_size,
+            audio_files.len().div_ceil(batch_size),
             batch.len()
         );
 
@@ -3427,7 +3427,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
                 "[{}] 处理文件夹批次 {}/{}: {} 个文件夹",
                 source_key,
                 batch_idx + 1,
-                (folder_renames.len() + batch_size - 1) / batch_size,
+                folder_renames.len().div_ceil(batch_size),
                 batch.len()
             );
             match ai_rename::ai_generate_folder_names_batch(&cfg.ai_rename, &source_key, batch, video_prompt_hint).await
@@ -3586,7 +3586,7 @@ async fn apply_ai_rename(
                 };
                 let mut target_dir = parent_dir.join(&folder_stem);
                 if target_dir.exists() && target_dir != old_dir {
-                    target_dir = parent_dir.join(format!("{}-{}", &folder_stem, file.bvid));
+                    target_dir = parent_dir.join(format!("{}-{}", folder_stem, file.bvid));
                 }
 
                 if target_dir != old_dir {
@@ -7415,33 +7415,33 @@ async fn download_page(
 
     let (poster_path, video_path, nfo_path, danmaku_path, fanart_path, subtitle_path) = if is_single_page {
         (
-            base_path.join(format!("{}-thumb.jpg", &base_name)),
-            base_path.join(format!("{}.{}", &base_name, media_ext)),
-            base_path.join(format!("{}.nfo", &base_name)),
-            base_path.join(format!("{}.zh-CN.default.ass", &base_name)),
-            Some(base_path.join(format!("{}-fanart.jpg", &base_name))),
-            base_path.join(format!("{}.srt", &base_name)),
+            base_path.join(format!("{}-thumb.jpg", base_name)),
+            base_path.join(format!("{}.{}", base_name, media_ext)),
+            base_path.join(format!("{}.nfo", base_name)),
+            base_path.join(format!("{}.zh-CN.default.ass", base_name)),
+            Some(base_path.join(format!("{}-fanart.jpg", base_name))),
+            base_path.join(format!("{}.srt", base_name)),
         )
     } else if is_bangumi {
         // 番剧直接使用基础路径，不创建子文件夹结构
         (
-            base_path.join(format!("{}-thumb.jpg", &base_name)),
-            base_path.join(format!("{}.{}", &base_name, media_ext)),
-            base_path.join(format!("{}.nfo", &base_name)),
-            base_path.join(format!("{}.zh-CN.default.ass", &base_name)),
+            base_path.join(format!("{}-thumb.jpg", base_name)),
+            base_path.join(format!("{}.{}", base_name, media_ext)),
+            base_path.join(format!("{}.nfo", base_name)),
+            base_path.join(format!("{}.zh-CN.default.ass", base_name)),
             None,
-            base_path.join(format!("{}.srt", &base_name)),
+            base_path.join(format!("{}.srt", base_name)),
         )
     } else {
         // 非番剧的多P视频直接使用基础路径，不创建子文件夹
         (
-            base_path.join(format!("{}-thumb.jpg", &base_name)),
-            base_path.join(format!("{}.{}", &base_name, media_ext)),
-            base_path.join(format!("{}.nfo", &base_name)),
-            base_path.join(format!("{}.zh-CN.default.ass", &base_name)),
+            base_path.join(format!("{}-thumb.jpg", base_name)),
+            base_path.join(format!("{}.{}", base_name, media_ext)),
+            base_path.join(format!("{}.nfo", base_name)),
+            base_path.join(format!("{}.zh-CN.default.ass", base_name)),
             // 多P视频的每个分页都应该有自己的fanart
-            Some(base_path.join(format!("{}-fanart.jpg", &base_name))),
-            base_path.join(format!("{}.srt", &base_name)),
+            Some(base_path.join(format!("{}-fanart.jpg", base_name))),
+            base_path.join(format!("{}.srt", base_name)),
         )
     };
     let dimension = match (page_model.width, page_model.height) {
@@ -7812,10 +7812,10 @@ async fn download_page(
                 bail!(DownloadAbortError::rate_limited());
             }
         }
-        ExecutionStatus::ClassifiedFailed(ref classified_error) => {
-            if classified_error.error_type == crate::error::ErrorType::RiskControl {
-                bail!(download_abort_from_classified_risk_control(classified_error));
-            }
+        ExecutionStatus::ClassifiedFailed(ref classified_error)
+            if classified_error.error_type == crate::error::ErrorType::RiskControl =>
+        {
+            bail!(download_abort_from_classified_risk_control(classified_error));
         }
         _ => {}
     }
@@ -8669,7 +8669,7 @@ async fn maybe_embed_cover_into_audio(
     }
 
     let media_downloaded = matches!(results.get(1), Some(ExecutionStatus::Succeeded));
-    let cover_downloaded_or_repaired = matches!(results.get(0), Some(ExecutionStatus::Succeeded));
+    let cover_downloaded_or_repaired = matches!(results.first(), Some(ExecutionStatus::Succeeded));
     if !media_downloaded && !cover_downloaded_or_repaired {
         return None;
     }
@@ -10998,7 +10998,10 @@ pub async fn generate_page_nfo(
                 } else {
                     // 普通单页视频生成Movie
                     use crate::utils::nfo::Movie;
-                    NFO::Movie(Movie::from_video_with_pages(video_model, &[page_model.clone()]))
+                    NFO::Movie(Movie::from_video_with_pages(
+                        video_model,
+                        std::slice::from_ref(page_model),
+                    ))
                 }
             } else {
                 use crate::utils::nfo::Episode;
@@ -11069,7 +11072,7 @@ pub async fn fetch_video_poster(
     debug!("  custom_fanart_url: {:?}", custom_fanart_url);
 
     // 下载thumb封面（依赖should_run参数，重置状态后会强制重新下载）
-    let Some(thumb_url) = custom_cover_url.or_else(|| {
+    let Some(thumb_url) = custom_cover_url.or({
         if allow_video_cover_fallback {
             Some(video_model.cover.as_str())
         } else {
@@ -11340,7 +11343,7 @@ pub async fn fetch_bangumi_poster(
     // 下载 poster.jpg 文件（依赖should_run参数，重置状态后会强制重新下载）
     ensure_parent_dir_for_file(&poster_path).await?;
 
-    let Some(poster_url) = custom_poster_url.or_else(|| {
+    let Some(poster_url) = custom_poster_url.or({
         if allow_video_cover_fallback {
             Some(video_model.cover.as_str())
         } else {
@@ -15550,7 +15553,7 @@ fn resolve_sidecar_base_name(base_path: &std::path::Path, rendered_name: Option<
     });
 
     let from_rendered_name = rendered_name.and_then(|name| {
-        name.rsplit(|c| c == '/' || c == '\\').find_map(|segment| {
+        name.rsplit(['/', '\\']).find_map(|segment| {
             let value = segment.trim();
             (!value.is_empty()).then_some(value.to_string())
         })

@@ -270,6 +270,169 @@ pub async fn run_maintenance(
     }
 }
 
+// ===== 备份 / 恢复 =====
+
+/// 列出配置目录下的数据库备份与导入文件（data-backup-*.sqlite / data-import-*.sqlite），按时间倒序。
+pub async fn list_backups() -> DatabaseBackupListResponse {
+    let mut backups = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(&*CONFIG_DIR).await else {
+        return DatabaseBackupListResponse::default();
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_import = name.starts_with("data-import-") && name.ends_with(".sqlite");
+        let is_backup = name.starts_with("data-backup-") && name.ends_with(".sqlite");
+        if !is_import && !is_backup {
+            continue;
+        }
+        let size_bytes = entry.metadata().await.map(|meta| meta.len()).unwrap_or(0);
+        let created_at = if let Some(parsed) = backup_timestamp(&name) {
+            parsed
+        } else if let Ok(meta) = entry.metadata().await {
+            meta.modified()
+                .ok()
+                .map(|time| {
+                    chrono::DateTime::<chrono::Local>::from(time)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        backups.push(DatabaseBackupInfo {
+            name,
+            path: entry.path().display().to_string(),
+            size_bytes,
+            created_at,
+            is_import,
+        });
+    }
+    backups.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    DatabaseBackupListResponse { backups }
+}
+
+/// 从备份文件名解析创建时间：data-backup-YYYYMMDD-HHMMSS.sqlite
+fn backup_timestamp(name: &str) -> Option<String> {
+    let stem = name.strip_prefix("data-backup-")?.strip_suffix(".sqlite")?;
+    chrono::NaiveDateTime::parse_from_str(stem, "%Y%m%d-%H%M%S")
+        .ok()
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+/// 校验备份文件确实是可用的 bili-sync SQLite 数据库。
+async fn validate_backup_is_sqlite(path: &std::path::Path) -> Result<()> {
+    use sea_orm::sqlx::sqlite::SqliteConnectOptions;
+    use sea_orm::sqlx::SqlitePool;
+    use sea_orm::SqlxSqliteConnector;
+
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false);
+    let pool = SqlitePool::connect_with(options)
+        .await
+        .with_context(|| format!("无法打开备份文件（不是有效的 SQLite 数据库）：{}", path.display()))?;
+    let conn = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool.clone());
+    for table in ["video", "video_source", "config_items", "seaql_migrations"] {
+        let sql = format!(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{}'",
+            table.replace('\'', "''")
+        );
+        let count = conn
+            .query_one(Statement::from_string(conn.get_database_backend(), sql))
+            .await?
+            .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+            .unwrap_or(0);
+        if count < 1 {
+            bail!("备份文件缺少必需的表 {table}，可能不是本程序的数据库备份");
+        }
+    }
+    pool.close().await;
+    Ok(())
+}
+
+/// 安排数据库恢复：校验备份 → 复制为暂存文件 → 写“重启后生效”标记。
+pub async fn restore_backup(backup_file: &str) -> Result<DatabaseRestoreResponse> {
+    let name = backup_file.trim();
+    stage_restore_at(&CONFIG_DIR, name).await?;
+    info!(backup = name, "数据库恢复已安排：重启后生效");
+    Ok(DatabaseRestoreResponse {
+        success: true,
+        message: format!("已安排恢复「{name}」，重启 bili-sync 后生效"),
+        backup_name: Some(name.to_string()),
+        restart_required: true,
+    })
+}
+
+/// `restore_backup` 的可测试实现：目标目录通过参数注入。
+async fn stage_restore_at(config_dir: &std::path::Path, name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains(['/', '\\'])
+        || name.contains("..")
+        || !name.ends_with(".sqlite")
+        || (!name.starts_with("data-backup-") && !name.starts_with("data-import-"))
+    {
+        bail!("无效的备份文件名：{name}");
+    }
+    let source = config_dir.join(name);
+    if !source.is_file() {
+        bail!("备份文件不存在：{}", source.display());
+    }
+    validate_backup_is_sqlite(&source).await?;
+
+    let staged = config_dir.join("data.restore.sqlite");
+    let marker = config_dir.join("data.restore.marker");
+    let _ = tokio::fs::remove_file(&staged).await;
+    tokio::fs::copy(&source, &staged)
+        .await
+        .with_context(|| format!("复制备份文件失败：{}", source.display()))?;
+    tokio::fs::write(&marker, name.as_bytes())
+        .await
+        .with_context(|| "写入恢复标记失败".to_string())?;
+    Ok(())
+}
+
+/// 导入外部备份包：校验 → 移入配置目录（data-import-*.sqlite）→ 安排恢复（重启后生效）。
+pub async fn import_backup(src_path: &std::path::Path, original_name: &str) -> Result<DatabaseRestoreResponse> {
+    import_backup_at(&CONFIG_DIR, src_path, original_name).await
+}
+
+/// `import_backup` 的可测试实现：目标目录通过参数注入。
+async fn import_backup_at(
+    config_dir: &std::path::Path,
+    src_path: &std::path::Path,
+    _original_name: &str,
+) -> Result<DatabaseRestoreResponse> {
+    // 仅接受真实的 bili-sync SQLite 数据库，避免导入任意文件。
+    validate_backup_is_sqlite(src_path).await?;
+
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let mut name = format!("data-import-{timestamp}.sqlite");
+    let mut target = config_dir.join(&name);
+    let mut counter = 1;
+    while target.exists() {
+        name = format!("data-import-{timestamp}-{counter}.sqlite");
+        target = config_dir.join(&name);
+        counter += 1;
+    }
+    tokio::fs::rename(src_path, &target)
+        .await
+        .with_context(|| format!("保存导入的备份包失败：{}", target.display()))?;
+
+    if let Err(err) = stage_restore_at(config_dir, &name).await {
+        let _ = tokio::fs::remove_file(&target).await;
+        return Err(err);
+    }
+    info!(path = %target.display(), "数据库管理：已导入外部备份包并安排恢复（重启后生效）");
+    Ok(DatabaseRestoreResponse {
+        success: true,
+        message: format!("已导入备份包「{name}」并安排恢复，重启 bili-sync 后生效"),
+        backup_name: Some(name),
+        restart_required: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::sqlx::sqlite::SqliteConnectOptions;
@@ -502,167 +665,4 @@ mod tests {
         assert!(result.is_err(), "无效文件应被拒绝");
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
-}
-
-// ===== 备份 / 恢复 =====
-
-/// 列出配置目录下的数据库备份与导入文件（data-backup-*.sqlite / data-import-*.sqlite），按时间倒序。
-pub async fn list_backups() -> DatabaseBackupListResponse {
-    let mut backups = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(&*CONFIG_DIR).await else {
-        return DatabaseBackupListResponse::default();
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let is_import = name.starts_with("data-import-") && name.ends_with(".sqlite");
-        let is_backup = name.starts_with("data-backup-") && name.ends_with(".sqlite");
-        if !is_import && !is_backup {
-            continue;
-        }
-        let size_bytes = entry.metadata().await.map(|meta| meta.len()).unwrap_or(0);
-        let created_at = if let Some(parsed) = backup_timestamp(&name) {
-            parsed
-        } else if let Ok(meta) = entry.metadata().await {
-            meta.modified()
-                .ok()
-                .map(|time| {
-                    chrono::DateTime::<chrono::Local>::from(time)
-                        .format("%Y-%m-%d %H:%M:%S")
-                        .to_string()
-                })
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        backups.push(DatabaseBackupInfo {
-            name,
-            path: entry.path().display().to_string(),
-            size_bytes,
-            created_at,
-            is_import,
-        });
-    }
-    backups.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-    DatabaseBackupListResponse { backups }
-}
-
-/// 从备份文件名解析创建时间：data-backup-YYYYMMDD-HHMMSS.sqlite
-fn backup_timestamp(name: &str) -> Option<String> {
-    let stem = name.strip_prefix("data-backup-")?.strip_suffix(".sqlite")?;
-    chrono::NaiveDateTime::parse_from_str(stem, "%Y%m%d-%H%M%S")
-        .ok()
-        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
-}
-
-/// 校验备份文件确实是可用的 bili-sync SQLite 数据库。
-async fn validate_backup_is_sqlite(path: &std::path::Path) -> Result<()> {
-    use sea_orm::sqlx::sqlite::SqliteConnectOptions;
-    use sea_orm::sqlx::SqlitePool;
-    use sea_orm::SqlxSqliteConnector;
-
-    let options = SqliteConnectOptions::new()
-        .filename(path)
-        .read_only(true)
-        .create_if_missing(false);
-    let pool = SqlitePool::connect_with(options)
-        .await
-        .with_context(|| format!("无法打开备份文件（不是有效的 SQLite 数据库）：{}", path.display()))?;
-    let conn = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool.clone());
-    for table in ["video", "video_source", "config_items", "seaql_migrations"] {
-        let sql = format!(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{}'",
-            table.replace('\'', "''")
-        );
-        let count = conn
-            .query_one(Statement::from_string(conn.get_database_backend(), sql))
-            .await?
-            .and_then(|row| row.try_get_by_index::<i64>(0).ok())
-            .unwrap_or(0);
-        if count < 1 {
-            bail!("备份文件缺少必需的表 {table}，可能不是本程序的数据库备份");
-        }
-    }
-    pool.close().await;
-    Ok(())
-}
-
-/// 安排数据库恢复：校验备份 → 复制为暂存文件 → 写“重启后生效”标记。
-pub async fn restore_backup(backup_file: &str) -> Result<DatabaseRestoreResponse> {
-    let name = backup_file.trim();
-    stage_restore_at(&CONFIG_DIR, name).await?;
-    info!(backup = name, "数据库恢复已安排：重启后生效");
-    Ok(DatabaseRestoreResponse {
-        success: true,
-        message: format!("已安排恢复「{name}」，重启 bili-sync 后生效"),
-        backup_name: Some(name.to_string()),
-        restart_required: true,
-    })
-}
-
-/// `restore_backup` 的可测试实现：目标目录通过参数注入。
-async fn stage_restore_at(config_dir: &std::path::Path, name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.contains(['/', '\\'])
-        || name.contains("..")
-        || !name.ends_with(".sqlite")
-        || (!name.starts_with("data-backup-") && !name.starts_with("data-import-"))
-    {
-        bail!("无效的备份文件名：{name}");
-    }
-    let source = config_dir.join(name);
-    if !source.is_file() {
-        bail!("备份文件不存在：{}", source.display());
-    }
-    validate_backup_is_sqlite(&source).await?;
-
-    let staged = config_dir.join("data.restore.sqlite");
-    let marker = config_dir.join("data.restore.marker");
-    let _ = tokio::fs::remove_file(&staged).await;
-    tokio::fs::copy(&source, &staged)
-        .await
-        .with_context(|| format!("复制备份文件失败：{}", source.display()))?;
-    tokio::fs::write(&marker, name.as_bytes())
-        .await
-        .with_context(|| "写入恢复标记失败".to_string())?;
-    Ok(())
-}
-
-/// 导入外部备份包：校验 → 移入配置目录（data-import-*.sqlite）→ 安排恢复（重启后生效）。
-pub async fn import_backup(src_path: &std::path::Path, original_name: &str) -> Result<DatabaseRestoreResponse> {
-    import_backup_at(&CONFIG_DIR, src_path, original_name).await
-}
-
-/// `import_backup` 的可测试实现：目标目录通过参数注入。
-async fn import_backup_at(
-    config_dir: &std::path::Path,
-    src_path: &std::path::Path,
-    _original_name: &str,
-) -> Result<DatabaseRestoreResponse> {
-    // 仅接受真实的 bili-sync SQLite 数据库，避免导入任意文件。
-    validate_backup_is_sqlite(src_path).await?;
-
-    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let mut name = format!("data-import-{timestamp}.sqlite");
-    let mut target = config_dir.join(&name);
-    let mut counter = 1;
-    while target.exists() {
-        name = format!("data-import-{timestamp}-{counter}.sqlite");
-        target = config_dir.join(&name);
-        counter += 1;
-    }
-    tokio::fs::rename(src_path, &target)
-        .await
-        .with_context(|| format!("保存导入的备份包失败：{}", target.display()))?;
-
-    if let Err(err) = stage_restore_at(config_dir, &name).await {
-        let _ = tokio::fs::remove_file(&target).await;
-        return Err(err);
-    }
-    info!(path = %target.display(), "数据库管理：已导入外部备份包并安排恢复（重启后生效）");
-    Ok(DatabaseRestoreResponse {
-        success: true,
-        message: format!("已导入备份包「{name}」并安排恢复，重启 bili-sync 后生效"),
-        backup_name: Some(name),
-        restart_required: true,
-    })
 }

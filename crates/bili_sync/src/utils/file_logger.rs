@@ -346,11 +346,9 @@ pub fn rotate_log_files_for_new_round() -> Option<String> {
 }
 
 pub fn get_current_log_file_name(level: &str) -> Option<String> {
-    if let Some(ref writer) = *FILE_LOG_WRITER {
-        Some(writer.current_log_file_name(level))
-    } else {
-        None
-    }
+    (*FILE_LOG_WRITER)
+        .as_ref()
+        .map(|writer| writer.current_log_file_name(level))
 }
 
 /// 手动清理旧日志文件：保留最近 `keep_days` 天（含今天）的日志，删除更早的文件。

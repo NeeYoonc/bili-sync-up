@@ -476,8 +476,8 @@ pub async fn sync_page_danmaku(
     let file_exists = tokio::fs::metadata(&danmaku_path).await.is_ok();
     let fetched_danmaku_count = danmaku_elems.len() as u32;
     let last_write_count = if file_exists && !cid_changed {
-        let existing_cursor = load_existing_danmaku_cursor(&danmaku_path).await?;
-        let cutoff = incremental_cutoff_timestamp(&danmaku_path, last_synced, &existing_cursor).await?;
+        let existing_cursor = load_existing_danmaku_cursor(danmaku_path).await?;
+        let cutoff = incremental_cutoff_timestamp(danmaku_path, last_synced, &existing_cursor).await?;
         let incremental_elems = filter_incremental_danmaku(danmaku_elems, cutoff, &existing_cursor);
         let incremental_count = incremental_elems.len() as u32;
         if !incremental_elems.is_empty() {
@@ -489,7 +489,7 @@ pub async fn sync_page_danmaku(
         }
         incremental_count
     } else {
-        let tmp_path = make_tmp_path(&danmaku_path);
+        let tmp_path = make_tmp_path(danmaku_path);
         let writer = DanmakuWriter::new(
             &page_info_for_danmaku,
             danmaku_elems.into_iter().map(Into::into).collect(),

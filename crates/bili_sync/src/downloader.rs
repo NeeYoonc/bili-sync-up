@@ -1288,10 +1288,10 @@ fn build_parallel_ranges(
         return (concurrency, ranges);
     }
 
-    let max_segments = ((total_size + MIN_SEGMENT_SIZE - 1) / MIN_SEGMENT_SIZE) as usize;
+    let max_segments = total_size.div_ceil(MIN_SEGMENT_SIZE) as usize;
     // 大文件不按「并发数」均分，而是限制单个分片的大小上限：限速 CDN 上小分片
     // 才能靠断点续传逐步推进（见 DEFAULT_SEGMENT_SIZE 的说明）。
-    let max_by_size = ((total_size + DEFAULT_SEGMENT_SIZE - 1) / DEFAULT_SEGMENT_SIZE) as usize;
+    let max_by_size = total_size.div_ceil(DEFAULT_SEGMENT_SIZE) as usize;
     let segment_count = concurrency.max(max_by_size).min(max_segments).max(1);
     let base = total_size / segment_count as u64;
     let mut ranges = Vec::with_capacity(segment_count);
@@ -1939,7 +1939,7 @@ mod tests {
         let (concurrency, ranges) = build_parallel_ranges(total_size, 16, false, 0, 16);
 
         assert_eq!(concurrency, 16, "并发数不应被放大");
-        let expected = ((total_size + DEFAULT_SEGMENT_SIZE - 1) / DEFAULT_SEGMENT_SIZE) as usize;
+        let expected = total_size.div_ceil(DEFAULT_SEGMENT_SIZE) as usize;
         assert_eq!(ranges.len(), expected);
         // 除最后一片外都不超过上限
         for range in &ranges[..ranges.len() - 1] {
@@ -2234,7 +2234,7 @@ mod tests {
     async fn parallel_download_resumes_after_connection_drop() {
         let data: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         // 服务器 A：收到首个分片 (0..2MB) 请求时直接断开连接并停止服务（模拟节点挂掉）
-        let (url_a, requested, _fail_start, _fail_left) = spawn_range_test_server(data.clone(), Some(0)).await;
+        let (url_a, _requested, _fail_start, _fail_left) = spawn_range_test_server(data.clone(), Some(0)).await;
         let dir = std::env::temp_dir().join(format!("bili-resume-drop-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir).await;
         let path = dir.join("video.tmp_video");

@@ -102,47 +102,6 @@ pub(crate) fn describe_config_key(key: &str) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_format_config_json_for_log_redacts_sensitive_values() {
-        let config_json = json!({
-            "ai_rename": {
-                "provider": "deepseek-web",
-                "api_key": "sk-test-secret",
-                "deepseek_web_token": "bearer-token-secret"
-            },
-            "credential": {
-                "sessdata": "sess-secret",
-                "bili_jct": "csrf-secret"
-            },
-            "notification": {
-                "webhook_url": "https://example.com/hook/secret"
-            },
-            "items": [
-                { "auth_token": "auth-secret" },
-                { "name": "keep-me" }
-            ],
-            "plain": "visible"
-        });
-
-        let logged = format_config_json_for_log(&config_json);
-
-        assert!(logged.contains("visible"));
-        assert!(logged.contains("keep-me"));
-        assert!(logged.contains("***REDACTED***"));
-        assert!(!logged.contains("sk-test-secret"));
-        assert!(!logged.contains("bearer-token-secret"));
-        assert!(!logged.contains("sess-secret"));
-        assert!(!logged.contains("csrf-secret"));
-        assert!(!logged.contains("auth-secret"));
-        assert!(!logged.contains("/hook/secret"));
-    }
-}
-
 fn is_sensitive_config_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase().replace('-', "_");
 
@@ -1035,5 +994,46 @@ impl ConfigManager {
                 info!("成功从数据库删除配置键: {}", key);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_format_config_json_for_log_redacts_sensitive_values() {
+        let config_json = json!({
+            "ai_rename": {
+                "provider": "deepseek-web",
+                "api_key": "sk-test-secret",
+                "deepseek_web_token": "bearer-token-secret"
+            },
+            "credential": {
+                "sessdata": "sess-secret",
+                "bili_jct": "csrf-secret"
+            },
+            "notification": {
+                "webhook_url": "https://example.com/hook/secret"
+            },
+            "items": [
+                { "auth_token": "auth-secret" },
+                { "name": "keep-me" }
+            ],
+            "plain": "visible"
+        });
+
+        let logged = format_config_json_for_log(&config_json);
+
+        assert!(logged.contains("visible"));
+        assert!(logged.contains("keep-me"));
+        assert!(logged.contains("***REDACTED***"));
+        assert!(!logged.contains("sk-test-secret"));
+        assert!(!logged.contains("bearer-token-secret"));
+        assert!(!logged.contains("sess-secret"));
+        assert!(!logged.contains("csrf-secret"));
+        assert!(!logged.contains("auth-secret"));
+        assert!(!logged.contains("/hook/secret"));
     }
 }

@@ -2348,7 +2348,6 @@ mod tests {
     /// 的 single_page/download_status，使其重新进入详情填充阶段。
     #[tokio::test]
     async fn check_favorite_videos_for_new_parts_resets_video_when_page_count_increased() {
-        use crate::bilibili::VideoInfo;
         use chrono::TimeZone;
 
         let db = create_test_db("favorite-page-reset").await;

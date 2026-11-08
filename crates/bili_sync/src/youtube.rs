@@ -685,10 +685,8 @@ fn youtube_playlist_url_from_item(item: &serde_json::Value) -> Option<String> {
         .or_else(|| item.get("url"))
         .and_then(|value| value.as_str());
     if let Some(value) = explicit {
-        if value.starts_with("http") {
-            if value.contains("playlist?list=") || value.contains("/playlist/") {
-                return Some(value.to_string());
-            }
+        if value.starts_with("http") && (value.contains("playlist?list=") || value.contains("/playlist/")) {
+            return Some(value.to_string());
         }
     }
     let id = item
@@ -3571,11 +3569,11 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     notify_video_sources_changed();
     if added > 0 {
         info!(
-            platform = source_platform_label(&source),
+            platform = source_platform_label(source),
             source_id = source.id,
             added,
             "{}视频源「{}」发现 {} 个新视频",
-            source_platform_label(&source),
+            source_platform_label(source),
             source.name,
             added
         );
@@ -4026,7 +4024,7 @@ async fn download_pending(
             .all(db)
             .await?
             .into_iter()
-            .filter(|source| crate::tiktok::is_tiktok_source(source))
+            .filter(crate::tiktok::is_tiktok_source)
             .map(|source| source.id)
             .collect::<std::collections::HashSet<_>>(),
     );
@@ -4800,7 +4798,7 @@ pub async fn ai_rename_external_history(
     let source_key = format!("{}_{}", source_platform(source), source.id);
     // 抖音短剧/放映厅/合集按番剧结构命名（S01E01 + Season 01），不允许 AI
     // 重命名，避免破坏剧集组织与媒体库识别。
-    if is_episodic_douyin_source(&source) {
+    if is_episodic_douyin_source(source) {
         let skipped = youtube_video::Entity::find()
             .filter(youtube_video::Column::SourceId.eq(source.id))
             .filter(youtube_video::Column::DownloadStatus.eq("completed"))
@@ -5141,7 +5139,7 @@ async fn download_youtube_media(
     } else if source.audio_only {
         let selected = selected.as_ref().context("图文作品不应进入音频流选择")?;
         if let Some(audio) = selected.audio.as_ref() {
-            let urls = format_urls(&audio, platform)?;
+            let urls = format_urls(audio, platform)?;
             let temporary = output_path.with_extension("download.m4a");
             if let Err(error) = fetch_platform_asset(downloader, source, &urls, &temporary)
                 .await
@@ -5152,7 +5150,7 @@ async fn download_youtube_media(
             }
             if audio.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&temporary).await {
                 let _ = remove_file_if_exists(&temporary).await;
-                return Ok(paid_placeholder_result(output_path, &metadata, title, uploader, platform).await?);
+                return paid_placeholder_result(output_path, &metadata, title, uploader, platform).await;
             }
             if let Some(key) = audio.decryption_key.as_deref() {
                 let decrypted = output_path.with_extension("decrypted.m4a");
@@ -5173,7 +5171,7 @@ async fn download_youtube_media(
                 .mixed
                 .as_ref()
                 .ok_or_else(|| anyhow!("{platform}未返回可用音频流"))?;
-            let urls = format_urls(&mixed, platform)?;
+            let urls = format_urls(mixed, platform)?;
             let source_temporary = output_path.with_extension("audio-source.mp4");
             let audio_temporary = output_path.with_extension("download.m4a");
             if let Err(error) = fetch_platform_asset(downloader, source, &urls, &source_temporary)
@@ -5185,7 +5183,7 @@ async fn download_youtube_media(
             }
             if mixed.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&source_temporary).await {
                 let _ = remove_file_if_exists(&source_temporary).await;
-                return Ok(paid_placeholder_result(output_path, &metadata, title, uploader, platform).await?);
+                return paid_placeholder_result(output_path, &metadata, title, uploader, platform).await;
             }
             let decrypted_source = output_path.with_extension("audio-source-decrypted.mp4");
             let extract_source = if let Some(key) = mixed.decryption_key.as_deref() {
@@ -5213,8 +5211,8 @@ async fn download_youtube_media(
         selected.as_ref().and_then(|streams| streams.video.as_ref()),
         selected.as_ref().and_then(|streams| streams.audio.as_ref()),
     ) {
-        let video_urls = format_urls(&video_stream, platform)?;
-        let audio_urls = format_urls(&audio_stream, platform)?;
+        let video_urls = format_urls(video_stream, platform)?;
+        let audio_urls = format_urls(audio_stream, platform)?;
         let video_temporary =
             output_path.with_extension(format!("video.{}", video_stream.ext.as_deref().unwrap_or("mp4")));
         let audio_temporary =
@@ -5300,7 +5298,7 @@ async fn download_youtube_media(
             .mixed
             .as_ref()
             .ok_or_else(|| anyhow!("{platform}未返回可用的音视频流"))?;
-        let urls = format_urls(&mixed, platform)?;
+        let urls = format_urls(mixed, platform)?;
         let temporary = output_path.with_extension(format!("download.{}", mixed.ext.as_deref().unwrap_or("mp4")));
         if let Err(error) = fetch_platform_asset(downloader, source, &urls, &temporary)
             .await
@@ -5311,7 +5309,7 @@ async fn download_youtube_media(
         }
         if mixed.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&temporary).await {
             let _ = remove_file_if_exists(&temporary).await;
-            return Ok(paid_placeholder_result(output_path, &metadata, title, uploader, platform).await?);
+            return paid_placeholder_result(output_path, &metadata, title, uploader, platform).await;
         }
         if let Some(key) = mixed.decryption_key.as_deref() {
             let decrypted = output_path.with_extension("decrypted.mp4");
@@ -6247,19 +6245,11 @@ fn path_leaf_matches(path: &Path, expected: &str) -> bool {
 }
 
 /// 附属文件子任务的结果：告警文案 + 本次解析到的头像地址。
+#[derive(Default)]
 struct YoutubeSidecarOutcome {
     warning: Option<String>,
     /// 本轮解析到的 UP 头像地址，透传给图集分页 NFO，避免重复请求平台接口。
     avatar_url: Option<String>,
-}
-
-impl Default for YoutubeSidecarOutcome {
-    fn default() -> Self {
-        Self {
-            warning: None,
-            avatar_url: None,
-        }
-    }
 }
 
 async fn ensure_youtube_sidecars(
@@ -7832,10 +7822,11 @@ async fn youtube_subtitle_exists(output_path: &Path) -> Result<bool> {
             continue;
         };
         let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
-        if name.starts_with(&format!("{stem}.")) && matches!(extension, "vtt" | "srt" | "ass") {
-            if tokio::fs::metadata(path).await.is_ok_and(|metadata| metadata.len() > 0) {
-                return Ok(true);
-            }
+        if name.starts_with(&format!("{stem}."))
+            && matches!(extension, "vtt" | "srt" | "ass")
+            && tokio::fs::metadata(path).await.is_ok_and(|metadata| metadata.len() > 0)
+        {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -8106,8 +8097,7 @@ fn external_source_identity(source_type: &str, url: &str) -> String {
     let query_param = |key: &str| {
         lower
             .split_once('?')
-            .map(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix(&format!("{key}="))))
-            .flatten()
+            .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix(&format!("{key}="))))
             .unwrap_or("")
     };
     match source_type {
@@ -9333,6 +9323,17 @@ fn trim_output(text: &str) -> String {
     } else {
         format!("…{}", &text[text.len() - MAX..])
     }
+}
+
+/// 迁移旧版 YouTube 凭证文件到数据库（升级兼容；成功后删除旧文件）。
+pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
+    let _ = crate::credential_store::migrate_file_to_db(
+        crate::credential_store::keys::YOUTUBE_COOKIES,
+        &CONFIG_DIR.join("youtube-cookies.txt"),
+        is_netscape_youtube_cookie_file,
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -11171,15 +11172,4 @@ mod tests {
             ]
         );
     }
-}
-
-/// 迁移旧版 YouTube 凭证文件到数据库（升级兼容；成功后删除旧文件）。
-pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
-    let _ = crate::credential_store::migrate_file_to_db(
-        crate::credential_store::keys::YOUTUBE_COOKIES,
-        &CONFIG_DIR.join("youtube-cookies.txt"),
-        is_netscape_youtube_cookie_file,
-    )
-    .await?;
-    Ok(())
 }

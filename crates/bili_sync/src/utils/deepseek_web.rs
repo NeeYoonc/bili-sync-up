@@ -368,7 +368,7 @@ impl DeepSeekWebClient {
         let client_stream_id = format!(
             "{}-{}",
             chrono::Local::now().format("%Y%m%d"),
-            uuid::Uuid::new_v4().to_string().replace("-", "")[..16].to_string()
+            &uuid::Uuid::new_v4().to_string().replace("-", "")[..16]
         );
 
         // parent_message_id 需要转换为数字类型（服务器要求 u32）
@@ -638,6 +638,46 @@ impl DeepSeekWebClient {
     }
 }
 
+/// 使用 DeepSeek Web API 生成原始响应（不清洗）
+///
+/// # 参数
+/// - `token`: DeepSeek Web Token
+/// - `session`: 会话信息（可选，如果为 None 则创建新会话）
+/// - `prompt`: 用户消息
+/// - `timeout_seconds`: 超时时间
+///
+/// # 返回
+/// - (原始响应文本, 更新后的会话信息)
+pub async fn deepseek_web_generate_raw(
+    token: &str,
+    session: Option<DeepSeekSession>,
+    prompt: &str,
+    timeout_seconds: u64,
+) -> Result<(String, DeepSeekSession)> {
+    // 检查并更新 WASM（仅首次调用时执行）
+    super::deepseek_pow::check_and_update_wasm().await;
+
+    let client = DeepSeekWebClient::new(token, timeout_seconds)?;
+
+    // 获取或创建会话
+    let (session_id, parent_message_id) = match session {
+        Some(s) => (s.session_id, s.parent_message_id),
+        None => (client.create_session().await?, None),
+    };
+
+    // 发送消息
+    let (response, new_message_id) = client
+        .send_message(&session_id, parent_message_id.as_deref(), prompt, timeout_seconds)
+        .await?;
+
+    let updated_session = DeepSeekSession {
+        session_id,
+        parent_message_id: new_message_id,
+    };
+
+    Ok((response, updated_session))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ApiResponse, CreateSessionResponse, DeepSeekWebClient};
@@ -690,44 +730,4 @@ data: {"v":"HY2020 2024-06-09\", \"三国bigbig 2024-06-09\"]"}
 
         assert_eq!(response, r#"["ZHY2020 2024-06-09", "三国bigbig 2024-06-09"]"#);
     }
-}
-
-/// 使用 DeepSeek Web API 生成原始响应（不清洗）
-///
-/// # 参数
-/// - `token`: DeepSeek Web Token
-/// - `session`: 会话信息（可选，如果为 None 则创建新会话）
-/// - `prompt`: 用户消息
-/// - `timeout_seconds`: 超时时间
-///
-/// # 返回
-/// - (原始响应文本, 更新后的会话信息)
-pub async fn deepseek_web_generate_raw(
-    token: &str,
-    session: Option<DeepSeekSession>,
-    prompt: &str,
-    timeout_seconds: u64,
-) -> Result<(String, DeepSeekSession)> {
-    // 检查并更新 WASM（仅首次调用时执行）
-    super::deepseek_pow::check_and_update_wasm().await;
-
-    let client = DeepSeekWebClient::new(token, timeout_seconds)?;
-
-    // 获取或创建会话
-    let (session_id, parent_message_id) = match session {
-        Some(s) => (s.session_id, s.parent_message_id),
-        None => (client.create_session().await?, None),
-    };
-
-    // 发送消息
-    let (response, new_message_id) = client
-        .send_message(&session_id, parent_message_id.as_deref(), prompt, timeout_seconds)
-        .await?;
-
-    let updated_session = DeepSeekSession {
-        session_id,
-        parent_message_id: new_message_id,
-    };
-
-    Ok((response, updated_session))
 }

@@ -1945,7 +1945,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             }
 
             // 显示剩余等待时间（只在较长等待时显示）
-            if remaining_time > 0 && remaining_time % 30 == 0 && remaining_time >= 30 {
+            if remaining_time > 0 && remaining_time.is_multiple_of(30) && remaining_time >= 30 {
                 debug!("距离下一轮扫描还有 {} 秒", remaining_time);
             }
         }

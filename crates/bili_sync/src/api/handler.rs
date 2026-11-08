@@ -8074,7 +8074,7 @@ async fn find_videos_by_source_relation(
         "watch_later" => video::Entity::find().filter(video::Column::WatchLaterId.eq(id)),
         "bangumi" | "pugv" | "manga" => video::Entity::find()
             .filter(video::Column::SourceId.eq(id))
-            .filter(video::Column::SourceType.eq(bili_source_type_code(&source_type).unwrap_or(1))),
+            .filter(video::Column::SourceType.eq(bili_source_type_code(source_type).unwrap_or(1))),
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type)),
     };
 
@@ -8134,7 +8134,7 @@ async fn clear_video_source_relation(conn: &impl ConnectionTrait, source_type: &
                     sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
                 )
                 .filter(video::Column::SourceId.eq(id))
-                .filter(video::Column::SourceType.eq(bili_source_type_code(&source_type).unwrap_or(1)))
+                .filter(video::Column::SourceType.eq(bili_source_type_code(source_type).unwrap_or(1)))
                 .exec(conn)
                 .await?;
         }
@@ -11869,11 +11869,10 @@ pub async fn preview_filename_templates(
         .map_err(|err| ApiError::from(InnerApiError::BadRequest(format!("命名模板解析失败: {}", err))))?;
 
     let mut warnings = Vec::new();
-    if preview_config.video_name.contains('/') || preview_config.video_name.contains('\\') {
-        if preview_config.multi_page_name.contains('/') || preview_config.multi_page_name.contains('\\') {
-            warnings
-                .push("视频文件名模板和多P视频文件名模板都包含路径分隔符，保存时会按路径冲突规则处理。".to_string());
-        }
+    if (preview_config.video_name.contains('/') || preview_config.video_name.contains('\\'))
+        && (preview_config.multi_page_name.contains('/') || preview_config.multi_page_name.contains('\\'))
+    {
+        warnings.push("视频文件名模板和多P视频文件名模板都包含路径分隔符，保存时会按路径冲突规则处理。".to_string());
     }
     if template_has_path_separator_outside_handlebars(&preview_config.page_name) {
         warnings.push("单P视频文件名模板包含路径分隔符，当前保存规则不允许这样配置。".to_string());

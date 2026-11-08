@@ -65,7 +65,7 @@ where
 
         if let Some(mut message) = visitor.message {
             if let Some(error) = visitor.error.filter(|error| !error.trim().is_empty()) {
-                message.push_str("：");
+                message.push('：');
                 message.push_str(&error);
             }
             let mut target = event.metadata().target().to_string();

@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn test_path_segments_truncate_independently() {
         let long_title = "变天了，请注意盖被子，我帮你盖的时候要记得说“谢谢你，宝宝”而不是“我草，你是怎么进来的？！”这种不知感恩的话，不要问我为什么会在你家里，我会一直看着你的，永远";
-        let result = filenamify_with_options(&format!("UP主名__UNIX_SEP__{}", long_title), true);
+        let result = filenamify_with_options(format!("UP主名__UNIX_SEP__{}", long_title), true);
         let parts = result.split("__UNIX_SEP__").collect::<Vec<_>>();
 
         assert_eq!(parts.len(), 2);
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn test_truncated_path_segment_does_not_end_with_period() {
         let title = format!("{}..tail", "a".repeat(super::MAX_FILENAME_BYTES - 2));
-        let result = filenamify_with_options(&format!("UP主名__UNIX_SEP__{}", title), true);
+        let result = filenamify_with_options(format!("UP主名__UNIX_SEP__{}", title), true);
         let parts = result.split("__UNIX_SEP__").collect::<Vec<_>>();
 
         assert_eq!(parts.len(), 2);

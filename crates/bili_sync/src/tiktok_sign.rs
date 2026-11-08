@@ -327,7 +327,7 @@ mod tests {
         let (plain, _pos, rounds) = decrypt_shell(&sig, X_GNARLY_MAGIC).expect("应能自解密");
         assert_eq!(plain.len(), 193, "明文长度应为 193");
         assert_eq!(plain[0], 16, "明文首字节应为字段数 16");
-        assert!(rounds >= 5 && rounds <= 20, "轮数应在 [5,20]: {rounds}");
+        assert!((5..=20).contains(&rounds), "轮数应在 [5,20]: {rounds}");
         // 字段 3 应是 md5(query) 的 hex
         let expect_md5 = md5_hex(query);
         let s = String::from_utf8_lossy(&plain);

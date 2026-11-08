@@ -528,6 +528,39 @@ impl Default for SubmissionRiskControlConfig {
     }
 }
 
+#[allow(dead_code)]
+pub trait PathSafeTemplate {
+    fn path_safe_register(&mut self, name: &'static str, template: &'static str) -> Result<()>;
+    fn path_safe_render(&self, name: &'static str, data: &serde_json::Value) -> Result<String>;
+}
+
+/// 通过将模板字符串中的分隔符替换为自定义的字符串，使得模板字符串中的分隔符得以保留
+impl PathSafeTemplate for handlebars::Handlebars<'_> {
+    fn path_safe_register(&mut self, name: &'static str, template: &'static str) -> Result<()> {
+        // 处理连续的路径分隔符，然后区分Unix风格和Windows风格
+        let safe_template = template
+            .replace("\\\\", "__WIN_SEP__")   // 连续的Windows反斜杠当作一个分隔符
+            .replace("//", "__UNIX_SEP__")    // 连续的Unix正斜杠当作一个分隔符
+            .replace('/', "__UNIX_SEP__")     // 单个Unix风格正斜杠
+            .replace('\\', "__WIN_SEP__"); // 单个Windows风格反斜杠
+        Ok(self.register_template_string(name, safe_template)?)
+    }
+
+    fn path_safe_render(&self, name: &'static str, data: &serde_json::Value) -> Result<String> {
+        let rendered = filenamify(&self.render(name, data)?);
+        #[cfg(windows)]
+        {
+            // Windows系统下：Unix风格转为下划线，Windows风格保持为反斜杠
+            Ok(rendered.replace("__UNIX_SEP__", "_").replace("__WIN_SEP__", "\\"))
+        }
+        #[cfg(not(windows))]
+        {
+            // 非Windows系统下：Unix风格转为正斜杠，Windows风格转为下划线
+            Ok(rendered.replace("__UNIX_SEP__", "/").replace("__WIN_SEP__", "_"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod submission_risk_control_config_tests {
     use super::SubmissionRiskControlConfig;
@@ -572,38 +605,5 @@ mod submission_risk_control_config_tests {
         assert_eq!(value["large_source_max_videos_per_round"], 7);
         assert_eq!(value["large_source_playurl_duration_ms"], 1500);
         assert_eq!(value["audio_only_use_low_qn_for_playurl"], true);
-    }
-}
-
-#[allow(dead_code)]
-pub trait PathSafeTemplate {
-    fn path_safe_register(&mut self, name: &'static str, template: &'static str) -> Result<()>;
-    fn path_safe_render(&self, name: &'static str, data: &serde_json::Value) -> Result<String>;
-}
-
-/// 通过将模板字符串中的分隔符替换为自定义的字符串，使得模板字符串中的分隔符得以保留
-impl PathSafeTemplate for handlebars::Handlebars<'_> {
-    fn path_safe_register(&mut self, name: &'static str, template: &'static str) -> Result<()> {
-        // 处理连续的路径分隔符，然后区分Unix风格和Windows风格
-        let safe_template = template
-            .replace("\\\\", "__WIN_SEP__")   // 连续的Windows反斜杠当作一个分隔符
-            .replace("//", "__UNIX_SEP__")    // 连续的Unix正斜杠当作一个分隔符
-            .replace('/', "__UNIX_SEP__")     // 单个Unix风格正斜杠
-            .replace('\\', "__WIN_SEP__"); // 单个Windows风格反斜杠
-        Ok(self.register_template_string(name, safe_template)?)
-    }
-
-    fn path_safe_render(&self, name: &'static str, data: &serde_json::Value) -> Result<String> {
-        let rendered = filenamify(&self.render(name, data)?);
-        #[cfg(windows)]
-        {
-            // Windows系统下：Unix风格转为下划线，Windows风格保持为反斜杠
-            Ok(rendered.replace("__UNIX_SEP__", "_").replace("__WIN_SEP__", "\\"))
-        }
-        #[cfg(not(windows))]
-        {
-            // 非Windows系统下：Unix风格转为正斜杠，Windows风格转为下划线
-            Ok(rendered.replace("__UNIX_SEP__", "/").replace("__WIN_SEP__", "_"))
-        }
     }
 }

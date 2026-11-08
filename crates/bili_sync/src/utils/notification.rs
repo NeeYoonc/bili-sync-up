@@ -831,7 +831,7 @@ impl NotificationClient {
             return content.to_string();
         }
 
-        let suffix_bytes = suffix.as_bytes().len();
+        let suffix_bytes = suffix.len();
         if suffix_bytes >= max_bytes {
             let mut end = max_bytes;
             while end > 0 && !content.is_char_boundary(end) {
