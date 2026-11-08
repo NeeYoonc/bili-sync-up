@@ -1131,6 +1131,17 @@ export interface QueueInfo {
 	tasks: QueueTaskInfo[];
 }
 
+// AI 批量重命名响应类型
+export interface BatchRenameResponse {
+	success: boolean;
+	renamed_count: number;
+	skipped_count: number;
+	failed_count: number;
+	message: string;
+	// 后端改成任务队列后：true 表示任务只是加入队列，真正的重命名在后台执行
+	queued?: boolean;
+}
+
 // 配置队列信息类型
 export interface ConfigQueueInfo {
 	update_length: number;
@@ -1147,6 +1158,7 @@ export interface QueueStatusResponse {
 	video_delete_queue: QueueInfo;
 	add_queue: QueueInfo;
 	danmaku_queue: QueueInfo;
+	ai_rename_queue: QueueInfo;
 	config_queue: ConfigQueueInfo;
 }
 

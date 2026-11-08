@@ -18,6 +18,7 @@
 		Clock,
 		CheckCircle,
 		AlertCircle,
+		WandSparkles,
 		X
 	} from '@lucide/svelte';
 	import api from '$lib/api';
@@ -45,6 +46,14 @@
 		{ label: '任务队列', href: '/queue' }
 	]);
 
+	// 兼容老后端：没有 ai_rename_queue 字段时补一个空队列，避免页面渲染时读 undefined
+	function normalizeQueueStatus(status: QueueStatusResponse): QueueStatusResponse {
+		return {
+			...status,
+			ai_rename_queue: status.ai_rename_queue ?? { length: 0, is_processing: false, tasks: [] }
+		};
+	}
+
 	// 获取队列状态
 	async function fetchQueueStatus() {
 		const response = await runRequest(() => api.getQueueStatus(), {
@@ -58,7 +67,7 @@
 		});
 		if (!response) return;
 
-		queueStatus = response.data;
+		queueStatus = normalizeQueueStatus(response.data);
 		try {
 			youtubeQueue = (await api.getYouTubeQueueStatus()).data;
 		} catch (youtubeError) {
@@ -81,7 +90,7 @@
 			handlers: {
 				queue: (event) => {
 					try {
-						queueStatus = JSON.parse(event.data) as QueueStatusResponse;
+						queueStatus = normalizeQueueStatus(JSON.parse(event.data) as QueueStatusResponse);
 						error = null;
 						loading = false;
 					} catch (err) {
@@ -112,7 +121,8 @@
 			add_video_source: '添加视频源',
 			update_config: '更新配置',
 			reload_config: '重载配置',
-			refresh_danmaku: '刷新弹幕'
+			refresh_danmaku: '刷新弹幕',
+			ai_rename_history: 'AI 批量重命名'
 		};
 		return typeMap[taskType] || taskType;
 	}
@@ -126,7 +136,8 @@
 			add_video_source: Plus,
 			update_config: Settings,
 			reload_config: RefreshCw,
-			refresh_danmaku: RefreshCw
+			refresh_danmaku: RefreshCw,
+			ai_rename_history: WandSparkles
 		};
 		return iconMap[taskType] || ListTodo;
 	}
@@ -400,6 +411,29 @@
 					</div>
 				</CardContent>
 			</Card>
+
+			<Card>
+				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
+					<CardTitle class="text-sm font-medium">AI 重命名队列</CardTitle>
+					<WandSparkles class="text-muted-foreground h-4 w-4" />
+				</CardHeader>
+				<CardContent>
+					<div class="text-2xl font-bold">{queueStatus.ai_rename_queue.length}</div>
+					<div class="flex items-center gap-2">
+						<Badge
+							variant={getQueueStatusVariant(
+								queueStatus.ai_rename_queue.is_processing,
+								queueStatus.ai_rename_queue.length > 0
+							)}
+						>
+							{getQueueStatusText(
+								queueStatus.ai_rename_queue.is_processing,
+								queueStatus.ai_rename_queue.length > 0
+							)}
+						</Badge>
+					</div>
+				</CardContent>
+			</Card>
 		</div>
 
 		<Card class="mb-6">
@@ -664,6 +698,63 @@
 					</CardContent>
 				</Card>
 
+				<!-- AI 重命名队列 -->
+				<Card>
+					<CardHeader>
+						<CardTitle class="flex items-center gap-2">
+							<WandSparkles class="h-5 w-5" />
+							AI 重命名队列
+							{#if queueStatus.ai_rename_queue.is_processing}
+								<Badge variant="destructive">处理中</Badge>
+							{/if}
+						</CardTitle>
+						<CardDescription>等待执行的 AI 批量重命名历史文件任务</CardDescription>
+					</CardHeader>
+					<CardContent>
+						{#if queueStatus.ai_rename_queue.tasks.length === 0}
+							<div class="text-muted-foreground flex items-center justify-center py-8">
+								<div class="text-center">
+									<CheckCircle class="mx-auto mb-3 h-12 w-12 opacity-50" />
+									<p>队列为空</p>
+								</div>
+							</div>
+						{:else}
+							<div class="space-y-3">
+								{#each queueStatus.ai_rename_queue.tasks as task (task.task_id)}
+									<div class="bg-muted/50 flex items-center justify-between rounded-lg p-3">
+										<div class="flex items-center gap-3">
+											<svelte:component
+												this={getTaskTypeIcon(task.task_type)}
+												class="text-muted-foreground h-4 w-4"
+											/>
+											<div>
+												<p class="text-sm font-medium">
+													{task.description || getTaskTypeName(task.task_type)}
+												</p>
+												<p class="text-muted-foreground text-xs">ID: {task.task_id}</p>
+											</div>
+										</div>
+										<div class="flex items-center gap-2">
+											<p class="text-muted-foreground text-xs">{formatTime(task.created_at)}</p>
+											<Button
+												variant="outline"
+												size="sm"
+												class="h-7 px-2 text-xs"
+												data-glossary-term="取消任务"
+												disabled={isCancelling(task.task_id)}
+												onclick={() => handleCancelTask(task.task_id)}
+											>
+												<X class="mr-1 h-3.5 w-3.5" />
+												{isCancelling(task.task_id) ? '取消中' : '取消'}
+											</Button>
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</CardContent>
+				</Card>
+
 				<!-- 配置队列 -->
 				<Card>
 					<CardHeader>
@@ -830,6 +921,16 @@
 							</div>
 						</div>
 
+						<div class="flex items-start gap-3 rounded-lg bg-violet-50 p-3 dark:bg-violet-950/20">
+							<WandSparkles class="mt-0.5 h-4 w-4 text-violet-600" />
+							<div>
+								<p class="font-medium text-violet-900 dark:text-violet-100">AI 重命名队列</p>
+								<p class="text-xs text-violet-700 dark:text-violet-300">
+									处理视频源的 AI 批量重命名历史文件任务
+								</p>
+							</div>
+						</div>
+
 						<!-- 状态说明 -->
 						<div>
 							<h4 class="mb-3 flex items-center gap-2 font-medium">
@@ -912,6 +1013,7 @@
 							<li>• <strong>add_video_source:</strong> 添加视频源</li>
 							<li>• <strong>update_config:</strong> 更新系统配置</li>
 							<li>• <strong>reload_config:</strong> 重载配置文件</li>
+							<li>• <strong>ai_rename_history:</strong> AI 批量重命名</li>
 						</ul>
 					</div>
 					<div>
