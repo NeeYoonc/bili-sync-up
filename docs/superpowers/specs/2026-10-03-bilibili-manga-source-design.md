@@ -82,7 +82,7 @@ POST /twirp/comic.v1.Comic/<Method>?device=pc&platform=web&ultra_sign=<S>&nov=27
 - 序号取 `video.episode_number`（= B漫 `ord`），补 4 位；`title` 为空时回退 `short_title`。
 - 特典判定：`type != 0 || extra != 0`，或标题命中「番外 / 特典 / 贺图 / 公告」。
 - 特典必须三件套：`Specials/` 目录 + 文件名 `SP%02d` + `ComicInfo.Format = Special`（Kavita 硬性要求）。
-- 模板变量复用现有集合：`{{title}}`、`{{ptitle}}`、`{{pid}}`、`{{pid_pad}}`、`{{ep_id}}`、`{{pubtime}}`、`{{upper_name}}`。
+- 模板变量复用现有集合：<code v-pre>{{title}}</code>、<code v-pre>{{ptitle}}</code>、<code v-pre>{{pid}}</code>、<code v-pre>{{pid_pad}}</code>、<code v-pre>{{ep_id}}</code>、<code v-pre>{{pubtime}}</code>、<code v-pre>{{upper_name}}</code>。
 
 CBZ 内部：
 
