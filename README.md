@@ -63,7 +63,7 @@
 docker run -d \
   --name bili-sync \
   -p 12345:12345 \
-  -v ./data:/data \
+  -v ./config:/app/.config/bili-sync \
   qq1582185982/bili-sync:latest
 ```
 
