@@ -11005,7 +11005,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let video = super::youtube_video::Model {
+        let mut video = super::youtube_video::Model {
             output_path: Some(output.display().to_string()),
             ..Default::default()
         };
