@@ -1,7 +1,7 @@
 # 质量门禁 v1（2026-11-08）
 #
-# 只启用三道「现在就能绿」的关：Rust 格式检查 / 前端 svelte-check / 文档站构建。
-# clippy 与 cargo test 暂缓，原因和启用方式见文件末尾的注释块。
+# 四道：Rust 格式检查 / Clippy / 前端 svelte-check / 文档站构建。
+# cargo test 暂缓，原因和启用方式见文件末尾的注释块。
 #
 # 几个刻意不做的事：
 # - 不用 `npm run check:node20` / `build:node20`：那是 Windows 本地给 npx 用的包装脚本，
@@ -86,46 +86,39 @@ jobs:
           npm ci
           npm run docs:build
 
+  clippy:
+    name: Rust Clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+      - name: 读取 rust-toolchain.toml 里的工具链版本
+        id: toolchain
+        run: |
+          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | head -n 1)"
+          if [ -z "$channel" ]; then
+            echo "读不到 rust-toolchain.toml 里的 channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - name: 安装 Rust 工具链（clippy + rustfmt）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy, rustfmt
+      - name: 缓存 cargo 编译产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: 占位前端产物目录（rust-embed 的 #[folder = "../../web/build"] 缺目录会编译失败）
+        run: mkdir -p web/build
+      # 先以「不开启 -D warnings」的方式采集完整告警清单，清零后再改成 -- -D warnings。
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets
+
 # ---------------------------------------------------------------------------
-# 暂未启用的两关（等前置条件满足后，删掉每行开头的 # 即可恢复；注意保留缩进）
-#
-# clippy（等编译 warning 清零后启用）
-#   现在启用必红：CI 日志里 28/30 条 rustc warning，加上 clippy 专属的 6 处
-#   too_many_arguments 等 lint，`-D warnings` 下全部是错误。warning 清零 PR 合并后再开。
-#   另：clippy 需要编译整个 crate，rust-embed 的 #[folder = "../../web/build"] 在
-#   web/build 不存在时只告警不报错，但为了输出干净，先 mkdir 一个空目录。
-#
-#  clippy:
-#    name: Rust Clippy
-#    runs-on: ubuntu-24.04
-#    steps:
-#      - name: 检出代码
-#        uses: actions/checkout@v6
-#      - name: 读取 rust-toolchain.toml 里的工具链版本
-#        id: toolchain
-#        run: |
-#          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | head -n 1)"
-#          if [ -z "$channel" ]; then
-#            echo "读不到 rust-toolchain.toml 里的 channel" >&2
-#            exit 1
-#          fi
-#          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-#      - name: 安装 Rust 工具链（clippy + rustfmt）
-#        uses: dtolnay/rust-toolchain@stable
-#        with:
-#          toolchain: ${{ steps.toolchain.outputs.channel }}
-#          components: clippy, rustfmt
-#      - name: 缓存 cargo 编译产物
-#        uses: Swatinem/rust-cache@v2
-#        with:
-#          shared-key: clippy
-#          save-if: ${{ github.ref == 'refs/heads/main' }}
-#      - name: 占位前端产物目录
-#        run: mkdir -p web/build
-#      - name: cargo clippy
-#        run: cargo clippy --workspace --all-targets -- -D warnings
-#
-# test（等测试基线建立后启用）
+# 暂未启用的一关：test（等测试基线建立后启用）
 #   现在启用风险高：cargo test 从未在 CI 跑过，510 个测试里 13 个 #[ignore]（依赖网络 /
 #   真实凭证 / ffmpeg），非 ignore 的测试也没验证过在干净 runner 上是否全绿。
 #   更硬的坑：不先建 web/build 时 rust-embed 的 #[folder] 可能直接编译失败，

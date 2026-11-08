@@ -265,7 +265,6 @@ impl MangaEpisode {
 /// B 漫作品详情（只保留同步需要的字段）。
 #[derive(Debug, Clone)]
 pub struct MangaComic {
-    pub comic_id: String,
     pub title: String,
     pub author: String,
     pub intro: String,
@@ -446,7 +445,6 @@ pub async fn fetch_comic_detail(comic_id: &str) -> Result<MangaComic> {
     }
 
     Ok(MangaComic {
-        comic_id: comic_id.to_string(),
         title,
         author,
         intro,
