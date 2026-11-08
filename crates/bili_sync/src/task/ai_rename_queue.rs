@@ -507,7 +507,7 @@ fn compute_structure_hint(source_type: &str, config: &crate::config::Config) -> 
                 "番剧季文件夹"
             }
         }
-        "collection" => match config.collection_folder_mode.as_deref() {
+        "collection" => match config.collection_folder_mode.as_ref() {
             Some("unified") => "合集统一模式（SxxExx）",
             Some("up_seasonal") => "UP分季结构（SxxExx）",
             _ => "",

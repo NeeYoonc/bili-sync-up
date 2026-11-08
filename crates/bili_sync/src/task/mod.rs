@@ -2,9 +2,7 @@ pub mod ai_rename_queue;
 mod http_server;
 pub mod video_downloader;
 
-pub use ai_rename_queue::{
-    execute_ai_rename_history_task, AiRenameHistoryOutcome, AiRenameHistoryTask, AiRenameHistoryTaskQueue,
-};
+pub use ai_rename_queue::{AiRenameHistoryTask, AiRenameHistoryTaskQueue};
 pub use http_server::http_server;
 pub use video_downloader::{credential_refresh_scheduler, video_downloader};
 
