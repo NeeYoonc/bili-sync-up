@@ -414,17 +414,30 @@ fn danmaku_subtask_completed(status: u32) -> bool {
     slot == STATUS_OK
 }
 
-pub async fn sync_page_danmaku(
-    bili_video: &Video<'_>,
-    config: &Config,
-    video_model: &video::Model,
-    db_page: &page::Model,
-    fresh: &BiliPageInfo,
-    danmaku_path: &Path,
+pub(crate) struct SyncPageDanmakuInput<'a> {
+    bili_video: &'a Video<'_>,
+    config: &'a Config,
+    video_model: &'a video::Model,
+    db_page: &'a page::Model,
+    fresh: &'a BiliPageInfo,
+    danmaku_path: &'a Path,
     next_stage: Option<Stage>,
     now: DateTime<Utc>,
     token: CancellationToken,
-) -> Result<PageDanmakuSyncUpdate> {
+}
+
+pub async fn sync_page_danmaku(p: SyncPageDanmakuInput<'_>) -> Result<PageDanmakuSyncUpdate> {
+    let SyncPageDanmakuInput {
+        bili_video,
+        config,
+        video_model,
+        db_page,
+        fresh,
+        danmaku_path,
+        next_stage,
+        now,
+        token,
+    } = p;
     if fresh.cid <= 0 {
         bail!("分页 pid={} 返回了无效 cid", fresh.page);
     }
@@ -787,6 +800,8 @@ mod tests {
         .expect("应能插入测试视频");
     }
 
+    /// 测试辅助：插入一条分页记录。参数全列出来更好读，故豁免参数个数检查。
+    #[allow(clippy::too_many_arguments, reason = "测试夹具，参数列出来比结构体更直观")]
     async fn insert_test_page(
         db: &DatabaseConnection,
         id: i32,

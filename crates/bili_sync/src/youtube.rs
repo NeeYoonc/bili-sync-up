@@ -5333,16 +5333,16 @@ async fn download_youtube_media(
     let sidecars = if source.audio_only && source.audio_only_m4a_only && !metadata.is_slideshow() {
         YoutubeSidecarOutcome::default()
     } else {
-        ensure_youtube_sidecars(
-            downloader,
-            &metadata,
-            &output_path,
-            &video.url,
-            &title,
-            &uploader,
-            source,
-            video.episode_number,
-        )
+        ensure_youtube_sidecars(YoutubeSidecarInput {
+            downloader: downloader,
+            metadata: &metadata,
+            output_path: &output_path,
+            video_url: &video.url,
+            title: &title,
+            uploader: &uploader,
+            source: source,
+            episode_number: video.episode_number,
+        })
         .await
     };
 
@@ -6252,16 +6252,28 @@ struct YoutubeSidecarOutcome {
     avatar_url: Option<String>,
 }
 
-async fn ensure_youtube_sidecars(
-    downloader: &UnifiedDownloader,
-    metadata: &ExternalMediaMetadata,
-    output_path: &Path,
-    video_url: &str,
-    title: &str,
-    uploader: &str,
-    source: &youtube_source::Model,
+struct YoutubeSidecarInput<'a> {
+    downloader: &'a UnifiedDownloader,
+    metadata: &'a ExternalMediaMetadata,
+    output_path: &'a Path,
+    video_url: &'a str,
+    title: &'a str,
+    uploader: &'a str,
+    source: &'a youtube_source::Model,
     episode_number: Option<i32>,
-) -> YoutubeSidecarOutcome {
+}
+
+async fn ensure_youtube_sidecars(p: YoutubeSidecarInput<'_>) -> YoutubeSidecarOutcome {
+    let YoutubeSidecarInput {
+        downloader,
+        metadata,
+        output_path,
+        video_url,
+        title,
+        uploader,
+        source,
+        episode_number,
+    } = p;
     let mut warnings = Vec::new();
     let platform = source_platform_label(source);
     let profile_url = metadata.channel_url.as_deref().or(metadata.uploader_url.as_deref());
@@ -7125,6 +7137,20 @@ fn youtube_co_creators(metadata: &ExternalMediaMetadata, uploader: &str) -> Vec<
     extras
 }
 
+struct YoutubeMovieNfoInput<'a> {
+    title: &'a str,
+    description: &'a str,
+    platform: &'a str,
+    studio: &'a str,
+    id: &'a str,
+    aired: chrono::NaiveDateTime,
+    uploader: &'a str,
+    co_creators: &'a [String],
+    thumbnail: &'a str,
+    video_url: &'a str,
+    avatar_url: Option<&'a str>,
+}
+
 /// 构建单视频（movie）NFO XML。
 ///
 /// - `studio`：平台名（如 YouTube/抖音），写入 `<studio>`；
@@ -7134,19 +7160,20 @@ fn youtube_co_creators(metadata: &ExternalMediaMetadata, uploader: &str) -> Vec<
 /// - `avatar_url`：主频道头像地址，写进 `<actor><thumb>`，媒体库里才有作者头像。
 /// 注意 `<aired>` 与 `<studio>` 两个标签的参数顺序不能写反，
 /// 否则会出现"工作室=日期、首播=平台名"的错位。
-fn build_youtube_movie_nfo_xml(
-    title: &str,
-    description: &str,
-    platform: &str,
-    studio: &str,
-    id: &str,
-    aired: chrono::NaiveDateTime,
-    uploader: &str,
-    co_creators: &[String],
-    thumbnail: &str,
-    video_url: &str,
-    avatar_url: Option<&str>,
-) -> String {
+fn build_youtube_movie_nfo_xml(p: YoutubeMovieNfoInput<'_>) -> String {
+    let YoutubeMovieNfoInput {
+        title,
+        description,
+        platform,
+        studio,
+        id,
+        aired,
+        uploader,
+        co_creators,
+        thumbnail,
+        video_url,
+        avatar_url,
+    } = p;
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     let avatar = avatar_url.filter(|url| !url.trim().is_empty());
     let actor_role = if platform == "douyin" { "UP主" } else { "频道" };
@@ -7240,19 +7267,19 @@ async fn generate_youtube_nfo(
     let platform = source_platform(source);
     let studio = source_platform_label(source);
     let co_creators = youtube_co_creators(metadata, uploader);
-    let xml = build_youtube_movie_nfo_xml(
-        title,
-        description,
-        platform,
-        studio,
-        &metadata.id,
-        aired,
-        uploader,
-        &co_creators,
-        thumbnail,
-        video_url,
-        avatar_url,
-    );
+    let xml = build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
+        title: title,
+        description: description,
+        platform: platform,
+        studio: studio,
+        id: &metadata.id,
+        aired: aired,
+        uploader: uploader,
+        co_creators: &co_creators,
+        thumbnail: thumbnail,
+        video_url: video_url,
+        avatar_url: avatar_url,
+    });
     let temporary = nfo_path.with_extension("nfo.download");
     tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
         format!(
@@ -10132,19 +10159,19 @@ mod tests {
             .expect("有效日期")
             .and_hms_opt(0, 0, 0)
             .expect("有效时间");
-        let xml = super::build_youtube_movie_nfo_xml(
-            "测试视频",
-            "简介",
-            "YouTube",
-            "YouTube",
-            "dQw4w9WgXcQ",
-            aired,
-            "测试频道",
-            &[],
-            "https://example.com/thumb.jpg",
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            None,
-        );
+        let xml = super::build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
+            title: "测试视频",
+            description: "简介",
+            platform: "YouTube",
+            studio: "YouTube",
+            id: "dQw4w9WgXcQ",
+            aired: aired,
+            uploader: "测试频道",
+            co_creators: &[],
+            thumbnail: "https://example.com/thumb.jpg",
+            video_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            avatar_url: None,
+        });
         assert!(xml.contains("<studio>YouTube</studio>"), "studio 应为平台名: {xml}");
         assert!(xml.contains("<aired>2026-09-01</aired>"), "aired 应为日期: {xml}");
         assert!(
@@ -10167,19 +10194,19 @@ mod tests {
             .expect("有效日期")
             .and_hms_opt(0, 0, 0)
             .expect("有效时间");
-        let xml = super::build_youtube_movie_nfo_xml(
-            "联合投稿测试",
-            "简介",
-            "YouTube",
-            "YouTube",
-            "vid123",
-            aired,
-            "主频道",
-            &["合作频道A".to_string(), "合作频道B".to_string()],
-            "https://example.com/thumb.jpg",
-            "https://www.youtube.com/watch?v=vid123",
-            None,
-        );
+        let xml = super::build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
+            title: "联合投稿测试",
+            description: "简介",
+            platform: "YouTube",
+            studio: "YouTube",
+            id: "vid123",
+            aired: aired,
+            uploader: "主频道",
+            co_creators: &["合作频道A".to_string(), "合作频道B".to_string()],
+            thumbnail: "https://example.com/thumb.jpg",
+            video_url: "https://www.youtube.com/watch?v=vid123",
+            avatar_url: None,
+        });
         assert_eq!(
             xml.matches("<actor>").count(),
             3,
@@ -10216,19 +10243,19 @@ mod tests {
             .expect("有效日期")
             .and_hms_opt(0, 0, 0)
             .expect("有效时间");
-        let xml = super::build_youtube_movie_nfo_xml(
-            "抖音作品",
-            "简介",
-            "douyin",
-            "抖音",
-            "7515762262805777727",
-            aired,
-            "古德末泥(高智版)",
-            &[],
-            "https://example.com/cover.jpg",
-            "https://www.douyin.com/video/7515762262805777727",
-            Some("https://p3.douyinpic.com/avatar.jpeg"),
-        );
+        let xml = super::build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
+            title: "抖音作品",
+            description: "简介",
+            platform: "douyin",
+            studio: "抖音",
+            id: "7515762262805777727",
+            aired: aired,
+            uploader: "古德末泥(高智版)",
+            co_creators: &[],
+            thumbnail: "https://example.com/cover.jpg",
+            video_url: "https://www.douyin.com/video/7515762262805777727",
+            avatar_url: Some("https://p3.douyinpic.com/avatar.jpeg"),
+        });
         assert!(
             xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role><thumb>https://p3.douyinpic.com/avatar.jpeg</thumb></actor>"),
             "主频道 actor 应带 <thumb> 头像: {xml}"
@@ -10248,19 +10275,19 @@ mod tests {
         );
 
         // 空白头像地址不写 <thumb>，避免生成空标签
-        let xml = super::build_youtube_movie_nfo_xml(
-            "抖音作品",
-            "简介",
-            "douyin",
-            "抖音",
-            "7515762262805777727",
-            aired,
-            "古德末泥(高智版)",
-            &[],
-            "https://example.com/cover.jpg",
-            "https://www.douyin.com/video/7515762262805777727",
-            Some("   "),
-        );
+        let xml = super::build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
+            title: "抖音作品",
+            description: "简介",
+            platform: "douyin",
+            studio: "抖音",
+            id: "7515762262805777727",
+            aired: aired,
+            uploader: "古德末泥(高智版)",
+            co_creators: &[],
+            thumbnail: "https://example.com/cover.jpg",
+            video_url: "https://www.douyin.com/video/7515762262805777727",
+            avatar_url: Some("   "),
+        });
         assert!(
             xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role></actor>"),
             "{xml}"

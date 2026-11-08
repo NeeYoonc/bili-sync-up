@@ -339,16 +339,18 @@ impl Downloader {
         };
         let (_, ranges) = build_parallel_ranges(total_size, 1, true, segment, 1);
         for (start, end) in ranges {
-            download_range_to_file_with_retry(
-                self.client.clone(),
-                url,
-                path,
-                start,
-                end,
-                RANGE_DOWNLOAD_ATTEMPTS,
-                referer,
-                None,
-            )
+            download_range_to_file_with_retry(DownloadRangeInput {
+                p: DownloadRangeInput {
+                    client: self.client.clone(),
+                    url: url,
+                    path: path,
+                    start: start,
+                    end: end,
+                    attempts: RANGE_DOWNLOAD_ATTEMPTS,
+                    referer: referer,
+                    cookie: None,
+                },
+            })
             .await?;
         }
         Ok(())
@@ -419,16 +421,18 @@ impl Downloader {
         let mut progress_done = progress_base;
         let progress_path = path.display().to_string();
         for (start, end) in pending {
-            download_range_to_file_with_retry(
-                self.client.clone(),
-                url,
-                path,
-                start,
-                end,
-                RANGE_DOWNLOAD_ATTEMPTS,
-                referer,
-                cookie,
-            )
+            download_range_to_file_with_retry(DownloadRangeInput {
+                p: DownloadRangeInput {
+                    client: self.client.clone(),
+                    url: url,
+                    path: path,
+                    start: start,
+                    end: end,
+                    attempts: RANGE_DOWNLOAD_ATTEMPTS,
+                    referer: referer,
+                    cookie: cookie,
+                },
+            })
             .await?;
             append_completed_range(&sidecar, start, end).await;
             progress_done = progress_done.saturating_add(end.saturating_sub(start) + 1);
@@ -618,16 +622,18 @@ impl Downloader {
             file.set_len(total_size).await?;
             drop(file);
             let (part_start, part_end) = ranges[0];
-            download_range_to_file_with_retry(
-                self.client.clone(),
-                url,
-                path,
-                part_start,
-                part_end,
-                RANGE_DOWNLOAD_ATTEMPTS,
-                referer,
-                cookie,
-            )
+            download_range_to_file_with_retry(DownloadRangeInput {
+                p: DownloadRangeInput {
+                    client: self.client.clone(),
+                    url: url,
+                    path: path,
+                    start: part_start,
+                    end: part_end,
+                    attempts: RANGE_DOWNLOAD_ATTEMPTS,
+                    referer: referer,
+                    cookie: cookie,
+                },
+            })
             .await?;
             crate::download_progress::DOWNLOAD_PROGRESS
                 .report_bytes(&path.display().to_string(), total_size)
@@ -719,16 +725,18 @@ impl Downloader {
             let downloaded_counter = downloaded_counter.clone();
             let progress_path = progress_path.clone();
             async move {
-                let result = download_range_to_file_with_retry(
-                    client,
-                    &url,
-                    &path,
-                    part_start,
-                    part_end,
-                    RANGE_DOWNLOAD_ATTEMPTS,
-                    referer.as_deref(),
-                    cookie.as_deref(),
-                )
+                let result = download_range_to_file_with_retry(DownloadRangeInput {
+                    p: DownloadRangeInput {
+                        client: client,
+                        url: &url,
+                        path: &path,
+                        start: part_start,
+                        end: part_end,
+                        attempts: RANGE_DOWNLOAD_ATTEMPTS,
+                        referer: referer.as_deref(),
+                        cookie: cookie.as_deref(),
+                    },
+                })
                 .await;
                 if result.is_ok() {
                     // 记录已完成分片：失败时保留状态，下次可断点续传
@@ -767,16 +775,18 @@ impl Downloader {
             // 通常能过；已经下完的分片不会白下，也不用整体重来。
             tokio::time::sleep(Duration::from_secs(3)).await;
             for (start, end) in failed_ranges {
-                let bytes = download_range_to_file_with_retry(
-                    self.client.clone(),
-                    url,
-                    path,
-                    start,
-                    end,
-                    RANGE_DOWNLOAD_ATTEMPTS,
-                    referer,
-                    cookie,
-                )
+                let bytes = download_range_to_file_with_retry(DownloadRangeInput {
+                    p: DownloadRangeInput {
+                        client: self.client.clone(),
+                        url: url,
+                        path: path,
+                        start: start,
+                        end: end,
+                        attempts: RANGE_DOWNLOAD_ATTEMPTS,
+                        referer: referer,
+                        cookie: cookie,
+                    },
+                })
                 .await
                 .with_context(|| format!("Range 分片补下仍失败: bytes={start}-{end}"))?;
                 append_completed_range(&sidecar, start, end).await;
@@ -1308,16 +1318,28 @@ fn build_parallel_ranges(
     (concurrency, ranges)
 }
 
-async fn download_range_to_file_with_retry(
+struct DownloadRangeInput<'a> {
     client: Client,
-    url: &str,
-    path: &Path,
+    url: &'a str,
+    path: &'a Path,
     start: u64,
     end: u64,
     attempts: usize,
-    referer: Option<&str>,
-    cookie: Option<&str>,
-) -> Result<u64> {
+    referer: Option<&'a str>,
+    cookie: Option<&'a str>,
+}
+
+async fn download_range_to_file_with_retry(p: DownloadRangeInput<'_>) -> Result<u64> {
+    let DownloadRangeInput {
+        client,
+        url,
+        path,
+        start,
+        end,
+        attempts,
+        referer,
+        cookie,
+    } = p;
     let mut last_error = None;
     for attempt in 1..=attempts.max(1) {
         match download_range_to_file(client.clone(), url, path, start, end, referer, cookie).await {

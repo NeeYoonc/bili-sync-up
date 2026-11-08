@@ -4054,16 +4054,28 @@ async fn build_queue_status_sse_event(last_snapshot: &mut String) -> Option<Even
     }
 }
 
-fn build_video_source_tag(
+struct VideoSourceTagInput<'a> {
     source_id: i32,
-    source_type: &str,
-    source_type_label: &str,
+    source_type: &'a str,
+    source_type_label: &'a str,
     source_name: String,
     split_chapters_after_download: bool,
     audio_only: bool,
     audio_only_m4a_only: bool,
     flat_folder: bool,
-) -> VideoSourceTag {
+}
+
+fn build_video_source_tag(p: VideoSourceTagInput<'_>) -> VideoSourceTag {
+    let VideoSourceTagInput {
+        source_id,
+        source_type,
+        source_type_label,
+        source_name,
+        split_chapters_after_download,
+        audio_only,
+        audio_only_m4a_only,
+        flat_folder,
+    } = p;
     VideoSourceTag {
         source_id,
         source_type: source_type.to_string(),
@@ -4093,16 +4105,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                     )
                 })
                 .unwrap_or_else(|| (format!("已删除漫画源 #{}", source_id), false, false, false, false));
-            return Ok(Some(build_video_source_tag(
-                source_id,
-                "manga",
-                "漫画",
-                source_name,
-                split_chapters_after_download,
-                audio_only,
-                audio_only_m4a_only,
-                flat_folder,
-            )));
+            return Ok(Some(build_video_source_tag(VideoSourceTagInput {
+                source_id: source_id,
+                source_type: "manga",
+                source_type_label: "漫画",
+                source_name: source_name,
+                split_chapters_after_download: split_chapters_after_download,
+                audio_only: audio_only,
+                audio_only_m4a_only: audio_only_m4a_only,
+                flat_folder: flat_folder,
+            })));
         }
     }
 
@@ -4120,16 +4132,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                     )
                 })
                 .unwrap_or_else(|| (format!("已删除番剧源 #{}", source_id), false, false, false, false));
-            return Ok(Some(build_video_source_tag(
-                source_id,
-                "bangumi",
-                "番剧",
-                source_name,
-                split_chapters_after_download,
-                audio_only,
-                audio_only_m4a_only,
-                flat_folder,
-            )));
+            return Ok(Some(build_video_source_tag(VideoSourceTagInput {
+                source_id: source_id,
+                source_type: "bangumi",
+                source_type_label: "番剧",
+                source_name: source_name,
+                split_chapters_after_download: split_chapters_after_download,
+                audio_only: audio_only,
+                audio_only_m4a_only: audio_only_m4a_only,
+                flat_folder: flat_folder,
+            })));
         }
     }
 
@@ -4146,16 +4158,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                 )
             })
             .unwrap_or_else(|| (format!("已删除合集源 #{}", source_id), false, false, false, false));
-        return Ok(Some(build_video_source_tag(
-            source_id,
-            "collection",
-            "合集 / 列表",
-            source_name,
-            split_chapters_after_download,
-            audio_only,
-            audio_only_m4a_only,
-            flat_folder,
-        )));
+        return Ok(Some(build_video_source_tag(VideoSourceTagInput {
+            source_id: source_id,
+            source_type: "collection",
+            source_type_label: "合集 / 列表",
+            source_name: source_name,
+            split_chapters_after_download: split_chapters_after_download,
+            audio_only: audio_only,
+            audio_only_m4a_only: audio_only_m4a_only,
+            flat_folder: flat_folder,
+        })));
     }
 
     if let Some(source_id) = video.favorite_id {
@@ -4171,16 +4183,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                 )
             })
             .unwrap_or_else(|| (format!("已删除收藏夹源 #{}", source_id), false, false, false, false));
-        return Ok(Some(build_video_source_tag(
-            source_id,
-            "favorite",
-            "收藏夹",
-            source_name,
-            split_chapters_after_download,
-            audio_only,
-            audio_only_m4a_only,
-            flat_folder,
-        )));
+        return Ok(Some(build_video_source_tag(VideoSourceTagInput {
+            source_id: source_id,
+            source_type: "favorite",
+            source_type_label: "收藏夹",
+            source_name: source_name,
+            split_chapters_after_download: split_chapters_after_download,
+            audio_only: audio_only,
+            audio_only_m4a_only: audio_only_m4a_only,
+            flat_folder: flat_folder,
+        })));
     }
 
     if let Some(source_id) = video.submission_id {
@@ -4196,16 +4208,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                 )
             })
             .unwrap_or_else(|| (format!("已删除投稿源 #{}", source_id), false, false, false, false));
-        return Ok(Some(build_video_source_tag(
-            source_id,
-            "submission",
-            "UP主投稿",
-            source_name,
-            split_chapters_after_download,
-            audio_only,
-            audio_only_m4a_only,
-            flat_folder,
-        )));
+        return Ok(Some(build_video_source_tag(VideoSourceTagInput {
+            source_id: source_id,
+            source_type: "submission",
+            source_type_label: "UP主投稿",
+            source_name: source_name,
+            split_chapters_after_download: split_chapters_after_download,
+            audio_only: audio_only,
+            audio_only_m4a_only: audio_only_m4a_only,
+            flat_folder: flat_folder,
+        })));
     }
 
     if let Some(source_id) = video.watch_later_id {
@@ -4221,16 +4233,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                 )
             })
             .unwrap_or_else(|| (format!("已删除稍后再看源 #{}", source_id), false, false, false, false));
-        return Ok(Some(build_video_source_tag(
-            source_id,
-            "watch_later",
-            "稍后再看",
-            source_name,
-            split_chapters_after_download,
-            audio_only,
-            audio_only_m4a_only,
-            flat_folder,
-        )));
+        return Ok(Some(build_video_source_tag(VideoSourceTagInput {
+            source_id: source_id,
+            source_type: "watch_later",
+            source_type_label: "稍后再看",
+            source_name: source_name,
+            split_chapters_after_download: split_chapters_after_download,
+            audio_only: audio_only,
+            audio_only_m4a_only: audio_only_m4a_only,
+            flat_folder: flat_folder,
+        })));
     }
 
     Ok(None)

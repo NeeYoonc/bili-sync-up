@@ -5290,20 +5290,20 @@ async fn download_video_pages(
             let season_uniqueid_override = season_lists_link_override.clone();
             let suppress_collection_season_label_in_title = season_folder.is_some();
 
-            generate_collection_video_nfo(
-                should_generate_collection_tvshow_nfo,
-                should_generate_collection_season_nfo,
-                suppress_collection_season_label_in_title,
-                &video_model,
-                collection_name.as_deref(),
-                season_collection_name.as_deref(),
-                collection_cover.as_deref(),
-                tvshow_intro.as_deref(),
-                collection_plot_link_override.as_deref(),
-                collection_uniqueid_override.as_deref(),
-                season_lists_link_override.as_deref(),
-                season_uniqueid_override.as_deref(),
-                if let Some(ref bangumi_path) = bangumi_folder_path {
+            generate_collection_video_nfo(CollectionNfoInput {
+                should_generate_tvshow_nfo: should_generate_collection_tvshow_nfo,
+                should_generate_season_nfo: should_generate_collection_season_nfo,
+                suppress_season_label_in_title: suppress_collection_season_label_in_title,
+                video_model: &video_model,
+                collection_name: collection_name.as_deref(),
+                season_collection_name: season_collection_name.as_deref(),
+                collection_cover: collection_cover.as_deref(),
+                upper_intro: tvshow_intro.as_deref(),
+                plot_link_override: collection_plot_link_override.as_deref(),
+                uniqueid_override: collection_uniqueid_override.as_deref(),
+                season_plot_link_override: season_lists_link_override.as_deref(),
+                season_uniqueid_override: season_uniqueid_override.as_deref(),
+                nfo_path: if let Some(ref bangumi_path) = bangumi_folder_path {
                     // 多P视频或合集使用Season结构时，tvshow.nfo放在视频根目录
                     if multi_page_like_use_season_structure || collection_use_root_season_structure {
                         bangumi_path.join("tvshow.nfo")
@@ -5324,16 +5324,16 @@ async fn download_video_pages(
                         base_path.join(format!("{}.nfo", video_base_name))
                     }
                 },
-                current_nfo_season_number,
-                Some(nfo_stats.total_seasons),
-                Some(nfo_stats.total_episodes),
-                Some(nfo_stats.season_total_episodes),
-                if season_folder.is_some() {
+                season_number: current_nfo_season_number,
+                total_seasons: Some(nfo_stats.total_seasons),
+                total_episodes: Some(nfo_stats.total_episodes),
+                season_total_episodes: Some(nfo_stats.season_total_episodes),
+                season_nfo_path: if season_folder.is_some() {
                     Some(base_path.join("season.nfo"))
                 } else {
                     None
                 },
-            )
+            })
             .await
         } else {
             // 普通视频或番剧：使用原有逻辑
@@ -7528,20 +7528,20 @@ async fn download_page(
         fanart_path,
         token.clone(),
     ));
-    let res_2_fut = Box::pin(fetch_page_video(
-        separate_status[1],
-        bili_client,
-        video_model,
-        connection,
-        page_model.id,
-        downloader,
-        &page_info,
-        &video_path,
-        audio_only,
-        video_source.download_charge_videos(),
-        filter_option,
-        token.clone(),
-    ));
+    let res_2_fut = Box::pin(fetch_page_video(FetchPageVideoInput {
+        should_run: separate_status[1],
+        bili_client: bili_client,
+        video_model: video_model,
+        connection: connection,
+        page_id: page_model.id,
+        downloader: downloader,
+        page_info: &page_info,
+        page_path: &video_path,
+        audio_only: audio_only,
+        download_charge_videos: video_source.download_charge_videos(),
+        filter_option: filter_option,
+        token: token.clone(),
+    }));
     let res_3_fut = Box::pin(generate_page_nfo(
         separate_status[2],
         video_model,
@@ -7559,27 +7559,27 @@ async fn download_page(
         collection_page_episode_number.or(submission_page_episode_number),
     ));
     let danmaku_config = crate::config::reload_config();
-    let res_4_fut = Box::pin(fetch_page_danmaku(
-        separate_status[3],
-        bili_client,
-        video_model,
-        &page_model_for_sidecars,
-        connection,
-        &danmaku_config,
-        &page_info,
-        danmaku_path,
-        token.clone(),
-    ));
-    let res_5_fut = Box::pin(fetch_page_subtitle(
-        separate_status[4],
-        bili_client,
-        video_model,
-        &page_info,
-        &subtitle_path,
-        video_source.download_ai_subtitle(),
-        video_source.ai_subtitle_language().to_string(),
-        token.clone(),
-    ));
+    let res_4_fut = Box::pin(fetch_page_danmaku(FetchPageDanmakuInput {
+        should_run: separate_status[3],
+        bili_client: bili_client,
+        video_model: video_model,
+        page_model: &page_model_for_sidecars,
+        _connection: connection,
+        config: &danmaku_config,
+        page_info: &page_info,
+        danmaku_path: danmaku_path,
+        token: token.clone(),
+    }));
+    let res_5_fut = Box::pin(fetch_page_subtitle(FetchPageSubtitleInput {
+        should_run: separate_status[4],
+        bili_client: bili_client,
+        video_model: video_model,
+        page_info: &page_info,
+        subtitle_path: &subtitle_path,
+        download_ai_subtitle: video_source.download_ai_subtitle(),
+        ai_subtitle_language: video_source.ai_subtitle_language().to_string(),
+        token: token.clone(),
+    }));
 
     // 先执行视频下载任务：若视频因未达到最低下载标准被主动跳过，
     // 则封面/NFO/弹幕/字幕等附属文件本轮不下载，避免为跳过视频生成多余文件。
@@ -7820,17 +7820,17 @@ async fn download_page(
         _ => {}
     }
 
-    if let Some(updated_file_size_bytes) = maybe_embed_cover_into_audio(
-        audio_only,
-        m4a_only_mode,
-        video_model,
-        &page_model,
-        downloader,
-        &video_path,
-        &poster_path_for_chapters,
-        &results,
-        token.clone(),
-    )
+    if let Some(updated_file_size_bytes) = maybe_embed_cover_into_audio(EmbedCoverAudioInput {
+        audio_only: audio_only,
+        m4a_only_mode: m4a_only_mode,
+        video_model: video_model,
+        page_model: &page_model,
+        downloader: downloader,
+        media_path: &video_path,
+        poster_path: &poster_path_for_chapters,
+        results: &results,
+        token: token.clone(),
+    })
     .await
     {
         page_file_size_bytes = Some(updated_file_size_bytes);
@@ -8022,16 +8022,16 @@ async fn download_page(
         .await;
         let planned_chapters = chapter_episode_plan.as_ref().and_then(|plan| plan.chapters.clone());
         let bili_video = Video::new(bili_client, video_model.bvid.clone());
-        match split_page_chapters_after_download(
-            &bili_video,
-            video_model,
-            &page_model,
-            &page_info,
-            &video_path,
-            chapter_output_naming,
-            planned_chapters,
-            token.clone(),
-        )
+        match split_page_chapters_after_download(SplitChaptersInput {
+            bili_video: &bili_video,
+            video_model: video_model,
+            source_page: &page_model,
+            page_info: &page_info,
+            page_path: &video_path,
+            naming: chapter_output_naming,
+            planned_chapters: planned_chapters,
+            token: token.clone(),
+        })
         .await
         {
             Ok(Some(mut outcome)) if !outcome.files.is_empty() => {
@@ -8050,17 +8050,17 @@ async fn download_page(
                 };
                 match sidecar_result {
                     Ok(_) => {
-                        maybe_embed_cover_into_chapter_audio_outputs(
-                            audio_only,
-                            m4a_only_mode,
-                            video_model,
-                            &page_model,
-                            downloader,
-                            &mut outcome,
-                            &poster_path_for_chapters,
-                            &video_path,
-                            token.clone(),
-                        )
+                        maybe_embed_cover_into_chapter_audio_outputs(EmbedCoverChapterInput {
+                            audio_only: audio_only,
+                            m4a_only_mode: m4a_only_mode,
+                            video_model: video_model,
+                            page_model: &page_model,
+                            downloader: downloader,
+                            outcome: &mut outcome,
+                            poster_path: &poster_path_for_chapters,
+                            temp_base_media_path: &video_path,
+                            token: token.clone(),
+                        })
                         .await;
 
                         match sync_chapter_pages_after_split(connection, video_model, &page_model, &outcome).await {
@@ -8240,20 +8240,32 @@ impl Drop for DownloadProgressGuard {
     }
 }
 
+struct DownloadStreamInput<'a> {
+    downloader: &'a UnifiedDownloader,
+    progress_key: &'a str,
+    progress_platform: &'a str,
+    progress_title: &'a str,
+    progress_phase: &'a str,
+    progress_file_name: &'a str,
+    urls: &'a [&'a str],
+    path: &'a Path,
+}
+
 /// 下载单个流文件并返回文件大小（使用UnifiedDownloader智能选择下载方式）
 ///
 /// 同时会把本次下载的 bytes 与耗时写入内存「入库事件」统计，用于首页展示平均下载速度；
 /// 并在首页「正在下载」进度区注册实时进度（分片下载器会持续上报字节）。
-async fn download_stream(
-    downloader: &UnifiedDownloader,
-    progress_key: &str,
-    progress_platform: &str,
-    progress_title: &str,
-    progress_phase: &str,
-    progress_file_name: &str,
-    urls: &[&str],
-    path: &Path,
-) -> Result<u64> {
+async fn download_stream(p: DownloadStreamInput<'_>) -> Result<u64> {
+    let DownloadStreamInput {
+        downloader,
+        progress_key,
+        progress_platform,
+        progress_title,
+        progress_phase,
+        progress_file_name,
+        urls,
+        path,
+    } = p;
     // 注册首页下载进度：幂等，每个流下载前刷新任务阶段
     let path_str = path.display().to_string();
     crate::download_progress::DOWNLOAD_PROGRESS
@@ -8653,17 +8665,30 @@ fn page_cover_url_for_embedding<'a>(video_model: &'a video::Model, page_model: &
     }
 }
 
-async fn maybe_embed_cover_into_audio(
+struct EmbedCoverAudioInput<'a> {
     audio_only: bool,
     m4a_only_mode: bool,
-    video_model: &video::Model,
-    page_model: &page::Model,
-    downloader: &UnifiedDownloader,
-    media_path: &Path,
-    poster_path: &Path,
-    results: &[ExecutionStatus],
+    video_model: &'a video::Model,
+    page_model: &'a page::Model,
+    downloader: &'a UnifiedDownloader,
+    media_path: &'a Path,
+    poster_path: &'a Path,
+    results: &'a [ExecutionStatus],
     token: CancellationToken,
-) -> Option<i64> {
+}
+
+async fn maybe_embed_cover_into_audio(p: EmbedCoverAudioInput<'_>) -> Option<i64> {
+    let EmbedCoverAudioInput {
+        audio_only,
+        m4a_only_mode,
+        video_model,
+        page_model,
+        downloader,
+        media_path,
+        poster_path,
+        results,
+        token,
+    } = p;
     if !audio_only || token.is_cancelled() {
         return None;
     }
@@ -8819,17 +8844,30 @@ async fn maybe_prepare_audio_cover_for_embedding(
     Some((temp_cover_path, true))
 }
 
-async fn maybe_embed_cover_into_chapter_audio_outputs(
+struct EmbedCoverChapterInput<'a> {
     audio_only: bool,
     m4a_only_mode: bool,
-    video_model: &video::Model,
-    page_model: &page::Model,
-    downloader: &UnifiedDownloader,
-    outcome: &mut ChapterSplitOutcome,
-    poster_path: &Path,
-    temp_base_media_path: &Path,
+    video_model: &'a video::Model,
+    page_model: &'a page::Model,
+    downloader: &'a UnifiedDownloader,
+    outcome: &'a mut ChapterSplitOutcome,
+    poster_path: &'a Path,
+    temp_base_media_path: &'a Path,
     token: CancellationToken,
-) {
+}
+
+async fn maybe_embed_cover_into_chapter_audio_outputs(p: EmbedCoverChapterInput<'_>) {
+    let EmbedCoverChapterInput {
+        audio_only,
+        m4a_only_mode,
+        video_model,
+        page_model,
+        downloader,
+        outcome,
+        poster_path,
+        temp_base_media_path,
+        token,
+    } = p;
     if !audio_only || token.is_cancelled() || outcome.files.is_empty() {
         return;
     }
@@ -8908,17 +8946,30 @@ async fn maybe_embed_cover_into_chapter_audio_outputs(
     }
 }
 
-async fn download_page_video_from_streams(
-    streams: &mut PageAnalyzer,
-    connection: &DatabaseConnection,
+struct DownloadPageStreamsInput<'a> {
+    streams: &'a mut PageAnalyzer,
+    connection: &'a DatabaseConnection,
     page_id: i32,
-    downloader: &UnifiedDownloader,
-    video_model: &video::Model,
-    page_info_for_download: &PageInfo,
-    page_path: &Path,
+    downloader: &'a UnifiedDownloader,
+    video_model: &'a video::Model,
+    page_info_for_download: &'a PageInfo,
+    page_path: &'a Path,
     audio_only: bool,
-    filter_option: &FilterOption,
-) -> Result<PageVideoFetchResult> {
+    filter_option: &'a FilterOption,
+}
+
+async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Result<PageVideoFetchResult> {
+    let DownloadPageStreamsInput {
+        streams,
+        connection,
+        page_id,
+        downloader,
+        video_model,
+        page_info_for_download,
+        page_path,
+        audio_only,
+        filter_option,
+    } = p;
     // 首页「正在下载」进度：任务键 = 视频ID:分页ID，标题/文件名用于展示
     let progress_key = format!("bilibili:{}:{}", video_model.id, page_id);
     let progress_title = video_model.name.clone();
@@ -9112,16 +9163,16 @@ async fn download_page_video_from_streams(
                 // 混合流无法提取纯音频，警告并使用混合流
                 warn!("混合流不支持纯音频提取，将下载完整内容");
                 let urls = mix_stream.urls();
-                let downloaded_size = download_stream(
-                    downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载中",
-                    &progress_file_name,
-                    &urls,
-                    page_path,
-                )
+                let downloaded_size = download_stream(DownloadStreamInput {
+                    downloader: downloader,
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载中",
+                    progress_file_name: &progress_file_name,
+                    urls: &urls,
+                    path: page_path,
+                })
                 .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
@@ -9131,16 +9182,16 @@ async fn download_page_video_from_streams(
             } => {
                 // 直接下载音频流
                 let audio_urls = audio_stream.urls();
-                let downloaded_size = download_stream(
-                    downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载音频流",
-                    &progress_file_name,
-                    &audio_urls,
-                    page_path,
-                )
+                let downloaded_size = download_stream(DownloadStreamInput {
+                    downloader: downloader,
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载音频流",
+                    progress_file_name: &progress_file_name,
+                    urls: &audio_urls,
+                    path: page_path,
+                })
                 .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
@@ -9151,16 +9202,16 @@ async fn download_page_video_from_streams(
                 // 没有独立音频流，警告并使用视频流（可能包含音频）
                 warn!("未找到独立音频流，将下载视频流");
                 let urls = video_stream.urls();
-                let downloaded_size = download_stream(
-                    downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载中",
-                    &progress_file_name,
-                    &urls,
-                    page_path,
-                )
+                let downloaded_size = download_stream(DownloadStreamInput {
+                    downloader: downloader,
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载中",
+                    progress_file_name: &progress_file_name,
+                    urls: &urls,
+                    path: page_path,
+                })
                 .await?;
                 // 单流下载完成即最终文件，清理可能遗留的断点续传状态
                 let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(page_path)).await;
@@ -9176,16 +9227,16 @@ async fn download_page_video_from_streams(
                     crate::bilibili::Stream::Flv(_) => {
                         let tmp_mix_path = page_path.with_extension("tmp_flv");
                         let urls = mix_stream.urls();
-                        let downloaded_size = download_stream(
-                            downloader,
-                            &progress_key,
-                            "bilibili",
-                            &progress_title,
-                            "下载中",
-                            &progress_file_name,
-                            &urls,
-                            &tmp_mix_path,
-                        )
+                        let downloaded_size = download_stream(DownloadStreamInput {
+                            downloader: downloader,
+                            progress_key: &progress_key,
+                            progress_platform: "bilibili",
+                            progress_title: &progress_title,
+                            progress_phase: "下载中",
+                            progress_file_name: &progress_file_name,
+                            urls: &urls,
+                            path: &tmp_mix_path,
+                        })
                         .await?;
                         crate::download_progress::DOWNLOAD_PROGRESS
                             .set_phase(&progress_key, "转封装中")
@@ -9213,16 +9264,16 @@ async fn download_page_video_from_streams(
                     }
                     _ => {
                         let urls = mix_stream.urls();
-                        let downloaded_size = download_stream(
-                            downloader,
-                            &progress_key,
-                            "bilibili",
-                            &progress_title,
-                            "下载中",
-                            &progress_file_name,
-                            &urls,
-                            page_path,
-                        )
+                        let downloaded_size = download_stream(DownloadStreamInput {
+                            downloader: downloader,
+                            progress_key: &progress_key,
+                            progress_platform: "bilibili",
+                            progress_title: &progress_title,
+                            progress_phase: "下载中",
+                            progress_file_name: &progress_file_name,
+                            urls: &urls,
+                            path: page_path,
+                        })
                         .await?;
                         (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
                     }
@@ -9233,16 +9284,16 @@ async fn download_page_video_from_streams(
                 audio: None,
             } => {
                 let urls = video_stream.urls();
-                let downloaded_size = download_stream(
-                    downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载中",
-                    &progress_file_name,
-                    &urls,
-                    page_path,
-                )
+                let downloaded_size = download_stream(DownloadStreamInput {
+                    downloader: downloader,
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载中",
+                    progress_file_name: &progress_file_name,
+                    urls: &urls,
+                    path: page_path,
+                })
                 .await?;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
             }
@@ -9256,16 +9307,16 @@ async fn download_page_video_from_streams(
                 );
 
                 let video_urls = video_stream.urls();
-                let video_size = download_stream(
-                    downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载视频流",
-                    &progress_file_name,
-                    &video_urls,
-                    &tmp_video_path,
-                )
+                let video_size = download_stream(DownloadStreamInput {
+                    downloader: downloader,
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载视频流",
+                    progress_file_name: &progress_file_name,
+                    urls: &video_urls,
+                    path: &tmp_video_path,
+                })
                 .await
                 .map_err(|e| {
                     // 使用错误分类器进行统一处理
@@ -9285,16 +9336,16 @@ async fn download_page_video_from_streams(
                 })?;
 
                 let audio_urls = audio_stream.urls();
-                let audio_size = download_stream(
-                    downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载音频流",
-                    &progress_file_name,
-                    &audio_urls,
-                    &tmp_audio_path,
-                )
+                let audio_size = download_stream(DownloadStreamInput {
+                    downloader: downloader,
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载音频流",
+                    progress_file_name: &progress_file_name,
+                    urls: &audio_urls,
+                    path: &tmp_audio_path,
+                })
                 .await
                 .map_err(|e| {
                     // 使用错误分类器进行统一处理
@@ -9419,20 +9470,36 @@ fn stream_filter_for_download(filter_option: &FilterOption, audio_only: bool) ->
     effective
 }
 
-async fn fetch_page_video(
+struct FetchPageVideoInput<'a> {
     should_run: bool,
-    bili_client: &BiliClient,
-    video_model: &video::Model,
-    connection: &DatabaseConnection,
+    bili_client: &'a BiliClient,
+    video_model: &'a video::Model,
+    connection: &'a DatabaseConnection,
     page_id: i32,
-    downloader: &UnifiedDownloader,
-    page_info: &PageInfo,
-    page_path: &Path,
+    downloader: &'a UnifiedDownloader,
+    page_info: &'a PageInfo,
+    page_path: &'a Path,
     audio_only: bool,
     download_charge_videos: bool,
-    filter_option: &FilterOption,
+    filter_option: &'a FilterOption,
     token: CancellationToken,
-) -> Result<PageVideoFetchResult> {
+}
+
+async fn fetch_page_video(p: FetchPageVideoInput<'_>) -> Result<PageVideoFetchResult> {
+    let FetchPageVideoInput {
+        should_run,
+        bili_client,
+        video_model,
+        connection,
+        page_id,
+        downloader,
+        page_info,
+        page_path,
+        audio_only,
+        download_charge_videos,
+        filter_option,
+        token,
+    } = p;
     if !should_run {
         return Ok(PageVideoFetchResult {
             status: ExecutionStatus::Skipped,
@@ -9573,17 +9640,17 @@ async fn fetch_page_video(
             }
         };
 
-        let download_result = download_page_video_from_streams(
-            &mut streams,
-            connection,
-            page_id,
-            downloader,
-            video_model,
-            &page_info_for_download,
-            page_path,
-            audio_only,
-            filter_option,
-        )
+        let download_result = download_page_video_from_streams(DownloadPageStreamsInput {
+            streams: &mut streams,
+            connection: connection,
+            page_id: page_id,
+            downloader: downloader,
+            video_model: video_model,
+            page_info_for_download: &page_info_for_download,
+            page_path: page_path,
+            audio_only: audio_only,
+            filter_option: filter_option,
+        })
         .await;
 
         match download_result {
@@ -10227,16 +10294,28 @@ fn chapter_output_path(
     Ok(parent.join(format!("{stem} - {:02} - {}.{}", index + 1, chapter_name, ext)))
 }
 
-async fn split_page_chapters_after_download(
-    bili_video: &Video<'_>,
-    video_model: &video::Model,
-    source_page: &page::Model,
-    page_info: &PageInfo,
-    page_path: &Path,
+struct SplitChaptersInput<'a> {
+    bili_video: &'a Video<'_>,
+    video_model: &'a video::Model,
+    source_page: &'a page::Model,
+    page_info: &'a PageInfo,
+    page_path: &'a Path,
     naming: ChapterOutputNaming,
     planned_chapters: Option<Vec<ValidChapter>>,
     token: CancellationToken,
-) -> Result<Option<ChapterSplitOutcome>> {
+}
+
+async fn split_page_chapters_after_download(p: SplitChaptersInput<'_>) -> Result<Option<ChapterSplitOutcome>> {
+    let SplitChaptersInput {
+        bili_video,
+        video_model,
+        source_page,
+        page_info,
+        page_path,
+        naming,
+        planned_chapters,
+        token,
+    } = p;
     if !page_path.exists() {
         bail!("downloaded media file does not exist: {}", page_path.display());
     }
@@ -10743,17 +10822,30 @@ pub struct PageDanmakuFetchResult {
     pub sync_update: Option<crate::workflow_danmaku::PageDanmakuSyncUpdate>,
 }
 
-pub async fn fetch_page_danmaku(
+pub(crate) struct FetchPageDanmakuInput<'a> {
     should_run: bool,
-    bili_client: &BiliClient,
-    video_model: &video::Model,
-    page_model: &page::Model,
-    _connection: &DatabaseConnection,
-    config: &crate::config::Config,
-    page_info: &PageInfo,
+    bili_client: &'a BiliClient,
+    video_model: &'a video::Model,
+    page_model: &'a page::Model,
+    _connection: &'a DatabaseConnection,
+    config: &'a crate::config::Config,
+    page_info: &'a PageInfo,
     danmaku_path: PathBuf,
     token: CancellationToken,
-) -> Result<PageDanmakuFetchResult> {
+}
+
+pub async fn fetch_page_danmaku(p: FetchPageDanmakuInput<'_>) -> Result<PageDanmakuFetchResult> {
+    let FetchPageDanmakuInput {
+        should_run,
+        bili_client,
+        video_model,
+        page_model,
+        _connection,
+        config,
+        page_info,
+        danmaku_path,
+        token,
+    } = p;
     const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     if !should_run {
@@ -10836,16 +10928,28 @@ pub async fn fetch_page_danmaku(
     })
 }
 
-pub async fn fetch_page_subtitle(
+pub(crate) struct FetchPageSubtitleInput<'a> {
     should_run: bool,
-    bili_client: &BiliClient,
-    video_model: &video::Model,
-    page_info: &PageInfo,
-    subtitle_path: &Path,
+    bili_client: &'a BiliClient,
+    video_model: &'a video::Model,
+    page_info: &'a PageInfo,
+    subtitle_path: &'a Path,
     download_ai_subtitle: bool,
     ai_subtitle_language: String,
     token: CancellationToken,
-) -> Result<ExecutionStatus> {
+}
+
+pub async fn fetch_page_subtitle(p: FetchPageSubtitleInput<'_>) -> Result<ExecutionStatus> {
+    let FetchPageSubtitleInput {
+        should_run,
+        bili_client,
+        video_model,
+        page_info,
+        subtitle_path,
+        download_ai_subtitle,
+        ai_subtitle_language,
+        token,
+    } = p;
     const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     if !should_run {
@@ -11449,27 +11553,49 @@ pub async fn generate_video_nfo(
     Ok(ExecutionStatus::Succeeded)
 }
 
-/// 为合集生成带有合集信息的TVShow NFO
-pub async fn generate_collection_video_nfo(
+pub(crate) struct CollectionNfoInput<'a> {
     should_generate_tvshow_nfo: bool,
     should_generate_season_nfo: bool,
     suppress_season_label_in_title: bool,
-    video_model: &video::Model,
-    collection_name: Option<&str>,
-    season_collection_name: Option<&str>,
-    collection_cover: Option<&str>,
-    upper_intro: Option<&str>,
-    plot_link_override: Option<&str>,
-    uniqueid_override: Option<&str>,
-    season_plot_link_override: Option<&str>,
-    season_uniqueid_override: Option<&str>,
+    video_model: &'a video::Model,
+    collection_name: Option<&'a str>,
+    season_collection_name: Option<&'a str>,
+    collection_cover: Option<&'a str>,
+    upper_intro: Option<&'a str>,
+    plot_link_override: Option<&'a str>,
+    uniqueid_override: Option<&'a str>,
+    season_plot_link_override: Option<&'a str>,
+    season_uniqueid_override: Option<&'a str>,
     nfo_path: PathBuf,
     season_number: i32,
     total_seasons: Option<i32>,
     total_episodes: Option<i32>,
     season_total_episodes: Option<i32>,
     season_nfo_path: Option<PathBuf>,
-) -> Result<ExecutionStatus> {
+}
+
+/// 为合集生成带有合集信息的TVShow NFO
+pub async fn generate_collection_video_nfo(p: CollectionNfoInput<'_>) -> Result<ExecutionStatus> {
+    let CollectionNfoInput {
+        should_generate_tvshow_nfo,
+        should_generate_season_nfo,
+        suppress_season_label_in_title,
+        video_model,
+        collection_name,
+        season_collection_name,
+        collection_cover,
+        upper_intro,
+        plot_link_override,
+        uniqueid_override,
+        season_plot_link_override,
+        season_uniqueid_override,
+        nfo_path,
+        season_number,
+        total_seasons,
+        total_episodes,
+        season_total_episodes,
+        season_nfo_path,
+    } = p;
     if !should_generate_tvshow_nfo && !should_generate_season_nfo {
         return Ok(ExecutionStatus::Skipped);
     }
@@ -16364,20 +16490,20 @@ mod tests {
             ..Default::default()
         };
 
-        let result = fetch_page_video(
-            true,
-            &bili_client,
-            &video_model,
-            &db,
-            1,
-            &downloader,
-            &page_info,
-            &page_path,
-            false,
-            false,
-            &FilterOption::default(),
-            CancellationToken::new(),
-        )
+        let result = fetch_page_video(FetchPageVideoInput {
+            should_run: true,
+            bili_client: &bili_client,
+            video_model: &video_model,
+            connection: &db,
+            page_id: 1,
+            downloader: &downloader,
+            page_info: &page_info,
+            page_path: &page_path,
+            audio_only: false,
+            download_charge_videos: false,
+            filter_option: &FilterOption::default(),
+            token: CancellationToken::new(),
+        })
         .await
         .expect("关闭源级充电视频下载时应直接跳过媒体下载");
 
@@ -17567,26 +17693,26 @@ mod tests {
         let tvshow_path = dir.join("tvshow.nfo");
         let season_path = dir.join("Season 01").join("season.nfo");
 
-        let status = generate_collection_video_nfo(
-            true,
-            true,
-            true,
-            &video,
-            Some("多P系列根目录"),
-            Some("测试多P视频"),
-            None,
-            Some("测试简介"),
-            None,
-            None,
-            None,
-            None,
-            tvshow_path.clone(),
-            1,
-            Some(1),
-            Some(3),
-            Some(3),
-            Some(season_path.clone()),
-        )
+        let status = generate_collection_video_nfo(CollectionNfoInput {
+            should_generate_tvshow_nfo: true,
+            should_generate_season_nfo: true,
+            suppress_season_label_in_title: true,
+            video_model: &video,
+            collection_name: Some("多P系列根目录"),
+            season_collection_name: Some("测试多P视频"),
+            collection_cover: None,
+            upper_intro: Some("测试简介"),
+            plot_link_override: None,
+            uniqueid_override: None,
+            season_plot_link_override: None,
+            season_uniqueid_override: None,
+            nfo_path: tvshow_path.clone(),
+            season_number: 1,
+            total_seasons: Some(1),
+            total_episodes: Some(3),
+            season_total_episodes: Some(3),
+            season_nfo_path: Some(season_path.clone()),
+        })
         .await
         .expect("生成多P Season 结构 NFO不应失败");
 

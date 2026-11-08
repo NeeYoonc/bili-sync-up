@@ -1724,6 +1724,17 @@ pub async fn apply_ai_rename_folder(
     Ok(true)
 }
 
+pub(crate) struct BatchRenameHistoryInput<'a> {
+    connection: &'a DatabaseConnection,
+    source_key: &'a str,
+    videos: Vec<(bili_sync_entity::video::Model, Vec<bili_sync_entity::page::Model>)>,
+    config: &'a AiRenameConfig,
+    video_prompt: &'a str,
+    audio_prompt: &'a str,
+    flat_folder: bool,
+    structure_hint: &'a str,
+}
+
 /// 批量重命名视频源下的历史文件
 ///
 /// # 参数
@@ -1737,16 +1748,17 @@ pub async fn apply_ai_rename_folder(
 ///
 /// # 返回
 /// - 批量重命名结果（renamed_count, skipped_count, failed_count）
-pub async fn batch_rename_history_files(
-    connection: &DatabaseConnection,
-    source_key: &str,
-    videos: Vec<(bili_sync_entity::video::Model, Vec<bili_sync_entity::page::Model>)>,
-    config: &AiRenameConfig,
-    video_prompt: &str,
-    audio_prompt: &str,
-    flat_folder: bool,
-    structure_hint: &str,
-) -> Result<BatchRenameResult> {
+pub async fn batch_rename_history_files(p: BatchRenameHistoryInput<'_>) -> Result<BatchRenameResult> {
+    let BatchRenameHistoryInput {
+        connection,
+        source_key,
+        videos,
+        config,
+        video_prompt,
+        audio_prompt,
+        flat_folder,
+        structure_hint,
+    } = p;
     let mut result = BatchRenameResult::default();
 
     // 第一步：收集所有需要重命名的文件
