@@ -15,8 +15,10 @@ docker run -d \
   -p 12345:12345 \
   -v /path/to/data:/app/.config/bili-sync \
   -v /path/to/videos:/Downloads \
-  qq1582185982/bili-sync
+  qq1582185982/bili-sync:latest
 ```
+
+> 镜像同时发布在 Docker Hub（`qq1582185982/bili-sync`）和 CNB（`docker.cnb.cool/sviplk.com/docker/bili-sync`）两个仓库：首选 Docker Hub，国内网络拉不动时把上面的镜像名换成 CNB 地址即可（tag 相同）。
 
 > 程序默认下载目录是容器内的 `/Downloads`（添加视频源时「保存路径」默认就是 `/Downloads`），所以视频卷要挂到 `/Downloads`；挂到别的容器内路径等于下载进容器，容器重建后文件会丢。
 
@@ -25,7 +27,7 @@ docker run -d \
 services:
 
   bili-sync:
-    image: docker.cnb.cool/sviplk.com/docker/bili-sync:latest
+    image: qq1582185982/bili-sync:latest   # 国内网络拉不动 Docker Hub 时，换成 docker.cnb.cool/sviplk.com/docker/bili-sync:latest
     # build:
     #   context: .
     #   dockerfile: Dockerfile
@@ -84,6 +86,8 @@ services:
 3. 下载并创建容器
 4. 设置端口映射和文件夹映射（视频目录挂到容器内 `/Downloads`）
 
+> 镜像同样发布在 CNB：国内网络可在 Container Manager 里把镜像地址填成 `docker.cnb.cool/sviplk.com/docker/bili-sync:latest`。
+
 ## 升级方法
 
 ### Windows
@@ -94,6 +98,8 @@ services:
 docker pull qq1582185982/bili-sync
 docker restart bili-sync
 ```
+
+国内网络可用 CNB 镜像：`docker pull docker.cnb.cool/sviplk.com/docker/bili-sync:latest`。
 
 ## 注意事项
 

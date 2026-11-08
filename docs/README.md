@@ -14,13 +14,15 @@
 
 ```bash
 # Docker 一键启动
-docker run -d -p 12345:12345 -v /path/to/data:/app/.config/bili-sync -v /path/to/videos:/Downloads qq1582185982/bili-sync
+docker run -d -p 12345:12345 -v /path/to/data:/app/.config/bili-sync -v /path/to/videos:/Downloads qq1582185982/bili-sync:latest
 
 # 或下载二进制文件直接运行
 ./bili-sync-rs
 ```
 
 访问 `http://localhost:12345` 开始使用
+
+> 镜像同时发布在 Docker Hub（`qq1582185982/bili-sync`）和 CNB（`docker.cnb.cool/sviplk.com/docker/bili-sync`）；国内网络拉不动 Docker Hub 时换成 CNB 地址即可（tag 相同）。
 
 ## 📖 文档
 

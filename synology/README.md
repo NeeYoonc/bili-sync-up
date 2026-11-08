@@ -19,21 +19,23 @@ bili-sync-up_armv8-<version>.spk      # 群晖 armv8（对应上游 aarch64 产�
 
 ```bash
 # x86_64（自动从 GitHub Release 下载二进制 + 从 johnvansickle 下载静态 ffmpeg）
-./synology/build-spk.sh --tag v3.1.5 --arch x86_64
+./synology/build-spk.sh --tag v3.1.6 --arch x86_64
 
 # armv8
-./synology/build-spk.sh --tag v3.1.5 --arch armv8
+./synology/build-spk.sh --tag v3.1.6 --arch armv8
 
 # 复用已下载的二进制 / ffmpeg（离线或反复打包时快很多）
-./synology/build-spk.sh --tag v3.1.5 --arch x86_64 \
+./synology/build-spk.sh --tag v3.1.6 --arch x86_64 \
   --binary dist/bili-sync-rs-Linux-x86_64-musl.tar.gz \
   --ffmpeg-dir /tmp/ffmpeg-static
 
 # 保留中间目录排障
-./synology/build-spk.sh --tag v3.1.5 --arch x86_64 --keep
+./synology/build-spk.sh --tag v3.1.6 --arch x86_64 --keep
 ```
 
 参数：`--tag`（必填）、`--arch`（`x86_64` / `armv8`）、`--binary`、`--ffmpeg-dir`、`--outdir`（默认 `./dist`）、`--keep`。
+
+> `--tag` 填当前最新 Release 的 tag（当前为 `v3.1.6`），与 `PACKAGING-GUIDE.md` 的示例保持一致；新版本发布后同步替换即可。
 
 ## 安装后的行为
 

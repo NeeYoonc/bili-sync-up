@@ -63,7 +63,7 @@ export default {
     ],
 
     footer: {
-      copyright: 'Copyright © 2025 Bili-Sync'
+      copyright: 'Copyright © 2026 Bili-Sync'
     }
   }
 }
