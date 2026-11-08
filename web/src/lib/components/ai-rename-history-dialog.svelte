@@ -72,13 +72,25 @@
 		// 立即关闭对话框
 		isOpen = false;
 
-		// 显示开始处理的提示
-		toast.info('AI批量重命名已开始', {
-			description: `正在处理 ${getSourceTypeLabel(sourceType)}「${sourceName}」，请稍候...`
-		});
-
-		// 在后台执行重命名
+		// 在后台执行重命名；入队 / 完成 / 失败都由 executeRenameInBackground 统一提示
 		executeRenameInBackground();
+	}
+
+	// 同步该源的 AI 重命名设置（提示词、开关和高级选项），失败只警告不打断主流程
+	async function syncAiRenameSettings() {
+		try {
+			await api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
+				ai_rename: true,
+				ai_rename_video_prompt: videoPrompt.trim(),
+				ai_rename_audio_prompt: audioPrompt.trim(),
+				ai_rename_enable_multi_page: enableMultiPage,
+				ai_rename_enable_collection: enableCollection,
+				ai_rename_enable_bangumi: enableBangumi,
+				ai_rename_rename_parent_dir: renameParentDir
+			});
+		} catch (updateError) {
+			console.warn('更新AI重命名设置失败:', updateError);
+		}
 	}
 
 	// 后台执行重命名逻辑
@@ -96,21 +108,19 @@
 				renameParentDir
 			);
 
+			if (result.data.queued === true) {
+				// 后端已改成任务队列：这里只是入队成功，真正的重命名在后台队列里执行
+				await syncAiRenameSettings();
+
+				toast.success('已加入队列', {
+					description: 'AI 批量重命名任务已加入队列，可在任务队列查看进度。'
+				});
+				return;
+			}
+
 			if (result.data.success) {
-				// 重命名成功后，同步更新该源的 AI 重命名设置（包括提示词、开关和高级选项）
-				try {
-					await api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
-						ai_rename: true,
-						ai_rename_video_prompt: videoPrompt.trim(),
-						ai_rename_audio_prompt: audioPrompt.trim(),
-						ai_rename_enable_multi_page: enableMultiPage,
-						ai_rename_enable_collection: enableCollection,
-						ai_rename_enable_bangumi: enableBangumi,
-						ai_rename_rename_parent_dir: renameParentDir
-					});
-				} catch (updateError) {
-					console.warn('更新AI重命名设置失败:', updateError);
-				}
+				// 老版本后端直接在请求里完成重命名：同步设置后提示完成
+				await syncAiRenameSettings();
 
 				toast.success('AI批量重命名完成', {
 					description: `重命名 ${result.data.renamed_count} 个，跳过 ${result.data.skipped_count} 个，失败 ${result.data.failed_count} 个。已自动开启AI重命名功能并同步设置。`

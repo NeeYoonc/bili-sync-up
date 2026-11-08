@@ -28,6 +28,7 @@ import type {
 	UserCollectionInfo,
 	QueueStatusResponse,
 	CancelQueueTaskResponse,
+	BatchRenameResponse,
 	UpdateVideoSourceEnabledResponse,
 	UpdateVideoSourceScanDeletedResponse,
 	ResetVideoSourcePathRequest,
@@ -948,22 +949,8 @@ class ApiClient {
 		enableCollection?: boolean,
 		enableBangumi?: boolean,
 		renameParentDir?: boolean
-	): Promise<
-		ApiResponse<{
-			success: boolean;
-			renamed_count: number;
-			skipped_count: number;
-			failed_count: number;
-			message: string;
-		}>
-	> {
-		return this.post<{
-			success: boolean;
-			renamed_count: number;
-			skipped_count: number;
-			failed_count: number;
-			message: string;
-		}>(`/${sourceType}/${id}/ai-rename-history`, {
+	): Promise<ApiResponse<BatchRenameResponse>> {
+		return this.post<BatchRenameResponse>(`/${sourceType}/${id}/ai-rename-history`, {
 			video_prompt: videoPrompt || '',
 			audio_prompt: audioPrompt || '',
 			enable_multi_page: enableMultiPage,
