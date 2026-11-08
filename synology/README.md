@@ -89,7 +89,7 @@ INSERT INTO config (data) VALUES ('{"bind_address":"0.0.0.0:22345","auth_token":
 
 ## 已知限制
 
-1. **端口只能在安装时/配置文件里改**：上游二进制没有 CLI 参数可改端口（只有 `--scan-only` / `--log-level`），端口来自配置项 `bind_address`。安装向导只在安装时出现一次，之后要改就改 `config.toml` 再重启服务。
+1. **端口可以在 Web 界面改**：上游二进制没有 CLI 参数可改端口（只有 `--scan-only` / `--log-level`），端口来自配置项 `bind_address`。安装后打开 Web 界面，在「系统设置 → 基本系统设置 → 服务器端口」里改成 `0.0.0.0:<端口>` 保存，再重启程序/套件即可生效。注意：应用配置存在 SQLite（`var/config/data.sqlite`），不是 `config.toml`；`config.toml` 只在从旧版本迁移时被读取并备份成 `config.toml.backup.<时间戳>`，之后不会再写。
 2. **ffmpeg 为 GPL 静态构建**（johnvansickle），随包分发属 GPL 再分发：源码见 <https://johnvansickle.com/ffmpeg/>。如不希望引入 GPL，可把 `build-spk.sh` 里的 `FFMPEG_*_URL` 换成 LGPL 构建（如 BtbN 的 lgpl 变体），或在套件里改为依赖系统 ffmpeg。
 3. **四段版本号**（如 `v3.1.4.1`）会转成 DSM 的 build 形式 `3.1.4-1`，因为 INFO 的 `version` 不接受四段点分。
 4. **包体较大**：内置 ffmpeg 后 x86_64 约 73 MB、armv8 约 64 MB。

@@ -14,9 +14,11 @@ docker run -d \
   --name bili-sync \
   -p 12345:12345 \
   -v /path/to/data:/app/.config/bili-sync \
-  -v /path/to/videos:/app/videos \
+  -v /path/to/videos:/Downloads \
   qq1582185982/bili-sync
 ```
+
+> 程序默认下载目录是容器内的 `/Downloads`（添加视频源时「保存路径」默认就是 `/Downloads`），所以视频卷要挂到 `/Downloads`；挂到别的容器内路径等于下载进容器，容器重建后文件会丢。
 
 ### docker-compose
 ```yaml
@@ -41,8 +43,8 @@ services:
     ports:
       - 12345:12345
     volumes:
-      - /volume1/Cloudreve/OD/20/config:/app/.config/bili-sync
-      - /volume1/Cloudreve/OD/20:/Downloads #下载目录 在前端直接/Downloads就是下载到/volume1/Cloudreve/OD/20
+      - ./config:/app/.config/bili-sync
+      - ./Downloads:/Downloads # 下载目录：程序默认下载到容器内 /Downloads，这里映射到宿主机 ./Downloads
 
     environment:
       - TZ=Asia/Shanghai
@@ -62,10 +64,25 @@ services:
 
 ## 群晖 NAS
 
+群晖有两种装法：**套件（推荐）** 和 **Container Manager（Docker）**。
+
+### 方式一：套件源（推荐）
+
+1. DSM → **套件中心** → **设置** → **套件来源** → **新增**
+2. 名称随意（如 `dnof`），位置填 `https://ssp.dnof.net/`
+3. 保存后回到「套件中心 → **社群**」，找到 **Bili Sync Up** → 安装
+4. 也可以到 [Releases](https://github.com/NeeYoonc/bili-sync-up/releases/latest) 下载 `.spk`，在套件中心「手动安装」
+
+安装向导可设置 **Web 访问端口**（默认 12345）、**访问 Token**、是否放行防火墙。装完点套件中心「打开」，或访问 `http://<NAS-IP>:<端口>`（填了 Token 会先要求输入）。
+
+> 套件以专用用户 `bili-sync-up` 运行（DSM 7 套件规范）。下载目录建议用安装时自动创建的共享文件夹 `bili-sync-up`；若要指向其它共享文件夹，需在「控制面板 → 共享文件夹 → 权限」中给 `bili-sync-up` 用户读写权限。
+
+### 方式二：Container Manager（Docker）
+
 1. 打开 Container Manager (Docker)
 2. 搜索 `qq1582185982/bili-sync`
 3. 下载并创建容器
-4. 设置端口映射和文件夹映射
+4. 设置端口映射和文件夹映射（视频目录挂到容器内 `/Downloads`）
 
 ## 升级方法
 
@@ -80,6 +97,6 @@ docker restart bili-sync
 
 ## 注意事项
 
-- 首次运行会自动创建配置文件
-- 视频默认保存在 `videos` 目录
+- 首次运行会自动创建数据库 `data.sqlite` 并进入设置向导（跟着向导配置 B 站 Cookie、下载路径即可）
+- 视频默认保存在 `/Downloads`（容器内），Docker 部署时请把宿主机目录挂到 `/Downloads`
 - 建议使用 Docker 部署，更新更方便
