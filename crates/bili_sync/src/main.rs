@@ -169,6 +169,17 @@ async fn async_main() -> Result<()> {
             Err(e) => warn!("处理恢复的弹幕刷新任务失败: {:#}", e),
         }
 
+        // 6. 处理 AI 批量重命名任务
+        match crate::task::process_ai_rename_history_tasks(connection.clone()).await {
+            Ok(count) => {
+                total_processed += count;
+                if count > 0 {
+                    info!("处理了 {} 个恢复的 AI 批量重命名任务", count);
+                }
+            }
+            Err(e) => warn!("处理恢复的 AI 批量重命名任务失败: {:#}", e),
+        }
+
         if total_processed > 0 {
             info!("恢复的任务处理完成，共处理 {} 个任务", total_processed);
         } else {

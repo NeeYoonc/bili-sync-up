@@ -20,6 +20,8 @@ pub enum TaskType {
     ReloadConfig,
     #[sea_orm(string_value = "refresh_danmaku")]
     RefreshDanmaku,
+    #[sea_orm(string_value = "ai_rename_history")]
+    AiRenameHistory,
 }
 
 /// 任务状态枚举

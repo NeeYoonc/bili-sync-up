@@ -1,6 +1,10 @@
+pub mod ai_rename_queue;
 mod http_server;
 pub mod video_downloader;
 
+pub use ai_rename_queue::{
+    execute_ai_rename_history_task, AiRenameHistoryOutcome, AiRenameHistoryTask, AiRenameHistoryTaskQueue,
+};
 pub use http_server::http_server;
 pub use video_downloader::{credential_refresh_scheduler, video_downloader};
 
@@ -2741,6 +2745,10 @@ pub static VIDEO_DELETE_TASK_QUEUE: once_cell::sync::Lazy<Arc<VideoDeleteTaskQue
 pub static REFRESH_DANMAKU_TASK_QUEUE: once_cell::sync::Lazy<Arc<RefreshDanmakuTaskQueue>> =
     once_cell::sync::Lazy::new(|| Arc::new(RefreshDanmakuTaskQueue::new()));
 
+/// 全局 AI 批量重命名任务队列实例
+pub static AI_RENAME_HISTORY_TASK_QUEUE: once_cell::sync::Lazy<Arc<AiRenameHistoryTaskQueue>> =
+    once_cell::sync::Lazy::new(|| Arc::new(AiRenameHistoryTaskQueue::new()));
+
 /// 暂停定时扫描任务的便捷函数
 pub async fn pause_scanning() {
     TASK_CONTROLLER.pause().await;
@@ -2835,6 +2843,24 @@ pub async fn process_refresh_danmaku_tasks(db: Arc<DatabaseConnection>) -> Resul
     REFRESH_DANMAKU_TASK_QUEUE.process_all_tasks(db).await
 }
 
+/// 添加 AI 批量重命名任务到队列的便捷函数
+pub async fn enqueue_ai_rename_history_task(
+    task: AiRenameHistoryTask,
+    connection: &DatabaseConnection,
+) -> Result<bool> {
+    timeout(
+        TASK_ENQUEUE_TIMEOUT,
+        AI_RENAME_HISTORY_TASK_QUEUE.enqueue_task(task, connection),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("AI 批量重命名任务加入队列超时，请稍后重试"))?
+}
+
+/// 处理所有 AI 批量重命名任务的便捷函数
+pub async fn process_ai_rename_history_tasks(db: Arc<DatabaseConnection>) -> Result<u32, anyhow::Error> {
+    AI_RENAME_HISTORY_TASK_QUEUE.process_all_tasks(db).await
+}
+
 /// 取消指定任务（仅支持待处理且仍在内存等待队列中的任务）
 pub async fn cancel_pending_task(task_id: &str, connection: &DatabaseConnection) -> Result<bool, anyhow::Error> {
     if DELETE_TASK_QUEUE.cancel_task(task_id, connection).await? {
@@ -2854,6 +2880,10 @@ pub async fn cancel_pending_task(task_id: &str, connection: &DatabaseConnection)
     }
 
     if REFRESH_DANMAKU_TASK_QUEUE.cancel_task(task_id, connection).await? {
+        return Ok(true);
+    }
+
+    if AI_RENAME_HISTORY_TASK_QUEUE.cancel_task(task_id, connection).await? {
         return Ok(true);
     }
 
@@ -2942,6 +2972,15 @@ pub async fn recover_pending_tasks(connection: &DatabaseConnection) -> Result<()
                 }
                 Err(e) => {
                     error!("反序列化弹幕刷新任务失败: {:#}", e);
+                }
+            },
+            TaskType::AiRenameHistory => match serde_json::from_str::<AiRenameHistoryTask>(task_data) {
+                Ok(task) => {
+                    AI_RENAME_HISTORY_TASK_QUEUE.recover_task(task).await;
+                    recovered_count += 1;
+                }
+                Err(e) => {
+                    error!("反序列化 AI 批量重命名任务失败: {:#}", e);
                 }
             },
         }

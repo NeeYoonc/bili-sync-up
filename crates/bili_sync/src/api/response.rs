@@ -1390,6 +1390,9 @@ pub struct BatchRenameResponse {
     pub renamed_count: usize,
     pub skipped_count: usize,
     pub failed_count: usize,
+    /// 是否已成功加入后台任务队列（true 表示接口已立即返回，任务稍后由队列执行）
+    #[serde(default)]
+    pub queued: bool,
     pub message: String,
 }
 
