@@ -125,11 +125,17 @@ log "ffmpeg: $(du -h "$WORK/app/bin/ffmpeg" | cut -f1)"
 cat > "$WORK/app/bin/start.sh" <<'START'
 #!/bin/sh
 # 手动/服务启动统一入口：ffmpeg 走包内 bin，配置走 $BILI_SYNC_CONFIG_DIR
+#
+# 正常安装/升级由 start-stop-status 拉起，它会显式传：
+#   HOME=/var/packages/bili-sync-up/var/home
+#   BILI_SYNC_CONFIG_DIR=/var/packages/bili-sync-up/var/config
+# 下面的默认值只用于「SSH 手工执行 start.sh」排障，必须和 start-stop-status 保持一致，
+# 否则手工会落到另一个配置目录，看起来像「配置丢了」。
 set -e
 BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$BIN_DIR:$PATH"
 export HOME="${HOME:-/var/packages/bili-sync-up/var/home}"
-export BILI_SYNC_CONFIG_DIR="${BILI_SYNC_CONFIG_DIR:-$HOME/.config/bili-sync}"
+export BILI_SYNC_CONFIG_DIR="${BILI_SYNC_CONFIG_DIR:-/var/packages/bili-sync-up/var/config}"
 export TZ="${TZ:-Asia/Shanghai}"
 export RUST_LOG="${RUST_LOG:-None,bili_sync=info}"
 mkdir -p "$HOME" "$BILI_SYNC_CONFIG_DIR"

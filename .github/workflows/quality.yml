@@ -1,0 +1,163 @@
+# 质量门禁 v1（2026-11-08）
+#
+# 只启用三道「现在就能绿」的关：Rust 格式检查 / 前端 svelte-check / 文档站构建。
+# clippy 与 cargo test 暂缓，原因和启用方式见文件末尾的注释块。
+#
+# 几个刻意不做的事：
+# - 不用 `npm run check:node20` / `build:node20`：那是 Windows 本地给 npx 用的包装脚本，
+#   CI 里 setup-node 已经钉了 Node 版本，直接 `npm run check` 才和 build.yml 的构建方式一致。
+# - 不加 `npm run lint`：prettier 3.9.5 与本仓库锁定的 prettier-plugin-svelte 3.5.2 不兼容，
+#   134 个 .svelte 文件全崩（getVisitorKeys is not a function），修工具链之前放进来只会全红。
+# - fmt 关不装 cargo 缓存：只跑 rustfmt、不编译，装缓存比它省下的时间还贵。
+name: 质量门禁
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: Rust 格式检查
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+      - name: 读取 rust-toolchain.toml 里的工具链版本
+        id: toolchain
+        run: |
+          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | head -n 1)"
+          if [ -z "$channel" ]; then
+            echo "读不到 rust-toolchain.toml 里的 channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - name: 安装 Rust 工具链（只装 rustfmt）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  frontend:
+    name: 前端检查
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+      - name: 安装 Node 20
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 安装依赖
+        working-directory: web
+        run: npm ci
+      - name: svelte-check
+        working-directory: web
+        run: npm run check
+
+  docs:
+    name: 文档站构建
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+      - name: 安装 Node 18
+        uses: actions/setup-node@v6
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - name: 安装依赖并构建
+        working-directory: docs
+        run: |
+          npm ci
+          npm run docs:build
+
+# ---------------------------------------------------------------------------
+# 暂未启用的两关（等前置条件满足后，删掉每行开头的 # 即可恢复；注意保留缩进）
+#
+# clippy（等编译 warning 清零后启用）
+#   现在启用必红：CI 日志里 28/30 条 rustc warning，加上 clippy 专属的 6 处
+#   too_many_arguments 等 lint，`-D warnings` 下全部是错误。warning 清零 PR 合并后再开。
+#   另：clippy 需要编译整个 crate，rust-embed 的 #[folder = "../../web/build"] 在
+#   web/build 不存在时只告警不报错，但为了输出干净，先 mkdir 一个空目录。
+#
+#  clippy:
+#    name: Rust Clippy
+#    runs-on: ubuntu-24.04
+#    steps:
+#      - name: 检出代码
+#        uses: actions/checkout@v6
+#      - name: 读取 rust-toolchain.toml 里的工具链版本
+#        id: toolchain
+#        run: |
+#          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | head -n 1)"
+#          if [ -z "$channel" ]; then
+#            echo "读不到 rust-toolchain.toml 里的 channel" >&2
+#            exit 1
+#          fi
+#          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+#      - name: 安装 Rust 工具链（clippy + rustfmt）
+#        uses: dtolnay/rust-toolchain@stable
+#        with:
+#          toolchain: ${{ steps.toolchain.outputs.channel }}
+#          components: clippy, rustfmt
+#      - name: 缓存 cargo 编译产物
+#        uses: Swatinem/rust-cache@v2
+#        with:
+#          shared-key: clippy
+#          save-if: ${{ github.ref == 'refs/heads/main' }}
+#      - name: 占位前端产物目录
+#        run: mkdir -p web/build
+#      - name: cargo clippy
+#        run: cargo clippy --workspace --all-targets -- -D warnings
+#
+# test（等测试基线建立后启用）
+#   现在启用风险高：cargo test 从未在 CI 跑过，510 个测试里 13 个 #[ignore]（依赖网络 /
+#   真实凭证 / ffmpeg），非 ignore 的测试也没验证过在干净 runner 上是否全绿。
+#   更硬的坑：不先建 web/build 时 rust-embed 的 #[folder] 可能直接编译失败，
+#   所以这个 job 必须先 `mkdir -p web/build`。先本地跑通 `cargo test --workspace`
+#   （bili_sync 没有 lib target，是 bin target）并确认 ignore 列表，再放开。
+#
+#  test:
+#    name: Rust 测试
+#    runs-on: ubuntu-24.04
+#    steps:
+#      - name: 检出代码
+#        uses: actions/checkout@v6
+#      - name: 读取 rust-toolchain.toml 里的工具链版本
+#        id: toolchain
+#        run: |
+#          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | head -n 1)"
+#          if [ -z "$channel" ]; then
+#            echo "读不到 rust-toolchain.toml 里的 channel" >&2
+#            exit 1
+#          fi
+#          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+#      - name: 安装 Rust 工具链
+#        uses: dtolnay/rust-toolchain@stable
+#        with:
+#          toolchain: ${{ steps.toolchain.outputs.channel }}
+#      - name: 缓存 cargo 编译产物
+#        uses: Swatinem/rust-cache@v2
+#        with:
+#          shared-key: test
+#          save-if: ${{ github.ref == 'refs/heads/main' }}
+#      - name: 占位前端产物目录（rust-embed 的 #[folder = "../../web/build"]）
+#        run: mkdir -p web/build
+#      - name: cargo test
+#        run: cargo test --workspace
+# ---------------------------------------------------------------------------
