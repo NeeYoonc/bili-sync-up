@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::utils::live_updates;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
-use crate::utils::live_updates;
 
 /// 单条下载任务进度快照（推送 / API 使用）。
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
@@ -65,13 +65,18 @@ struct TaskState {
 
 impl TaskState {
     fn total_bytes(&self) -> u64 {
-        self.streams.values().map(|s| s.total_bytes.load(Ordering::Relaxed)).sum()
+        self.streams
+            .values()
+            .map(|s| s.total_bytes.load(Ordering::Relaxed))
+            .sum()
     }
 
     fn downloaded_bytes(&self) -> u64 {
-        self.streams.values().map(|s| s.downloaded_bytes.load(Ordering::Relaxed)).sum()
+        self.streams
+            .values()
+            .map(|s| s.downloaded_bytes.load(Ordering::Relaxed))
+            .sum()
     }
-
 }
 
 pub struct DownloadProgress {
@@ -95,14 +100,7 @@ impl DownloadProgress {
     }
 
     /// 建立（或更新）一个下载任务。幂等：key 已存在时只刷新元信息，不清流状态。
-    pub async fn begin_task(
-        &self,
-        key: &str,
-        platform: &str,
-        title: &str,
-        phase: &str,
-        file_name: &str,
-    ) {
+    pub async fn begin_task(&self, key: &str, platform: &str, title: &str, phase: &str, file_name: &str) {
         let now = now_standard_string();
         {
             let mut tasks = self.tasks.write().await;
@@ -129,10 +127,7 @@ impl DownloadProgress {
         {
             let mut tasks = self.tasks.write().await;
             if let Some(task) = tasks.get_mut(key) {
-                let stream = task
-                    .streams
-                    .entry(path.to_string())
-                    .or_insert_with(StreamState::new);
+                let stream = task.streams.entry(path.to_string()).or_insert_with(StreamState::new);
                 if total_bytes > 0 {
                     stream.total_bytes.store(total_bytes, Ordering::Relaxed);
                 }
@@ -170,7 +165,9 @@ impl DownloadProgress {
         {
             let mut tasks = self.tasks.write().await;
             let Some(task) = tasks.get_mut(&key) else { return };
-            let Some(stream) = task.streams.get_mut(path) else { return };
+            let Some(stream) = task.streams.get_mut(path) else {
+                return;
+            };
             let previous = stream.downloaded_bytes.load(Ordering::Relaxed);
             if downloaded <= previous {
                 return;

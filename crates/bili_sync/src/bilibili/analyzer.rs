@@ -798,10 +798,7 @@ mod tests {
         };
 
         // 未过滤的最高可用质量应为 480p
-        assert_eq!(
-            analyzer.max_available_video_quality(),
-            Some(VideoQuality::Quality480p)
-        );
+        assert_eq!(analyzer.max_available_video_quality(), Some(VideoQuality::Quality480p));
 
         // 筛选后无视频流（不应触发“无可用视频流”ERROR 分支，因为 max_available < min）
         let streams = analyzer.streams(&filter).expect("streams 不应报错");

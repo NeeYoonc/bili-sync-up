@@ -79,7 +79,10 @@ pub async fn download_manga_chapter(
     let chapter_title = chapter_display_title(&video_model, &source_name);
     let is_special = video_model.episode_number.is_none();
     let label = if is_special {
-        format!("SP{:02}", resolve_special_index(video_source, &video_model, connection).await?)
+        format!(
+            "SP{:02}",
+            resolve_special_index(video_source, &video_model, connection).await?
+        )
     } else {
         format!("{:04}", video_model.episode_number.unwrap_or_default())
     };
@@ -115,7 +118,10 @@ pub async fn download_manga_chapter(
         .iter()
         .map(|model| (model.pid, model.image.clone()))
         .collect();
-    let existing_status: HashMap<i32, u32> = page_models.iter().map(|model| (model.pid, model.download_status)).collect();
+    let existing_status: HashMap<i32, u32> = page_models
+        .iter()
+        .map(|model| (model.pid, model.download_status))
+        .collect();
 
     tokio::fs::create_dir_all(&staging_dir)
         .await
@@ -177,7 +183,16 @@ pub async fn download_manga_chapter(
     }
     if !failures.is_empty() {
         // 已成功的页写入数据库，失败页保持未完成状态，下轮直接续传
-        persist_page_progress(&video_model, &page_models, &downloaded, &fetched, &cbz_path, connection, false).await?;
+        persist_page_progress(
+            &video_model,
+            &page_models,
+            &downloaded,
+            &fetched,
+            &cbz_path,
+            connection,
+            false,
+        )
+        .await?;
         return Err(anyhow!(
             "漫画「{}」第{}话有 {} 页下载失败：{}",
             source_name,
@@ -234,7 +249,16 @@ pub async fn download_manga_chapter(
         .context("漫画打包任务失败")??;
 
     // 5) 落库并清理暂存目录
-    persist_page_progress(&video_model, &page_models, &downloaded, &fetched, &cbz_path, connection, true).await?;
+    persist_page_progress(
+        &video_model,
+        &page_models,
+        &downloaded,
+        &fetched,
+        &cbz_path,
+        connection,
+        true,
+    )
+    .await?;
 
     if let Err(error) = tokio::fs::remove_dir_all(&staging_dir).await {
         debug!(
@@ -428,11 +452,7 @@ async fn fetch_image_bytes(client: &Client, url: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("请求漫画图片失败: {}", short_url(url)))?;
     let status = response.status();
     if !status.is_success() {
-        bail!(
-            "漫画图片 CDN 返回 {}（{}）",
-            status.as_u16(),
-            short_url(url)
-        );
+        bail!("漫画图片 CDN 返回 {}（{}）", status.as_u16(), short_url(url));
     }
     let bytes = response.bytes().await.context("读取漫画图片响应失败")?;
     if bytes.is_empty() {

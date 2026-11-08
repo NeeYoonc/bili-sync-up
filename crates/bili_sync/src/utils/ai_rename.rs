@@ -1685,7 +1685,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let db = crate::database::setup_database().await;
-            crate::config::init_config_with_database(db).await.expect("初始化配置失败");
+            crate::config::init_config_with_database(db)
+                .await
+                .expect("初始化配置失败");
             let cfg = crate::config::with_config(|bundle| bundle.config.ai_rename.clone());
             if !cfg.enabled || cfg.api_key.is_none() {
                 panic!("AI 重命名未启用或缺少 API key，无法进行真实联调");
@@ -1771,7 +1773,8 @@ mod tests {
             }
             assert_eq!(names.len(), 2, "多P 返回数量必须与文件数一致");
             assert_ne!(names[0], names[1], "两个分P 的文件名不能相同");
-            let mp_folder = super::append_missing_template_variables(&names[0], &multi_page_template, &files_multi[0].ctx);
+            let mp_folder =
+                super::append_missing_template_variables(&names[0], &multi_page_template, &files_multi[0].ctx);
             println!("多P 文件夹补全后（multi_page_name）: {}", mp_folder);
 
             // 场景1.5：单P（1 个分页，无多P序号）——按 page_name 补全 bvid/pubtime
@@ -1799,14 +1802,16 @@ mod tests {
                 single_page: true,
                 flat_folder: false,
             };
-            let single_names = super::ai_generate_filenames_batch(&cfg, "live-test-single", &[single_file], prompt_hint)
-                .await
-                .expect("单P 真实 AI 调用失败");
+            let single_names =
+                super::ai_generate_filenames_batch(&cfg, "live-test-single", &[single_file], prompt_hint)
+                    .await
+                    .expect("单P 真实 AI 调用失败");
             println!("=== 单P 真实返回（{} 个） ===", single_names.len());
             for (i, n) in single_names.iter().enumerate() {
                 println!("  {} -> {}", i + 1, n);
             }
-            let single_file_name = super::append_missing_template_variables(&single_names[0], &page_template, &single_ctx);
+            let single_file_name =
+                super::append_missing_template_variables(&single_names[0], &page_template, &single_ctx);
             println!("单P 文件补全后（page_name）: {}", single_file_name);
             let single_folder_name = super::append_missing_template_variables(
                 &super::append_missing_template_variables(&single_names[0], &video_template, &single_ctx),
@@ -1875,11 +1880,11 @@ mod tests {
             assert_ne!(names[0], names[1], "两集的文件名不能相同");
             let bg_file = super::append_missing_template_variables(&names[0], &bangumi_template, &files_bangumi[0].ctx);
             println!("番剧 文件补全后（bangumi_name）: {}", bg_file);
-            let bg_folder = super::append_missing_template_variables(&names[0], &bangumi_folder_template, &files_bangumi[0].ctx);
+            let bg_folder =
+                super::append_missing_template_variables(&names[0], &bangumi_folder_template, &files_bangumi[0].ctx);
             println!("番剧 文件夹补全后（bangumi_folder_name）: {}", bg_folder);
         });
     }
-
 
     #[test]
     fn resolves_multi_page_video_folder() {
@@ -1888,10 +1893,7 @@ mod tests {
         // 无 Season 结构：所有分页文件在同一目录
         let p1 = PathBuf::from("F:/下载/视频A/P01.mp4");
         let p2 = PathBuf::from("F:/下载/视频A/P02.mp4");
-        let parents = vec![
-            p1.parent().unwrap().to_path_buf(),
-            p2.parent().unwrap().to_path_buf(),
-        ];
+        let parents = vec![p1.parent().unwrap().to_path_buf(), p2.parent().unwrap().to_path_buf()];
         assert_eq!(
             super::resolve_multi_page_video_folder(&parents),
             Some(PathBuf::from("F:/下载/视频A"))
@@ -1900,10 +1902,7 @@ mod tests {
         // Season 结构：分页文件位于「视频文件夹/Season XX」下
         let p3 = PathBuf::from("F:/下载/视频B/Season 01/P01.mp4");
         let p4 = PathBuf::from("F:/下载/视频B/Season 01/P02.mp4");
-        let parents = vec![
-            p3.parent().unwrap().to_path_buf(),
-            p4.parent().unwrap().to_path_buf(),
-        ];
+        let parents = vec![p3.parent().unwrap().to_path_buf(), p4.parent().unwrap().to_path_buf()];
         assert_eq!(
             super::resolve_multi_page_video_folder(&parents),
             Some(PathBuf::from("F:/下载/视频B"))
@@ -1911,10 +1910,7 @@ mod tests {
 
         // 同一视频跨季（结构异常但仍在同一视频文件夹下）：仍能反推出视频文件夹
         let p5 = PathBuf::from("F:/下载/视频B/Season 02/P01.mp4");
-        let parents = vec![
-            p3.parent().unwrap().to_path_buf(),
-            p5.parent().unwrap().to_path_buf(),
-        ];
+        let parents = vec![p3.parent().unwrap().to_path_buf(), p5.parent().unwrap().to_path_buf()];
         assert_eq!(
             super::resolve_multi_page_video_folder(&parents),
             Some(PathBuf::from("F:/下载/视频B"))
@@ -1922,10 +1918,7 @@ mod tests {
 
         // 分页散落在不同视频文件夹下：无法确定单一文件夹
         let p6 = PathBuf::from("F:/下载/视频C/Season 01/P01.mp4");
-        let parents = vec![
-            p3.parent().unwrap().to_path_buf(),
-            p6.parent().unwrap().to_path_buf(),
-        ];
+        let parents = vec![p3.parent().unwrap().to_path_buf(), p6.parent().unwrap().to_path_buf()];
         assert_eq!(super::resolve_multi_page_video_folder(&parents), None);
 
         // 空输入
@@ -2013,7 +2006,10 @@ pub async fn collect_multi_page_folders(
             continue;
         }
         if skip_if_all_pages_renamed && pages.iter().all(|p| p.ai_renamed.unwrap_or(0) == 1) {
-            debug!("[{}] 跳过多P文件夹重命名（所有分页均已 AI 重命名）: {}", video_model.id, video_model.name);
+            debug!(
+                "[{}] 跳过多P文件夹重命名（所有分页均已 AI 重命名）: {}",
+                video_model.id, video_model.name
+            );
             continue;
         }
         // 收集有真实路径的分页
@@ -2055,7 +2051,11 @@ pub async fn collect_multi_page_folders(
         let folder_str_alt = folder_str.replace('/', "\\");
         let shared_count = match video::Entity::find()
             .filter(video::Column::Id.ne(video_model.id))
-            .filter(video::Column::Path.eq(&folder_str).or(video::Column::Path.eq(&folder_str_alt)))
+            .filter(
+                video::Column::Path
+                    .eq(&folder_str)
+                    .or(video::Column::Path.eq(&folder_str_alt)),
+            )
             .count(connection)
             .await
         {
@@ -2140,10 +2140,8 @@ fn resolve_multi_page_video_folder(parents: &[std::path::PathBuf]) -> Option<std
 
 /// 多P视频处于「视频文件夹/Season XX」结构时，从分页文件目录反推视频文件夹。
 fn resolve_season_parent(parents: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
-    let grandparents: Vec<Option<std::path::PathBuf>> = parents
-        .iter()
-        .map(|d| d.parent().map(|g| g.to_path_buf()))
-        .collect();
+    let grandparents: Vec<Option<std::path::PathBuf>> =
+        parents.iter().map(|d| d.parent().map(|g| g.to_path_buf())).collect();
     let first = grandparents.first()?.as_ref()?;
     if !grandparents.iter().all(|g| g.as_ref() == Some(first)) {
         return None;
@@ -2174,10 +2172,7 @@ pub async fn apply_ai_rename_folder(
 
     let new_name = new_name.trim();
     if new_name.is_empty() || new_name == folder.current_name {
-        debug!(
-            "[{}] 跳过文件夹重命名(相同或为空): {}",
-            source_key, folder.current_name
-        );
+        debug!("[{}] 跳过文件夹重命名(相同或为空): {}", source_key, folder.current_name);
         return Ok(false);
     }
     // 多P/番剧文件夹按对应命名模板补全 AI 名字中缺失的模板变量（如 {{bvid}}/{{pubtime}}），
@@ -2202,11 +2197,7 @@ pub async fn apply_ai_rename_folder(
     let old_dir = &folder.path;
     // 重新确认文件夹仍存在
     if !old_dir.is_dir() {
-        debug!(
-            "[{}] 跳过文件夹重命名(目录不存在): {}",
-            source_key,
-            old_dir.display()
-        );
+        debug!("[{}] 跳过文件夹重命名(目录不存在): {}", source_key, old_dir.display());
         return Ok(false);
     }
     let parent_dir = match old_dir.parent() {
@@ -2529,22 +2520,14 @@ pub async fn batch_rename_history_files(
                             Ok(true) => result.renamed_count += 1,
                             Ok(false) => result.skipped_count += 1,
                             Err(e) => {
-                                warn!(
-                                    "[{}] 文件夹重命名失败 {}: {}",
-                                    source_key, folder.current_name, e
-                                );
+                                warn!("[{}] 文件夹重命名失败 {}: {}", source_key, folder.current_name, e);
                                 result.failed_count += 1;
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "[{}] 文件夹批次 {} AI 调用失败: {}",
-                        source_key,
-                        batch_idx + 1,
-                        e
-                    );
+                    warn!("[{}] 文件夹批次 {} AI 调用失败: {}", source_key, batch_idx + 1, e);
                     result.failed_count += batch.len();
                 }
             }
@@ -2756,9 +2739,14 @@ async fn apply_rename(
                 let folder_stem = if file.ctx.is_audio {
                     final_stem.clone()
                 } else if file.ctx.is_bangumi {
-                    append_missing_template_variables(&final_stem, global_config.bangumi_folder_name.as_ref(), &file.ctx)
+                    append_missing_template_variables(
+                        &final_stem,
+                        global_config.bangumi_folder_name.as_ref(),
+                        &file.ctx,
+                    )
                 } else {
-                    let with_folder = append_missing_template_variables(&final_stem, global_config.video_name.as_ref(), &file.ctx);
+                    let with_folder =
+                        append_missing_template_variables(&final_stem, global_config.video_name.as_ref(), &file.ctx);
                     append_missing_template_variables(&with_folder, global_config.page_name.as_ref(), &file.ctx)
                 };
                 let mut target_dir = parent_dir.join(&folder_stem);

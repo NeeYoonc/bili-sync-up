@@ -3305,107 +3305,107 @@ pub async fn get_video_sources(
     // 番剧（type=1）、课程（type=2）与漫画（type=3）共用 video_source 表，一起取出后按类型分组
     let (bangumi_sources, pugv_sources, manga_sources): (Vec<VideoSource>, Vec<VideoSource>, Vec<VideoSource>) =
         video_source::Entity::find()
-        .filter(video_source::Column::Type.is_in([1, 2, 3]))
-        .all(db.as_ref())
-        .await?
-        .into_iter()
-        .map(|model| {
-            let __source_type = model.r#type;
-            let selected_seasons =
-                model
-                    .selected_seasons
+            .filter(video_source::Column::Type.is_in([1, 2, 3]))
+            .all(db.as_ref())
+            .await?
+            .into_iter()
+            .map(|model| {
+                let __source_type = model.r#type;
+                let selected_seasons =
+                    model
+                        .selected_seasons
+                        .as_ref()
+                        .and_then(|json| match serde_json::from_str::<Vec<String>>(json) {
+                            Ok(seasons) if !seasons.is_empty() => Some(seasons),
+                            Ok(_) => None,
+                            Err(err) => {
+                                warn!(
+                                    "Failed to parse selected_seasons for bangumi source {}: {}",
+                                    model.id, err
+                                );
+                                None
+                            }
+                        });
+                let keyword_filters = model
+                    .keyword_filters
                     .as_ref()
-                    .and_then(|json| match serde_json::from_str::<Vec<String>>(json) {
-                        Ok(seasons) if !seasons.is_empty() => Some(seasons),
-                        Ok(_) => None,
-                        Err(err) => {
-                            warn!(
-                                "Failed to parse selected_seasons for bangumi source {}: {}",
-                                model.id, err
-                            );
-                            None
-                        }
-                    });
-            let keyword_filters = model
-                .keyword_filters
-                .as_ref()
-                .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok());
-            let blacklist_keywords = model
-                .blacklist_keywords
-                .as_ref()
-                .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok());
-            let whitelist_keywords = model
-                .whitelist_keywords
-                .as_ref()
-                .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok());
+                    .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok());
+                let blacklist_keywords = model
+                    .blacklist_keywords
+                    .as_ref()
+                    .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok());
+                let whitelist_keywords = model
+                    .whitelist_keywords
+                    .as_ref()
+                    .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok());
 
-            (
-                VideoSource {
-                id: model.id,
-                name: model.name,
-                enabled: model.enabled,
-                path: model.path,
-                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
-                scan_deleted_videos: model.scan_deleted_videos,
-                scan_deleted_videos_once: model.scan_deleted_videos_once,
-                filter_option: model.filter_option.and_then(|value| serde_json::from_value(value).ok()),
-                f_id: None,
-                s_id: None,
-                m_id: None,
-                collection_type: None,
-                collection_aggregate_enabled: false,
-                collection_aggregate_season_number: None,
-                upper_id: None,
-                season_id: model.season_id,
-                media_id: model.media_id,
-                selected_seasons,
-                blacklist_keywords,
-                whitelist_keywords,
-                case_sensitive: model.keyword_case_sensitive,
-                min_duration_seconds: model.min_duration_seconds,
-                max_duration_seconds: model.max_duration_seconds,
-                published_after: model.published_after,
-                published_before: model.published_before,
-                keyword_filters,
-                keyword_filter_mode: model.keyword_filter_mode,
-                audio_only: model.audio_only,
-                audio_only_m4a_only: model.audio_only_m4a_only,
-                flat_folder: model.flat_folder,
-                split_chapters_after_download: model.split_chapters_after_download,
-                download_charge_videos: model.download_charge_videos,
-                download_danmaku: model.download_danmaku,
-                download_subtitle: model.download_subtitle,
-                download_ai_subtitle: model.download_ai_subtitle,
-                ai_subtitle_language: model.ai_subtitle_language,
-                ai_rename: model.ai_rename,
-                ai_rename_video_prompt: model.ai_rename_video_prompt,
-                ai_rename_audio_prompt: model.ai_rename_audio_prompt,
-                ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
-                ai_rename_enable_collection: model.ai_rename_enable_collection,
-                ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
-                ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
-                use_dynamic_api: None,
+                (
+                    VideoSource {
+                        id: model.id,
+                        name: model.name,
+                        enabled: model.enabled,
+                        path: model.path,
+                        latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
+                        scan_deleted_videos: model.scan_deleted_videos,
+                        scan_deleted_videos_once: model.scan_deleted_videos_once,
+                        filter_option: model.filter_option.and_then(|value| serde_json::from_value(value).ok()),
+                        f_id: None,
+                        s_id: None,
+                        m_id: None,
+                        collection_type: None,
+                        collection_aggregate_enabled: false,
+                        collection_aggregate_season_number: None,
+                        upper_id: None,
+                        season_id: model.season_id,
+                        media_id: model.media_id,
+                        selected_seasons,
+                        blacklist_keywords,
+                        whitelist_keywords,
+                        case_sensitive: model.keyword_case_sensitive,
+                        min_duration_seconds: model.min_duration_seconds,
+                        max_duration_seconds: model.max_duration_seconds,
+                        published_after: model.published_after,
+                        published_before: model.published_before,
+                        keyword_filters,
+                        keyword_filter_mode: model.keyword_filter_mode,
+                        audio_only: model.audio_only,
+                        audio_only_m4a_only: model.audio_only_m4a_only,
+                        flat_folder: model.flat_folder,
+                        split_chapters_after_download: model.split_chapters_after_download,
+                        download_charge_videos: model.download_charge_videos,
+                        download_danmaku: model.download_danmaku,
+                        download_subtitle: model.download_subtitle,
+                        download_ai_subtitle: model.download_ai_subtitle,
+                        ai_subtitle_language: model.ai_subtitle_language,
+                        ai_rename: model.ai_rename,
+                        ai_rename_video_prompt: model.ai_rename_video_prompt,
+                        ai_rename_audio_prompt: model.ai_rename_audio_prompt,
+                        ai_rename_enable_multi_page: model.ai_rename_enable_multi_page,
+                        ai_rename_enable_collection: model.ai_rename_enable_collection,
+                        ai_rename_enable_bangumi: model.ai_rename_enable_bangumi,
+                        ai_rename_rename_parent_dir: model.ai_rename_rename_parent_dir,
+                        use_dynamic_api: None,
+                    },
+                    __source_type,
+                )
+            })
+            .collect::<Vec<(VideoSource, i32)>>()
+            .into_iter()
+            .fold(
+                (
+                    Vec::<VideoSource>::new(),
+                    Vec::<VideoSource>::new(),
+                    Vec::<VideoSource>::new(),
+                ),
+                |(mut bangumi, mut pugv, mut manga), (source, source_type)| {
+                    match source_type {
+                        2 => pugv.push(source),
+                        3 => manga.push(source),
+                        _ => bangumi.push(source),
+                    }
+                    (bangumi, pugv, manga)
                 },
-                __source_type,
-            )
-        })
-        .collect::<Vec<(VideoSource, i32)>>()
-        .into_iter()
-        .fold(
-            (
-                Vec::<VideoSource>::new(),
-                Vec::<VideoSource>::new(),
-                Vec::<VideoSource>::new(),
-            ),
-            |(mut bangumi, mut pugv, mut manga), (source, source_type)| {
-                match source_type {
-                    2 => pugv.push(source),
-                    3 => manga.push(source),
-                    _ => bangumi.push(source),
-                }
-                (bangumi, pugv, manga)
-            },
-        );
+            );
 
     // 返回响应，确保每个分类都是一个数组
     Ok(ApiResponse::ok(VideoSourcesResponse {
@@ -4544,8 +4544,8 @@ pub async fn reset_video(
 
     // 重置 NFO 时，数据库里的 staff_info 可能已经落后于 B 站最新联合投稿名单。
     // 标记为待刷新，让下一轮扫描重新拉取详情后再生成 NFO。
-    let needs_metadata_refresh = video_info.category == 2
-        && (video_status.get(VIDEO_STATUS_NFO_INDEX) == 0 || page_nfo_pending);
+    let needs_metadata_refresh =
+        video_info.category == 2 && (video_status.get(VIDEO_STATUS_NFO_INDEX) == 0 || page_nfo_pending);
     if needs_metadata_refresh {
         video_resetted = true;
     }
@@ -5527,8 +5527,7 @@ pub async fn update_video_status(
                 ..Default::default()
             };
             if has_video_updates {
-                video_active_model.download_status =
-                    sea_orm::Set(VideoStatus::from(video_info.download_status).into());
+                video_active_model.download_status = sea_orm::Set(VideoStatus::from(video_info.download_status).into());
             }
             if needs_metadata_refresh {
                 video_active_model.metadata_refresh_pending = sea_orm::Set(true);
@@ -6514,10 +6513,7 @@ pub async fn add_video_source_internal(
 
             let insert_result = video_source::Entity::insert(manga).exec(&txn).await?;
             std::fs::create_dir_all(&params.path).map_err(|e| anyhow!("创建目录失败: {}", e))?;
-            info!(
-                "新漫画添加完成: {} (comic_id={})",
-                params.name, params.source_id
-            );
+            info!("新漫画添加完成: {} (comic_id={})", params.name, params.source_id);
 
             AddVideoSourceResponse {
                 success: true,
@@ -12076,8 +12072,7 @@ pub async fn update_config(
             parallel_download_enabled: params.parallel_download_enabled,
             parallel_download_threads: params.parallel_download_threads,
             parallel_download_use_aria2: params.parallel_download_use_aria2,
-            parallel_download_googlevideo_max_connections: params
-                .parallel_download_googlevideo_max_connections,
+            parallel_download_googlevideo_max_connections: params.parallel_download_googlevideo_max_connections,
             // 视频质量设置
             video_max_quality: params.video_max_quality.clone(),
             video_min_quality: params.video_min_quality.clone(),
@@ -12661,8 +12656,7 @@ pub async fn update_config_internal(
                 )
                 .into());
             }
-            reqwest::Proxy::all(&proxy)
-                .map_err(|error| ApiError::from(anyhow!("网络代理地址无效：{error}")))?;
+            reqwest::Proxy::all(&proxy).map_err(|error| ApiError::from(anyhow!("网络代理地址无效：{error}")))?;
         }
         if proxy != config.proxy {
             config.proxy = proxy;
@@ -13921,8 +13915,16 @@ pub async fn update_config_internal(
                         .await
                 }
                 // 处理视频质量相关字段
-                "video_max_quality" | "video_min_quality" | "audio_max_quality" | "audio_min_quality" | "codecs"
-                | "no_dolby_video" | "no_dolby_audio" | "no_hdr" | "no_hires" | "prefer_douyin_original" => {
+                "video_max_quality"
+                | "video_min_quality"
+                | "audio_max_quality"
+                | "audio_min_quality"
+                | "codecs"
+                | "no_dolby_video"
+                | "no_dolby_audio"
+                | "no_hdr"
+                | "no_hires"
+                | "prefer_douyin_original" => {
                     manager
                         .update_config_item("filter_option", serde_json::to_value(&config.filter_option)?)
                         .await
@@ -15250,7 +15252,7 @@ pub async fn get_bangumi_seasons(
 pub async fn get_pugv_up_courses(
     Query(params): Query<crate::api::request::PugvUpCoursesRequest>,
 ) -> Result<ApiResponse<crate::api::response::PugvUpCoursesResponse>, ApiError> {
-    use crate::bilibili::{BiliClient, pugv::Pugv};
+    use crate::bilibili::{pugv::Pugv, BiliClient};
 
     let up_id = params.up_id.trim().to_string();
     if up_id.is_empty() {
@@ -15262,12 +15264,10 @@ pub async fn get_pugv_up_courses(
 
     // 课程列表不需要登录也能读取
     let bili_client = BiliClient::new(String::new());
-    let courses = Pugv::fetch_up_courses(&bili_client, &up_id)
-        .await
-        .map_err(|e| {
-            error!("获取讲师 {} 的课程列表失败: {:#}", up_id, e);
-            e
-        })?;
+    let courses = Pugv::fetch_up_courses(&bili_client, &up_id).await.map_err(|e| {
+        error!("获取讲师 {} 的课程列表失败: {:#}", up_id, e);
+        e
+    })?;
 
     let data = courses
         .into_iter()
@@ -16325,7 +16325,8 @@ pub struct CancelQueueTaskResponse {
         (status = 500, description = "服务器内部错误", body = String)
     )
 )]
-pub async fn get_downloads_progress() -> Result<ApiResponse<Vec<crate::download_progress::DownloadProgressItem>>, ApiError> {
+pub async fn get_downloads_progress(
+) -> Result<ApiResponse<Vec<crate::download_progress::DownloadProgressItem>>, ApiError> {
     Ok(ApiResponse::ok(
         crate::download_progress::DOWNLOAD_PROGRESS.snapshot().await,
     ))
@@ -17122,13 +17123,7 @@ pub async fn proxy_image(
         let mut target = url.clone();
         let mut refreshed = false;
         loop {
-            match crate::tiktok_impersonate::tiktok_impersonated_get(
-                &target,
-                &headers,
-                Duration::from_secs(45),
-            )
-            .await
-            {
+            match crate::tiktok_impersonate::tiktok_impersonated_get(&target, &headers, Duration::from_secs(45)).await {
                 Ok((200, body, response_headers)) => {
                     let content_type = response_headers
                         .iter()
@@ -17142,10 +17137,7 @@ pub async fn proxy_image(
                     refreshed = true;
                     match crate::tiktok::refresh_tiktok_cover_url(db.as_ref(), &url).await {
                         Ok(Some(fresh)) if fresh != url => {
-                            debug!(
-                                "TikTok 图片直链签名过期，已刷新直链重试: {}",
-                                summarize_image_url(&url)
-                            );
+                            debug!("TikTok 图片直链签名过期，已刷新直链重试: {}", summarize_image_url(&url));
                             target = fresh;
                             continue;
                         }
@@ -17721,8 +17713,8 @@ async fn persist_bilibili_credential(
     // 注意：`Config::clone()` 会为 credential 新建一个 ArcSwap（不是共享槽位），
     // 所以 `reload_config().credential.store(...)` 只改到临时副本。这里必须直接用
     // 调用方手上的新凭据序列化，写库后再 reload 配置包让它全局生效。
-    let credential_value = serde_json::to_value(credential)
-        .map_err(|error| ApiError::from(anyhow!("序列化凭据失败: {error}")))?;
+    let credential_value =
+        serde_json::to_value(credential).map_err(|error| ApiError::from(anyhow!("序列化凭据失败: {error}")))?;
     let manager = ConfigManager::new(db.clone());
 
     let mut last_error: Option<anyhow::Error> = None;
@@ -18495,13 +18487,10 @@ async fn fetch_external_ingests(
         ORDER BY yv.created_at DESC, yv.id DESC
         LIMIT {limit}"
     );
-    ExternalIngestRow::find_by_statement(sea_orm::Statement::from_string(
-        db.get_database_backend(),
-        sql,
-    ))
-    .all(db)
-    .await
-    .map_err(|e| ApiError::from(InnerApiError::from(e)))
+    ExternalIngestRow::find_by_statement(sea_orm::Statement::from_string(db.get_database_backend(), sql))
+        .all(db)
+        .await
+        .map_err(|e| ApiError::from(InnerApiError::from(e)))
 }
 
 /// 把外部平台入库记录行转换为响应结构。
@@ -18642,9 +18631,7 @@ pub async fn get_latest_ingests(
     items.sort_by(|a, b| b.ingested_at.cmp(&a.ingested_at));
     items.truncate(limit);
 
-    Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
-        items,
-    }))
+    Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse { items }))
 }
 
 /// 获取首页「最近处理」列表（下载/修复/弹幕等任务完成事件，支持平台过滤）
@@ -18713,9 +18700,7 @@ pub async fn get_recent_ingests(
     items.sort_by(|a, b| b.ingested_at.cmp(&a.ingested_at));
     items.truncate(limit);
 
-    Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
-        items,
-    }))
+    Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse { items }))
 }
 
 /// 获取视频的BVID信息（用于构建B站链接）
@@ -21372,9 +21357,7 @@ pub async fn test_proxy_handler(
     if !proxy.is_empty() {
         builder = builder
             .no_proxy()
-            .proxy(reqwest::Proxy::all(&proxy).map_err(|error| {
-                ApiError::from(anyhow!("网络代理地址无效：{error}"))
-            })?);
+            .proxy(reqwest::Proxy::all(&proxy).map_err(|error| ApiError::from(anyhow!("网络代理地址无效：{error}")))?);
     }
     let client = builder
         .build()
@@ -22615,7 +22598,9 @@ pub async fn update_video_source_keyword_filters(
                 message: format!(
                     "{} {} 的关键词过滤器已更新，黑名单 {} 个，白名单 {} 个",
                     bili_source_type_label(&source_type),
-                    record.name, blacklist_count, whitelist_count
+                    record.name,
+                    blacklist_count,
+                    whitelist_count
                 ),
             }
         }
@@ -23026,12 +23011,12 @@ pub async fn ai_rename_history(
 
     if matches!(source_type.as_str(), "youtube" | "douyin" | "tiktok") {
         let platform_label = if source_type == "douyin" {
-                "抖音"
-            } else if source_type == "tiktok" {
-                "TikTok"
-            } else {
-                "YouTube"
-            };
+            "抖音"
+        } else if source_type == "tiktok" {
+            "TikTok"
+        } else {
+            "YouTube"
+        };
         let source = youtube_source::Entity::find_by_id(id)
             .one(db.as_ref())
             .await?

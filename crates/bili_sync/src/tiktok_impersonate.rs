@@ -23,8 +23,7 @@ use crate::youtube::configured_external_proxy;
 
 /// curl-impersonate 版本（lexiforest fork 的 release tag）。
 const CURL_IMPERSONATE_VERSION: &str = "1.5.6";
-const CURL_IMPERSONATE_RELEASE_BASE: &str =
-    "https://github.com/lexiforest/curl-impersonate/releases/download";
+const CURL_IMPERSONATE_RELEASE_BASE: &str = "https://github.com/lexiforest/curl-impersonate/releases/download";
 /// Mozilla CA 证书包（Windows 的 BoringSSL 构建不带系统证书库，必须显式指定）。
 const CACERT_DOWNLOAD_URL: &str = "https://curl.se/ca/cacert.pem";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(240);
@@ -64,12 +63,7 @@ fn redact_url(url: &str) -> String {
 }
 
 /// curl 退出码 → 可操作的中文原因（curl 的 CURLE_* 语义）。
-fn curl_exit_hint(
-    code: i32,
-    elapsed: Duration,
-    connect_timeout: Duration,
-    max_time: Duration,
-) -> Option<String> {
+fn curl_exit_hint(code: i32, elapsed: Duration, connect_timeout: Duration, max_time: Duration) -> Option<String> {
     let hint = match code {
         5 => "代理地址无法解析".to_string(),
         6 => "无法解析域名（DNS 失败）".to_string(),
@@ -203,12 +197,19 @@ fn cacert_path_for(package: &CurlImpersonatePackage) -> PathBuf {
 async fn ensure_tiktok_impersonate() -> Result<PathBuf> {
     if let Ok(configured) = std::env::var("BILI_SYNC_CURL_IMPERSONATE_PATH") {
         let path = PathBuf::from(configured);
-        let binary_name = if cfg!(windows) { "curl-impersonate.exe" } else { "curl-impersonate" };
+        let binary_name = if cfg!(windows) {
+            "curl-impersonate.exe"
+        } else {
+            "curl-impersonate"
+        };
         let candidate = if path.is_dir() { path.join(binary_name) } else { path };
         if candidate.is_file() {
             return Ok(candidate);
         }
-        bail!("BILI_SYNC_CURL_IMPERSONATE_PATH 指向的 curl-impersonate 不可用：{}", candidate.display());
+        bail!(
+            "BILI_SYNC_CURL_IMPERSONATE_PATH 指向的 curl-impersonate 不可用：{}",
+            candidate.display()
+        );
     }
     let package = current_package().ok_or_else(|| {
         anyhow!(
@@ -342,9 +343,7 @@ fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<()> {
     use std::io::Read;
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
-    let entries = archive
-        .entries()
-        .context("解析 curl-impersonate tar.gz 失败")?;
+    let entries = archive.entries().context("解析 curl-impersonate tar.gz 失败")?;
     for entry in entries {
         let mut entry = entry.context("读取 curl-impersonate tar.gz 条目失败")?;
         let entry_type = entry.header().entry_type();
@@ -644,7 +643,9 @@ fn format_header(name: &str, value: &str) -> Result<String> {
 fn parse_status_body(stdout: &[u8]) -> Result<(u16, Vec<u8>)> {
     let marker = STATUS_MARKER.as_bytes();
     if let Some(pos) = find_last(stdout, marker) {
-        let status_text = String::from_utf8_lossy(&stdout[pos + marker.len()..]).trim().to_string();
+        let status_text = String::from_utf8_lossy(&stdout[pos + marker.len()..])
+            .trim()
+            .to_string();
         let status: u16 = status_text
             .parse()
             .with_context(|| format!("解析 curl-impersonate HTTP 状态码失败：{status_text}"))?;
@@ -686,7 +687,10 @@ mod tests {
 
     #[test]
     fn redact_url_keeps_port_and_unparsable_urls() {
-        assert_eq!(redact_url("https://example.com:8443/a/b?x=1"), "https://example.com:8443/a/b");
+        assert_eq!(
+            redact_url("https://example.com:8443/a/b?x=1"),
+            "https://example.com:8443/a/b"
+        );
         assert_eq!(redact_url("not a url?x=1"), "not a url");
     }
 
@@ -706,7 +710,10 @@ mod tests {
         assert!(message.contains("已等待 30.0 秒"), "{message}");
         assert!(message.contains("卡在建连/握手阶段"), "{message}");
         assert!(message.contains("proxy/youtube_proxy"), "{message}");
-        assert!(message.ends_with("目标：https://www.tiktok.com/api/user/list/"), "{message}");
+        assert!(
+            message.ends_with("目标：https://www.tiktok.com/api/user/list/"),
+            "{message}"
+        );
         assert!(!message.contains("X-Dynosaur"), "{message}");
     }
 

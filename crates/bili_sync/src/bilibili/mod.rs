@@ -457,10 +457,7 @@ mod tests {
             "state": 0
         });
         match serde_json::from_value::<VideoInfo>(data) {
-            Ok(info) => assert!(
-                matches!(info, VideoInfo::Detail { .. }),
-                "正常 view 数据解析变体不符"
-            ),
+            Ok(info) => assert!(matches!(info, VideoInfo::Detail { .. }), "正常 view 数据解析变体不符"),
             Err(e) => panic!("正常 view 数据解析失败: {}", e),
         }
     }

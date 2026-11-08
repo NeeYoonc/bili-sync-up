@@ -18,8 +18,8 @@ use crate::utils::live_updates::notify_video_sources_changed;
 use crate::utils::notification::SourceScanResult;
 use crate::utils::scan_collector::ScanCollector;
 use crate::utils::scan_id_tracker::{
-    get_last_scanned_ids, group_sources_by_new_old, update_last_scanned_ids, LastScannedIds, MaxIdRecorder, SourceType,
-    SourceScanState, VideoSourceWithId,
+    get_last_scanned_ids, group_sources_by_new_old, update_last_scanned_ids, LastScannedIds, MaxIdRecorder,
+    SourceScanState, SourceType, VideoSourceWithId,
 };
 use crate::utils::time_format::{now_naive, now_standard_string, parse_time_string, STANDARD_TIME_FORMAT};
 use crate::workflow::process_video_source;
@@ -195,12 +195,7 @@ fn update_collection_or_favorite_scan_state(
     is_risk_control: bool,
     config: &Config,
 ) {
-    if !scan_strategy_enabled(config)
-        || !matches!(
-            source.source_type,
-            SourceType::Collection | SourceType::Favorite
-        )
-    {
+    if !scan_strategy_enabled(config) || !matches!(source.source_type, SourceType::Collection | SourceType::Favorite) {
         return;
     }
 
@@ -208,12 +203,8 @@ fn update_collection_or_favorite_scan_state(
         .source_scan_state(source.source_type, source.id)
         .cloned()
         .unwrap_or_default();
-    let (next_scan_at, no_update_streak) = calc_scan_state(
-        current.no_update_streak,
-        new_video_count,
-        is_risk_control,
-        config,
-    );
+    let (next_scan_at, no_update_streak) =
+        calc_scan_state(current.no_update_streak, new_video_count, is_risk_control, config);
 
     last_scanned_ids.set_source_scan_state(
         source.source_type,
@@ -992,7 +983,10 @@ impl ExternalScanTotals {
         let mut platforms: Vec<PlatformScanTotals> = Vec::new();
         for result in results {
             let new_videos = result.new_videos.len();
-            match platforms.iter_mut().find(|platform| platform.label == result.source_type) {
+            match platforms
+                .iter_mut()
+                .find(|platform| platform.label == result.source_type)
+            {
                 Some(platform) => {
                     platform.sources += 1;
                     platform.new_videos += new_videos;
@@ -1173,14 +1167,14 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
         };
 
         // 从数据库加载视频源，而不是从配置文件
-        let enabled_sources =
-            match load_video_sources_from_db(&config, &optimized_connection, &last_scanned_ids).await {
-                Ok(sources) => sources,
-                Err(e) => {
-                    error!("从数据库加载视频源失败: {}", e);
-                    continue;
-                }
-            };
+        let enabled_sources = match load_video_sources_from_db(&config, &optimized_connection, &last_scanned_ids).await
+        {
+            Ok(sources) => sources,
+            Err(e) => {
+                error!("从数据库加载视频源失败: {}", e);
+                continue;
+            }
+        };
         let strategy_candidate_count = enabled_sources
             .iter()
             .filter(|source| scan_strategy_applies_to(source.source_type))
@@ -1243,11 +1237,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             let external_part = external_parts.join("；");
             info!(
                 "开始执行本轮视频下载任务：B站视频源 {} 个（启用 {}，暂缓 {}，禁用 {}）；{}",
-                total_sources_count,
-                due_sources_count,
-                deferred_sources_count,
-                disabled_sources_count,
-                external_part
+                total_sources_count, due_sources_count, deferred_sources_count, disabled_sources_count, external_part
             );
         } else {
             info!("开始执行本轮视频下载任务，共 {} 个启用的视频源", due_sources_count);
@@ -1408,11 +1398,8 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             }
 
             let ordered_sources = if scan_strategy_enabled(&config) {
-                let selection = select_sources_for_round(
-                    new_sources,
-                    old_sources,
-                    config.submission_scan_strategy.batch_size,
-                );
+                let selection =
+                    select_sources_for_round(new_sources, old_sources, config.submission_scan_strategy.batch_size);
                 info!(
                     "B站源扫描策略生效：本轮扫描 {}/{} 个合集/收藏夹/投稿源（每轮上限: {}，自适应: {}）",
                     selection.eligible_selected,
@@ -2065,11 +2052,7 @@ mod tests {
         ];
 
         let selection = select_sources_for_round(new_sources, old_sources, 2);
-        let selected_ids = selection
-            .sources
-            .iter()
-            .map(|source| source.id)
-            .collect::<Vec<_>>();
+        let selected_ids = selection.sources.iter().map(|source| source.id).collect::<Vec<_>>();
 
         assert_eq!(selected_ids, vec![99, 1]);
     }

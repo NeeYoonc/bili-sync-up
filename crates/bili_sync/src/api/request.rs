@@ -632,14 +632,12 @@ pub struct ConfigMigrationRequest {
     pub dry_run: Option<bool>,
 }
 
-
 /// 网络代理连通性测试请求：不传 proxy 时使用当前配置的外源代理。
 #[derive(Deserialize, ToSchema)]
 pub struct TestProxyRequest {
     /// 待测试的代理地址（http/socks5）；为空时使用当前已保存配置。
     pub proxy: Option<String>,
 }
-
 
 /// 数据库维护操作类型。
 #[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
@@ -669,7 +667,6 @@ pub struct DatabaseMaintenanceRequest {
     #[serde(default)]
     pub keep_days: Option<u32>,
 }
-
 
 /// 数据库恢复请求：指定要恢复的备份文件名。
 #[derive(Debug, Deserialize, ToSchema)]

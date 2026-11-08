@@ -187,10 +187,7 @@ async fn run_sidecar(command: &str, args: serde_json::Value) -> Result<serde_jso
             sidecar_output_text(&stderr, &stdout)
         );
     }
-    Ok(parsed
-        .get("result")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null))
+    Ok(parsed.get("result").cloned().unwrap_or(serde_json::Value::Null))
 }
 
 /// 把签名器子进程输出截断为可读文本（UTF-8）。
@@ -198,7 +195,14 @@ fn sidecar_output_text(stderr: &str, stdout: &str) -> String {
     let text = if stderr.trim().is_empty() { stdout } else { stderr };
     let text = text.trim();
     if text.chars().count() > 400 {
-        let tail: String = text.chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(400)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         format!("…{tail}")
     } else {
         text.to_string()
@@ -322,14 +326,17 @@ fn parse_pubtime(raw: &str) -> DateTime<Utc> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::normalize_comic_id;
+    use super::*;
 
     #[test]
     fn search_slot_first_call_is_immediate() {
         let now = Instant::now();
         let mut last = None;
-        assert_eq!(reserve_search_slot(&mut last, now, Duration::from_secs(2)), Duration::ZERO);
+        assert_eq!(
+            reserve_search_slot(&mut last, now, Duration::from_secs(2)),
+            Duration::ZERO
+        );
         assert!(last.is_some());
     }
 
@@ -690,7 +697,13 @@ fn with_cdn_code(url: String) -> String {
 pub async fn fetch_chapter_pages(ep_id: &str) -> Result<(Vec<MangaPage>, Option<String>)> {
     let result = run_sidecar("chapter-pages", serde_json::json!({ "ep_id": ep_id })).await?;
     let mut pages = Vec::new();
-    for (index, item) in result["pages"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+    for (index, item) in result["pages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
         let raw_url = item["url"].as_str().unwrap_or_default().to_string();
         if raw_url.is_empty() {
             continue;

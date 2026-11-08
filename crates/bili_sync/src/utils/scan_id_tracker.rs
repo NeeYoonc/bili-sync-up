@@ -330,8 +330,8 @@ mod tests {
 
     #[test]
     fn legacy_last_scanned_ids_without_scan_states_deserializes() {
-        let ids: LastScannedIds = serde_json::from_str(r#"{"collection":1190,"favorite":9}"#)
-            .expect("旧版扫描游标 JSON 应能兼容");
+        let ids: LastScannedIds =
+            serde_json::from_str(r#"{"collection":1190,"favorite":9}"#).expect("旧版扫描游标 JSON 应能兼容");
 
         assert_eq!(ids.collection, Some(1190));
         assert_eq!(ids.favorite, Some(9));

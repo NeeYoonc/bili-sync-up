@@ -715,7 +715,11 @@ impl Aria2Downloader {
         }
 
         // 尝试执行 aria2c --version 来验证
-        match crate::utils::process::tokio_command(path).arg("--version").output().await {
+        match crate::utils::process::tokio_command(path)
+            .arg("--version")
+            .output()
+            .await
+        {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -750,7 +754,11 @@ impl Aria2Downloader {
         };
 
         // 尝试使用which命令查找
-        match crate::utils::process::tokio_command("which").arg("aria2c").output().await {
+        match crate::utils::process::tokio_command("which")
+            .arg("aria2c")
+            .output()
+            .await
+        {
             Ok(output) if output.status.success() => {
                 let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let system_path = PathBuf::from(path_str);
@@ -766,7 +774,11 @@ impl Aria2Downloader {
         // 在Windows上尝试where命令
         #[cfg(target_os = "windows")]
         {
-            match crate::utils::process::tokio_command("where").arg("aria2c").output().await {
+            match crate::utils::process::tokio_command("where")
+                .arg("aria2c")
+                .output()
+                .await
+            {
                 Ok(output) if output.status.success() => {
                     let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     let system_path = PathBuf::from(path_str);
@@ -1888,7 +1900,11 @@ impl Aria2Downloader {
         #[cfg(target_os = "linux")]
         {
             // 检查进程限制
-            if let Ok(output) = crate::utils::process::tokio_command("ulimit").args(["-n"]).output().await {
+            if let Ok(output) = crate::utils::process::tokio_command("ulimit")
+                .args(["-n"])
+                .output()
+                .await
+            {
                 if output.status.success() {
                     let limit = String::from_utf8_lossy(&output.stdout);
                     info!("✓ 文件描述符限制: {}", limit.trim());

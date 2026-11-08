@@ -44,7 +44,7 @@ use crate::task::TASK_CONTROLLER;
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::live_updates::{notify_queue_status_changed, notify_video_sources_changed, notify_videos_changed};
 use crate::utils::notification::{NewVideoInfo, SourceScanResult};
-use crate::utils::status::{PageStatus, STATUS_OK, VideoStatus};
+use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK};
 use crate::utils::time_format::now_standard_string;
 
 const YTDLP_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -337,7 +337,6 @@ pub struct YouTubeLoginResponse {
     pub message: String,
 }
 
-
 pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiError> {
     // 与 aria2 一致：第一次进入设置页/添加源页时若本机没有 yt-dlp，
     // 自动下载当前系统对应的官方可执行文件。
@@ -363,7 +362,9 @@ pub async fn youtube_status() -> Result<ApiResponse<YouTubeStatusResponse>, ApiE
         session_check,
         default_output_path: default_output_path().display().to_string(),
         container_runtime: is_container_runtime(),
-        cookie_path: youtube_cookie_file().map(|path| path.display().to_string()).unwrap_or_default(),
+        cookie_path: youtube_cookie_file()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
     }))
 }
 
@@ -377,11 +378,8 @@ pub async fn check_youtube_session() -> Result<ApiResponse<YouTubeSessionCheckRe
             "尚未导入 YouTube 登录凭证，请先在设置页导入 cookies.txt 或传输登录状态",
         ));
     }
-    let (state, message) = match tokio::time::timeout(
-        Duration::from_secs(60),
-        probe_youtube_subscription_channels(),
-    )
-    .await
+    let (state, message) = match tokio::time::timeout(Duration::from_secs(60), probe_youtube_subscription_channels())
+        .await
     {
         Ok(Ok(_)) => (
             YoutubeSessionState::Valid,
@@ -390,9 +388,7 @@ pub async fn check_youtube_session() -> Result<ApiResponse<YouTubeSessionCheckRe
         Ok(Err(YoutubeSessionError::Expired(error))) => {
             (YoutubeSessionState::Expired, format!("探测返回未登录：{error:#}"))
         }
-        Ok(Err(YoutubeSessionError::Unclear(error))) => {
-            (YoutubeSessionState::Unclear, format!("无法判断：{error:#}"))
-        }
+        Ok(Err(YoutubeSessionError::Unclear(error))) => (YoutubeSessionState::Unclear, format!("无法判断：{error:#}")),
         Err(_) => (
             YoutubeSessionState::Unclear,
             "联网验证超时（代理过慢或不可用），凭证已保留".to_string(),
@@ -465,11 +461,7 @@ pub async fn search_youtube(
         else {
             continue;
         };
-        let url = if channel_mode {
-            canonical_channel_url(&url)
-        } else {
-            url
-        };
+        let url = if channel_mode { canonical_channel_url(&url) } else { url };
         if !seen_urls.insert(url.clone()) {
             continue;
         }
@@ -589,10 +581,7 @@ pub async fn get_youtube_my_playlists() -> Result<ApiResponse<YouTubeSearchRespo
     }))
 }
 
-async fn fetch_youtube_playlist_catalog(
-    playlists_url: &str,
-    operation: &str,
-) -> Result<Vec<YouTubeSearchResult>> {
+async fn fetch_youtube_playlist_catalog(playlists_url: &str, operation: &str) -> Result<Vec<YouTubeSearchResult>> {
     let mut command = ytdlp_command();
     command.args([
         "--flat-playlist",
@@ -799,9 +788,7 @@ pub async fn get_youtube_source_videos(
     if !output.status.success() {
         let raw_error = command_error(&output);
         let command_failure = anyhow!("加载 YouTube 历史视频失败：{raw_error}");
-        if matches!(source_type.as_str(), "liked" | "watch_later")
-            && is_youtube_auth_required_error(&command_failure)
-        {
+        if matches!(source_type.as_str(), "liked" | "watch_later") && is_youtube_auth_required_error(&command_failure) {
             let label = if source_type == "watch_later" {
                 "稍后再看"
             } else {
@@ -1023,8 +1010,7 @@ async fn probe_youtube_subscription_channels() -> std::result::Result<serde_json
     if !has_youtube_session_value(&contents) {
         return Err(YoutubeSessionError::Expired(youtube_cookie_expired_error()));
     }
-    let cookie_jar =
-        youtube_cookie_jar_from_text(&contents).map_err(YoutubeSessionError::Unclear)?;
+    let cookie_jar = youtube_cookie_jar_from_text(&contents).map_err(YoutubeSessionError::Unclear)?;
     let mut client_builder = reqwest::Client::builder()
         // Netscape 文件同时包含 YouTube 和 Google 账号域 Cookie。必须让
         // Cookie Jar 按域名分别发送：直接拼成一个 Cookie 请求头会把
@@ -1034,14 +1020,13 @@ async fn probe_youtube_subscription_channels() -> std::result::Result<serde_json
         .timeout(Duration::from_secs(30));
     let proxy = configured_external_proxy();
     if !proxy.is_empty() {
-        let proxy = reqwest::Proxy::all(&proxy).map_err(|error| {
-            YoutubeSessionError::Unclear(anyhow::Error::new(error).context("外源代理地址无效"))
-        })?;
+        let proxy = reqwest::Proxy::all(&proxy)
+            .map_err(|error| YoutubeSessionError::Unclear(anyhow::Error::new(error).context("外源代理地址无效")))?;
         client_builder = client_builder.no_proxy().proxy(proxy);
     }
-    let client = client_builder
-        .build()
-        .map_err(|error| YoutubeSessionError::Unclear(anyhow::Error::new(error).context("构建 YouTube 请求客户端失败")))?;
+    let client = client_builder.build().map_err(|error| {
+        YoutubeSessionError::Unclear(anyhow::Error::new(error).context("构建 YouTube 请求客户端失败"))
+    })?;
     let response = client
         .get(SUBSCRIPTION_CHANNELS_URL)
         .header(
@@ -1167,11 +1152,7 @@ enum YoutubeLoginVerdict {
 /// `"LOGGED_IN":false`。其余情况（同意条款页、人机验证页、非 2xx、页面结构变化）
 /// 一律判为不确定，由调用方保留现有凭证 —— 判错成「已退出」的代价是删掉用户还能
 /// 用的登录状态，比漏判一次严重得多。
-fn youtube_login_verdict(
-    final_url: &str,
-    status: reqwest::StatusCode,
-    html: &str,
-) -> YoutubeLoginVerdict {
+fn youtube_login_verdict(final_url: &str, status: reqwest::StatusCode, html: &str) -> YoutubeLoginVerdict {
     if final_url.contains("accounts.google.com") || final_url.contains("ServiceLogin") {
         return YoutubeLoginVerdict::LoggedOut;
     }
@@ -1450,8 +1431,6 @@ pub async fn import_youtube_cookie_file(
     }))
 }
 
-
-
 pub async fn get_youtube_sources(
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<Vec<YouTubeSourceResponse>>, ApiError> {
@@ -1516,10 +1495,7 @@ async fn require_video_platform(db: &DatabaseConnection, id: i32, platform: &str
 
 /// 校验外源（YouTube/抖音/TikTok）下载任务可重试：外源统一存在 `youtube_video` 表，
 /// 重试逻辑与来源平台无关。返回 400 时给出明确平台提示。
-async fn require_external_video_platform(
-    db: &DatabaseConnection,
-    id: i32,
-) -> Result<(), ApiError> {
+async fn require_external_video_platform(db: &DatabaseConnection, id: i32) -> Result<(), ApiError> {
     let Some(video) = youtube_video::Entity::find_by_id(id).one(db).await? else {
         return Err(ApiError::from(anyhow!("外源下载任务不存在")));
     };
@@ -1556,8 +1532,6 @@ pub async fn create_douyin_source(
     }
     create_youtube_source(Extension(db), Json(request)).await
 }
-
-
 
 pub async fn create_youtube_source(
     Extension(db): Extension<std::sync::Arc<DatabaseConnection>>,
@@ -1910,8 +1884,7 @@ pub(crate) async fn reset_external_source_path_shared(
                     moved_files_count += 1;
                 }
                 if request.clean_empty_folders {
-                    cleaned_folders_count +=
-                        remove_empty_parent_directories(old_file.parent(), &old_base).await;
+                    cleaned_folders_count += remove_empty_parent_directories(old_file.parent(), &old_base).await;
                 }
             }
             // 无论媒体文件是否还在磁盘上，都要同步数据库里的 output_path：
@@ -2113,7 +2086,6 @@ fn is_douyin_source(source: &youtube_source::Model) -> bool {
     source.source_type.starts_with("douyin")
 }
 
-
 fn source_platform(source: &youtube_source::Model) -> &'static str {
     if is_douyin_source(source) {
         "douyin"
@@ -2253,15 +2225,11 @@ async fn unified_youtube_parts(
     // 抖音与 TikTok 都可能有图文作品（TikTok 侧为 photo post / 幻灯片），
     // 两者的图片目录约定一致，这里一起标记，供视频管理页与详情页显示图片。
     let is_image_post = (is_douyin_source(source) || crate::tiktok::is_tiktok_source(source))
-        && (video.is_image_post
-            || !image_paths.is_empty()
-            || local_files.has_video_segments
-            || page_paths.len() > 1);
+        && (video.is_image_post || !image_paths.is_empty() || local_files.has_video_segments || page_paths.len() > 1);
     // 图集作品里的视频段是独立分页：有多个分页（或本地还留着早前版本的视频片段）
     // 就按「多段动态」处理——卡片用紫色「动态」徽标区分，详情页不再提示「图片尚未下载」。
-    let image_post_video_only = is_image_post
-        && image_paths.is_empty()
-        && (page_paths.len() > 1 || local_files.has_video_segments);
+    let image_post_video_only =
+        is_image_post && image_paths.is_empty() && (page_paths.len() > 1 || local_files.has_video_segments);
     let image_urls = image_paths
         .iter()
         .enumerate()
@@ -2530,7 +2498,12 @@ async fn remove_youtube_task_artifact(
         if danmaku {
             remove_file_if_exists(&external_ass_path(&output_path)).await?;
             remove_file_if_exists(&output_path.with_extension("ass")).await?;
-            for suffix in ["danmaku.json", "danmaku.json.download", "danmaku.checked", "live_chat.json"] {
+            for suffix in [
+                "danmaku.json",
+                "danmaku.json.download",
+                "danmaku.checked",
+                "live_chat.json",
+            ] {
                 remove_file_if_exists(&output_path.with_extension(suffix)).await?;
             }
         }
@@ -2575,10 +2548,7 @@ async fn remove_external_subtitle_files(output_path: &Path) -> Result<()> {
             continue;
         };
         let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
-        if name.starts_with(&prefix)
-            && matches!(extension, "vtt" | "srt" | "ass" | "ssa")
-            && name != danmaku_ass
-        {
+        if name.starts_with(&prefix) && matches!(extension, "vtt" | "srt" | "ass" | "ssa") && name != danmaku_ass {
             remove_file_if_exists(&path).await?;
         }
     }
@@ -2856,10 +2826,7 @@ pub async fn update_unified_youtube_status(
         // 媒体会被「目标文件已存在，复用现有文件」复用、UP头像/UP主信息会被缓存命中，
         // 只有先把产物删掉，重置为「未开始」才是真的重跑（与批量重置一致）。
         if !(cleared_video.is_empty() && cleared_page.is_empty()) {
-            if let Some(source) = youtube_source::Entity::find_by_id(video.source_id)
-                .one(db)
-                .await?
-            {
+            if let Some(source) = youtube_source::Entity::find_by_id(video.source_id).one(db).await? {
                 remove_youtube_task_artifact(&video, &source, &cleared_video, &cleared_page).await?;
             }
         }
@@ -2976,15 +2943,14 @@ async fn regenerate_youtube_artifacts(
                 if let Some(series_dir) = episodic_series_dir(&output_path, &source.path) {
                     let tvshow = series_dir.join("tvshow.nfo");
                     remove_file_if_exists(&tvshow).await?;
-                    if let Err(error) =
-                        ensure_youtube_series_sidecars(
-                            downloader,
-                            metadata,
-                            &output_path,
-                            &source,
-                            avatar_url.as_deref(),
-                        )
-                        .await
+                    if let Err(error) = ensure_youtube_series_sidecars(
+                        downloader,
+                        metadata,
+                        &output_path,
+                        &source,
+                        avatar_url.as_deref(),
+                    )
+                    .await
                     {
                         warn!(platform, %error, "{platform}剧集 tvshow.nfo 重建失败（单集 NFO 已更新）");
                     }
@@ -3199,11 +3165,7 @@ pub async fn process_scheduled_sources(
         // 每个外源都打一条「开始扫描」：以前只有失败/有新视频时才出日志，YouTube
         // 源在「没有新视频」的轮次里完全静默，看起来像没扫。日志沿用项目里其它
         // 外源日志的纯文本风格，不额外挂字段，免得行尾跟一长串 kv 显得乱。
-        info!(
-            "开始扫描{}视频源「{}」",
-            source_platform_label(source),
-            source.name
-        );
+        info!("开始扫描{}视频源「{}」", source_platform_label(source), source.name);
         let mut scan_result = scan_source(db, source).await;
         if let Err(error) = scan_result.as_ref() {
             if is_douyin_source(source) && crate::douyin::is_douyin_risk_error(error) {
@@ -3818,10 +3780,7 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
     Ok(added)
 }
 
-async fn migrate_douyin_sidecars_for_source(
-    db: &DatabaseConnection,
-    source: &youtube_source::Model,
-) -> Result<()> {
+async fn migrate_douyin_sidecars_for_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<()> {
     if !is_douyin_source(source) {
         return Ok(());
     }
@@ -4387,8 +4346,7 @@ async fn download_video(
             Err(error) => {
                 let retry_count = video.retry_count.saturating_add(1);
                 let error_text = error.to_string();
-                let permanent_failure =
-                    error_text.contains("CENC 加密 DASH") || error_text.contains("付费/加密内容");
+                let permanent_failure = error_text.contains("CENC 加密 DASH") || error_text.contains("付费/加密内容");
                 let exhausted = permanent_failure || retry_count >= MAX_DOWNLOAD_RETRIES;
                 // 与 B 站一致：把失败次数写进「媒体」子任务的状态位（视频级 index 4、
                 // 分页级 index 1）。只改 download_status 字符串的话，卡片右上角读到的
@@ -4627,9 +4585,7 @@ async fn ai_rename_external_pages(
     };
     let old_base = base_stem.to_string();
     file.current_stem = old_base.clone();
-    let prompt = if audio_prompt.is_some_and(|value| !value.trim().is_empty())
-        && file.ctx.is_audio
-    {
+    let prompt = if audio_prompt.is_some_and(|value| !value.trim().is_empty()) && file.ctx.is_audio {
         audio_prompt.unwrap_or_default()
     } else {
         video_prompt
@@ -4675,15 +4631,11 @@ async fn ai_rename_external_pages(
                 }
                 continue;
             }
-            if let Err(error) =
-                crate::utils::ai_rename::rename_sidecars(page, &page_stem, &ext)
-            {
+            if let Err(error) = crate::utils::ai_rename::rename_sidecars(page, &page_stem, &ext) {
                 warn!(platform, %error, "{}图集分页侧车文件 AI 重命名失败", platform);
             }
-            if let Err(error) = crate::utils::ai_rename::update_nfo_content(
-                &new_path.with_extension("nfo"),
-                &page_stem,
-            ) {
+            if let Err(error) = crate::utils::ai_rename::update_nfo_content(&new_path.with_extension("nfo"), &page_stem)
+            {
                 warn!(platform, %error, "{}图集分页 NFO 更新失败", platform);
             }
         }
@@ -4787,9 +4739,7 @@ async fn ai_rename_external_file(
         return Ok(downloaded.output_path.clone());
     }
     // 多段动态作品按整篇改名，保持 `<作品>-P01.mp4` 的分页编号。
-    if let Some(renamed) =
-        ai_rename_external_pages(source, video, downloaded, video_prompt, audio_prompt).await?
-    {
+    if let Some(renamed) = ai_rename_external_pages(source, video, downloaded, video_prompt, audio_prompt).await? {
         return Ok(renamed);
     }
     let config = crate::config::reload_config().ai_rename;
@@ -4858,9 +4808,7 @@ pub async fn ai_rename_external_history(
             .unwrap_or(0);
         info!(
             "{}剧集源「{}」跳过历史 AI 重命名（保持 S01E01/Season 结构），跳过 {} 个已完成文件",
-            platform,
-            source.name,
-            skipped
+            platform, source.name, skipped
         );
         result.skipped_count += skipped as usize;
         return Ok(result);
@@ -5042,8 +4990,13 @@ async fn download_youtube_media(
             } else {
                 video.uploader.clone()
             };
-            let output_path =
-                youtube_output_path(source, video, &fallback_metadata, &placeholder_title, &placeholder_uploader)?;
+            let output_path = youtube_output_path(
+                source,
+                video,
+                &fallback_metadata,
+                &placeholder_title,
+                &placeholder_uploader,
+            )?;
             crate::douyin::create_paid_placeholder(&output_path).await?;
             // 尽力把封面下载到本地（TikTok 封面 CDN 同样要求 Chrome 指纹，走
             // curl-impersonate），这样卡片有真实本地封面而不是只能依赖远程代理。
@@ -5100,7 +5053,10 @@ async fn download_youtube_media(
     if media_exists
         && metadata.is_slideshow()
         && !source.generate_image_post_video
-        && !metadata.slides.iter().any(crate::external_media::ExternalImageSlide::is_video)
+        && !metadata
+            .slides
+            .iter()
+            .any(crate::external_media::ExternalImageSlide::is_video)
     {
         remove_file_if_exists(&output_path).await?;
         media_exists = false;
@@ -5179,14 +5135,8 @@ async fn download_youtube_media(
     } else if metadata.is_slideshow() {
         // 图集作品里的视频段会各自成页，主媒体文件（第一个分页）由下载函数返回：
         // 封面、NFO、字幕等附属文件都跟着这个主文件走。
-        output_path = crate::douyin::download_image_post(
-            downloader,
-            &metadata,
-            &output_path,
-            &filter_option,
-            source,
-        )
-        .await?;
+        output_path =
+            crate::douyin::download_image_post(downloader, &metadata, &output_path, &filter_option, source).await?;
     } else if source.audio_only {
         let selected = selected.as_ref().context("图文作品不应进入音频流选择")?;
         if let Some(audio) = selected.audio.as_ref() {
@@ -5201,10 +5151,7 @@ async fn download_youtube_media(
             }
             if audio.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&temporary).await {
                 let _ = remove_file_if_exists(&temporary).await;
-                return Ok(paid_placeholder_result(
-                    output_path, &metadata, title, uploader, platform,
-                )
-                .await?);
+                return Ok(paid_placeholder_result(output_path, &metadata, title, uploader, platform).await?);
             }
             if let Some(key) = audio.decryption_key.as_deref() {
                 let decrypted = output_path.with_extension("decrypted.m4a");
@@ -5237,10 +5184,7 @@ async fn download_youtube_media(
             }
             if mixed.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&source_temporary).await {
                 let _ = remove_file_if_exists(&source_temporary).await;
-                return Ok(paid_placeholder_result(
-                    output_path, &metadata, title, uploader, platform,
-                )
-                .await?);
+                return Ok(paid_placeholder_result(output_path, &metadata, title, uploader, platform).await?);
             }
             let decrypted_source = output_path.with_extension("audio-source-decrypted.mp4");
             let extract_source = if let Some(key) = mixed.decryption_key.as_deref() {
@@ -5289,9 +5233,7 @@ async fn download_youtube_media(
                 "{}视频流临时文件已存在，复用后仅重试音频",
                 platform
             );
-            if let Err(error) =
-                fetch_platform_asset(downloader, source, &audio_urls, &audio_temporary).await
-            {
+            if let Err(error) = fetch_platform_asset(downloader, source, &audio_urls, &audio_temporary).await {
                 audio_error = Some(error.context(format!("使用项目统一下载器下载{platform}音频流失败")));
             }
         } else {
@@ -5368,10 +5310,7 @@ async fn download_youtube_media(
         }
         if mixed.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&temporary).await {
             let _ = remove_file_if_exists(&temporary).await;
-            return Ok(paid_placeholder_result(
-                output_path, &metadata, title, uploader, platform,
-            )
-            .await?);
+            return Ok(paid_placeholder_result(output_path, &metadata, title, uploader, platform).await?);
         }
         if let Some(key) = mixed.decryption_key.as_deref() {
             let decrypted = output_path.with_extension("decrypted.mp4");
@@ -5587,14 +5526,10 @@ async fn is_reusable_media_file(path: &Path, expected_duration: Option<f64>) -> 
 /// 分流到图文链路（下载原图与配乐并合成幻灯片 MP4）。
 fn external_metadata_has_video_stream(metadata: &ExternalMediaMetadata) -> bool {
     metadata.formats.iter().any(|format| {
-        format
-            .vcodec
-            .as_deref()
-            .is_some_and(|codec| {
-                let codec = codec.trim();
-                !codec.is_empty() && !codec.eq_ignore_ascii_case("none")
-            })
-            && format.url.as_deref().is_some_and(|url| !url.is_empty())
+        format.vcodec.as_deref().is_some_and(|codec| {
+            let codec = codec.trim();
+            !codec.is_empty() && !codec.eq_ignore_ascii_case("none")
+        }) && format.url.as_deref().is_some_and(|url| !url.is_empty())
     })
 }
 
@@ -5607,9 +5542,7 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
         // 官方详情接口优先：一次请求就能拿到 playAddr / 图片贴原图；而 yt-dlp 的
         // 网页解析在 TikTok 上经常被 WAF 打回 403/验证页（Unable to extract
         // universal data for rehydration），先跑它等于每次先白等一次必败请求。
-        let mut api_error = if crate::tiktok::has_tiktok_login()
-            && !crate::tiktok::tiktok_detail_api_in_cooldown()
-        {
+        let mut api_error = if crate::tiktok::has_tiktok_login() && !crate::tiktok::tiktok_detail_api_in_cooldown() {
             // 只试一次：空响应（BotGuard）时不重签，立刻交给 yt-dlp，避免每个视频白等十几秒。
             match crate::tiktok::extract_tiktok_media_detail_quick(url).await {
                 Ok(metadata) => return Ok(metadata),
@@ -5672,9 +5605,7 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
                 }
                 // 详情接口再走一次完整重签重试：第一轮的空响应通常已经带回了新的
                 // msToken，重新签名后有机会直接拿到 playAddr（比 embed 直链更权威）。
-                if crate::tiktok::has_tiktok_login()
-                    && !crate::tiktok::tiktok_detail_api_in_cooldown()
-                {
+                if crate::tiktok::has_tiktok_login() && !crate::tiktok::tiktok_detail_api_in_cooldown() {
                     match crate::tiktok::extract_tiktok_media_detail(url).await {
                         Ok(metadata) => return Ok(metadata),
                         Err(error) => {
@@ -5692,8 +5623,9 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
                 }
                 let tikwm_note = match crate::tiktok::fetch_tiktok_photo_via_tikwm(url).await {
                     Ok(Some(photo)) => return Ok(photo),
-                    Ok(None) => "TikWM 没有返回原图（该作品可能不是图片作品，或已被删除/设为私密/受地区限制）"
-                        .to_string(),
+                    Ok(None) => {
+                        "TikWM 没有返回原图（该作品可能不是图片作品，或已被删除/设为私密/受地区限制）".to_string()
+                    }
                     Err(error) => {
                         debug!(error = %error, url = %url, "TikWM 图片贴解析失败，继续按视频解析结果处理");
                         format!("TikWM 解析服务请求失败：{error:#}")
@@ -5777,12 +5709,8 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
                     "web_embedded 仅返回最高 {}p 格式，尝试 tv_embedded/tv/visionos 获取更高码率（每视频仅一次）",
                     best_max
                 );
-                if let Ok(alt) = run_ytdlp_metadata(
-                    url,
-                    platform,
-                    Some("youtube:player_client=tv_embedded,tv,visionos"),
-                )
-                .await
+                if let Ok(alt) =
+                    run_ytdlp_metadata(url, platform, Some("youtube:player_client=tv_embedded,tv,visionos")).await
                 {
                     let alt_max = youtube_max_format_height(&alt.formats);
                     if alt_max > best_max {
@@ -5805,14 +5733,9 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
 }
 
 /// 记录已尝试过 tv_embedded 兜底解析的视频 URL，避免每次重试都多发一个请求。
-static YOUTUBE_FALLBACK_TRIED: LazyLock<StdMutex<HashSet<String>>> =
-    LazyLock::new(|| StdMutex::new(HashSet::new()));
+static YOUTUBE_FALLBACK_TRIED: LazyLock<StdMutex<HashSet<String>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
 
-async fn run_ytdlp_metadata(
-    url: &str,
-    platform: &str,
-    client_args: Option<&str>,
-) -> Result<ExternalMediaMetadata> {
+async fn run_ytdlp_metadata(url: &str, platform: &str, client_args: Option<&str>) -> Result<ExternalMediaMetadata> {
     let mut command = ytdlp_command();
     command.args([
         "--dump-single-json",
@@ -5838,11 +5761,7 @@ async fn run_ytdlp_metadata(
 
 /// 格式列表中分辨率上限（最高高度，无则 0）。
 fn youtube_max_format_height(formats: &[ExternalMediaFormat]) -> i32 {
-    formats
-        .iter()
-        .filter_map(|format| format.height)
-        .max()
-        .unwrap_or(0)
+    formats.iter().filter_map(|format| format.height).max().unwrap_or(0)
 }
 
 /// YouTube 验证墙/客户端不可用错误：命中后应拉长退避，避免高频请求加重风控。
@@ -5860,10 +5779,7 @@ fn is_youtube_bot_wall_error(error: &anyhow::Error) -> bool {
 
 /// 需要 YouTube 登录状态的私有来源类型。
 fn is_youtube_private_source(source: &youtube_source::Model) -> bool {
-    matches!(
-        source.source_type.as_str(),
-        "watch_later" | "liked" | "subscriptions"
-    )
+    matches!(source.source_type.as_str(), "watch_later" | "liked" | "subscriptions")
 }
 
 /// yt-dlp 对“需要登录的私有列表（如稍后再看 WL）”在未登录/登录失效时的典型报错。
@@ -6378,8 +6294,16 @@ async fn ensure_youtube_sidecars(
         warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但封面子任务失败", platform, source.name, title);
         warnings.push(format!("封面下载失败：{error:#}"));
     }
-    if let Err(error) =
-        generate_youtube_nfo(metadata, output_path, video_url, title, uploader, avatar_url.as_deref(), source).await
+    if let Err(error) = generate_youtube_nfo(
+        metadata,
+        output_path,
+        video_url,
+        title,
+        uploader,
+        avatar_url.as_deref(),
+        source,
+    )
+    .await
     {
         warn!(platform, youtube_id = %metadata.id, error = %error, "{}视频源「{}」视频「{}」媒体已下载，但 NFO 子任务失败", platform, source.name, title);
         warnings.push(format!("NFO 生成失败：{error:#}"));
@@ -6485,10 +6409,7 @@ fn episodic_series_dir(output_path: &Path, source_path: &str) -> Option<PathBuf>
 /// 仅当根目录 `tvshow.nfo` 确实是本收藏夹源生成的内容时才一并删除同组封面，
 /// 避免误删同一目录下用户自己的图片。收藏夹的视频目录内 `season.nfo`
 /// 也是旧版本硬塞进去的固定模板文件，可安全删除。
-async fn cleanup_legacy_collection_series_sidecars(
-    source: &youtube_source::Model,
-    output_path: &Path,
-) -> Result<()> {
+async fn cleanup_legacy_collection_series_sidecars(source: &youtube_source::Model, output_path: &Path) -> Result<()> {
     if source.source_type != "douyin_collection" {
         return Ok(());
     }
@@ -6625,9 +6546,9 @@ async fn ensure_youtube_series_sidecars(
     if needs_tvshow_refresh {
         let xml = generate_youtube_tvshow_nfo(source, metadata, avatar_url);
         let temporary = unique_download_path(&series_dir.join("tvshow.nfo"));
-        tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
-            format!("写入{platform}剧集 NFO 失败: {}", temporary.display())
-        })?;
+        tokio::fs::write(&temporary, xml.as_bytes())
+            .await
+            .with_context(|| format!("写入{platform}剧集 NFO 失败: {}", temporary.display()))?;
         replace_file(&temporary, &tvshow_path).await?;
         info!(platform, path = %tvshow_path.display(), "{}视频源「{}」剧集 tvshow.nfo 生成完成", platform, source.name);
     }
@@ -6639,9 +6560,9 @@ async fn ensure_youtube_series_sidecars(
     {
         let xml = generate_youtube_season_nfo();
         let temporary = unique_download_path(&season_dir.join("season.nfo"));
-        tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
-            format!("写入{platform}季度 NFO 失败: {}", temporary.display())
-        })?;
+        tokio::fs::write(&temporary, xml.as_bytes())
+            .await
+            .with_context(|| format!("写入{platform}季度 NFO 失败: {}", temporary.display()))?;
         replace_file(&temporary, &season_path).await?;
         info!(platform, path = %season_path.display(), "{}视频源「{}」季度 season.nfo 生成完成", platform, source.name);
     }
@@ -6713,7 +6634,7 @@ fn generate_youtube_season_nfo() -> String {
     <locked>false</locked>
 </season>
 "#
-        .to_string()
+    .to_string()
 }
 
 /// 解析外源 UP / 频道的头像地址。
@@ -6721,10 +6642,7 @@ fn generate_youtube_season_nfo() -> String {
 /// 同一份地址有两个用处：下载 `upper_path` 下的头像文件，以及写进视频 NFO 的
 /// `<actor><thumb>`（媒体库据此显示作者头像）。抖音 / TikTok / YouTube 取法各不相同，
 /// 统一收在这里，避免两处各写一份。
-async fn resolve_platform_avatar_url(
-    source: &youtube_source::Model,
-    profile_url: Option<&str>,
-) -> Result<String> {
+async fn resolve_platform_avatar_url(source: &youtube_source::Model, profile_url: Option<&str>) -> Result<String> {
     if crate::tiktok::is_tiktok_source(source) {
         let author_handle = profile_url
             .and_then(crate::tiktok::tiktok_handle_from_url)
@@ -7030,10 +6948,7 @@ async fn ensure_jpeg_image(path: &Path) -> Result<()> {
     if read == 0 || is_jpeg_header(&head[..read]) || !needs_jpeg_conversion(&head[..read]) {
         return Ok(());
     }
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("cover.jpg");
+    let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("cover.jpg");
     // 同一张合集封面会被多个分集并发校正，临时名必须唯一，否则先完成的那个把
     // 临时文件 rename 走，另一个会读到 0 字节或直接报错。
     let unique = uuid::Uuid::new_v4().simple().to_string();
@@ -7186,9 +7101,7 @@ async fn ensure_image_post_page_sidecars(
                 warn!(platform, path = %target.display(), %error, "{}图集分页封面生成失败", platform);
             }
         }
-        if let Err(error) =
-            generate_youtube_nfo(metadata, page, video_url, title, uploader, avatar_url, source).await
-        {
+        if let Err(error) = generate_youtube_nfo(metadata, page, video_url, title, uploader, avatar_url, source).await {
             warn!(platform, path = %page.display(), %error, "{}图集分页 NFO 生成失败", platform);
         }
     }
@@ -7409,10 +7322,8 @@ async fn download_youtube_single_subtitle(
 ) -> Result<()> {
     let platform = source_platform_label(source);
     let title = metadata.title.as_deref().unwrap_or(&metadata.id);
-    let candidates = collect_youtube_subtitle_candidates(
-        metadata,
-        &youtube_subtitle_language_order(metadata, preferred_language),
-    );
+    let candidates =
+        collect_youtube_subtitle_candidates(metadata, &youtube_subtitle_language_order(metadata, preferred_language));
     if candidates.is_empty() {
         info!(youtube_id = %metadata.id, "{}视频源「{}」视频「{}」没有匹配的字幕，跳过字幕子任务", platform, source.name, title);
         return Ok(());
@@ -7464,14 +7375,10 @@ async fn download_youtube_bilingual_subtitle(
 ) -> Result<()> {
     let platform = source_platform_label(source);
     let title = metadata.title.as_deref().unwrap_or(&metadata.id);
-    let primary_candidates = collect_youtube_subtitle_candidates(
-        metadata,
-        &youtube_subtitle_language_candidates(primary_language),
-    );
-    let secondary_candidates = collect_youtube_subtitle_candidates(
-        metadata,
-        &youtube_subtitle_language_candidates(secondary_language),
-    );
+    let primary_candidates =
+        collect_youtube_subtitle_candidates(metadata, &youtube_subtitle_language_candidates(primary_language));
+    let secondary_candidates =
+        collect_youtube_subtitle_candidates(metadata, &youtube_subtitle_language_candidates(secondary_language));
     if primary_candidates.is_empty() {
         info!(youtube_id = %metadata.id, "{}视频源「{}」视频「{}」没有 {} 字幕轨，跳过双语字幕子任务", platform, source.name, title, primary_language);
         return Ok(());
@@ -7596,10 +7503,7 @@ async fn read_youtube_subtitle_cues(path: &Path) -> Result<Vec<crate::utils::sub
 ///
 /// 用户把目标语言设成中文时，先试中文人工轨、再试中文自动翻译轨，最后才退到
 /// 原语言轨——这样「视频恰好有英文人工轨」不会再抢走中文自动轨。
-fn collect_youtube_subtitle_candidates(
-    metadata: &ExternalMediaMetadata,
-    order: &[String],
-) -> Vec<SubtitleCandidate> {
+fn collect_youtube_subtitle_candidates(metadata: &ExternalMediaMetadata, order: &[String]) -> Vec<SubtitleCandidate> {
     let mut candidates: Vec<SubtitleCandidate> = Vec::new();
     let mut seen_urls: HashSet<String> = HashSet::new();
     for language in order {
@@ -8029,7 +7933,10 @@ async fn remove_file_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-pub(crate) async fn source_response(db: &DatabaseConnection, source: youtube_source::Model) -> Result<YouTubeSourceResponse> {
+pub(crate) async fn source_response(
+    db: &DatabaseConnection,
+    source: youtube_source::Model,
+) -> Result<YouTubeSourceResponse> {
     let count = |status: &str| {
         youtube_video::Entity::find()
             .filter(youtube_video::Column::SourceId.eq(source.id))
@@ -8297,7 +8204,9 @@ async fn ytdlp_version() -> Option<String> {
 async fn ytdlp_version_at(executable: &Path) -> Option<String> {
     let output = tokio::time::timeout(
         YTDLP_VERSION_TIMEOUT,
-        crate::utils::process::tokio_command(executable).arg("--version").output(),
+        crate::utils::process::tokio_command(executable)
+            .arg("--version")
+            .output(),
     )
     .await
     .ok()?
@@ -8490,11 +8399,7 @@ async fn download_and_install_ytdlp(
     let asset_url = format!("{YTDLP_RELEASE_BASE_URL}/{}", package.asset_name);
     let checksums_url = format!("{YTDLP_RELEASE_BASE_URL}/SHA2-256SUMS");
     match old_version {
-        Some(version) => info!(
-            version,
-            url = asset_url,
-            "yt-dlp 版本过旧，自动下载最新版替换"
-        ),
+        Some(version) => info!(version, url = asset_url, "yt-dlp 版本过旧，自动下载最新版替换"),
         None => info!(
             target = package.target_key,
             asset = package.asset_name,
@@ -8518,26 +8423,26 @@ async fn download_and_install_ytdlp(
             .user_agent(concat!("bili-sync-up/", env!("CARGO_PKG_VERSION")));
         if use_proxy {
             if let Some(proxy) = proxy.as_deref() {
-                builder = builder.proxy(
-                    reqwest::Proxy::all(proxy)
-                        .with_context(|| format!("解析 yt-dlp 下载代理失败：{proxy}"))?,
-                );
+                builder = builder
+                    .proxy(reqwest::Proxy::all(proxy).with_context(|| format!("解析 yt-dlp 下载代理失败：{proxy}"))?);
             }
         }
         builder.build().context("创建 yt-dlp 下载客户端失败")
     };
-    let attempts: Vec<bool> = if proxy.is_some() { vec![true, false] } else { vec![false] };
+    let attempts: Vec<bool> = if proxy.is_some() {
+        vec![true, false]
+    } else {
+        vec![false]
+    };
     let total_attempts = attempts.len();
 
     let mut last_error = None;
     for (index, use_proxy) in attempts.into_iter().enumerate() {
         let client = build_client(use_proxy)?;
         let fetched = async {
-            let (asset_response, checksums_response) = tokio::try_join!(
-                client.get(&asset_url).send(),
-                client.get(&checksums_url).send(),
-            )
-            .context("请求 yt-dlp 官方发布文件失败")?;
+            let (asset_response, checksums_response) =
+                tokio::try_join!(client.get(&asset_url).send(), client.get(&checksums_url).send(),)
+                    .context("请求 yt-dlp 官方发布文件失败")?;
             let asset_bytes = asset_response
                 .error_for_status()
                 .with_context(|| format!("下载 yt-dlp 返回错误状态：{asset_url}"))?
@@ -8874,13 +8779,10 @@ struct YoutubeSessionCheck {
     checked_at: String,
 }
 
-static YOUTUBE_SESSION_CHECK: LazyLock<StdMutex<Option<YoutubeSessionCheck>>> =
-    LazyLock::new(|| StdMutex::new(None));
+static YOUTUBE_SESSION_CHECK: LazyLock<StdMutex<Option<YoutubeSessionCheck>>> = LazyLock::new(|| StdMutex::new(None));
 
 fn record_youtube_session_check(state: YoutubeSessionState, message: impl Into<String>) {
-    let mut guard = YOUTUBE_SESSION_CHECK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let mut guard = YOUTUBE_SESSION_CHECK.lock().unwrap_or_else(|error| error.into_inner());
     *guard = Some(YoutubeSessionCheck {
         state,
         message: message.into(),
@@ -9028,12 +8930,8 @@ async fn guard_external_login_states() -> Result<()> {
 
 async fn record_external_login_expired(platform: &str, message: &str) {
     info!(platform, "{}登录状态过期，已发送重新导入提示", platform);
-    if let Err(error) = crate::utils::notification::send_error_notification(
-        &format!("{platform}登录状态过期"),
-        message,
-        None,
-    )
-    .await
+    if let Err(error) =
+        crate::utils::notification::send_error_notification(&format!("{platform}登录状态过期"), message, None).await
     {
         warn!(platform, error = %error, "发送外源登录过期通知失败");
     }
@@ -9272,7 +9170,6 @@ fn should_proxy_ytdlp_url(url: &str) -> bool {
     is_youtube_url(url) || crate::tiktok::is_tiktok_url(url)
 }
 
-
 /// 频道/播放列表 tab 扫描时跳过 yt-dlp 的 authcheck。
 ///
 /// yt-dlp 新版在“网页下载不成功”（例如 YouTube 返回登录墙/验证页）时会误判
@@ -9483,9 +9380,8 @@ mod tests {
     fn decodes_gbk_command_error_text() {
         // GBK 编码的“远程主机强迫关闭了一个现有的连接”（Windows 10054 错误文本）
         let gbk: &[u8] = &[
-            0xd4, 0xb6, 0xb3, 0xcc, 0xd6, 0xf7, 0xbb, 0xfa, 0xc7, 0xbf, 0xc6, 0xc8,
-            0xb9, 0xd8, 0xb1, 0xd5, 0xc1, 0xcb, 0xd2, 0xbb, 0xb8, 0xf6, 0xcf, 0xd6,
-            0xd3, 0xd0, 0xb5, 0xc4, 0xc1, 0xac, 0xbd, 0xd3,
+            0xd4, 0xb6, 0xb3, 0xcc, 0xd6, 0xf7, 0xbb, 0xfa, 0xc7, 0xbf, 0xc6, 0xc8, 0xb9, 0xd8, 0xb1, 0xd5, 0xc1, 0xcb,
+            0xd2, 0xbb, 0xb8, 0xf6, 0xcf, 0xd6, 0xd3, 0xd0, 0xb5, 0xc4, 0xc1, 0xac, 0xbd, 0xd3,
         ];
         assert!(std::str::from_utf8(gbk).is_err());
         let decoded = super::decode_command_bytes(gbk);
@@ -9518,7 +9414,11 @@ mod tests {
             .iter()
             .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["02.jpg".to_string(), "03.JPG".to_string()], "只统计真正的原图");
+        assert_eq!(
+            names,
+            vec!["02.jpg".to_string(), "03.JPG".to_string()],
+            "只统计真正的原图"
+        );
 
         // 纯视频段图集：没有原图，但必须被识别成图集（否则会显示成图片尚未下载）。
         let video_only_dir = root.join("20260101000000-7689447727160205745-images");
@@ -9556,7 +9456,10 @@ mod tests {
     fn episodic_series_dir_handles_flat_and_season_layouts() {
         // 平铺目录：视频直接在源目录里，合集根就是源目录，不能再往上退一层
         assert_eq!(
-            episodic_series_dir(Path::new(r"J:\EMBY\AI短剧\困兽之战\S01E01 - x.mp4"), r"J:\EMBY\AI短剧\困兽之战"),
+            episodic_series_dir(
+                Path::new(r"J:\EMBY\AI短剧\困兽之战\S01E01 - x.mp4"),
+                r"J:\EMBY\AI短剧\困兽之战"
+            ),
             Some(PathBuf::from(r"J:\EMBY\AI短剧\困兽之战"))
         );
         // Season 结构：合集根是 Season 的上一层
@@ -9588,10 +9491,14 @@ mod tests {
         assert!(is_jpeg_header(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0]));
         assert!(!is_jpeg_header(b"RIFF\x00\x00\x00\x00WEBP"));
         assert!(needs_jpeg_conversion(b"RIFF\x24\x00\x00\x00WEBPVP8 "));
-        assert!(needs_jpeg_conversion(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]));
+        assert!(needs_jpeg_conversion(&[
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0
+        ]));
         assert!(needs_jpeg_conversion(b"GIF89a......"));
         // 已经是 JPEG 的不再转（避免每轮扫描都空跑 ffmpeg）
-        assert!(!needs_jpeg_conversion(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(!needs_jpeg_conversion(&[
+            0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ]));
     }
 
     #[test]
@@ -9660,7 +9567,9 @@ mod tests {
         let now = chrono::Local::now().naive_local();
         let recent = now.format("%Y-%m-%d %H:%M:%S").to_string();
         assert!(source_scanned_recently(Some(&recent), 1200));
-        let old = (now - chrono::Duration::hours(2)).format("%Y-%m-%d %H:%M:%S").to_string();
+        let old = (now - chrono::Duration::hours(2))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
         assert!(!source_scanned_recently(Some(&old), 1200));
         assert!(!source_scanned_recently(None, 1200));
         assert!(!source_scanned_recently(Some("not-a-date"), 1200));
@@ -9668,16 +9577,13 @@ mod tests {
 
     use super::{
         canonical_channel_url, checksum_for_release_asset, collect_external_scan_result,
-        collect_youtube_channel_renderers, current_ytdlp_package,
-        extract_youtube_initial_data, generate_youtube_person_nfo, is_netscape_youtube_cookie_file, is_youtube_url,
-        has_youtube_session_value,
-        is_jpeg_header, needs_jpeg_conversion,
-        episodic_series_dir,
-        is_partial_download_artifact, remove_partial_download_artifacts,
-        normalize_source_type, normalize_youtube_playlist_url, parse_youtube_live_chat, resolve_source_url,
+        collect_youtube_channel_renderers, current_ytdlp_package, episodic_series_dir, extract_youtube_initial_data,
+        generate_youtube_person_nfo, has_youtube_session_value, is_jpeg_header, is_netscape_youtube_cookie_file,
+        is_partial_download_artifact, is_youtube_url, needs_jpeg_conversion, normalize_source_type,
+        normalize_youtube_playlist_url, parse_youtube_live_chat, remove_partial_download_artifacts, resolve_source_url,
         should_proxy_ytdlp_url, source_scanned_recently, unique_download_path, youtube_cookie_jar,
-        youtube_login_verdict, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for,
-        ytdlp_runtime_target_env, YoutubeLoginVerdict, SUBSCRIPTIONS_URL, WATCH_LATER_URL,
+        youtube_login_verdict, youtube_search_url, ytdlp_js_runtime_name, ytdlp_package_for, ytdlp_runtime_target_env,
+        YoutubeLoginVerdict, SUBSCRIPTIONS_URL, WATCH_LATER_URL,
     };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
@@ -9813,16 +9719,16 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn tiktok_photo_and_video_split_by_media_kind() {
-        let photo_url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
+        let photo_url =
+            std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
         let photo = super::extract_youtube_metadata(&photo_url, None)
             .await
             .expect("解析 TikTok 图片贴失败");
         assert!(!photo.images.is_empty(), "图片贴应带原图");
         assert!(photo.formats.is_empty(), "图片贴不应带视频流");
 
-        let video_url = std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
+        let video_url =
+            std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
         let video = super::extract_youtube_metadata(&video_url, None)
             .await
             .expect("解析 TikTok 普通视频失败");
@@ -9835,8 +9741,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn media_unavailable_tiktok_post_stays_retryable() {
-        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_REGION_URL")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_REGION_URL");
+        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_REGION_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_REGION_URL");
         let error = super::extract_youtube_metadata(&url, None)
             .await
             .expect_err("媒体取不到的作品应返回错误");
@@ -9871,9 +9776,8 @@ mod tests {
         assert!(super::should_placeholder_unavailable_tiktok(&media_missing, 4));
         // 0 次重试时绝不能落占位：换节点后可能又能取到。
         assert!(!crate::tiktok::is_tiktok_unavailable_error(&media_missing));
-        let hard_unavailable = anyhow::anyhow!(
-            "TikTok视频无法下载：你所在国家或地区无法下载此视频（statusCode 10231）"
-        );
+        let hard_unavailable =
+            anyhow::anyhow!("TikTok视频无法下载：你所在国家或地区无法下载此视频（statusCode 10231）");
         assert!(super::should_placeholder_unavailable_tiktok(&hard_unavailable, 0));
         // 其它类型的失败（风控、解析报错等）继续走原有重试逻辑，不受影响。
         let other = anyhow::anyhow!("yt-dlp 解析 TikTok 媒体直链失败：HTTP 403");
@@ -9917,10 +9821,16 @@ mod tests {
 
     #[test]
     fn episodic_douyin_source_is_detected() {
-        assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_theater")));
-        assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_series")));
+        assert!(super::is_episodic_douyin_source(&sample_external_source(
+            "douyin_theater"
+        )));
+        assert!(super::is_episodic_douyin_source(&sample_external_source(
+            "douyin_series"
+        )));
         assert!(super::is_episodic_douyin_source(&sample_external_source("douyin_mix")));
-        assert!(!super::is_episodic_douyin_source(&sample_external_source("douyin_collection")));
+        assert!(!super::is_episodic_douyin_source(&sample_external_source(
+            "douyin_collection"
+        )));
         assert!(!super::is_episodic_douyin_source(&sample_external_source("douyin")));
     }
 
@@ -9978,15 +9888,10 @@ mod tests {
     #[test]
     fn douyin_tvshow_nfo_includes_uploader_actor_and_avatar() {
         let source = sample_external_source("douyin_mix");
-        let metadata: crate::external_media::ExternalMediaMetadata = serde_json::from_str(
-            r#"{"id":"mix-episode","uploader":"测试作者","description":"合集简介"}"#,
-        )
-        .expect("metadata 应可构造");
-        let xml = super::generate_youtube_tvshow_nfo(
-            &source,
-            &metadata,
-            Some("https://example.com/avatar.jpg"),
-        );
+        let metadata: crate::external_media::ExternalMediaMetadata =
+            serde_json::from_str(r#"{"id":"mix-episode","uploader":"测试作者","description":"合集简介"}"#)
+                .expect("metadata 应可构造");
+        let xml = super::generate_youtube_tvshow_nfo(&source, &metadata, Some("https://example.com/avatar.jpg"));
         assert!(
             xml.contains(
                 "<actor><name>测试作者</name><role>UP主</role><thumb>https://example.com/avatar.jpg</thumb></actor>"
@@ -9997,8 +9902,8 @@ mod tests {
 
     #[test]
     fn youtube_stream_selection_falls_back_to_vp9_for_highest_quality() {
-        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
         use super::ExternalMediaFormat;
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
 
         let filter = FilterOption {
             video_max_quality: VideoQuality::Quality8k,
@@ -10063,8 +9968,8 @@ mod tests {
 
     #[test]
     fn youtube_stream_selection_prefers_allowed_codec_at_same_height() {
-        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
         use super::ExternalMediaFormat;
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
 
         let filter = FilterOption {
             video_max_quality: VideoQuality::Quality8k,
@@ -10130,8 +10035,8 @@ mod tests {
 
     #[test]
     fn douyin_original_stream_wins_same_resolution_over_codec_preference() {
-        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
         use super::ExternalMediaFormat;
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
 
         let filter = FilterOption {
             video_max_quality: VideoQuality::Quality8k,
@@ -10168,13 +10073,8 @@ mod tests {
             is_original: true,
             ..current.clone()
         };
-        let selected = super::select_youtube_streams(
-            &[current, original],
-            &filter,
-            false,
-            "抖音",
-        )
-        .expect("应选出原画候选");
+        let selected =
+            super::select_youtube_streams(&[current, original], &filter, false, "抖音").expect("应选出原画候选");
         let mixed = selected.mixed.expect("应选择混合流");
         assert_eq!(
             mixed.format_id.as_deref(),
@@ -10185,8 +10085,8 @@ mod tests {
 
     #[test]
     fn youtube_stream_selection_vp9_fallback_respects_no_hdr_and_max_height() {
-        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
         use super::ExternalMediaFormat;
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
 
         let vfmt = |id: &str, h: i32, vcodec: &str, dr: &str| ExternalMediaFormat {
             format_id: Some(id.to_string()),
@@ -10285,11 +10185,17 @@ mod tests {
         );
         assert!(xml.contains("<studio>YouTube</studio>"), "studio 应为平台名: {xml}");
         assert!(xml.contains("<aired>2026-09-01</aired>"), "aired 应为日期: {xml}");
-        assert!(xml.contains("<premiered>2026-09-01</premiered>"), "premiered 应为日期: {xml}");
+        assert!(
+            xml.contains("<premiered>2026-09-01</premiered>"),
+            "premiered 应为日期: {xml}"
+        );
         assert!(xml.contains("<year>2026</year>"), "year 应为年份: {xml}");
         assert!(!xml.contains("<studio>2026-09-01</studio>"), "studio 不应是日期: {xml}");
         assert!(!xml.contains("<aired>YouTube</aired>"), "aired 不应是平台名: {xml}");
-        assert!(xml.contains("<director>测试频道</director>"), "director 应为频道: {xml}");
+        assert!(
+            xml.contains("<director>测试频道</director>"),
+            "director 应为频道: {xml}"
+        );
     }
 
     #[test]
@@ -10312,12 +10218,32 @@ mod tests {
             "https://www.youtube.com/watch?v=vid123",
             None,
         );
-        assert_eq!(xml.matches("<actor>").count(), 3, "主频道+2个合作频道共3个 actor: {xml}");
-        assert!(xml.contains("<actor><name>主频道</name><role>频道</role></actor>"), "{xml}");
-        assert!(xml.contains("<actor><name>合作频道A</name><role>频道</role></actor>"), "{xml}");
-        assert!(xml.contains("<actor><name>合作频道B</name><role>频道</role></actor>"), "{xml}");
-        assert!(xml.contains("<director>主频道</director>"), "director 应为主频道: {xml}");
-        assert_eq!(xml.matches("主频道").count(), 2, "主频道只在 director 与第一个 actor 出现: {xml}");
+        assert_eq!(
+            xml.matches("<actor>").count(),
+            3,
+            "主频道+2个合作频道共3个 actor: {xml}"
+        );
+        assert!(
+            xml.contains("<actor><name>主频道</name><role>频道</role></actor>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<actor><name>合作频道A</name><role>频道</role></actor>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<actor><name>合作频道B</name><role>频道</role></actor>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<director>主频道</director>"),
+            "director 应为主频道: {xml}"
+        );
+        assert_eq!(
+            xml.matches("主频道").count(),
+            2,
+            "主频道只在 director 与第一个 actor 出现: {xml}"
+        );
     }
 
     #[test]
@@ -10350,8 +10276,14 @@ mod tests {
             1,
             "只有主频道 actor 写头像 <thumb>: {xml}"
         );
-        assert!(!xml.contains("<director>"), "抖音 UGC 不应把同一 UP 重复写成导演: {xml}");
-        assert!(xml.contains("<fanart><thumb>https://example.com/cover.jpg</thumb></fanart>"), "{xml}");
+        assert!(
+            !xml.contains("<director>"),
+            "抖音 UGC 不应把同一 UP 重复写成导演: {xml}"
+        );
+        assert!(
+            xml.contains("<fanart><thumb>https://example.com/cover.jpg</thumb></fanart>"),
+            "{xml}"
+        );
 
         // 空白头像地址不写 <thumb>，避免生成空标签
         let xml = super::build_youtube_movie_nfo_xml(
@@ -10367,7 +10299,10 @@ mod tests {
             "https://www.douyin.com/video/7515762262805777727",
             Some("   "),
         );
-        assert!(xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role></actor>"), "{xml}");
+        assert!(
+            xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role></actor>"),
+            "{xml}"
+        );
         assert_eq!(
             xml.matches("<role>UP主</role><thumb>").count(),
             0,
@@ -10384,7 +10319,10 @@ mod tests {
         assert_eq!(super::youtube_co_creators(&metadata, "主频道"), Vec::<String>::new());
         let metadata: ExternalMediaMetadata =
             serde_json::from_str(r#"{"id":"v1","creators":["音乐人"]}"#).expect("metadata 应可解析");
-        assert_eq!(super::youtube_co_creators(&metadata, "主频道VEVO"), Vec::<String>::new());
+        assert_eq!(
+            super::youtube_co_creators(&metadata, "主频道VEVO"),
+            Vec::<String>::new()
+        );
         // 联合投稿：保留合作频道，去掉主频道与重复项（忽略大小写与首尾空格）。
         let metadata: ExternalMediaMetadata = serde_json::from_str(
             r#"{"id":"v1","creators":["主频道","合作频道A","合作频道B","合作频道A"," 合作频道B  "]}"#,
@@ -10395,8 +10333,7 @@ mod tests {
             vec!["合作频道A".to_string(), "合作频道B".to_string()]
         );
         // 未返回 creators 字段时为空。
-        let metadata: ExternalMediaMetadata =
-            serde_json::from_str(r#"{"id":"v1"}"#).expect("metadata 应可解析");
+        let metadata: ExternalMediaMetadata = serde_json::from_str(r#"{"id":"v1"}"#).expect("metadata 应可解析");
         assert_eq!(super::youtube_co_creators(&metadata, "主频道"), Vec::<String>::new());
     }
 
@@ -10450,9 +10387,18 @@ mod tests {
         let metadata: crate::external_media::ExternalMediaMetadata =
             serde_json::from_str(r#"{"id":"vid1"}"#).expect("metadata 应可构造");
         let xml = super::generate_youtube_tvshow_nfo(&source, &metadata, None);
-        assert!(xml.contains("<studio>TikTok</studio>"), "TikTok tvshow studio 应为 TikTok: {xml}");
-        assert!(xml.contains(r#"<uniqueid type="tiktok""#), "TikTok tvshow uniqueid type 应为 tiktok: {xml}");
-        assert!(!xml.contains("<studio>YouTube</studio>"), "TikTok tvshow studio 不应是 YouTube: {xml}");
+        assert!(
+            xml.contains("<studio>TikTok</studio>"),
+            "TikTok tvshow studio 应为 TikTok: {xml}"
+        );
+        assert!(
+            xml.contains(r#"<uniqueid type="tiktok""#),
+            "TikTok tvshow uniqueid type 应为 tiktok: {xml}"
+        );
+        assert!(
+            !xml.contains("<studio>YouTube</studio>"),
+            "TikTok tvshow studio 不应是 YouTube: {xml}"
+        );
     }
 
     #[test]
@@ -10748,8 +10694,8 @@ mod tests {
 
     #[test]
     fn builds_episodic_douyin_output_path_like_bilibili_collection() {
-        use bili_sync_entity::{youtube_source, youtube_video};
         use crate::external_media::ExternalMediaMetadata;
+        use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
         let mut source = youtube_source::Model::default();
@@ -10794,8 +10740,8 @@ mod tests {
     /// 抖音合集按 B 站合集默认模板命名：`合集名/Season 01/S01E01 - 集标题.mp4`。
     #[test]
     fn builds_douyin_mix_output_path_with_episode_title() {
-        use bili_sync_entity::{youtube_source, youtube_video};
         use crate::external_media::ExternalMediaMetadata;
+        use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
         let mut source = youtube_source::Model::default();
@@ -11102,7 +11048,9 @@ mod tests {
         .await
         .unwrap();
         for name in ["folder.jpg", "poster.jpg"] {
-            tokio::fs::write(uploader_dir.join(name), vec![1u8; 2048]).await.unwrap();
+            tokio::fs::write(uploader_dir.join(name), vec![1u8; 2048])
+                .await
+                .unwrap();
         }
 
         super::cleanup_legacy_collection_series_sidecars(&source, &output_path)
@@ -11130,7 +11078,10 @@ mod tests {
         );
         // 抖音收藏夹 / 放映厅 / 短剧 / 合集：按末段 id
         assert_eq!(
-            identity("douyin_collection", "https://www.douyin.com/collection/7672884606911354673?from=web"),
+            identity(
+                "douyin_collection",
+                "https://www.douyin.com/collection/7672884606911354673?from=web"
+            ),
             "douyin:collection:7672884606911354673",
         );
         assert_eq!(
@@ -11161,9 +11112,18 @@ mod tests {
             identity("playlist", "https://www.youtube.com/playlist?list=PLabc123"),
         );
         // 天然只有一个的源：不同账号也是同一个键
-        assert_eq!(identity("watch_later", "https://www.youtube.com/playlist?list=WL"), "youtube:watch_later");
-        assert_eq!(identity("liked", "https://www.youtube.com/playlist?list=LL"), "youtube:liked");
-        assert_eq!(identity("douyin_liked", "https://www.douyin.com/user/self?tab=like"), "douyin:liked");
+        assert_eq!(
+            identity("watch_later", "https://www.youtube.com/playlist?list=WL"),
+            "youtube:watch_later"
+        );
+        assert_eq!(
+            identity("liked", "https://www.youtube.com/playlist?list=LL"),
+            "youtube:liked"
+        );
+        assert_eq!(
+            identity("douyin_liked", "https://www.douyin.com/user/self?tab=like"),
+            "douyin:liked"
+        );
         // 不同源必须不同
         assert_ne!(
             identity("douyin", "https://www.douyin.com/user/AAA"),
@@ -11244,7 +11204,10 @@ mod tests {
         let urls: Vec<&str> = candidates.iter().map(|value| value.url.as_str()).collect();
         assert_eq!(
             urls,
-            vec!["https://example.com/manual-zh.vtt", "https://example.com/auto-zh.vtt?tlang=zh-Hans"]
+            vec![
+                "https://example.com/manual-zh.vtt",
+                "https://example.com/auto-zh.vtt?tlang=zh-Hans"
+            ]
         );
     }
 }

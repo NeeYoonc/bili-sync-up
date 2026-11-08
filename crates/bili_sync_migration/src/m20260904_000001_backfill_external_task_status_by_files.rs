@@ -34,9 +34,7 @@ impl MigrationTrait for Migration {
                    WHERE download_status = 'pending' \
                      AND video_task_status = 0 AND page_task_status = 0 \
                      AND output_path IS NOT NULL AND output_path != ''";
-        let rows = conn
-            .query_all(Statement::from_string(backend, sql))
-            .await?;
+        let rows = conn.query_all(Statement::from_string(backend, sql)).await?;
 
         let mut ids: Vec<i64> = Vec::new();
         for row in &rows {
@@ -44,7 +42,9 @@ impl MigrationTrait for Migration {
             let output_path: Option<String> = row.try_get_by_index(1)?;
             let Some(output_path) = output_path else { continue };
             // 媒体文件真实存在且非空
-            let Ok(meta) = std::fs::metadata(&output_path) else { continue };
+            let Ok(meta) = std::fs::metadata(&output_path) else {
+                continue;
+            };
             if !meta.is_file() || meta.len() == 0 {
                 continue;
             }

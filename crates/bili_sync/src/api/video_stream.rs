@@ -123,7 +123,12 @@ async fn stream_video_impl(
         let is_tiktok = video_id.starts_with("tiktok-");
         info!("检测到充电/付费视频占位文件，返回不可播放提示: {:?}", video_path);
         let mut response = Response::new(
-            if is_douyin || is_tiktok { "付费视频未付费" } else { "充电视频未充电" }.into(),
+            if is_douyin || is_tiktok {
+                "付费视频未付费"
+            } else {
+                "充电视频未充电"
+            }
+            .into(),
         );
         *response.status_mut() = StatusCode::FORBIDDEN;
         let headers = response.headers_mut();
@@ -209,11 +214,7 @@ async fn maybe_remux_flv_in_mp4(video_path: &PathBuf) -> Result<()> {
 }
 
 /// 查找视频文件路径
-async fn find_video_file(
-    video_id: &str,
-    requested_pid: Option<i32>,
-    db: &DatabaseConnection,
-) -> Result<PathBuf> {
+async fn find_video_file(video_id: &str, requested_pid: Option<i32>, db: &DatabaseConnection) -> Result<PathBuf> {
     debug!("查找视频文件: {}", video_id);
 
     let external = video_id
@@ -237,10 +238,7 @@ async fn find_video_file(
         // 图集作品的视频段各自成页，按前端传来的分页号取对应的那一段。
         let page_paths = crate::douyin::image_post_page_paths(&output_path);
         let requested_pid = requested_pid.unwrap_or(1).max(1) as usize;
-        let resolved = page_paths
-            .get(requested_pid - 1)
-            .cloned()
-            .unwrap_or(output_path);
+        let resolved = page_paths.get(requested_pid - 1).cloned().unwrap_or(output_path);
         if !resolved.is_file() {
             bail!(
                 "{platform}视频文件不存在: {:?}（分页 {}，共 {} 页）",

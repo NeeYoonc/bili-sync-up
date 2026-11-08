@@ -171,7 +171,7 @@ fn build_v3_payload(query_string: &str, user_agent: &str, body: &str, ts_sec: u3
 
     let mut out = Vec::with_capacity(193);
     out.push(16); // count
-    // 字段顺序与线上 SDK 一致：16,0,14,6,13,2,12,9,11,4,3,1,8,15,10,5
+                  // 字段顺序与线上 SDK 一致：16,0,14,6,13,2,12,9,11,4,3,1,8,15,10,5
     push_field(&mut out, 16, &F_FIELD16.to_be_bytes());
     push_field(&mut out, 0, &F_FIELD0.to_be_bytes());
     push_field(&mut out, 14, &F_FIELD14.to_be_bytes());

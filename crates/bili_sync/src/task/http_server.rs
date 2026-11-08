@@ -15,7 +15,6 @@ use utoipa_swagger_ui::{Config, SwaggerUi};
 
 use crate::api::auth;
 
-
 /// 浏览器扩展「外部平台登录助手」（chrome-extension:// 源）跨域调用本服务时的 CORS 处理。
 ///
 /// 扩展在未授予 localhost host 权限时会先发 OPTIONS 预检（携带 Authorization 头），
@@ -26,10 +25,8 @@ pub(crate) async fn cors_middleware(
     request: Request,
     next: middleware::Next,
 ) -> Result<axum::response::Response, StatusCode> {
-    let is_preflight = request.method() == Method::OPTIONS
-        && request
-            .headers()
-            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    let is_preflight =
+        request.method() == Method::OPTIONS && request.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
     if is_preflight {
         let mut response = axum::response::Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -88,17 +85,19 @@ use crate::api::handler::{
     get_config_migration_status,
     get_current_user,
     get_dashboard_data,
+    get_database_backups,
+    get_database_status,
     get_downloads_progress,
     get_hot_reload_status,
     get_latest_ingests,
     get_log_files,
     get_logs,
+    get_manga_chapter,
+    get_manga_comic,
+    get_manga_page,
+    get_manga_search,
     get_notification_config,
     get_notification_status,
-    get_manga_comic,
-    get_manga_search,
-    get_manga_chapter,
-    get_manga_page,
     get_pugv_up_courses,
     get_queue_status,
     get_recent_ingests,
@@ -132,8 +131,11 @@ use crate::api::handler::{
     reset_specific_tasks,
     reset_video,
     reset_video_source_path,
+    restore_database,
+    restore_database_upload,
     resume_scanning_endpoint,
     retry_charge_videos_for_source,
+    run_database_maintenance,
     search_bilibili,
     setup_auth_token,
     stream_logs,
@@ -143,11 +145,6 @@ use crate::api::handler::{
     test_credential_refresh,
     test_notification_handler,
     test_proxy_handler,
-    get_database_status,
-    get_database_backups,
-    restore_database,
-    restore_database_upload,
-    run_database_maintenance,
     test_risk_control_handler,
     update_config,
     update_config_item_internal,
@@ -174,20 +171,17 @@ use crate::douyin::{
     douyin_status, get_douyin_catalog, get_douyin_followings, get_douyin_source_videos, import_douyin_cookie_file,
     search_douyin,
 };
-use crate::utils::model::queue_missing_video_file_size_backfill;
 use crate::tiktok::{
-    create_tiktok_source, delete_tiktok_source, get_tiktok_followings, get_tiktok_playlists,
-    get_tiktok_source_videos,
-    get_tiktok_sources, import_tiktok_cookie_file, search_tiktok,
-    tiktok_secuid_status, tiktok_status, update_tiktok_secuid, update_tiktok_source,
-    update_tiktok_source_enabled,
+    create_tiktok_source, delete_tiktok_source, get_tiktok_followings, get_tiktok_playlists, get_tiktok_source_videos,
+    get_tiktok_sources, import_tiktok_cookie_file, search_tiktok, tiktok_secuid_status, tiktok_status,
+    update_tiktok_secuid, update_tiktok_source, update_tiktok_source_enabled,
 };
+use crate::utils::model::queue_missing_video_file_size_backfill;
 use crate::youtube::{
-    create_douyin_source, create_youtube_source_checked, delete_douyin_source, delete_youtube_source_checked,
-    get_douyin_queue_status, get_douyin_sources, get_douyin_videos, get_youtube_queue_status,
-    get_youtube_channel_playlists, get_youtube_my_playlists, get_youtube_source_videos, get_youtube_sources,
-    get_youtube_videos,
-    check_youtube_session, import_youtube_cookie_file, retry_douyin_video,
+    check_youtube_session, create_douyin_source, create_youtube_source_checked, delete_douyin_source,
+    delete_youtube_source_checked, get_douyin_queue_status, get_douyin_sources, get_douyin_videos,
+    get_youtube_channel_playlists, get_youtube_my_playlists, get_youtube_queue_status, get_youtube_source_videos,
+    get_youtube_sources, get_youtube_videos, import_youtube_cookie_file, retry_douyin_video,
     retry_youtube_video_checked, search_youtube, update_douyin_source, update_douyin_source_enabled,
     update_youtube_source_checked, update_youtube_source_enabled_checked, youtube_status,
 };

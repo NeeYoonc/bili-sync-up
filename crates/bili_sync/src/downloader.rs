@@ -104,10 +104,7 @@ fn googlevideo_alternate_urls(url: &str) -> Vec<String> {
             continue;
         }
         let mut alt = parsed.clone();
-        if alt
-            .set_host(Some(&format!("{prefix}sn-{sn}.googlevideo.com")))
-            .is_ok()
-        {
+        if alt.set_host(Some(&format!("{prefix}sn-{sn}.googlevideo.com"))).is_ok() {
             candidates.push(alt.to_string());
         }
     }
@@ -321,12 +318,7 @@ impl Downloader {
     /// googlevideo 直链拒绝无 Range 的完整 GET（403/掐断连接），多线程分片又因
     /// 探测失败不可用时的兜底：重新探测总大小，再按有界 Range（音频 1MiB、
     /// 视频 4MiB）顺序下载。
-    async fn fetch_googlevideo_single(
-        &self,
-        url: &str,
-        path: &Path,
-        referer: Option<&str>,
-    ) -> Result<()> {
+    async fn fetch_googlevideo_single(&self, url: &str, path: &Path, referer: Option<&str>) -> Result<()> {
         let (range_supported, probe_size) = self.probe_range_support_and_size(url, referer, None).await?;
         let total_size = probe_size
             .filter(|size| *size > 0)
@@ -383,10 +375,7 @@ impl Downloader {
         // 与并发分片使用相同的分片方式，保证断点状态中的分片能精确命中
         let config = crate::config::reload_config();
         let threads = config.concurrent_limit.parallel_download.threads.max(1);
-        let max_googlevideo_connections = config
-            .concurrent_limit
-            .parallel_download
-            .googlevideo_max_connections;
+        let max_googlevideo_connections = config.concurrent_limit.parallel_download.googlevideo_max_connections;
         let (_, ranges) = build_parallel_ranges(total_size, threads, false, 0, max_googlevideo_connections);
         if ranges.is_empty() {
             return self.fetch_single(url, path, referer, cookie).await;
@@ -448,10 +437,7 @@ impl Downloader {
                 .await;
         }
 
-        let size = tokio::fs::metadata(path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
         ensure!(
             size == total_size,
             "断点续传后文件大小不一致: {} != {}",
@@ -1892,17 +1878,13 @@ mod tests {
             video_size.saturating_mul(99) / 100
         ));
         // Issue #254：2GB 视频流合并后只剩 1.7GB，不能被当作完成
-        assert!(!merged_output_size_is_complete(
-            video_size,
-            1700 * 1024 * 1024
-        ));
+        assert!(!merged_output_size_is_complete(video_size, 1700 * 1024 * 1024));
     }
 
     #[test]
     fn googlevideo_uses_small_ranges_with_bounded_native_concurrency() {
         let total_size = 18 * 1024 * 1024;
-        let (concurrency, ranges) =
-            build_parallel_ranges(total_size, 16, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        let (concurrency, ranges) = build_parallel_ranges(total_size, 16, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
 
         assert_eq!(concurrency, 16);
         assert_eq!(ranges.len(), 5);
@@ -1916,25 +1898,20 @@ mod tests {
         let total_size = 64 * 1024 * 1024;
         // 用户把「下载线程数」调到 8 时，YouTube 必须真的用 8 条连接
         // （旧版一律砍到 4，调节线程数对 YouTube 无效）。
-        let (concurrency, _) =
-            build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        let (concurrency, _) = build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
         assert_eq!(concurrency, 8);
 
         // 配置上限低于线程数时，按配置上限收敛
-        let (concurrency, _) =
-            build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 4);
+        let (concurrency, _) = build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 4);
         assert_eq!(concurrency, 4);
 
         // 上限本身可配置，且不能被线程数反向放大
-        let (concurrency, _) =
-            build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
         assert_eq!(concurrency, 16);
-        let (concurrency, _) =
-            build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 32);
+        let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 32);
         assert_eq!(concurrency, 32);
         // 非法 0 值也不能让并发变成 0
-        let (concurrency, _) =
-            build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 0);
+        let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 0);
         assert_eq!(concurrency, 1);
     }
 
@@ -2220,10 +2197,7 @@ mod tests {
         let sidecar = resume_sidecar_path(&path);
         let completed = load_completed_ranges(&sidecar, &url).await;
         assert!(!completed.is_empty(), "失败后应保留已完成分片状态");
-        assert!(
-            !completed.contains(&(0, 2 * 1024 * 1024 - 1)),
-            "失败分片不应被标记完成"
-        );
+        assert!(!completed.contains(&(0, 2 * 1024 * 1024 - 1)), "失败分片不应被标记完成");
 
         // 修复 server 后再次下载：应只请求缺失分片并续传成功
         fail_start.store(usize::MAX, Ordering::SeqCst);
@@ -2281,8 +2255,7 @@ mod tests {
     async fn parallel_download_resumes_after_connection_drop() {
         let data: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         // 服务器 A：收到首个分片 (0..2MB) 请求时直接断开连接并停止服务（模拟节点挂掉）
-        let (url_a, requested, _fail_start, _fail_left) =
-            spawn_range_test_server(data.clone(), Some(0)).await;
+        let (url_a, requested, _fail_start, _fail_left) = spawn_range_test_server(data.clone(), Some(0)).await;
         let dir = std::env::temp_dir().join(format!("bili-resume-drop-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir).await;
         let path = dir.join("video.tmp_video");
@@ -2298,24 +2271,24 @@ mod tests {
         let first = downloader.fetch_parallel(&url_a, &path, 4, 16, None, None).await;
         assert!(first.is_err(), "节点断开后并发下载应返回错误");
         let first_err = format!("{:#}", first.unwrap_err());
-        assert!(
-            first_err.to_lowercase().contains("error"),
-            "错误应来自网络层连接失败"
+        assert!(first_err.to_lowercase().contains("error"), "错误应来自网络层连接失败");
+        println!(
+            "[2] 分片 (0..2MiB) 连接被断开、服务器 A 停止服务 -> 下载失败: {}",
+            first_err.lines().next().unwrap_or("")
         );
-        println!("[2] 分片 (0..2MiB) 连接被断开、服务器 A 停止服务 -> 下载失败: {}", first_err.lines().next().unwrap_or(""));
 
         // 断点状态保留：首个分片未完成，其余分片已完成
         let sidecar = resume_sidecar_path(&path);
         let completed = load_completed_ranges(&sidecar, &url_a).await;
         assert!(!completed.is_empty(), "断连后应保留已完成分片状态");
-        assert!(
-            !completed.contains(&(0, 2 * 1024 * 1024 - 1)),
-            "断连分片不应被标记完成"
-        );
+        assert!(!completed.contains(&(0, 2 * 1024 * 1024 - 1)), "断连分片不应被标记完成");
         println!(
             "[3] 断连后已落盘 {} 个分片状态（首分片未完成）; 文件大小={} MiB",
             completed.len(),
-            tokio::fs::metadata(&path).await.map(|m| m.len() / 1024 / 1024).unwrap_or(0)
+            tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.len() / 1024 / 1024)
+                .unwrap_or(0)
         );
 
         // 服务器 B：同一内容、同一 URL 路径，换端口（等价换 CDN 节点）重新提供服务
@@ -2368,5 +2341,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir).await;
     }
-
 }

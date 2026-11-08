@@ -39,9 +39,9 @@ use std::time::Duration;
 
 // 移除未使用的Lazy导入
 use task::{credential_refresh_scheduler, http_server, video_downloader};
-use youtube::external_login_guard_scheduler;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use youtube::external_login_guard_scheduler;
 
 use crate::config::{init_config_with_database, ARGS, CONFIG_BUNDLE};
 use crate::database::setup_database;

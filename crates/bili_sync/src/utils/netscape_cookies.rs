@@ -116,7 +116,10 @@ pub fn merge_set_cookie(
     if !allowed_domain(&domain) {
         return false;
     }
-    let path = cookie.path().map(|value| value.to_string()).unwrap_or_else(|| "/".to_string());
+    let path = cookie
+        .path()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "/".to_string());
     // RFC 6265：Max-Age 优先于 Expires；Expiration 为 Session 时按会话 Cookie 处理。
     let expires = cookie
         .max_age()
@@ -265,9 +268,7 @@ mod tests {
     use super::*;
 
     fn cookie_line(domain: &str, name: &str, value: &str) -> String {
-        format!(
-            "{domain}\tTRUE\t/\tTRUE\t1817124794\t{name}\t{value}"
-        )
+        format!("{domain}\tTRUE\t/\tTRUE\t1817124794\t{name}\t{value}")
     }
 
     #[test]

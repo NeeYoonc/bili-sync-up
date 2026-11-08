@@ -124,12 +124,20 @@ pub async fn init(db: &DatabaseConnection) -> Result<()> {
 
 /// 同步读取某个外部凭证（无则返回 None）。
 pub fn get(key: &str) -> Option<String> {
-    cache().lock().unwrap_or_else(|e| e.into_inner()).get(key).map(|entry| entry.value.clone())
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .map(|entry| entry.value.clone())
 }
 
 /// 某个外部凭证最近写入时间的 unix 秒；未缓存时返回 None。
 pub fn updated_at(key: &str) -> Option<i64> {
-    cache().lock().unwrap_or_else(|e| e.into_inner()).get(key).map(|entry| entry.updated_at_unix)
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .map(|entry| entry.updated_at_unix)
 }
 
 /// 同步判断某个外部凭证是否存在。
@@ -196,11 +204,7 @@ pub fn sync_shadow(key: &str, value: &str) -> std::io::Result<PathBuf> {
 
 /// 迁移旧版单独文件凭证到数据库：数据库已有同 key 凭证则跳过；文件不存在或
 /// 内容不合法则跳过；成功迁移后删除旧文件。
-pub async fn migrate_file_to_db(
-    key: &str,
-    path: &Path,
-    is_valid: impl Fn(&str) -> bool,
-) -> Result<bool> {
+pub async fn migrate_file_to_db(key: &str, path: &Path, is_valid: impl Fn(&str) -> bool) -> Result<bool> {
     if has(key) {
         return Ok(false);
     }
@@ -228,7 +232,10 @@ mod tests {
             let mut guard = cache.lock().unwrap();
             guard.insert(
                 "test.key".to_string(),
-                CredentialEntry { value: "value".to_string(), updated_at_unix: 0 },
+                CredentialEntry {
+                    value: "value".to_string(),
+                    updated_at_unix: 0,
+                },
             );
         }
         assert_eq!(get("test.key").as_deref(), Some("value"));

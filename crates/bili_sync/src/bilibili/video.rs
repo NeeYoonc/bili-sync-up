@@ -1769,7 +1769,12 @@ impl<'a> Video<'a> {
             .headers(create_api_headers());
 
         wait_for_scoped_playurl_rate_limit().await;
-        let res = request.send().await?.error_for_status()?.json::<serde_json::Value>().await?;
+        let res = request
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
 
         if let Some(code) = res["code"].as_i64() {
             if code != 0 {
@@ -1783,10 +1788,10 @@ impl<'a> Video<'a> {
                 "课程视频流为空，完整data字段: {}",
                 serde_json::to_string_pretty(&res["data"]).unwrap_or_else(|_| "无法序列化".to_string())
             );
-            return Err(
-                crate::bilibili::BiliError::VideoStreamEmpty("课程API返回的视频流为空（可能需要购买该课程）".to_string())
-                    .into(),
-            );
+            return Err(crate::bilibili::BiliError::VideoStreamEmpty(
+                "课程API返回的视频流为空（可能需要购买该课程）".to_string(),
+            )
+            .into());
         }
 
         let mut validated_res = res.validate()?;

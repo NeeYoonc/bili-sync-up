@@ -154,4 +154,3 @@ mod tests {
         assert!(!should_skip_favorite_media_type(2));
     }
 }
-

@@ -10,12 +10,7 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(YouTubeVideo::Table)
-                    .add_column(
-                        ColumnDef::new(YouTubeVideo::EpisodeNumber)
-                            .integer()
-                            .null()
-                            .to_owned(),
-                    )
+                    .add_column(ColumnDef::new(YouTubeVideo::EpisodeNumber).integer().null().to_owned())
                     .to_owned(),
             )
             .await?;

@@ -3,15 +3,15 @@ use std::pin::Pin;
 
 use crate::utils::time_format::{now_standard_string, parse_time_string};
 use anyhow::{Context, Result};
-use chrono::Utc;
 use bili_sync_entity::*;
+use chrono::Utc;
 use futures::Stream;
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{OnConflict, SimpleExpr};
 use sea_orm::ActiveValue::Set;
 use sea_orm::{DatabaseConnection, Unchanged};
 
-use crate::adapter::{VideoSource, VideoSourceEnum, _ActiveModel};
+use crate::adapter::{_ActiveModel, VideoSource, VideoSourceEnum};
 use crate::bilibili::{BiliClient, FavoriteList, VideoInfo};
 
 pub(super) fn favorite_sync_on_conflict() -> OnConflict {

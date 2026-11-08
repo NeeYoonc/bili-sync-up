@@ -30,9 +30,7 @@ impl MigrationTrait for Migration {
                    WHERE download_status = 'pending' \
                      AND video_task_status = 0 AND page_task_status = 0 \
                      AND output_path IS NOT NULL AND output_path != ''";
-        let rows = conn
-            .query_all(Statement::from_string(backend, sql))
-            .await?;
+        let rows = conn.query_all(Statement::from_string(backend, sql)).await?;
 
         let mut ids: Vec<i64> = Vec::new();
         for row in &rows {
