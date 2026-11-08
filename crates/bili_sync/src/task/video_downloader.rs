@@ -1884,6 +1884,10 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                 error!("处理弹幕刷新任务队列失败: {:#}", e);
             }
 
+            if let Err(e) = crate::task::process_ai_rename_history_tasks(connection.clone()).await {
+                error!("处理 AI 批量重命名任务队列失败: {:#}", e);
+            }
+
             // mmap自动处理数据持久化，不需要手动同步
         } else {
             debug!("任务已暂停，跳过后处理阶段");
