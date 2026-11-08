@@ -875,7 +875,6 @@ async fn request_ai_names_with_retry(
     max_attempts: usize,
 ) -> Result<Vec<String>> {
     let max_attempts = max_attempts.max(1);
-    let mut last_error: Option<anyhow::Error> = None;
     let mut attempt = 1usize;
     loop {
         match request_ai_names_once(cfg, source_key, prompt, expected_count).await {
@@ -886,12 +885,10 @@ async fn request_ai_names_with_retry(
                 let retryable = is_retryable_ai_error(&err) || rate_limited;
                 let attempt_limit = attempt_limit_for_error(max_attempts, rate_limited);
                 let Some(backoff) = ai_retry_backoff(attempt, rate_limited) else {
-                    last_error = Some(err);
-                    break;
+                    return Err(err);
                 };
                 if !retryable || attempt >= attempt_limit {
-                    last_error = Some(err);
-                    break;
+                    return Err(err);
                 }
                 warn!(
                     "[{}] {}AI 请求第 {}/{} 次失败（{}），{} 毫秒后重试: {:#}",
@@ -908,7 +905,6 @@ async fn request_ai_names_with_retry(
             }
         }
     }
-    Err(last_error.unwrap_or_else(|| anyhow!("AI 请求失败")))
 }
 
 /// 先生成整批，失败后降级为逐条请求
