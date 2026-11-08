@@ -39,9 +39,11 @@ impl ConfigMigrator {
 
         // 加载TOML配置
         let config = self.load_toml_config()?;
-        
+
         // 保存到数据库
-        self.manager.save_config(&config).await
+        self.manager
+            .save_config(&config)
+            .await
             .context("将配置保存到数据库失败")?;
 
         info!("TOML配置迁移到数据库完成");
@@ -53,11 +55,16 @@ impl ConfigMigrator {
         info!("开始从数据库导出配置到TOML文件");
 
         // 从数据库加载配置
-        let bundle = self.manager.load_config_bundle().await
+        let bundle = self
+            .manager
+            .load_config_bundle()
+            .await
             .context("从数据库加载配置失败")?;
 
         // 保存为TOML文件
-        bundle.config.save_to_path(output_path)
+        bundle
+            .config
+            .save_to_path(output_path)
             .context("保存TOML配置文件失败")?;
 
         info!("数据库配置导出到TOML文件完成: {}", output_path.display());
@@ -67,7 +74,7 @@ impl ConfigMigrator {
     /// 备份当前TOML配置
     pub fn backup_toml_config(&self) -> Result<()> {
         use crate::config::CONFIG_DIR;
-        
+
         let config_path = CONFIG_DIR.join("config.toml");
         if !config_path.exists() {
             info!("TOML配置文件不存在，无需备份");
@@ -79,9 +86,13 @@ impl ConfigMigrator {
             chrono::Utc::now().format("%Y%m%d_%H%M%S")
         ));
 
-        std::fs::copy(&config_path, &backup_path)
-            .with_context(|| format!("备份TOML配置失败: {} -> {}", 
-                config_path.display(), backup_path.display()))?;
+        std::fs::copy(&config_path, &backup_path).with_context(|| {
+            format!(
+                "备份TOML配置失败: {} -> {}",
+                config_path.display(),
+                backup_path.display()
+            )
+        })?;
 
         info!("TOML配置已备份到: {}", backup_path.display());
         Ok(())
@@ -113,12 +124,15 @@ impl ConfigMigrator {
         info!("验证配置迁移结果");
 
         // 尝试加载数据库配置
-        let bundle = self.manager.load_config_bundle().await
+        let bundle = self
+            .manager
+            .load_config_bundle()
+            .await
             .context("从数据库加载配置失败")?;
 
         // 验证配置有效性
         let is_valid = bundle.validate();
-        
+
         if is_valid {
             info!("配置迁移验证通过");
         } else {
@@ -147,10 +161,11 @@ impl ConfigMigrator {
     pub async fn import_from_json(&self, json_data: &str) -> Result<()> {
         info!("开始从JSON数据导入配置");
 
-        let config: Config = serde_json::from_str(json_data)
-            .context("解析JSON配置数据失败")?;
+        let config: Config = serde_json::from_str(json_data).context("解析JSON配置数据失败")?;
 
-        self.manager.save_config(&config).await
+        self.manager
+            .save_config(&config)
+            .await
             .context("将JSON配置保存到数据库失败")?;
 
         info!("JSON配置导入完成");
@@ -161,11 +176,13 @@ impl ConfigMigrator {
     pub async fn export_to_json(&self) -> Result<String> {
         info!("开始导出配置为JSON");
 
-        let bundle = self.manager.load_config_bundle().await
+        let bundle = self
+            .manager
+            .load_config_bundle()
+            .await
             .context("从数据库加载配置失败")?;
 
-        let json_data = serde_json::to_string_pretty(&bundle.config)
-            .context("序列化配置为JSON失败")?;
+        let json_data = serde_json::to_string_pretty(&bundle.config).context("序列化配置为JSON失败")?;
 
         info!("配置导出为JSON完成");
         Ok(json_data)
@@ -177,12 +194,12 @@ impl Config {
     /// 保存配置到指定路径
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
         let config_content = self.save_with_structured_comments()?;
-        
+
         // 确保父目录存在
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         std::fs::write(path, config_content)?;
         Ok(())
     }

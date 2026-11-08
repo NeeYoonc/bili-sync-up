@@ -309,13 +309,15 @@ use crate::utils::format_arg::{collection_unified_page_format_args, page_format_
 use crate::utils::model::{
     check_favorite_multipage_videos_for_new_parts, check_favorite_videos_for_new_parts,
     check_submission_videos_for_new_parts, collect_favorite_page_counts, create_pages, create_videos,
-    filter_unfilled_videos, filter_unhandled_video_pages, get_failed_videos_in_current_cycle,
-    update_pages_model, update_videos_model,
+    filter_unfilled_videos, filter_unhandled_video_pages, get_failed_videos_in_current_cycle, update_pages_model,
+    update_videos_model,
 };
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
 use crate::utils::scan_collector::create_new_video_info;
-use crate::utils::status::{PageStatus, VideoStatus, STATUS_COMPLETED, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX};
+use crate::utils::status::{
+    PageStatus, VideoStatus, STATUS_COMPLETED, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX,
+};
 
 const DB_LOCK_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
 const DOWNLOAD_RISK_CONTROL_RESUME_KEY: &str = "download_risk_control_resume_sources";
@@ -1695,21 +1697,20 @@ pub async fn refresh_video_source<'a>(
             // 为每个新插入的视频创建通知信息
             for new_video in newly_inserted {
                 // 查找对应的视频信息，对番剧使用ep_id进行精确匹配
-                let video_info_idx = if bili_sync_entity::is_episode_source_type(new_video.source_type)
-                    && new_video.ep_id.is_some()
-                {
-                    // 番剧：使用ep_id匹配
-                    temp_video_infos.iter().position(
-                        |(_, _, _, _, ep_id): &(String, String, String, Option<i32>, Option<String>)| {
-                            ep_id.as_ref() == new_video.ep_id.as_ref()
-                        },
-                    )
-                } else {
-                    // 其他类型：使用bvid匹配
-                    temp_video_infos
-                        .iter()
-                        .position(|(_, bvid, _, _, _)| bvid == &new_video.bvid)
-                };
+                let video_info_idx =
+                    if bili_sync_entity::is_episode_source_type(new_video.source_type) && new_video.ep_id.is_some() {
+                        // 番剧：使用ep_id匹配
+                        temp_video_infos.iter().position(
+                            |(_, _, _, _, ep_id): &(String, String, String, Option<i32>, Option<String>)| {
+                                ep_id.as_ref() == new_video.ep_id.as_ref()
+                            },
+                        )
+                    } else {
+                        // 其他类型：使用bvid匹配
+                        temp_video_infos
+                            .iter()
+                            .position(|(_, bvid, _, _, _)| bvid == &new_video.bvid)
+                    };
 
                 if let Some(idx) = video_info_idx {
                     let (title, _, _upper_name, bangumi_episode, _) = &temp_video_infos[idx];
@@ -1992,11 +1993,9 @@ pub async fn fetch_video_details(
 
     // 分离出番剧 / 课程 / 普通视频
     let (bangumi_videos, rest): (Vec<_>, Vec<_>) = videos_model.into_iter().partition(|v| v.source_type == Some(1));
-    let (pugv_videos, rest): (Vec<_>, Vec<_>) =
-        rest.into_iter().partition(|v| v.source_type == Some(2));
+    let (pugv_videos, rest): (Vec<_>, Vec<_>) = rest.into_iter().partition(|v| v.source_type == Some(2));
     // 漫画章节
-    let (manga_videos, normal_videos): (Vec<_>, Vec<_>) =
-        rest.into_iter().partition(|v| v.source_type == Some(3));
+    let (manga_videos, normal_videos): (Vec<_>, Vec<_>) = rest.into_iter().partition(|v| v.source_type == Some(3));
 
     // 课程课时：cid 在入库时就已带上，这里只需补齐 page 记录
     if !pugv_videos.is_empty() {
@@ -2774,7 +2773,10 @@ async fn cleanup_completed_skipped_video_sidecars(
                 .map(|name| name.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if matches!(ext, "mp4" | "m4a" | "flv" | "mkv" | "mov" | "ts" | "webm" | "mp3" | "aac" | "wav" | "flac" | "m4s") {
+            if matches!(
+                ext,
+                "mp4" | "m4a" | "flv" | "mkv" | "mov" | "ts" | "webm" | "mp3" | "aac" | "wav" | "flac" | "m4s"
+            ) {
                 has_media = true;
                 break;
             }
@@ -2800,8 +2802,7 @@ async fn cleanup_completed_skipped_video_sidecars(
         if sidecar_count > 0 {
             info!(
                 "已清理已完成跳过视频「{}」的 {} 个历史附属文件（未达到最低下载标准不保留封面/NFO/弹幕/字幕）",
-                video_model.name,
-                sidecar_count
+                video_model.name, sidecar_count
             );
         }
         // 删除残留的空视频文件夹及空父目录（如 UP 目录），直到视频源根目录为止。
@@ -3429,13 +3430,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
                 (folder_renames.len() + batch_size - 1) / batch_size,
                 batch.len()
             );
-            match ai_rename::ai_generate_folder_names_batch(
-                &cfg.ai_rename,
-                &source_key,
-                batch,
-                video_prompt_hint,
-            )
-            .await
+            match ai_rename::ai_generate_folder_names_batch(&cfg.ai_rename, &source_key, batch, video_prompt_hint).await
             {
                 Ok(new_names) => {
                     for (folder, new_name) in batch.iter().zip(new_names.iter()) {
@@ -3443,22 +3438,14 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
                             Ok(true) => renamed_count += 1,
                             Ok(false) => skipped_count += 1,
                             Err(e) => {
-                                warn!(
-                                    "[{}] 文件夹重命名失败 {}: {}",
-                                    source_key, folder.current_name, e
-                                );
+                                warn!("[{}] 文件夹重命名失败 {}: {}", source_key, folder.current_name, e);
                                 failed_count += 1;
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "[{}] 文件夹批次 {} AI 调用失败: {}",
-                        source_key,
-                        batch_idx + 1,
-                        e
-                    );
+                    warn!("[{}] 文件夹批次 {} AI 调用失败: {}", source_key, batch_idx + 1, e);
                     failed_count += batch.len();
                 }
             }
@@ -3587,9 +3574,14 @@ async fn apply_ai_rename(
                 let folder_stem = if file.ctx.is_audio {
                     final_stem.clone()
                 } else if file.ctx.is_bangumi {
-                    ai_rename::append_missing_template_variables(&final_stem, cfg.bangumi_folder_name.as_ref(), &file.ctx)
+                    ai_rename::append_missing_template_variables(
+                        &final_stem,
+                        cfg.bangumi_folder_name.as_ref(),
+                        &file.ctx,
+                    )
                 } else {
-                    let with_folder = ai_rename::append_missing_template_variables(&final_stem, cfg.video_name.as_ref(), &file.ctx);
+                    let with_folder =
+                        ai_rename::append_missing_template_variables(&final_stem, cfg.video_name.as_ref(), &file.ctx);
                     ai_rename::append_missing_template_variables(&with_folder, cfg.page_name.as_ref(), &file.ctx)
                 };
                 let mut target_dir = parent_dir.join(&folder_stem);
@@ -7415,10 +7407,8 @@ async fn download_page(
     // MAX_BASENAME_BYTES 字节内，为 `.mp4.tmp_video`、`.zh-CN.default.ass` 等后缀
     // 预留空间，避免超过文件系统单段 255 字节上限后，所有直链在建临时文件时
     // 统一报 `Filename too long (os error 36)` 导致整页下载失败。
-    let base_name = crate::utils::filenamify::cap_path_segments_bytes(
-        &base_name,
-        crate::utils::filenamify::MAX_BASENAME_BYTES,
-    );
+    let base_name =
+        crate::utils::filenamify::cap_path_segments_bytes(&base_name, crate::utils::filenamify::MAX_BASENAME_BYTES);
 
     // 根据audio_only设置选择文件扩展名
     let media_ext = if audio_only { "m4a" } else { "mp4" };
@@ -7622,9 +7612,7 @@ async fn download_page(
         .as_deref()
         .is_some_and(|reason| !reason.trim().is_empty());
     let skip_sidecars = media_skip_reason.is_some()
-        || (skip_reason_persisted
-            && !media_file_exists
-            && matches!(res_2, Ok(ExecutionStatus::Skipped)));
+        || (skip_reason_persisted && !media_file_exists && matches!(res_2, Ok(ExecutionStatus::Skipped)));
 
     let (res_1, res_3, res_4, res_5) = if skip_sidecars {
         if let Err(err) = remove_original_page_artifacts(
@@ -7646,8 +7634,7 @@ async fn download_page(
         // 删除本页跳过产生的空视频文件夹及空父目录（直到视频源根目录），
         // 避免未达到最低下载标准的视频残留空文件夹。
         if let Some(video_dir) = video_path.parent() {
-            if let Err(err) =
-                cleanup_empty_dir_chain(video_dir, video_source.path(), "未达最低下载标准视频残留").await
+            if let Err(err) = cleanup_empty_dir_chain(video_dir, video_source.path(), "未达最低下载标准视频残留").await
             {
                 debug!("清理未达最低下载标准视频的空文件夹失败: {:#}", err);
             }
@@ -8138,18 +8125,17 @@ async fn download_page(
     let final_video_path = chapter_primary_path.unwrap_or_else(|| video_path.clone());
 
     let final_video_path_str = final_video_path.to_string_lossy().to_string();
-    let final_page_path = if skip_charge_video_media_download
-        || matches!(results.get(1), Some(ExecutionStatus::Skipped))
-    {
-        original_page_model.path.clone()
-    } else if inaccessible_reason.is_some() {
-        original_page_model
-            .path
-            .clone()
-            .or_else(|| final_video_path.exists().then_some(final_video_path_str.clone()))
-    } else {
-        Some(final_video_path_str.clone())
-    };
+    let final_page_path =
+        if skip_charge_video_media_download || matches!(results.get(1), Some(ExecutionStatus::Skipped)) {
+            original_page_model.path.clone()
+        } else if inaccessible_reason.is_some() {
+            original_page_model
+                .path
+                .clone()
+                .or_else(|| final_video_path.exists().then_some(final_video_path_str.clone()))
+        } else {
+            Some(final_video_path_str.clone())
+        };
     if page_model.path.as_deref() != final_page_path.as_deref() {
         debug!(
             "分页路径已更新并将写入数据库: page_id={}, old={:?}, new={:?}",
@@ -8943,7 +8929,13 @@ async fn download_page_video_from_streams(
     // 函数返回（无论成败）后自动清理进度条目
     let _progress_guard = DownloadProgressGuard::new(progress_key.clone());
     crate::download_progress::DOWNLOAD_PROGRESS
-        .begin_task(&progress_key, "bilibili", &progress_title, "准备下载", &progress_file_name)
+        .begin_task(
+            &progress_key,
+            "bilibili",
+            &progress_title,
+            "准备下载",
+            &progress_file_name,
+        )
         .await;
     // 按需创建保存目录（只在实际下载时创建）
     ensure_parent_dir_for_file(page_path).await?;
@@ -9016,10 +9008,7 @@ async fn download_page_video_from_streams(
                     if max_quality < filter_option.video_min_quality {
                         warn!(
                             "视频「{}」第{}页未达到设定的最低分辨率/质量（最低 {:?}，实际最高 {:?}），跳过下载",
-                            video_model.name,
-                            page_info_for_download.page,
-                            filter_option.video_min_quality,
-                            max_quality
+                            video_model.name, page_info_for_download.page, filter_option.video_min_quality, max_quality
                         );
                         return Ok(PageVideoFetchResult {
                             status: ExecutionStatus::Skipped,
@@ -9051,10 +9040,7 @@ async fn download_page_video_from_streams(
             if actual_quality < filter_option.video_min_quality {
                 warn!(
                     "视频「{}」第{}页未达到设定的最低分辨率/质量（最低 {:?}，实际 {:?}），跳过下载",
-                    video_model.name,
-                    page_info_for_download.page,
-                    filter_option.video_min_quality,
-                    actual_quality
+                    video_model.name, page_info_for_download.page, filter_option.video_min_quality, actual_quality
                 );
                 return Ok(PageVideoFetchResult {
                     status: ExecutionStatus::Skipped,
@@ -9127,7 +9113,14 @@ async fn download_page_video_from_streams(
                 warn!("混合流不支持纯音频提取，将下载完整内容");
                 let urls = mix_stream.urls();
                 let downloaded_size = download_stream(
-                    downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                    downloader,
+                    &progress_key,
+                    "bilibili",
+                    &progress_title,
+                    "下载中",
+                    &progress_file_name,
+                    &urls,
+                    page_path,
                 )
                 .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
@@ -9139,7 +9132,14 @@ async fn download_page_video_from_streams(
                 // 直接下载音频流
                 let audio_urls = audio_stream.urls();
                 let downloaded_size = download_stream(
-                    downloader, &progress_key, "bilibili", &progress_title, "下载音频流", &progress_file_name, &audio_urls, page_path,
+                    downloader,
+                    &progress_key,
+                    "bilibili",
+                    &progress_title,
+                    "下载音频流",
+                    &progress_file_name,
+                    &audio_urls,
+                    page_path,
                 )
                 .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
@@ -9152,7 +9152,14 @@ async fn download_page_video_from_streams(
                 warn!("未找到独立音频流，将下载视频流");
                 let urls = video_stream.urls();
                 let downloaded_size = download_stream(
-                    downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                    downloader,
+                    &progress_key,
+                    "bilibili",
+                    &progress_title,
+                    "下载中",
+                    &progress_file_name,
+                    &urls,
+                    page_path,
                 )
                 .await?;
                 // 单流下载完成即最终文件，清理可能遗留的断点续传状态
@@ -9170,7 +9177,14 @@ async fn download_page_video_from_streams(
                         let tmp_mix_path = page_path.with_extension("tmp_flv");
                         let urls = mix_stream.urls();
                         let downloaded_size = download_stream(
-                            downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, &tmp_mix_path,
+                            downloader,
+                            &progress_key,
+                            "bilibili",
+                            &progress_title,
+                            "下载中",
+                            &progress_file_name,
+                            &urls,
+                            &tmp_mix_path,
                         )
                         .await?;
                         crate::download_progress::DOWNLOAD_PROGRESS
@@ -9200,7 +9214,14 @@ async fn download_page_video_from_streams(
                     _ => {
                         let urls = mix_stream.urls();
                         let downloaded_size = download_stream(
-                            downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                            downloader,
+                            &progress_key,
+                            "bilibili",
+                            &progress_title,
+                            "下载中",
+                            &progress_file_name,
+                            &urls,
+                            page_path,
                         )
                         .await?;
                         (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
@@ -9213,7 +9234,14 @@ async fn download_page_video_from_streams(
             } => {
                 let urls = video_stream.urls();
                 let downloaded_size = download_stream(
-                    downloader, &progress_key, "bilibili", &progress_title, "下载中", &progress_file_name, &urls, page_path,
+                    downloader,
+                    &progress_key,
+                    "bilibili",
+                    &progress_title,
+                    "下载中",
+                    &progress_file_name,
+                    &urls,
+                    page_path,
                 )
                 .await?;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
@@ -9229,49 +9257,63 @@ async fn download_page_video_from_streams(
 
                 let video_urls = video_stream.urls();
                 let video_size = download_stream(
-                    downloader, &progress_key, "bilibili", &progress_title, "下载视频流", &progress_file_name, &video_urls, &tmp_video_path,
+                    downloader,
+                    &progress_key,
+                    "bilibili",
+                    &progress_title,
+                    "下载视频流",
+                    &progress_file_name,
+                    &video_urls,
+                    &tmp_video_path,
                 )
                 .await
-                    .map_err(|e| {
-                        // 使用错误分类器进行统一处理
-                        let classified_error = crate::error::ErrorClassifier::classify_error(&e);
-                        match classified_error.error_type {
-                            crate::error::ErrorType::UserCancelled => {
-                                info!("视频流下载因用户暂停而终止");
-                            }
-                            _ if crate::downloader::should_refresh_playurl_after_download_error(&e) => {
-                                debug!("视频流下载失败，交由上层刷新播放地址后重试: {:#}", e);
-                            }
-                            _ => {
-                                error!("视频流下载失败: {:#}", e);
-                            }
+                .map_err(|e| {
+                    // 使用错误分类器进行统一处理
+                    let classified_error = crate::error::ErrorClassifier::classify_error(&e);
+                    match classified_error.error_type {
+                        crate::error::ErrorType::UserCancelled => {
+                            info!("视频流下载因用户暂停而终止");
                         }
-                        e
-                    })?;
+                        _ if crate::downloader::should_refresh_playurl_after_download_error(&e) => {
+                            debug!("视频流下载失败，交由上层刷新播放地址后重试: {:#}", e);
+                        }
+                        _ => {
+                            error!("视频流下载失败: {:#}", e);
+                        }
+                    }
+                    e
+                })?;
 
                 let audio_urls = audio_stream.urls();
                 let audio_size = download_stream(
-                    downloader, &progress_key, "bilibili", &progress_title, "下载音频流", &progress_file_name, &audio_urls, &tmp_audio_path,
+                    downloader,
+                    &progress_key,
+                    "bilibili",
+                    &progress_title,
+                    "下载音频流",
+                    &progress_file_name,
+                    &audio_urls,
+                    &tmp_audio_path,
                 )
                 .await
-                    .map_err(|e| {
-                        // 使用错误分类器进行统一处理
-                        let classified_error = crate::error::ErrorClassifier::classify_error(&e);
-                        match classified_error.error_type {
-                            crate::error::ErrorType::UserCancelled => {
-                                info!("音频流下载因用户暂停而终止");
-                            }
-                            _ if crate::downloader::should_refresh_playurl_after_download_error(&e) => {
-                                debug!("音频流下载失败，交由上层刷新播放地址后重试: {:#}", e);
-                            }
-                            _ => {
-                                error!("音频流下载失败: {:#}", e);
-                            }
+                .map_err(|e| {
+                    // 使用错误分类器进行统一处理
+                    let classified_error = crate::error::ErrorClassifier::classify_error(&e);
+                    match classified_error.error_type {
+                        crate::error::ErrorType::UserCancelled => {
+                            info!("音频流下载因用户暂停而终止");
                         }
-                        // 保留已下载完成的视频临时文件：重试时走断点续传复用。
-                        // 之前用 tokio::spawn 异步删除会与重试下载产生竞态，误删新文件。
-                        e
-                    })?;
+                        _ if crate::downloader::should_refresh_playurl_after_download_error(&e) => {
+                            debug!("音频流下载失败，交由上层刷新播放地址后重试: {:#}", e);
+                        }
+                        _ => {
+                            error!("音频流下载失败: {:#}", e);
+                        }
+                    }
+                    // 保留已下载完成的视频临时文件：重试时走断点续传复用。
+                    // 之前用 tokio::spawn 异步删除会与重试下载产生竞态，误删新文件。
+                    e
+                })?;
 
                 // 增强的音视频合并，带损坏文件检测和重试机制
                 crate::download_progress::DOWNLOAD_PROGRESS
@@ -12359,11 +12401,7 @@ async fn fill_manga_videos(
 
     let page_counts = match crate::bilibili::manga::fetch_comic_detail(&media_id).await {
         Ok(comic) => {
-            info!(
-                "漫画「{}」获取到 {} 话元信息",
-                comic.title,
-                comic.episodes.len()
-            );
+            info!("漫画「{}」获取到 {} 话元信息", comic.title, comic.episodes.len());
             comic
                 .episodes
                 .into_iter()
@@ -12371,10 +12409,7 @@ async fn fill_manga_videos(
                 .collect::<HashMap<String, u32>>()
         }
         Err(error) => {
-            warn!(
-                "获取漫画 mc{} 详情失败，将退化为按已有信息填充: {:#}",
-                media_id, error
-            );
+            warn!("获取漫画 mc{} 详情失败，将退化为按已有信息填充: {:#}", media_id, error);
             HashMap::new()
         }
     };
@@ -12451,10 +12486,7 @@ async fn fill_pugv_videos(
 
     for video_model in pugv_videos {
         match &video_model.season_id {
-            Some(season_id) => videos_by_season
-                .entry(season_id.clone())
-                .or_default()
-                .push(video_model),
+            Some(season_id) => videos_by_season.entry(season_id.clone()).or_default().push(video_model),
             None => videos_without_season.push(video_model),
         }
     }
@@ -16219,7 +16251,10 @@ mod tests {
             .best_stream(&audio_filter)
             .expect("纯音频模式应允许 480P 视频作为音频载体")
         {
-            BestStream::VideoAudio { audio: Some(VideoStream::DashAudio { .. }), .. } => {}
+            BestStream::VideoAudio {
+                audio: Some(VideoStream::DashAudio { .. }),
+                ..
+            } => {}
             other => panic!("应选择独立音频流，实际: {other:?}"),
         }
     }
@@ -16480,8 +16515,8 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_skipped_video_sidecars_removes_empty_up_dir() {
-        use bili_sync_entity::{favorite, video};
         use crate::adapter::VideoSourceEnum;
+        use bili_sync_entity::{favorite, video};
 
         let db = create_test_db("cleanup-skipped-dirs").await;
         let root = unique_temp_dir("cleanup-skipped-dirs-root");
@@ -16578,7 +16613,9 @@ mod tests {
             is_charge_video: Set(false),
             charge_can_play: Set(false),
             total_file_size_bytes: Set(None),
-            skip_reason: Set(Some("未达到设定的最低分辨率（最低 Quality720p，实际最高 Quality480p），已跳过下载".to_string())),
+            skip_reason: Set(Some(
+                "未达到设定的最低分辨率（最低 Quality720p，实际最高 Quality480p），已跳过下载".to_string(),
+            )),
             metadata_refresh_pending: Set(false),
         }
         .insert(&db)

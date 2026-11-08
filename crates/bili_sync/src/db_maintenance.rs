@@ -188,11 +188,7 @@ pub async fn run_maintenance(
             })
         }
         DatabaseMaintenanceAction::ClearQueueHistory => {
-            let removed = delete_where(
-                db,
-                "DELETE FROM task_queue WHERE status IN ('completed', 'failed')",
-            )
-            .await?;
+            let removed = delete_where(db, "DELETE FROM task_queue WHERE status IN ('completed', 'failed')").await?;
             info!(removed, "数据库管理：已清理任务队列历史");
             Ok(DatabaseMaintenanceResponse {
                 success: true,
@@ -207,16 +203,15 @@ pub async fn run_maintenance(
                 "DELETE FROM you_tube_video WHERE source_id NOT IN (SELECT id FROM you_tube_source)",
             )
             .await?;
-            let removed_pages = delete_where(
-                db,
-                "DELETE FROM page WHERE video_id NOT IN (SELECT id FROM video)",
-            )
-            .await?;
+            let removed_pages =
+                delete_where(db, "DELETE FROM page WHERE video_id NOT IN (SELECT id FROM video)").await?;
             let removed = removed_youtube + removed_pages;
             info!(removed_youtube, removed_pages, "数据库管理：已清理孤立记录");
             Ok(DatabaseMaintenanceResponse {
                 success: true,
-                message: format!("已清理孤立记录 {removed} 条（YouTube 视频 {removed_youtube}，无主分P {removed_pages}）"),
+                message: format!(
+                    "已清理孤立记录 {removed} 条（YouTube 视频 {removed_youtube}，无主分P {removed_pages}）"
+                ),
                 removed_rows: Some(removed),
                 ..Default::default()
             })
@@ -225,7 +220,9 @@ pub async fn run_maintenance(
             let before = file_size(&database_file()).await;
             // 先截断 WAL，避免 VACUUM 后 WAL 里残留大量旧页。
             let _ = db.execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE)").await;
-            db.execute_unprepared("VACUUM").await.with_context(|| "VACUUM 压缩数据库失败".to_string())?;
+            db.execute_unprepared("VACUUM")
+                .await
+                .with_context(|| "VACUUM 压缩数据库失败".to_string())?;
             let after = file_size(&database_file()).await;
             let freed = before.saturating_sub(after);
             info!(before, after, "数据库管理：VACUUM 压缩完成");
@@ -281,9 +278,7 @@ mod tests {
 
     /// 构造一个最小但有效的 bili-sync 备份库（含必需表）。
     async fn make_valid_backup(path: &std::path::Path) {
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true);
+        let options = SqliteConnectOptions::new().filename(path).create_if_missing(true);
         let pool = SqlitePool::connect_with(options).await.unwrap();
         let conn = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool.clone());
         for sql in [
@@ -315,9 +310,7 @@ mod tests {
 
     /// 构造最小测试库：仅建维护操作涉及的表。
     async fn test_db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("创建内存测试库失败");
+        let db = Database::connect("sqlite::memory:").await.expect("创建内存测试库失败");
         for sql in [
             "CREATE TABLE you_tube_video (id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL, youtube_id TEXT, url TEXT, title TEXT, uploader TEXT, download_status TEXT NOT NULL DEFAULT 'pending', retry_count INTEGER DEFAULT 0)",
             "CREATE TABLE you_tube_source (id INTEGER PRIMARY KEY, name TEXT)",
@@ -393,7 +386,14 @@ mod tests {
         }
         let status = database_status(&db).await.expect("状态查询失败");
         assert!(status.path.contains("data.sqlite"));
-        let rows = |table: &str| status.tables.iter().find(|t| t.table == table).map(|t| t.rows).unwrap_or(0);
+        let rows = |table: &str| {
+            status
+                .tables
+                .iter()
+                .find(|t| t.table == table)
+                .map(|t| t.rows)
+                .unwrap_or(0)
+        };
         assert_eq!(rows("you_tube_video"), 2);
         assert_eq!(rows("video"), 1);
         assert_eq!(rows("page"), 1);
@@ -519,11 +519,7 @@ pub async fn list_backups() -> DatabaseBackupListResponse {
         if !is_import && !is_backup {
             continue;
         }
-        let size_bytes = entry
-            .metadata()
-            .await
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let size_bytes = entry.metadata().await.map(|meta| meta.len()).unwrap_or(0);
         let created_at = if let Some(parsed) = backup_timestamp(&name) {
             parsed
         } else if let Ok(meta) = entry.metadata().await {
@@ -632,10 +628,7 @@ async fn stage_restore_at(config_dir: &std::path::Path, name: &str) -> Result<()
 }
 
 /// 导入外部备份包：校验 → 移入配置目录（data-import-*.sqlite）→ 安排恢复（重启后生效）。
-pub async fn import_backup(
-    src_path: &std::path::Path,
-    original_name: &str,
-) -> Result<DatabaseRestoreResponse> {
+pub async fn import_backup(src_path: &std::path::Path, original_name: &str) -> Result<DatabaseRestoreResponse> {
     import_backup_at(&CONFIG_DIR, src_path, original_name).await
 }
 

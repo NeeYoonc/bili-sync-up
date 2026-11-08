@@ -20,25 +20,24 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use bili_sync_entity::{youtube_source, youtube_video};
 use crate::external_media::{ExternalMediaFormat, ExternalMediaMetadata};
+use bili_sync_entity::{youtube_source, youtube_video};
 
+use crate::api::response::{SubmissionVideoInfo, SubmissionVideosResponse};
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::config::CONFIG_DIR;
 use crate::utils::live_updates::{notify_queue_status_changed, notify_video_sources_changed, notify_videos_changed};
 use crate::utils::time_format::now_standard_string;
 use crate::youtube::{
-    append_ytdlp_runtime, append_youtube_proxy, command_error,
-    create_youtube_source,
-    ensure_ytdlp_available, get_platform_sources, normalize_source_type, parse_video_id_set,
-    require_source_platform, serialize_video_id_set, update_youtube_source,
-    update_youtube_source_enabled, ytdlp_command, YouTubeLoginResponse, YouTubeSearchResponse,
+    append_youtube_proxy, append_ytdlp_runtime, command_error, create_youtube_source, ensure_ytdlp_available,
+    get_platform_sources, normalize_source_type, parse_video_id_set, require_source_platform, serialize_video_id_set,
+    update_youtube_source, update_youtube_source_enabled, ytdlp_command, YouTubeLoginResponse, YouTubeSearchResponse,
     YouTubeSearchResult, YouTubeSourceResponse, YouTubeSourceVideosRequest,
 };
-use crate::api::response::{SubmissionVideoInfo, SubmissionVideosResponse};
 
 const TIKWM_USER_SEARCH_API: &str = "https://www.tikwm.com/api/user/search";
-pub(crate) const TIKTOK_WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
+pub(crate) const TIKTOK_WEB_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
 const TIKTOK_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const TIKTOK_SEARCH_CONCURRENCY: usize = 4;
 
@@ -140,7 +139,6 @@ async fn persist_tiktok_ms_token(token: &str) {
     }
 }
 
-
 #[derive(Debug, Deserialize)]
 pub struct TikTokSearchRequest {
     pub keyword: String,
@@ -209,10 +207,7 @@ async fn search_tiktok_profiles(keyword: &str) -> Result<Vec<YouTubeSearchResult
         .timeout(TIKTOK_SEARCH_TIMEOUT)
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
-    let url = reqwest::Url::parse_with_params(
-        TIKWM_USER_SEARCH_API,
-        &[("keywords", keyword), ("count", "12")],
-    )?;
+    let url = reqwest::Url::parse_with_params(TIKWM_USER_SEARCH_API, &[("keywords", keyword), ("count", "12")])?;
     let response = client
         .get(url)
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
@@ -222,8 +217,8 @@ async fn search_tiktok_profiles(keyword: &str) -> Result<Vec<YouTubeSearchResult
     if !response.status().is_success() {
         bail!("TikTok 作者搜索返回 HTTP {}", response.status());
     }
-    let payload: serde_json::Value = serde_json::from_str(&response.text().await?)
-        .context("解析 TikTok 作者搜索响应失败")?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&response.text().await?).context("解析 TikTok 作者搜索响应失败")?;
     if payload.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
         let message = payload
             .get("msg")
@@ -231,10 +226,7 @@ async fn search_tiktok_profiles(keyword: &str) -> Result<Vec<YouTubeSearchResult
             .unwrap_or("未知错误");
         bail!("TikTok 作者搜索服务返回错误：{message}");
     }
-    let Some(user_list) = payload
-        .pointer("/data/user_list")
-        .and_then(serde_json::Value::as_array)
-    else {
+    let Some(user_list) = payload.pointer("/data/user_list").and_then(serde_json::Value::as_array) else {
         return Ok(Vec::new());
     };
 
@@ -347,12 +339,9 @@ async fn fetch_tiktok_ssr_profile(unique_id: &str) -> Result<Option<serde_json::
     let Some(script) = captures.get(1) else {
         return Ok(None);
     };
-    let payload: serde_json::Value =
-        serde_json::from_str(script.as_str()).context("解析 TikTok 用户主页数据失败")?;
+    let payload: serde_json::Value = serde_json::from_str(script.as_str()).context("解析 TikTok 用户主页数据失败")?;
     // stats 位于 userInfo 层（user 对象本身没有），合并进去以便统一映射粉丝数。
-    let Some(user_info) = payload
-        .pointer("/__DEFAULT_SCOPE__/webapp.user-detail/userInfo")
-    else {
+    let Some(user_info) = payload.pointer("/__DEFAULT_SCOPE__/webapp.user-detail/userInfo") else {
         return Ok(None);
     };
     let has_identity = user_info.get("user").is_some()
@@ -404,8 +393,7 @@ pub async fn tiktok_status() -> Result<ApiResponse<TikTokStatusResponse>, ApiErr
 
 /// 生成 TikTok Cookie 导入结果提示；登录 Cookie 不完整时附加警告。
 fn tiktok_import_message() -> String {
-    let mut message =
-        "已导入 TikTok 登录凭证；作者扫描和媒体解析将使用此登录状态".to_string();
+    let mut message = "已导入 TikTok 登录凭证；作者扫描和媒体解析将使用此登录状态".to_string();
     if !tiktok_cookie_has_login() {
         message.push_str("；注意：未检测到 sessionid/sid_guard/uid_tt 等登录 Cookie，关注/喜欢列表可能不可用，请确认浏览器处于登录状态后重新导出 cookies.txt");
     }
@@ -621,9 +609,7 @@ fn is_netscape_tiktok_cookie_file(contents: &str) -> bool {
 
 fn is_tiktok_cookie_domain(domain: &str) -> bool {
     let domain = domain.trim_start_matches('.').to_ascii_lowercase();
-    domain == "tiktok.com"
-        || domain.ends_with(".tiktok.com")
-        || domain.ends_with("tiktokcdn.com")
+    domain == "tiktok.com" || domain.ends_with(".tiktok.com") || domain.ends_with("tiktokcdn.com")
 }
 
 /// 清理 TikTok 登录状态：数据库凭证 + 旧版/历史残留文件。
@@ -787,10 +773,12 @@ struct TikTokRiskState {
 
 fn tiktok_risk_state() -> &'static RwLock<TikTokRiskState> {
     static STATE: OnceLock<RwLock<TikTokRiskState>> = OnceLock::new();
-    STATE.get_or_init(|| RwLock::new(TikTokRiskState {
-        last_risk_at: None,
-        risk_streak: 0,
-    }))
+    STATE.get_or_init(|| {
+        RwLock::new(TikTokRiskState {
+            last_risk_at: None,
+            risk_streak: 0,
+        })
+    })
 }
 
 /// 记录一次 TikTok 风控/限流事件；窗口内的连续事件会阶梯放大后续请求间隔。
@@ -824,8 +812,7 @@ async fn tiktok_page_delay() -> Duration {
     }
     let max_multiplier = config.auto_backoff_max_multiplier.max(1);
     let multiplier = state.risk_streak.clamp(1, max_multiplier);
-    let backoff =
-        Duration::from_secs(config.auto_backoff_base_seconds.max(1).saturating_mul(multiplier));
+    let backoff = Duration::from_secs(config.auto_backoff_base_seconds.max(1).saturating_mul(multiplier));
     base.max(backoff)
 }
 
@@ -890,12 +877,7 @@ pub(crate) async fn probe_tiktok_session() -> TikTokSessionState {
     let Ok(cookie) = tiktok_cookie_header() else {
         return TikTokSessionState::Unknown;
     };
-    match tiktok_impersonated_get(
-        "https://www.tiktok.com/passport/web/account/info/?aid=1988",
-        &cookie,
-    )
-    .await
-    {
+    match tiktok_impersonated_get("https://www.tiktok.com/passport/web/account/info/?aid=1988", &cookie).await {
         Ok((status, body, _)) if status == 200 => {
             if body.contains("session_expired") || body.contains("\"error_code\":13") {
                 TikTokSessionState::Expired
@@ -1328,9 +1310,7 @@ pub(crate) fn tiktok_item_is_image_post(item: &serde_json::Map<String, serde_jso
 ///
 /// 不同接口版本的图片直链字段名略有差异（`imageURL` / `displayImage` /
 /// `imageUrl`），这里全部兼容，只保留 http(s) 地址。
-pub(crate) fn tiktok_image_post_urls(
-    item: &serde_json::Map<String, serde_json::Value>,
-) -> Vec<Vec<String>> {
+pub(crate) fn tiktok_image_post_urls(item: &serde_json::Map<String, serde_json::Value>) -> Vec<Vec<String>> {
     item.get("imagePost")
         .and_then(|value| value.get("images"))
         .and_then(serde_json::Value::as_array)
@@ -1394,20 +1374,19 @@ pub(crate) fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> 
         .and_then(serde_json::Value::as_i64)
         .map(|millis| (millis / 1000) as i32)
         .filter(|seconds| *seconds > 0);
-    let timestamp = item
-        .get("createTime")
-        .and_then(serde_json::Value::as_i64);
+    let timestamp = item.get("createTime").and_then(serde_json::Value::as_i64);
     let published_at = timestamp.map(|value| {
         chrono::DateTime::from_timestamp(value, 0)
             .map(|time| time.with_timezone(&Local).format("%Y-%m-%d").to_string())
             .unwrap_or_default()
     });
-    let is_image_post = item
-        .as_object()
-        .is_some_and(|object| tiktok_item_is_image_post(object));
+    let is_image_post = item.as_object().is_some_and(|object| tiktok_item_is_image_post(object));
     Some(TikTokPost {
         id: id.clone(),
-        url: format!("https://www.tiktok.com/@{}/video/{id}", unique_id.trim().trim_start_matches('@')),
+        url: format!(
+            "https://www.tiktok.com/@{}/video/{id}",
+            unique_id.trim().trim_start_matches('@')
+        ),
         title,
         uploader,
         thumbnail,
@@ -1425,18 +1404,12 @@ fn decode_tiktok_body(body: &str) -> Result<serde_json::Value> {
     if trimmed.starts_with('{') {
         return serde_json::from_str(trimmed).context("解析 TikTok 我的喜欢响应失败");
     }
-    let decoded = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        trimmed,
-    )
-    .context("解码 TikTok 我的喜欢响应失败")?;
+    let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, trimmed)
+        .context("解码 TikTok 我的喜欢响应失败")?;
     serde_json::from_slice(&decoded).context("解析解码后的 TikTok 我的喜欢响应失败")
 }
 
-async fn fetch_tiktok_favorites(
-    limit: usize,
-    stop_when_known: Option<&HashSet<String>>,
-) -> Result<Vec<TikTokPost>> {
+async fn fetch_tiktok_favorites(limit: usize, stop_when_known: Option<&HashSet<String>>) -> Result<Vec<TikTokPost>> {
     // 极简请求（与实测可用的 tiktok_personal_lists.py 一致）：仅需 cookies.txt 登录态
     // + secUid，不携带签名与浏览器参数。关键前提是出口 IP 未被 TikTok 风控：
     // 本机直连 IP 被标记时该接口返回 HTTP 200 空 body，配置外源代理
@@ -1447,20 +1420,12 @@ async fn fetch_tiktok_favorites(
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
     for _ in 0..500 {
-        let (status, body) =
-            tiktok_impersonated_get_with_retry(TIKTOK_FAVORITE_API, &sec_uid, cursor, 30).await?;
+        let (status, body) = tiktok_impersonated_get_with_retry(TIKTOK_FAVORITE_API, &sec_uid, cursor, 30).await?;
         if status != 200 {
-            bail!(
-                "TikTok 我的喜欢返回 HTTP {}{}",
-                status,
-                tiktok_risk_status_hint(status)
-            );
+            bail!("TikTok 我的喜欢返回 HTTP {}{}", status, tiktok_risk_status_hint(status));
         }
         if body.trim().is_empty() {
-            bail!(
-                "{}",
-                tiktok_empty_body_hint("我的喜欢").await
-            );
+            bail!("{}", tiktok_empty_body_hint("我的喜欢").await);
         }
         let payload = decode_tiktok_body(&body)?;
         let mut page_posts = Vec::new();
@@ -1482,7 +1447,10 @@ async fn fetch_tiktok_favorites(
             }
         }
         if posts.len() >= limit
-            || !payload.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false)
+            || !payload
+                .get("hasMore")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
         {
             break;
         }
@@ -1507,10 +1475,7 @@ async fn fetch_tiktok_favorites(
 }
 
 /// 扫描“我的喜欢”源：官方接口拉取 + 与抖音源一致的入库/增量逻辑。
-pub async fn scan_tiktok_favorite_source(
-    db: &DatabaseConnection,
-    source: &youtube_source::Model,
-) -> Result<u64> {
+pub async fn scan_tiktok_favorite_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
     let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
     let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
     let stop_when_known = (!scan_deleted_videos).then_some(&known_video_ids);
@@ -1523,10 +1488,7 @@ pub async fn scan_tiktok_favorite_source(
 /// 替代 yt-dlp `tiktok:user` 平铺扫描（yt-dlp 对部分作者会因无法解析
 /// secondary user ID 而整轮失败，报错形如 “Unable to extract secondary
 /// user ID”）。公开作者无需登录；已导入 cookies 时自动携带以获得完整列表。
-pub async fn scan_tiktok_user_source(
-    db: &DatabaseConnection,
-    source: &youtube_source::Model,
-) -> Result<u64> {
+pub async fn scan_tiktok_user_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
     let sec_uid = resolve_tiktok_sec_uid_public(&source.url).await?;
     let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
     let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
@@ -1604,10 +1566,7 @@ async fn search_tiktok_sec_uid(unique_id: &str) -> Result<Option<String>> {
         .timeout(TIKTOK_SEARCH_TIMEOUT)
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
-    let url = reqwest::Url::parse_with_params(
-        TIKWM_USER_SEARCH_API,
-        &[("keywords", unique_id), ("count", "12")],
-    )?;
+    let url = reqwest::Url::parse_with_params(TIKWM_USER_SEARCH_API, &[("keywords", unique_id), ("count", "12")])?;
     let response = client
         .get(url)
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
@@ -1617,15 +1576,12 @@ async fn search_tiktok_sec_uid(unique_id: &str) -> Result<Option<String>> {
     if !response.status().is_success() {
         return Ok(None);
     }
-    let payload: serde_json::Value = serde_json::from_str(&response.text().await?)
-        .context("解析 TikTok 作者搜索响应失败（用于解析 secUid）")?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&response.text().await?).context("解析 TikTok 作者搜索响应失败（用于解析 secUid）")?;
     if payload.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
         return Ok(None);
     }
-    let Some(user_list) = payload
-        .pointer("/data/user_list")
-        .and_then(serde_json::Value::as_array)
-    else {
+    let Some(user_list) = payload.pointer("/data/user_list").and_then(serde_json::Value::as_array) else {
         return Ok(None);
     };
     for entry in user_list {
@@ -1797,7 +1753,6 @@ pub fn ensure_tiktok_session() -> Result<()> {
     }
 }
 
-
 // ---------- TikTok 作者历史作品选择（右侧面板，yt-dlp 扫描） ----------
 
 /// 选择面板的数据结构：TikTok 作者历史视频 / 我的喜欢视频列表，供添加来源时
@@ -1809,9 +1764,7 @@ pub async fn get_tiktok_source_videos(
     match source_type.as_str() {
         "tiktok" => fetch_tiktok_author_videos(&request).await,
         "tiktok_favorite" => fetch_tiktok_favorite_videos(&request).await,
-        _ => Err(ApiError::from(anyhow!(
-            "仅 TikTok 作者与我的喜欢支持历史作品选择"
-        ))),
+        _ => Err(ApiError::from(anyhow!("仅 TikTok 作者与我的喜欢支持历史作品选择"))),
     }
 }
 
@@ -2073,7 +2026,14 @@ fn signer_output_text(stderr: &[u8], stdout: &[u8]) -> String {
     };
     let text = text.trim();
     if text.chars().count() > 300 {
-        let tail: String = text.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(300)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         format!("…{tail}")
     } else {
         text.to_string()
@@ -2279,11 +2239,14 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
             ("secUid", target_sec_uid.clone()),
             ("tz_name", "Asia/Shanghai".to_string()),
             ("user_is_login", "true".to_string()),
-            ("WebIdLastTime", (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or(1))
-            .to_string()),
+            (
+                "WebIdLastTime",
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(1))
+                .to_string(),
+            ),
             ("verifyFp", tiktok_login_verify_fp().unwrap_or_default()),
             ("webcast_language", "zh-Hans".to_string()),
             ("msToken", ms_token.clone()),
@@ -2295,19 +2258,9 @@ async fn fetch_tiktok_followings() -> anyhow::Result<ApiResponse<YouTubeSearchRe
             params.push(("odinId", odin_id.clone()));
             params.push(("targetUserId", odin_id.clone()));
         }
-        let (status, body) = tiktok_signed_get_with_retry(
-            TIKTOK_USER_LIST_API,
-            &params,
-            &cookie,
-            "关注列表",
-        )
-        .await?;
+        let (status, body) = tiktok_signed_get_with_retry(TIKTOK_USER_LIST_API, &params, &cookie, "关注列表").await?;
         if status != 200 {
-            bail!(
-                "TikTok 关注列表返回 HTTP {}{}",
-                status,
-                tiktok_risk_status_hint(status)
-            );
+            bail!("TikTok 关注列表返回 HTTP {}{}", status, tiktok_risk_status_hint(status));
         }
         if body.trim().is_empty() {
             bail!(
@@ -2398,8 +2351,7 @@ static TIKTOK_SEC_UID_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new(
 /// 用于判断填写的作者主页链接是否就是登录账号本人：是则直接复用登录
 /// secUid，避免抓取主页 HTML 被 TikTok 403 风控拦截。接口失败返回 None，
 /// 不影响后续走 user/detail 或主页 HTML 兜底流程。
-static TIKTOK_LOGIN_UNIQUE_ID: std::sync::OnceLock<tokio::sync::Mutex<Option<String>>> =
-    std::sync::OnceLock::new();
+static TIKTOK_LOGIN_UNIQUE_ID: std::sync::OnceLock<tokio::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
 
 async fn tiktok_login_account_unique_id() -> Option<String> {
     let cached = TIKTOK_LOGIN_UNIQUE_ID.get_or_init(|| tokio::sync::Mutex::new(None));
@@ -2548,9 +2500,7 @@ async fn resolve_tiktok_sec_uid(url: &str) -> Result<String> {
     let page_url = format!("https://www.tiktok.com/@{unique_id}");
     let (status, body, _) = tiktok_impersonated_get(&page_url, &cookie).await?;
     if status == 200 {
-        let regex = TIKTOK_SEC_UID_RE.get_or_init(|| {
-            Regex::new(r#""secUid":"([^"]+)"#).expect("invalid secUid regex")
-        });
+        let regex = TIKTOK_SEC_UID_RE.get_or_init(|| Regex::new(r#""secUid":"([^"]+)"#).expect("invalid secUid regex"));
         if let Some(sec_uid) = regex
             .captures(&body)
             .and_then(|captures| captures.get(1))
@@ -2635,14 +2585,9 @@ async fn fetch_tiktok_public_playlists(sec_uid: &str) -> anyhow::Result<Vec<YouT
         ("msToken", ms_token.clone()),
         ("X-Bogus", "1".to_string()),
     ];
-    let (status, body) =
-        tiktok_signed_get_with_retry(TIKTOK_USER_PLAYLIST_API, &params, &cookie, "播放列表").await?;
+    let (status, body) = tiktok_signed_get_with_retry(TIKTOK_USER_PLAYLIST_API, &params, &cookie, "播放列表").await?;
     if status != 200 {
-        bail!(
-            "TikTok 播放列表返回 HTTP {}{}",
-            status,
-            tiktok_risk_status_hint(status)
-        );
+        bail!("TikTok 播放列表返回 HTTP {}{}", status, tiktok_risk_status_hint(status));
     }
     if body.trim().is_empty() {
         bail!(
@@ -2740,8 +2685,7 @@ async fn fetch_tiktok_playlists(sec_uid: &str, own: bool) -> anyhow::Result<ApiR
 /// 任何失败都返回 Ok(None)，由上层决定是否继续展示空的播放列表结果。
 async fn fetch_tiktok_collect_preview() -> Result<Option<(i64, String)>> {
     let sec_uid = tiktok_login_sec_uid().await?;
-    let (status, body) =
-        tiktok_impersonated_get_with_retry(TIKTOK_USER_COLLECT_API, &sec_uid, 0, 30).await?;
+    let (status, body) = tiktok_impersonated_get_with_retry(TIKTOK_USER_COLLECT_API, &sec_uid, 0, 30).await?;
     if status != 200 || body.trim().is_empty() {
         return Ok(None);
     }
@@ -2791,30 +2735,21 @@ async fn fetch_tiktok_collect_videos(
         // 注：这里刻意用不签名的极简参数。实测同一时刻给这个接口加完整
         // webmssdk 签名（X-Dynosaur/X-Gnarly）也一样只回 200 + 空正文，
         // 说明空正文是出口 IP 的软风控而不是缺签名；走签名反而多花 2 秒签一次。
-        let (status, body) =
-            tiktok_impersonated_get_with_retry(TIKTOK_USER_COLLECT_API, &sec_uid, cursor, 30).await?;
+        let (status, body) = tiktok_impersonated_get_with_retry(TIKTOK_USER_COLLECT_API, &sec_uid, cursor, 30).await?;
         if status != 200 {
-            bail!(
-                "TikTok 收藏返回 HTTP {}{}",
-                status,
-                tiktok_risk_status_hint(status)
-            );
+            bail!("TikTok 收藏返回 HTTP {}{}", status, tiktok_risk_status_hint(status));
         }
         if body.trim().is_empty() {
             if empty_retries < 2 {
                 empty_retries += 1;
                 debug!(
                     attempt = empty_retries,
-                    cursor,
-                    "TikTok 收藏返回空正文，已合并新下发的 msToken，重试同一页"
+                    cursor, "TikTok 收藏返回空正文，已合并新下发的 msToken，重试同一页"
                 );
                 tokio::time::sleep(tiktok_page_delay().await).await;
                 continue;
             }
-            bail!(
-                "{}",
-                tiktok_empty_body_hint("收藏").await
-            );
+            bail!("{}", tiktok_empty_body_hint("收藏").await);
         }
         empty_retries = 0;
         let payload = decode_tiktok_body(&body)?;
@@ -2836,7 +2771,10 @@ async fn fetch_tiktok_collect_videos(
             }
         }
         if posts.len() >= limit
-            || !payload.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false)
+            || !payload
+                .get("hasMore")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
         {
             break;
         }
@@ -2897,8 +2835,7 @@ async fn fetch_tiktok_playlist_videos(
             ("X-Bogus", "1".to_string()),
         ];
         let base = format!("{TIKTOK_PLAYLIST_API}{playlist_id}/");
-        let (status, body) =
-            tiktok_signed_get_with_retry(&base, &params, &cookie, "播放列表视频").await?;
+        let (status, body) = tiktok_signed_get_with_retry(&base, &params, &cookie, "播放列表视频").await?;
         if status != 200 {
             bail!(
                 "TikTok 播放列表视频返回 HTTP {}{}",
@@ -2907,7 +2844,10 @@ async fn fetch_tiktok_playlist_videos(
             );
         }
         if body.trim().is_empty() {
-            warn!(playlist_id, cursor, "TikTok 播放列表视频返回空响应（已自动重新签名一次仍失败），可能登录态过期或触发了风控");
+            warn!(
+                playlist_id,
+                cursor, "TikTok 播放列表视频返回空响应（已自动重新签名一次仍失败），可能登录态过期或触发了风控"
+            );
             break;
         }
         let payload = decode_tiktok_body(&body)?;
@@ -2929,7 +2869,10 @@ async fn fetch_tiktok_playlist_videos(
             }
         }
         if posts.len() >= limit
-            || !payload.get("hasMore").and_then(serde_json::Value::as_bool).unwrap_or(false)
+            || !payload
+                .get("hasMore")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
         {
             break;
         }
@@ -2949,10 +2892,7 @@ async fn fetch_tiktok_playlist_videos(
 }
 
 /// 扫描“收藏夹”源：拉取播放列表视频并入库。
-pub async fn scan_tiktok_collection_source(
-    db: &DatabaseConnection,
-    source: &youtube_source::Model,
-) -> Result<u64> {
+pub async fn scan_tiktok_collection_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
     let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
     let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
     let stop_when_known = (!scan_deleted_videos).then_some(&known_video_ids);
@@ -2961,8 +2901,7 @@ pub async fn scan_tiktok_collection_source(
     let posts = if source.url.to_ascii_lowercase().contains("/collect/favorites") {
         fetch_tiktok_collect_videos(usize::MAX, stop_when_known).await?
     } else {
-        let playlist_id = numeric_playlist_id(&source.url)
-            .context("无法从 TikTok 播放列表链接识别播放列表 ID")?;
+        let playlist_id = numeric_playlist_id(&source.url).context("无法从 TikTok 播放列表链接识别播放列表 ID")?;
         fetch_tiktok_playlist_videos(playlist_id, usize::MAX, stop_when_known).await?
     };
     persist_tiktok_posts(db, source, posts).await
@@ -3005,9 +2944,8 @@ static TIKTOK_WEB_DEVICE_ID: OnceLock<u64> = OnceLock::new();
 
 fn tiktok_web_device_id() -> u64 {
     *TIKTOK_WEB_DEVICE_ID.get_or_init(|| {
-        load_manual_tiktok_webid().unwrap_or_else(|| {
-            rand::random::<u64>() % 9_000_000_000_000_000_000 + 1_000_000_000_000_000_000
-        })
+        load_manual_tiktok_webid()
+            .unwrap_or_else(|| rand::random::<u64>() % 9_000_000_000_000_000_000 + 1_000_000_000_000_000_000)
     })
 }
 
@@ -3051,9 +2989,7 @@ async fn resolve_tiktok_author_sec_uid(sec_uid_or_handle: &str) -> Option<String
 /// 该接口是 yt-dlp 扫描 TikTok 用户作品所用的 Web API：带登录 Cookie + 随机
 /// verifyFp + 进程稳定 device_id 即可在服务端直接访问（不要求浏览器签名）。
 /// 头像为可选资源，任何失败都返回 `Ok(None)`，不影响主下载流程。
-pub(crate) async fn fetch_tiktok_author_avatar_url(
-    sec_uid_or_handle: &str,
-) -> anyhow::Result<Option<String>> {
+pub(crate) async fn fetch_tiktok_author_avatar_url(sec_uid_or_handle: &str) -> anyhow::Result<Option<String>> {
     // `creator/item_list` 只接受 secUid：调用方常只拿得到作者主页句柄
     // （uniqueId，如 nkuu666），把句柄当 secUid 传进去接口会返回空 itemList
     // —— 这正是旧版“TikTok 作者作品接口没有返回头像地址”的根因。这里统一解析。
@@ -3065,7 +3001,9 @@ pub(crate) async fn fetch_tiktok_author_avatar_url(
     let device_id = tiktok_web_device_id();
     let verify_fp = format!(
         "verify_{}",
-        (0..7).map(|_| format!("{:x}", rand::random::<u8>() % 16)).collect::<String>()
+        (0..7)
+            .map(|_| format!("{:x}", rand::random::<u8>() % 16))
+            .collect::<String>()
     );
     let cursor = chrono::Utc::now().timestamp_millis().to_string();
     let params: Vec<(&str, String)> = vec![
@@ -3106,8 +3044,7 @@ pub(crate) async fn fetch_tiktok_author_avatar_url(
     if status != 200 {
         return Ok(None);
     }
-    let payload: serde_json::Value =
-        serde_json::from_str(&body).with_context(|| "解析 TikTok 作者作品响应失败")?;
+    let payload: serde_json::Value = serde_json::from_str(&body).with_context(|| "解析 TikTok 作者作品响应失败")?;
     let avatar = payload
         .get("itemList")
         .and_then(|items| items.as_array())
@@ -3143,7 +3080,9 @@ async fn fetch_tiktok_creator_posts(
     let device_id = tiktok_web_device_id();
     let verify_fp = format!(
         "verify_{}",
-        (0..7).map(|_| format!("{:x}", rand::random::<u8>() % 16)).collect::<String>()
+        (0..7)
+            .map(|_| format!("{:x}", rand::random::<u8>() % 16))
+            .collect::<String>()
     );
     let mut cursor = chrono::Utc::now().timestamp_millis().to_string();
     let mut posts = Vec::new();
@@ -3182,8 +3121,7 @@ async fn fetch_tiktok_creator_posts(
             ("verifyFp", verify_fp.clone()),
             ("webcast_language", "en".to_string()),
         ];
-        let url =
-            reqwest::Url::parse_with_params("https://www.tiktok.com/api/creator/item_list/", &params)?;
+        let url = reqwest::Url::parse_with_params("https://www.tiktok.com/api/creator/item_list/", &params)?;
         // 风控/限流退避重试（与 tiktok_impersonated_get_with_retry 一致）
         let mut attempt = 0usize;
         let (status, body) = loop {
@@ -3210,11 +3148,7 @@ async fn fetch_tiktok_creator_posts(
             attempt += 1;
         };
         if status != 200 {
-            bail!(
-                "TikTok 作者作品返回 HTTP {}{}",
-                status,
-                tiktok_risk_status_hint(status)
-            );
+            bail!("TikTok 作者作品返回 HTTP {}{}", status, tiktok_risk_status_hint(status));
         }
         if body.trim().is_empty() {
             bail!(
@@ -3275,9 +3209,7 @@ async fn fetch_tiktok_creator_posts(
 /// 该页作品是否全部属于已知集合（用于增量扫描提前停止翻页）。
 fn all_tiktok_posts_known(posts: &[TikTokPost], known: Option<&HashSet<String>>) -> bool {
     match known {
-        Some(known) if !known.is_empty() => {
-            !posts.is_empty() && posts.iter().all(|post| known.contains(&post.id))
-        }
+        Some(known) if !known.is_empty() => !posts.is_empty() && posts.iter().all(|post| known.contains(&post.id)),
         _ => false,
     }
 }
@@ -3291,7 +3223,6 @@ pub(crate) fn tiktok_handle_from_url(url: &str) -> Option<String> {
         .map(|segment| segment.trim().trim_start_matches('@').to_string())
         .filter(|segment| !segment.is_empty())
 }
-
 
 // ---------- TikTok webmssdk SDK 自动发现/激活（定时任务） ----------
 
@@ -3328,10 +3259,7 @@ async fn ensure_tiktok_sdk_manager() -> Result<PathBuf> {
 /// 环境变量 `BILI_SYNC_TIKTOK_SDK_AUTOUPDATE=0`（或 false/off/no）关闭。
 fn tiktok_sdk_autoupdate_enabled() -> bool {
     match std::env::var("BILI_SYNC_TIKTOK_SDK_AUTOUPDATE") {
-        Ok(value) => !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
+        Ok(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
         Err(_) => true,
     }
 }
@@ -3344,10 +3272,7 @@ const TIKTOK_SDK_AUTOUPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60
 const TIKTOK_SDK_MANAGER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 运行 TikTok SDK 管理器子命令，返回 (退出码, stdout, stderr)。
-async fn run_tiktok_sdk_manager(
-    manager: &Path,
-    args: &[&str],
-) -> Result<(i32, String, String)> {
+async fn run_tiktok_sdk_manager(manager: &Path, args: &[&str]) -> Result<(i32, String, String)> {
     let node = find_tiktok_node().ok_or_else(|| {
         anyhow!(
             "未找到 Node.js 运行时：TikTok webmssdk SDK 自动更新需要 Node.js。请安装 Node.js，或通过环境变量 BILI_SYNC_TIKTOK_NODE 指定 node 路径"
@@ -3359,18 +3284,10 @@ async fn run_tiktok_sdk_manager(
         .args(args)
         .env("BILI_SYNC_CONFIG_DIR", CONFIG_DIR.as_os_str())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(
-        TIKTOK_SDK_MANAGER_TIMEOUT + Duration::from_secs(10),
-        command.output(),
-    )
-    .await
-    .map_err(|_| {
-        anyhow!(
-            "TikTok SDK 管理器执行超时（{}s）",
-            TIKTOK_SDK_MANAGER_TIMEOUT.as_secs()
-        )
-    })?
-    .map_err(|error| anyhow!("启动 TikTok SDK 管理器失败（Node 运行时不完整？）：{error}"))?;
+    let output = tokio::time::timeout(TIKTOK_SDK_MANAGER_TIMEOUT + Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| anyhow!("TikTok SDK 管理器执行超时（{}s）", TIKTOK_SDK_MANAGER_TIMEOUT.as_secs()))?
+        .map_err(|error| anyhow!("启动 TikTok SDK 管理器失败（Node 运行时不完整？）：{error}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let code = output.status.code().unwrap_or(-1);
@@ -3393,10 +3310,7 @@ fn tiktok_sdk_active_runtime_id() -> Option<String> {
 /// 要求 HTTP 200 且 userList 非空才算通过，返回实际返回的 userList 数量。
 async fn tiktok_sdk_canary(sdk_id: &str) -> Result<usize> {
     let cookie = tiktok_cookie_header()?;
-    let ms_token = tiktok_cookie_values()
-        .get("msToken")
-        .cloned()
-        .unwrap_or_default();
+    let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let odin_id = match tiktok_login_odin_id() {
         Some(id) => id,
         None => bail!("{}", tiktok_missing_account_id_hint().await),
@@ -3454,11 +3368,7 @@ async fn tiktok_sdk_canary(sdk_id: &str) -> Result<usize> {
     let signed = sign_tiktok_url_with_sdk(unsigned.as_str(), Some(sdk_id)).await?;
     let (status, body, _) = tiktok_impersonated_get(&signed, &cookie).await?;
     if status != 200 {
-        bail!(
-            "TikTok 关注接口返回 HTTP {}{}",
-            status,
-            tiktok_risk_status_hint(status)
-        );
+        bail!("TikTok 关注接口返回 HTTP {}{}", status, tiktok_risk_status_hint(status));
     }
     if body.trim().is_empty() {
         bail!("TikTok 关注接口返回空响应（登录态或出口网络问题）");
@@ -3557,8 +3467,7 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
     let mut any_verified = false;
     let mut activated = false;
     for runtime_id in &discovered {
-        let (test_code, test_stdout, test_stderr) =
-            run_tiktok_sdk_manager(&manager, &["test", runtime_id]).await?;
+        let (test_code, test_stdout, test_stderr) = run_tiktok_sdk_manager(&manager, &["test", runtime_id]).await?;
         if test_code != 0 {
             debug!(
                 runtime_id = %runtime_id,
@@ -3571,8 +3480,7 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
             Ok(count) => {
                 any_verified = true;
                 let (verify_code, verify_stdout, verify_stderr) =
-                    run_tiktok_sdk_manager(&manager, &["verify", runtime_id, &count.to_string()])
-                        .await?;
+                    run_tiktok_sdk_manager(&manager, &["verify", runtime_id, &count.to_string()]).await?;
                 if verify_code != 0 {
                     debug!(
                         runtime_id = %runtime_id,
@@ -3654,10 +3562,7 @@ async fn refresh_tiktok_sdk_runtime() -> Result<()> {
 fn tiktok_video_id(url: &str) -> Option<String> {
     let path = url.trim().split(['?', '#']).next()?;
     let segment = path.rsplit('/').next()?;
-    segment
-        .chars()
-        .all(|c| c.is_ascii_digit())
-        .then(|| segment.to_string())
+    segment.chars().all(|c| c.is_ascii_digit()).then(|| segment.to_string())
 }
 
 /// yt-dlp 网页解析失败（TikTok WAF 风控 / 页面改版）时的 API 兜底：
@@ -3722,26 +3627,16 @@ pub(crate) async fn extract_tiktok_media_detail_quick(url: &str) -> Result<Exter
     extract_tiktok_media_detail_attempts(url, 1).await
 }
 
-async fn extract_tiktok_media_detail_attempts(
-    url: &str,
-    attempts: usize,
-) -> Result<ExternalMediaMetadata> {
+async fn extract_tiktok_media_detail_attempts(url: &str, attempts: usize) -> Result<ExternalMediaMetadata> {
     let result = extract_tiktok_media_detail_inner(url, attempts).await;
     record_tiktok_detail_outcome(result.is_ok());
     result
 }
 
-async fn extract_tiktok_media_detail_inner(
-    url: &str,
-    attempts: usize,
-) -> Result<ExternalMediaMetadata> {
-    let item_id =
-        tiktok_video_id(url).ok_or_else(|| anyhow!("无法从 TikTok 链接识别视频 ID：{url}"))?;
+async fn extract_tiktok_media_detail_inner(url: &str, attempts: usize) -> Result<ExternalMediaMetadata> {
+    let item_id = tiktok_video_id(url).ok_or_else(|| anyhow!("无法从 TikTok 链接识别视频 ID：{url}"))?;
     let cookie = tiktok_cookie_header()?;
-    let ms_token = tiktok_cookie_values()
-        .get("msToken")
-        .cloned()
-        .unwrap_or_default();
+    let ms_token = tiktok_cookie_values().get("msToken").cloned().unwrap_or_default();
     let odin_id = tiktok_login_odin_id().unwrap_or_default();
     let verify_fp = tiktok_login_verify_fp().unwrap_or_default();
     let device_id = tiktok_web_device_id().to_string();
@@ -3795,8 +3690,7 @@ async fn extract_tiktok_media_detail_inner(
         ("msToken", ms_token),
         ("X-Bogus", "1".to_string()),
     ];
-    let unsigned =
-        reqwest::Url::parse_with_params("https://www.tiktok.com/api/item/detail/", &params)?;
+    let unsigned = reqwest::Url::parse_with_params("https://www.tiktok.com/api/item/detail/", &params)?;
 
     let mut last_body = String::new();
     for attempt in 0..attempts.max(1) {
@@ -3808,10 +3702,7 @@ async fn extract_tiktok_media_detail_inner(
         let signed = sign_tiktok_url_with_sdk(unsigned.as_str(), None).await?;
         let (status, body, _) = tiktok_impersonated_get(&signed, &current_cookie).await?;
         if status != 200 {
-            bail!(
-                "TikTok 视频详情返回 HTTP {status}{}",
-                tiktok_risk_status_hint(status)
-            );
+            bail!("TikTok 视频详情返回 HTTP {status}{}", tiktok_risk_status_hint(status));
         }
         last_body = body;
         if !last_body.trim().is_empty() {
@@ -3836,9 +3727,7 @@ async fn extract_tiktok_media_detail_inner(
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| {
             if status_code != 0 {
-                anyhow!(
-                    "TikTok视频无法下载：你所在国家或地区无法下载此视频（statusCode {status_code}）"
-                )
+                anyhow!("TikTok视频无法下载：你所在国家或地区无法下载此视频（statusCode {status_code}）")
             } else {
                 anyhow!("TikTok 视频详情响应缺少 item 信息")
             }
@@ -3862,27 +3751,18 @@ async fn extract_tiktok_media_detail_inner(
             let mut ranked: Vec<(i64, Option<String>, Vec<String>)> = bitrate_info
                 .iter()
                 .filter_map(|entry| {
-                    let bitrate = entry
-                        .get("Bitrate")
-                        .and_then(serde_json::Value::as_i64)
-                        .unwrap_or(0);
-                    let codec = entry
-                        .get("CodecType")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|value| {
-                            if value.starts_with("h264") || value.starts_with("avc") {
-                                "h264".to_string()
-                            } else if value.starts_with("h265")
-                                || value.starts_with("hvc")
-                                || value.starts_with("hev")
-                            {
-                                "h265".to_string()
-                            } else if value.starts_with("av1") || value.starts_with("av01") {
-                                "av1".to_string()
-                            } else {
-                                value.to_string()
-                            }
-                        });
+                    let bitrate = entry.get("Bitrate").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                    let codec = entry.get("CodecType").and_then(serde_json::Value::as_str).map(|value| {
+                        if value.starts_with("h264") || value.starts_with("avc") {
+                            "h264".to_string()
+                        } else if value.starts_with("h265") || value.starts_with("hvc") || value.starts_with("hev") {
+                            "h265".to_string()
+                        } else if value.starts_with("av1") || value.starts_with("av01") {
+                            "av1".to_string()
+                        } else {
+                            value.to_string()
+                        }
+                    });
                     let urls = entry
                         .get("PlayAddr")
                         .and_then(|play_addr| play_addr.get("UrlList"))
@@ -3994,13 +3874,9 @@ async fn extract_tiktok_media_detail_inner(
     };
     Ok(ExternalMediaMetadata {
         id,
-        title: item
-            .get("desc")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
+        title: item.get("desc").and_then(serde_json::Value::as_str).map(str::to_string),
         uploader: (!unique_id.is_empty()).then(|| unique_id.clone()),
-        uploader_url: (!unique_id.is_empty())
-            .then(|| format!("https://www.tiktok.com/@{unique_id}")),
+        uploader_url: (!unique_id.is_empty()).then(|| format!("https://www.tiktok.com/@{unique_id}")),
         channel: None,
         channel_id: None,
         channel_url: None,
@@ -4069,13 +3945,9 @@ fn tiktok_photo_metadata(
     }
     ExternalMediaMetadata {
         id,
-        title: item
-            .get("desc")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
+        title: item.get("desc").and_then(serde_json::Value::as_str).map(str::to_string),
         uploader: (!unique_id.is_empty()).then(|| unique_id.clone()),
-        uploader_url: (!unique_id.is_empty())
-            .then(|| format!("https://www.tiktok.com/@{unique_id}")),
+        uploader_url: (!unique_id.is_empty()).then(|| format!("https://www.tiktok.com/@{unique_id}")),
         channel: None,
         channel_id: None,
         channel_url: None,
@@ -4122,10 +3994,7 @@ pub(crate) fn is_tiktok_media_missing_error(error: &anyhow::Error) -> bool {
 
 /// TikTok 封面直链签名过期（CDN 返回 403）时，通过 item/detail 刷新最新封面直链。
 /// 命中数据库记录后重新解析元数据，更新 thumbnail 字段并返回新地址。
-pub(crate) async fn refresh_tiktok_cover_url(
-    db: &DatabaseConnection,
-    stale_url: &str,
-) -> Result<Option<String>> {
+pub(crate) async fn refresh_tiktok_cover_url(db: &DatabaseConnection, stale_url: &str) -> Result<Option<String>> {
     let video = youtube_video::Entity::find()
         .filter(youtube_video::Column::Thumbnail.eq(stale_url))
         .one(db)
@@ -4156,10 +4025,7 @@ pub(crate) async fn refresh_tiktok_cover_url(
         active.thumbnail = Set(Some(fresh.clone()));
         active.updated_at = Set(now_standard_string());
         active.update(db).await?;
-        info!(
-            video_id,
-            "TikTok 视频封面直链已刷新（原直链签名过期）"
-        );
+        info!(video_id, "TikTok 视频封面直链已刷新（原直链签名过期）");
     }
     Ok(Some(fresh))
 }
@@ -4197,10 +4063,7 @@ async fn request_tiktok_tikwm_once(video_url: &str, proxy: &str) -> Result<Optio
         builder = builder.proxy(reqwest::Proxy::all(proxy).context("外源代理地址无效（TikWM 请求）")?);
     }
     let client = builder.build()?;
-    let api_url = reqwest::Url::parse_with_params(
-        "https://www.tikwm.com/api/",
-        &[("url", video_url)],
-    )?;
+    let api_url = reqwest::Url::parse_with_params("https://www.tikwm.com/api/", &[("url", video_url)])?;
     let response = client
         .get(api_url)
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
@@ -4212,12 +4075,9 @@ async fn request_tiktok_tikwm_once(video_url: &str, proxy: &str) -> Result<Optio
     if !status.is_success() {
         bail!("TikWM 解析服务返回 HTTP {status}");
     }
-    let payload: serde_json::Value = serde_json::from_str(&body)
-        .context("解析 TikWM 响应失败（服务返回了非 JSON 内容，可能被网关拦截）")?;
-    let code = payload
-        .get("code")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(-1);
+    let payload: serde_json::Value =
+        serde_json::from_str(&body).context("解析 TikWM 响应失败（服务返回了非 JSON 内容，可能被网关拦截）")?;
+    let code = payload.get("code").and_then(serde_json::Value::as_i64).unwrap_or(-1);
     if code != 0 {
         // 服务明确表示解析不了该作品（已删除/私密/地区限制/不支持的类型）。
         let message = payload
@@ -4261,9 +4121,7 @@ async fn fetch_tiktok_cover_via_tikwm(video_url: &str) -> Result<Option<String>>
 /// yt-dlp 对图片贴只能解析出配乐音轨（没有任何视频格式），官方 item/detail
 /// 接口服务端直连常返回空响应；TikWM 能返回未过期的原图直链与配乐地址。
 /// 非图片贴（普通视频）返回 `Ok(None)`，由调用方继续走视频解析流程。
-pub(crate) async fn fetch_tiktok_photo_via_tikwm(
-    video_url: &str,
-) -> Result<Option<ExternalMediaMetadata>> {
+pub(crate) async fn fetch_tiktok_photo_via_tikwm(video_url: &str) -> Result<Option<ExternalMediaMetadata>> {
     let Some(payload) = request_tiktok_tikwm(video_url).await? else {
         return Ok(None);
     };
@@ -4297,9 +4155,7 @@ pub(crate) async fn fetch_tiktok_photo_via_tikwm(
         .filter(|url| url.starts_with("http"))
         .map(|url| vec![url.to_string()])
         .unwrap_or_default();
-    let author = payload
-        .pointer("/data/author")
-        .and_then(serde_json::Value::as_object);
+    let author = payload.pointer("/data/author").and_then(serde_json::Value::as_object);
     let unique_id = author
         .and_then(|author| author.get("unique_id"))
         .or_else(|| author.and_then(|author| author.get("uniqueId")))
@@ -4352,9 +4208,7 @@ pub(crate) async fn fetch_tiktok_photo_via_tikwm(
 /// 出口 IP 信誉、签名、msToken 都不敏感，是目前最稳的 TikTok 媒体来源。
 ///
 /// 图片贴（`data.images` 非空）返回 `Ok(None)`，交给图片贴分支处理。
-pub(crate) async fn fetch_tiktok_video_via_tikwm(
-    video_url: &str,
-) -> Result<Option<ExternalMediaMetadata>> {
+pub(crate) async fn fetch_tiktok_video_via_tikwm(video_url: &str) -> Result<Option<ExternalMediaMetadata>> {
     let Some(payload) = request_tiktok_tikwm(video_url).await? else {
         return Ok(None);
     };
@@ -4362,14 +4216,8 @@ pub(crate) async fn fetch_tiktok_video_via_tikwm(
 }
 
 /// 把 TikWM 的作品载荷转换成统一下载器需要的元数据；图片贴或没有直链时返回 None。
-fn tikwm_video_metadata_from_payload(
-    payload: &serde_json::Value,
-    video_url: &str,
-) -> Option<ExternalMediaMetadata> {
-    let data = payload
-        .get("data")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+fn tikwm_video_metadata_from_payload(payload: &serde_json::Value, video_url: &str) -> Option<ExternalMediaMetadata> {
+    let data = payload.get("data").cloned().unwrap_or(serde_json::Value::Null);
     if data
         .get("images")
         .and_then(serde_json::Value::as_array)
@@ -4516,8 +4364,7 @@ static TIKTOK_EMBED_SCRIPT_RE: OnceLock<Regex> = OnceLock::new();
 
 /// 通过 TikTok 官方 embed 接口探测作品媒体。
 pub(crate) async fn probe_tiktok_embed_media(video_url: &str) -> Result<TikTokEmbedMedia> {
-    let aweme_id = tiktok_video_id(video_url)
-        .ok_or_else(|| anyhow!("无法从 TikTok 链接识别视频 ID：{video_url}"))?;
+    let aweme_id = tiktok_video_id(video_url).ok_or_else(|| anyhow!("无法从 TikTok 链接识别视频 ID：{video_url}"))?;
     let embed_url = format!("https://www.tiktok.com/embed/v2/{aweme_id}");
     // 嵌入接口本身不需要登录，带上 Cookie 只是为了与其它 TikTok 请求保持一致的
     // 会话信息；未导入登录状态时用空 Cookie 同样可以取到数据。
@@ -4540,7 +4387,10 @@ pub(crate) async fn probe_tiktok_embed_media(video_url: &str) -> Result<TikTokEm
     let has_video = video_data
         .pointer("/itemInfos/video/urls")
         .and_then(serde_json::Value::as_array)
-        .is_some_and(|urls| urls.iter().any(|value| value.as_str().is_some_and(|url| url.starts_with("http"))));
+        .is_some_and(|urls| {
+            urls.iter()
+                .any(|value| value.as_str().is_some_and(|url| url.starts_with("http")))
+        });
     let has_cover = video_data
         .pointer("/itemInfos/covers")
         .and_then(serde_json::Value::as_array)
@@ -4568,10 +4418,7 @@ fn extract_tiktok_embed_video_data(html: &str) -> Result<Option<serde_json::Valu
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(raw.as_str()) else {
             continue;
         };
-        let Some(data) = payload
-            .pointer("/source/data")
-            .and_then(serde_json::Value::as_object)
-        else {
+        let Some(data) = payload.pointer("/source/data").and_then(serde_json::Value::as_object) else {
             continue;
         };
         for value in data.values() {
@@ -4777,13 +4624,8 @@ pub(crate) async fn fetch_tiktok_media_with_impersonation(urls: &[&str], path: &
     }
     let mut last_error: Option<anyhow::Error> = None;
     for url in urls {
-        match crate::tiktok_impersonate::tiktok_impersonated_download(
-            url,
-            path,
-            &headers,
-            Duration::from_secs(900),
-        )
-        .await
+        match crate::tiktok_impersonate::tiktok_impersonated_download(url, path, &headers, Duration::from_secs(900))
+            .await
         {
             Ok(()) => return Ok(()),
             Err(error) => {
@@ -4818,10 +4660,7 @@ pub(crate) async fn migrate_legacy_tiktok_credentials() -> Result<()> {
     if !crate::credential_store::has(crate::credential_store::keys::TIKTOK_WEBID) {
         if let Ok(value) = std::fs::read_to_string(tiktok_webid_path()) {
             let value = value.trim().to_string();
-            if value.len() >= 16
-                && value.len() <= 20
-                && value.chars().all(|character| character.is_ascii_digit())
-            {
+            if value.len() >= 16 && value.len() <= 20 && value.chars().all(|character| character.is_ascii_digit()) {
                 crate::credential_store::set(crate::credential_store::keys::TIKTOK_WEBID, &value).await?;
                 let _ = tokio::fs::remove_file(tiktok_webid_path()).await;
             }
@@ -4948,10 +4787,7 @@ mod tests {
         let urls = tiktok_image_post_urls(object);
         assert_eq!(urls.len(), 2);
         assert_eq!(urls[0].len(), 2);
-        assert_eq!(
-            urls[1],
-            vec!["https://p16-common-sign.example/b.jpeg?x=1".to_string()]
-        );
+        assert_eq!(urls[1], vec!["https://p16-common-sign.example/b.jpeg?x=1".to_string()]);
     }
 
     /// 普通视频没有 `imagePost`，空对象也不算图片贴，不能被误判。
@@ -4994,8 +4830,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn fetches_author_avatar_from_handle() {
-        let handle = std::env::var("BILI_SYNC_TEST_TIKTOK_AUTHOR_HANDLE")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_AUTHOR_HANDLE");
+        let handle =
+            std::env::var("BILI_SYNC_TEST_TIKTOK_AUTHOR_HANDLE").expect("需要设置 BILI_SYNC_TEST_TIKTOK_AUTHOR_HANDLE");
         let sec_uid = resolve_tiktok_author_sec_uid(&handle)
             .await
             .expect("作者句柄应能解析出 secUid");
@@ -5012,8 +4848,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn embed_probe_classifies_photo_video_and_missing() {
-        let photo_url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
+        let photo_url =
+            std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
         match probe_tiktok_embed_media(&photo_url).await.expect("embed 探测失败") {
             TikTokEmbedMedia::Photo(metadata) => {
                 assert!(!metadata.images.is_empty(), "图片作品应带原图");
@@ -5022,8 +4858,8 @@ mod tests {
             _ => panic!("图片作品未被 embed 识别为 Photo"),
         }
 
-        let video_url = std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
+        let video_url =
+            std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
         match probe_tiktok_embed_media(&video_url).await.expect("embed 探测失败") {
             TikTokEmbedMedia::Video(metadata) => {
                 assert!(!metadata.formats.is_empty(), "普通视频应带可下载直链");
@@ -5034,8 +4870,8 @@ mod tests {
         // 只有元数据、取不到媒体的作品：embed 会给出 MediaUnavailable。
         // 它不是"内容已删除"的判定依据（实测换出口地区返回的数据会变化），
         // 因此只能作为提示线索，必须保持可重试。
-        let blocked_url = std::env::var("BILI_SYNC_TEST_TIKTOK_REGION_URL")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_REGION_URL");
+        let blocked_url =
+            std::env::var("BILI_SYNC_TEST_TIKTOK_REGION_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_REGION_URL");
         match probe_tiktok_embed_media(&blocked_url).await.expect("embed 探测失败") {
             TikTokEmbedMedia::MediaUnavailable => {}
             other => panic!(
@@ -5098,8 +4934,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn tikwm_returns_images_for_photo_post() {
-        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
+        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
         let metadata = fetch_tiktok_photo_via_tikwm(&url)
             .await
             .expect("TikWM 请求失败")
@@ -5108,18 +4943,14 @@ mod tests {
         assert!(metadata.images.iter().all(|urls| !urls.is_empty()));
         assert!(!metadata.music_urls.is_empty(), "应返回配乐");
         assert!(metadata.formats.is_empty(), "图片贴不应带视频流");
-        assert_eq!(
-            metadata.duration,
-            Some(tiktok_image_post_duration(&metadata.images))
-        );
+        assert_eq!(metadata.duration, Some(tiktok_image_post_duration(&metadata.images)));
     }
 
     /// 真实网络测试（默认 ignore）：普通视频不会被误判成图片贴。
     #[tokio::test]
     #[ignore]
     async fn tikwm_skips_normal_video() {
-        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
+        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
         assert!(
             fetch_tiktok_photo_via_tikwm(&url)
                 .await
@@ -5133,8 +4964,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn downloads_photo_post_as_slideshow_mp4() {
-        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL")
-            .expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
+        let url = std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
         let metadata = fetch_tiktok_photo_via_tikwm(&url)
             .await
             .expect("TikWM 请求失败")
@@ -5144,9 +4974,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).expect("创建输出目录失败");
         let stem = format!("20260101000000-{}", metadata.id);
         let output_path = output_dir.join(format!("{stem}.mp4"));
-        let downloader = crate::unified_downloader::UnifiedDownloader::new_native(
-            crate::bilibili::Client::new(),
-        );
+        let downloader = crate::unified_downloader::UnifiedDownloader::new_native(crate::bilibili::Client::new());
         crate::douyin::download_image_post(
             &downloader,
             &metadata,
@@ -5156,9 +4984,7 @@ mod tests {
         )
         .await
         .expect("图片贴下载失败");
-        let size = std::fs::metadata(&output_path)
-            .expect("幻灯片 MP4 未生成")
-            .len();
+        let size = std::fs::metadata(&output_path).expect("幻灯片 MP4 未生成").len();
         assert!(size > 10_000, "幻灯片 MP4 过小：{size} 字节");
         let image_count = std::fs::read_dir(output_dir.join(format!("{stem}-images")))
             .expect("图片目录未生成")

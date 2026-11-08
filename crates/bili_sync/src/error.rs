@@ -559,7 +559,9 @@ mod tests {
 
     #[test]
     fn filename_too_long_message_is_detected_in_wrapped_error() {
-        let err = anyhow::anyhow!("failed to download from [\"https://example.com\"]: 所有URL尝试失败: Filename too long (os error 36)");
+        let err = anyhow::anyhow!(
+            "failed to download from [\"https://example.com\"]: 所有URL尝试失败: Filename too long (os error 36)"
+        );
         let classified = ErrorClassifier::classify_error(&err);
 
         assert_eq!(classified.error_type, ErrorType::FileSystem);

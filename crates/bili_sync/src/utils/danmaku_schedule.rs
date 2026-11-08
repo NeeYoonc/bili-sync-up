@@ -213,12 +213,24 @@ mod tests {
         let policy = policy();
         // 1 小时前刚刷新过：不再立刻补刷
         assert_eq!(
-            should_sync_danmaku(&policy, t(0, 0), Some(t(200, 0)), Stage::Cold.as_generation(), t(200, 1)),
+            should_sync_danmaku(
+                &policy,
+                t(0, 0),
+                Some(t(200, 0)),
+                Stage::Cold.as_generation(),
+                t(200, 1)
+            ),
             Decision::Skip
         );
         // 距上次同步已超过老化期间隔：补最后一次并冻结
         assert_eq!(
-            should_sync_danmaku(&policy, t(0, 0), Some(t(100, 0)), Stage::Cold.as_generation(), t(200, 0)),
+            should_sync_danmaku(
+                &policy,
+                t(0, 0),
+                Some(t(100, 0)),
+                Stage::Cold.as_generation(),
+                t(200, 0)
+            ),
             Decision::Sync {
                 next_stage: Stage::Frozen
             }

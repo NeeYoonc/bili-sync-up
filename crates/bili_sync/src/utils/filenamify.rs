@@ -402,11 +402,7 @@ mod tests {
         // `Filename too long (os error 36)`（S339E006 - 视频标题 - 分P标题）。
         let video_title = "【一小时高效英语听力磨耳朵】发音+听力飞速提升｜从听不懂到秒懂，让英文听力爆发式成长";
         let page_title = "懶人必備_搞懂超市英語｜從選購到結帳｜最常用對話＋地道表達｜搞定購物、問價、結帳、退換貨｜英語磨耳朵｜無痛學習聽懂｜零基礎也能學會｜English Listening Practice";
-        let raw = format!(
-            "S339E006 - {} - {}",
-            filenamify(video_title),
-            filenamify(page_title)
-        );
+        let raw = format!("S339E006 - {} - {}", filenamify(video_title), filenamify(page_title));
         assert!(raw.len() > 255, "原始拼接名应当超过 255 字节");
 
         let capped = super::cap_path_segments_bytes(&raw, super::MAX_BASENAME_BYTES);

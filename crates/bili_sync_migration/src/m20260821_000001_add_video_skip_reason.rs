@@ -18,14 +18,7 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        drop_column_if_exists(
-            manager,
-            "video",
-            Video::Table,
-            "skip_reason",
-            Video::SkipReason,
-        )
-        .await
+        drop_column_if_exists(manager, "video", Video::Table, "skip_reason", Video::SkipReason).await
     }
 }
 

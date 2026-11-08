@@ -1100,11 +1100,7 @@ async fn reset_video_if_parts_increased(
     }
     info!(
         "「{}」视频 {} ({}) 检测到新增分P（本地 {} -> B站 {}），重新拉取详情并下载新分P",
-        source_name,
-        video_model.name,
-        video_model.bvid,
-        local_page_count,
-        current_page_count
+        source_name, video_model.name, video_model.bvid, local_page_count, current_page_count
     );
     let update = video::ActiveModel {
         id: Unchanged(video_model.id),
@@ -1575,10 +1571,7 @@ fn dedupe_page_models(pages: Vec<page::ActiveModel>) -> Vec<page::ActiveModel> {
 }
 
 /// 在一个事务里写入分页状态。
-async fn write_merged_pages(
-    merged_pages: Vec<page::ActiveModel>,
-    connection: &DatabaseConnection,
-) -> Result<()> {
+async fn write_merged_pages(merged_pages: Vec<page::ActiveModel>, connection: &DatabaseConnection) -> Result<()> {
     let affected_count = merged_pages.len();
     let result = crate::database::run_traced_db_operation(
         format!("utils.model.update_pages_model(count={affected_count})"),
@@ -1596,8 +1589,9 @@ async fn write_merged_pages(
                 })
                 .await
                 .map_err(|err| match err {
-                    sea_orm::TransactionError::Connection(db_err)
-                    | sea_orm::TransactionError::Transaction(db_err) => db_err,
+                    sea_orm::TransactionError::Connection(db_err) | sea_orm::TransactionError::Transaction(db_err) => {
+                        db_err
+                    }
                 })?;
             Ok::<_, DbErr>(())
         },
@@ -1855,7 +1849,7 @@ mod tests {
         let videos = vec![
             mk_favorite("BV1multi", 2, 16),
             mk_favorite("BV1single", 2, 1),
-            mk_favorite("", 2, 5),      // bvid 为空：忽略
+            mk_favorite("", 2, 5),        // bvid 为空：忽略
             mk_favorite("BV1zero", 2, 0), // page 为 0：忽略
         ];
         let map = collect_favorite_page_counts(&videos);
@@ -2019,43 +2013,41 @@ mod tests {
     #[tokio::test]
     async fn check_favorite_multipage_videos_skips_non_favorite_sources() {
         let db = create_test_db("favorite-multipage-guard").await;
-        let source = VideoSourceEnum::WatchLater(
-            watch_later::Model {
-                id: 1,
-                path: "/tmp/wl".to_string(),
-                created_at: "2026-08-01 00:00:00".to_string(),
-                latest_row_at: "1970-01-01 00:00:00".to_string(),
-                enabled: true,
-                scan_deleted_videos: false,
-                scan_deleted_videos_once: false,
-                filter_option: None,
-                keyword_filters: None,
-                keyword_filter_mode: None,
-                blacklist_keywords: None,
-                whitelist_keywords: None,
-                keyword_case_sensitive: false,
-                min_duration_seconds: None,
-                max_duration_seconds: None,
-                published_after: None,
-                published_before: None,
-                audio_only: false,
-                audio_only_m4a_only: false,
-                flat_folder: false,
-                split_chapters_after_download: false,
-                download_charge_videos: true,
-                download_danmaku: true,
-                download_subtitle: true,
-                download_ai_subtitle: true,
-                ai_subtitle_language: "zh-CN".to_string(),
-                ai_rename: false,
-                ai_rename_video_prompt: String::new(),
-                ai_rename_audio_prompt: String::new(),
-                ai_rename_enable_multi_page: false,
-                ai_rename_enable_collection: false,
-                ai_rename_enable_bangumi: false,
-                ai_rename_rename_parent_dir: false,
-            },
-        );
+        let source = VideoSourceEnum::WatchLater(watch_later::Model {
+            id: 1,
+            path: "/tmp/wl".to_string(),
+            created_at: "2026-08-01 00:00:00".to_string(),
+            latest_row_at: "1970-01-01 00:00:00".to_string(),
+            enabled: true,
+            scan_deleted_videos: false,
+            scan_deleted_videos_once: false,
+            filter_option: None,
+            keyword_filters: None,
+            keyword_filter_mode: None,
+            blacklist_keywords: None,
+            whitelist_keywords: None,
+            keyword_case_sensitive: false,
+            min_duration_seconds: None,
+            max_duration_seconds: None,
+            published_after: None,
+            published_before: None,
+            audio_only: false,
+            audio_only_m4a_only: false,
+            flat_folder: false,
+            split_chapters_after_download: false,
+            download_charge_videos: true,
+            download_danmaku: true,
+            download_subtitle: true,
+            download_ai_subtitle: true,
+            ai_subtitle_language: "zh-CN".to_string(),
+            ai_rename: false,
+            ai_rename_video_prompt: String::new(),
+            ai_rename_audio_prompt: String::new(),
+            ai_rename_enable_multi_page: false,
+            ai_rename_enable_collection: false,
+            ai_rename_enable_bangumi: false,
+            ai_rename_rename_parent_dir: false,
+        });
         let client = crate::bilibili::BiliClient::new(String::new());
         let count = check_favorite_multipage_videos_for_new_parts(&client, &source, &db)
             .await
@@ -2174,43 +2166,41 @@ mod tests {
     #[tokio::test]
     async fn check_submission_videos_skips_non_submission_sources() {
         let db = create_test_db("submission-multipage-guard").await;
-        let source = VideoSourceEnum::WatchLater(
-            watch_later::Model {
-                id: 1,
-                path: "/tmp/wl".to_string(),
-                created_at: "2026-08-01 00:00:00".to_string(),
-                latest_row_at: "1970-01-01 00:00:00".to_string(),
-                enabled: true,
-                scan_deleted_videos: false,
-                scan_deleted_videos_once: false,
-                filter_option: None,
-                keyword_filters: None,
-                keyword_filter_mode: None,
-                blacklist_keywords: None,
-                whitelist_keywords: None,
-                keyword_case_sensitive: false,
-                min_duration_seconds: None,
-                max_duration_seconds: None,
-                published_after: None,
-                published_before: None,
-                audio_only: false,
-                audio_only_m4a_only: false,
-                flat_folder: false,
-                split_chapters_after_download: false,
-                download_charge_videos: true,
-                download_danmaku: true,
-                download_subtitle: true,
-                download_ai_subtitle: true,
-                ai_subtitle_language: "zh-CN".to_string(),
-                ai_rename: false,
-                ai_rename_video_prompt: String::new(),
-                ai_rename_audio_prompt: String::new(),
-                ai_rename_enable_multi_page: false,
-                ai_rename_enable_collection: false,
-                ai_rename_enable_bangumi: false,
-                ai_rename_rename_parent_dir: false,
-            },
-        );
+        let source = VideoSourceEnum::WatchLater(watch_later::Model {
+            id: 1,
+            path: "/tmp/wl".to_string(),
+            created_at: "2026-08-01 00:00:00".to_string(),
+            latest_row_at: "1970-01-01 00:00:00".to_string(),
+            enabled: true,
+            scan_deleted_videos: false,
+            scan_deleted_videos_once: false,
+            filter_option: None,
+            keyword_filters: None,
+            keyword_filter_mode: None,
+            blacklist_keywords: None,
+            whitelist_keywords: None,
+            keyword_case_sensitive: false,
+            min_duration_seconds: None,
+            max_duration_seconds: None,
+            published_after: None,
+            published_before: None,
+            audio_only: false,
+            audio_only_m4a_only: false,
+            flat_folder: false,
+            split_chapters_after_download: false,
+            download_charge_videos: true,
+            download_danmaku: true,
+            download_subtitle: true,
+            download_ai_subtitle: true,
+            ai_subtitle_language: "zh-CN".to_string(),
+            ai_rename: false,
+            ai_rename_video_prompt: String::new(),
+            ai_rename_audio_prompt: String::new(),
+            ai_rename_enable_multi_page: false,
+            ai_rename_enable_collection: false,
+            ai_rename_enable_bangumi: false,
+            ai_rename_rename_parent_dir: false,
+        });
         let client = crate::bilibili::BiliClient::new(String::new());
         let count = check_submission_videos_for_new_parts(&client, &source, &db)
             .await
@@ -2230,13 +2220,9 @@ mod tests {
         insert_test_submission_video(&db, 7002, 7, Some(true), false).await;
 
         let client = crate::bilibili::BiliClient::new(String::new());
-        let count = check_submission_videos_for_new_parts(
-            &client,
-            &VideoSourceEnum::Submission(source_model),
-            &db,
-        )
-        .await
-        .expect("没有可巡检视频时应直接返回 0");
+        let count = check_submission_videos_for_new_parts(&client, &VideoSourceEnum::Submission(source_model), &db)
+            .await
+            .expect("没有可巡检视频时应直接返回 0");
         assert_eq!(count, 0, "待填充详情 / 未自动下载的视频不应触发巡检请求");
     }
 
@@ -2515,16 +2501,23 @@ mod tests {
             "attr": 0,
             "bvid": "BV1CV4y1e7qF",
             "page": 6,
-        })).expect("收藏夹条目应能解析")]);
+        }))
+        .expect("收藏夹条目应能解析")]);
 
         assert_eq!(page_map.get("BV1CV4y1e7qF"), Some(&6));
         check_favorite_videos_for_new_parts(page_map, &source, &db)
             .await
             .expect("分P检测应成功");
 
-        let updated = video::Entity::find_by_id(video_id).one(&db).await.expect("应能找到视频");
+        let updated = video::Entity::find_by_id(video_id)
+            .one(&db)
+            .await
+            .expect("应能找到视频");
         let updated = updated.expect("视频应存在");
-        assert_eq!(updated.single_page, None, "检测到新增分P后应重置 single_page 以重新拉取详情");
+        assert_eq!(
+            updated.single_page, None,
+            "检测到新增分P后应重置 single_page 以重新拉取详情"
+        );
         assert_eq!(updated.download_status, 0, "检测到新增分P后应重置下载状态");
     }
 

@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -108,8 +108,7 @@ async fn douyin_page_delay() -> Duration {
     }
     let max_multiplier = config.auto_backoff_max_multiplier.max(1);
     let multiplier = state.risk_streak.clamp(1, max_multiplier);
-    let backoff =
-        Duration::from_secs(config.auto_backoff_base_seconds.max(1).saturating_mul(multiplier));
+    let backoff = Duration::from_secs(config.auto_backoff_base_seconds.max(1).saturating_mul(multiplier));
     base.max(backoff)
 }
 
@@ -127,10 +126,12 @@ struct DouyinRiskState {
 
 fn douyin_risk_state() -> &'static RwLock<DouyinRiskState> {
     static STATE: OnceLock<RwLock<DouyinRiskState>> = OnceLock::new();
-    STATE.get_or_init(|| RwLock::new(DouyinRiskState {
-        last_risk_at: None,
-        risk_streak: 0,
-    }))
+    STATE.get_or_init(|| {
+        RwLock::new(DouyinRiskState {
+            last_risk_at: None,
+            risk_streak: 0,
+        })
+    })
 }
 
 /// 记录一次风控/限流事件；窗口内的连续事件会阶梯放大后续请求间隔。
@@ -138,9 +139,7 @@ async fn record_douyin_risk_event() {
     let mut state = douyin_risk_state().write().await;
     let now = Instant::now();
     state.risk_streak = match state.last_risk_at {
-        Some(previous) if now.duration_since(previous) < RISK_BACKOFF_WINDOW => {
-            state.risk_streak.saturating_add(1)
-        }
+        Some(previous) if now.duration_since(previous) < RISK_BACKOFF_WINDOW => state.risk_streak.saturating_add(1),
         _ => 1,
     };
     state.last_risk_at = Some(now);
@@ -448,9 +447,7 @@ pub async fn import_douyin_cookie_file(
     };
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
-        message: format!(
-            "已导入抖音登录凭证{device_suffix}；作者作品扫描和媒体解析将使用此状态{secsdk_suffix}"
-        ),
+        message: format!("已导入抖音登录凭证{device_suffix}；作者作品扫描和媒体解析将使用此状态{secsdk_suffix}"),
     }))
 }
 
@@ -995,7 +992,7 @@ async fn fetch_collection_catalog() -> Result<Vec<YouTubeSearchResult>> {
                 youtube_url: format!("https://www.douyin.com/collection/{id}"),
                 channel_id: Some(id),
                 cover: image_url(item.get("collects_cover")).unwrap_or_default(),
-description: count.map(|n| format!("共 {n} 个作品")).unwrap_or_default(),
+                description: count.map(|n| format!("共 {n} 个作品")).unwrap_or_default(),
                 follower: count,
             });
         }
@@ -1080,10 +1077,7 @@ async fn fetch_user_collects_via_mobile(sec_uid: &str) -> Result<Vec<YouTubeSear
         if !response.status().is_success() {
             bail!("抖音移动端收藏夹接口返回 HTTP {}", response.status());
         }
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .context("解析抖音移动端收藏夹响应失败")?;
+        let json: serde_json::Value = response.json().await.context("解析抖音移动端收藏夹响应失败")?;
         ensure_douyin_status_ok(&json, "获取抖音 UP 收藏夹")?;
         for item in json
             .get("collects_list")
@@ -1106,7 +1100,7 @@ async fn fetch_user_collects_via_mobile(sec_uid: &str) -> Result<Vec<YouTubeSear
                 youtube_url: format!("https://www.douyin.com/collection/{id}"),
                 channel_id: Some(id),
                 cover: image_url(item.get("collects_cover")).unwrap_or_default(),
-description: count.map(|n| format!("共 {n} 个作品")).unwrap_or_default(),
+                description: count.map(|n| format!("共 {n} 个作品")).unwrap_or_default(),
                 follower: count,
             });
         }
@@ -1126,14 +1120,14 @@ description: count.map(|n| format!("共 {n} 个作品")).unwrap_or_default(),
 /// 抖音收藏夹接口偶发不返回 total_number，兜底尝试其他数字字段；
 /// 全部缺失时返回 None，避免把作品数误显示为 0。
 fn collection_video_count(item: &serde_json::Value) -> Option<i64> {
-	for key in ["total_number", "aweme_count", "video_count", "collect_count"] {
-		if let Some(value) = integer(item, &[key]) {
-			if value > 0 {
-				return Some(value);
-			}
-		}
-	}
-	None
+    for key in ["total_number", "aweme_count", "video_count", "collect_count"] {
+        if let Some(value) = integer(item, &[key]) {
+            if value > 0 {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 /// 移动端收藏夹接口需要的设备参数：伪造一组稳定值即可匿名访问公开收藏夹。
 fn mobile_device_params() -> Vec<(&'static str, String)> {
@@ -1564,8 +1558,7 @@ pub async fn fetch_source_posts(
                     // 「日常」是最近 7 天发布的最新内容，插入列表开头优先展示，
                     // 避免日常作品被分页 limit 截断到作品列表末尾。
                     let story_count = stories.len();
-                    let mut known: HashSet<String> =
-                        posts.iter().map(|post| post.id.clone()).collect();
+                    let mut known: HashSet<String> = posts.iter().map(|post| post.id.clone()).collect();
                     let mut merged = Vec::with_capacity(posts.len() + story_count);
                     for story in stories {
                         if known.insert(story.id.clone()) {
@@ -1634,11 +1627,7 @@ async fn resolve_collection_id(source_url: &str) -> Result<String> {
     if trimmed.contains("v.douyin.com") {
         ensure_session()?;
         let client = client()?;
-        let response = client
-            .get(trimmed)
-            .send()
-            .await
-            .context("打开抖音收藏夹分享链接失败")?;
+        let response = client.get(trimmed).send().await.context("打开抖音收藏夹分享链接失败")?;
         let final_url = response.url().clone();
         let final_url = final_url.as_str();
         if let Some(id) = collection_id_from_url(final_url) {
@@ -1669,10 +1658,8 @@ fn query_collection_id(value: &str) -> Option<&str> {
         let mut parts = pair.splitn(2, '=');
         let key = parts.next()?;
         let value = parts.next()?;
-        (key == "collection_id"
-            && !value.is_empty()
-            && value.chars().all(|character| character.is_ascii_digit()))
-        .then_some(value)
+        (key == "collection_id" && !value.is_empty() && value.chars().all(|character| character.is_ascii_digit()))
+            .then_some(value)
     })
 }
 
@@ -1696,11 +1683,7 @@ pub(crate) async fn resolve_mix_id(source_url: &str) -> Result<String> {
     if trimmed.contains("v.douyin.com") {
         ensure_session()?;
         let client = client()?;
-        let response = client
-            .get(trimmed)
-            .send()
-            .await
-            .context("打开抖音合集分享链接失败")?;
+        let response = client.get(trimmed).send().await.context("打开抖音合集分享链接失败")?;
         let final_url = response.url().clone();
         if let Some(id) = mix_id_from_url(final_url.as_str()) {
             return Ok(id.to_string());
@@ -1757,10 +1740,7 @@ async fn current_user_ids() -> Result<(String, String)> {
     ))
 }
 
-async fn fetch_liked_posts(
-    limit: usize,
-    stop_when_known: Option<&HashSet<String>>,
-) -> Result<Vec<DouyinPost>> {
+async fn fetch_liked_posts(limit: usize, stop_when_known: Option<&HashSet<String>>) -> Result<Vec<DouyinPost>> {
     let (_, sec_uid) = current_user_ids().await?;
     let mut cursor = 0i64;
     let mut posts = Vec::new();
@@ -1833,11 +1813,7 @@ async fn fetch_collection_posts(
             };
             fetch_collection_posts_inner(id, limit, stop_when_known, Some(&cookie))
                 .await
-                .with_context(|| {
-                    format!(
-                        "匿名读取抖音收藏夹失败（{anonymous_error:#}），带登录 Cookie 重试也失败"
-                    )
-                })
+                .with_context(|| format!("匿名读取抖音收藏夹失败（{anonymous_error:#}），带登录 Cookie 重试也失败"))
         }
     }
 }
@@ -1869,23 +1845,15 @@ async fn fetch_collection_posts_inner(
             ("count", page_size.to_string()),
         ]);
         let url = reqwest::Url::parse_with_params(DOUYIN_MOBILE_COLLECTION_VIDEOS_API, &pairs)?;
-        let mut request = client
-            .get(url)
-            .header(reqwest::header::ACCEPT, "application/json");
+        let mut request = client.get(url).header(reqwest::header::ACCEPT, "application/json");
         if let Some(cookie) = cookie {
             request = request.header(reqwest::header::COOKIE, cookie);
         }
-        let response = request
-            .send()
-            .await
-            .context("请求抖音移动端收藏夹作品接口失败")?;
+        let response = request.send().await.context("请求抖音移动端收藏夹作品接口失败")?;
         if !response.status().is_success() {
             bail!("抖音移动端收藏夹作品接口返回 HTTP {}", response.status());
         }
-        let response: serde_json::Value = response
-            .json()
-            .await
-            .context("解析抖音移动端收藏夹作品响应失败")?;
+        let response: serde_json::Value = response.json().await.context("解析抖音移动端收藏夹作品响应失败")?;
         ensure_douyin_status_ok(&response, "获取抖音收藏夹作品")?;
         let mut page_posts = Vec::new();
         for item in response
@@ -1899,13 +1867,7 @@ async fn fetch_collection_posts_inner(
             }
         }
         let has_more = response.get("has_more").and_then(value_as_bool).unwrap_or(false);
-        log_douyin_scan_progress(
-            "收藏夹作品",
-            id,
-            page_number,
-            posts.len() + page_posts.len(),
-            has_more,
-        );
+        log_douyin_scan_progress("收藏夹作品", id, page_number, posts.len() + page_posts.len(), has_more);
         // 增量优先：整页都是已知视频时提前停止翻页
         if all_posts_known(&page_posts, stop_when_known) {
             break;
@@ -1951,10 +1913,7 @@ async fn mobile_user_uid(sec_uid: &str) -> Result<String> {
     if !response.status().is_success() {
         bail!("抖音移动端用户资料接口返回 HTTP {}", response.status());
     }
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .context("解析抖音移动端用户资料响应失败")?;
+    let json: serde_json::Value = response.json().await.context("解析抖音移动端用户资料响应失败")?;
     ensure_douyin_status_ok(&json, "获取抖音作者 uid")?;
     json.get("user")
         .and_then(|user| text(user, &["uid"]))
@@ -2001,10 +1960,7 @@ async fn fetch_story_items(sec_uid: &str, limit: usize) -> Result<Vec<serde_json
         if !response.status().is_success() {
             bail!("抖音移动端日常接口返回 HTTP {}", response.status());
         }
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .context("解析抖音移动端日常响应失败")?;
+        let json: serde_json::Value = response.json().await.context("解析抖音移动端日常响应失败")?;
         ensure_douyin_status_ok(&json, "获取抖音作者日常")?;
         for item in story_items(&json) {
             if let Some(id) = text(item, &["aweme_id", "group_id"]) {
@@ -2067,10 +2023,7 @@ fn story_items(json: &serde_json::Value) -> Vec<&serde_json::Value> {
     items
 }
 
-async fn fetch_watch_later_posts(
-    limit: usize,
-    stop_when_known: Option<&HashSet<String>>,
-) -> Result<Vec<DouyinPost>> {
+async fn fetch_watch_later_posts(limit: usize, stop_when_known: Option<&HashSet<String>>) -> Result<Vec<DouyinPost>> {
     let mut offset = 0i64;
     let mut posts = Vec::new();
     let mut seen = HashSet::new();
@@ -2353,10 +2306,7 @@ async fn fetch_favorite_mix_catalog() -> Result<Vec<YouTubeSearchResult>> {
     let mut seen = HashSet::new();
     for _ in 0..50 {
         let mut pairs = common_query_pairs();
-        pairs.extend([
-            ("count", "20".to_string()),
-            ("cursor", cursor.to_string()),
-        ]);
+        pairs.extend([("count", "20".to_string()), ("cursor", cursor.to_string())]);
         let response = signed_get(DOUYIN_MIX_COLLECTION_API, pairs).await?;
         ensure_douyin_status_ok(&response, "获取收藏的合集")?;
         for item in response
@@ -2816,9 +2766,7 @@ async fn fetch_posts_until(
 /// 该页作品是否全部属于已知集合（用于增量扫描提前停止翻页）。
 fn all_posts_known(posts: &[DouyinPost], known: Option<&HashSet<String>>) -> bool {
     match known {
-        Some(known) if !known.is_empty() => {
-            !posts.is_empty() && posts.iter().all(|post| known.contains(&post.id))
-        }
+        Some(known) if !known.is_empty() => !posts.is_empty() && posts.iter().all(|post| known.contains(&post.id)),
         _ => false,
     }
 }
@@ -2890,8 +2838,7 @@ fn parse_post(item: &serde_json::Value) -> Option<DouyinPost> {
         .get("is_story")
         .and_then(serde_json::Value::as_i64)
         .is_some_and(|value| value > 0)
-        || text(item, &["is_story"])
-            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        || text(item, &["is_story"]).is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let id = text(item, &["aweme_id", "group_id"])?;
     let author = item.get("author");
     let timestamp = item.get("create_time").and_then(serde_json::Value::as_i64);
@@ -2993,10 +2940,7 @@ async fn signed_get(base_url: &str, pairs: Vec<(&str, String)>) -> Result<serde_
 /// cookies.txt 不包含 webid，项目自生成的 webid 与该会话不匹配，导致
 /// favorite 接口返回 HTTP 200 空响应。实测移除 webid 后该接口恢复正常，
 /// 因此为它提供不带 webid 的变体（a_bogus 按实际参数重新生成）。
-async fn signed_get_without_webid(
-    base_url: &str,
-    pairs: Vec<(&str, String)>,
-) -> Result<serde_json::Value> {
+async fn signed_get_without_webid(base_url: &str, pairs: Vec<(&str, String)>) -> Result<serde_json::Value> {
     signed_get_impl(base_url, pairs, false).await
 }
 
@@ -3187,7 +3131,12 @@ async fn sign_douyin_url(url: &str) -> Result<String> {
         .rfind(marker)
         .and_then(|index| serde_json::from_str::<serde_json::Value>(stdout[index + marker.len()..].trim()).ok())
         .filter(|value| value.get("ok").and_then(serde_json::Value::as_bool) == Some(true))
-        .and_then(|value| value.get("signed_url").and_then(serde_json::Value::as_str).map(str::to_string));
+        .and_then(|value| {
+            value
+                .get("signed_url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
     let Some(signed) = signed else {
         bail!(
             "抖音签名器未返回有效签名 URL：{}",
@@ -3210,7 +3159,14 @@ fn douyin_signer_output_text(stderr: &[u8], stdout: &[u8]) -> String {
     };
     let text = text.trim();
     if text.chars().count() > 300 {
-        let tail: String = text.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(300)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         format!("…{tail}")
     } else {
         text.to_string()
@@ -3501,7 +3457,9 @@ async fn ensure_search_ms_token(force_refresh: bool) -> Result<()> {
             if valid_ms_token(&value) {
                 // 保留原文件时代 12 小时内复用的新鲜度语义：
                 // 数据库的 updated_at 代替文件 mtime。
-                if let Some(updated_at_unix) = crate::credential_store::updated_at(crate::credential_store::keys::DOUYIN_MSTOKEN) {
+                if let Some(updated_at_unix) =
+                    crate::credential_store::updated_at(crate::credential_store::keys::DOUYIN_MSTOKEN)
+                {
                     if chrono::Utc::now().timestamp().saturating_sub(updated_at_unix) < 12 * 3600 {
                         return Ok(());
                     }
@@ -3698,8 +3656,7 @@ async fn sync_douyin_signer_env() -> Result<PathBuf> {
     let dir = douyin_signer_shadow_dir();
     tokio::fs::create_dir_all(&dir).await?;
     let cookies = douyin_cookie_text().context("缺少抖音 cookies：请先在设置页导入 cookies.txt")?;
-    let secsdk = douyin_secsdk_text()
-        .context("缺少抖音 secsdk 签名会话：请用电脑端登录助手重新传输登录状态")?;
+    let secsdk = douyin_secsdk_text().context("缺少抖音 secsdk 签名会话：请用电脑端登录助手重新传输登录状态")?;
     write_signer_env_file(&dir.join("douyin-cookies.txt"), cookies.as_bytes()).await?;
     write_signer_env_file(&dir.join("douyin-secsdk.json"), secsdk.as_bytes()).await?;
     Ok(dir)
@@ -3721,7 +3678,9 @@ async fn write_signer_env_file(path: &Path, contents: &[u8]) -> Result<()> {
 
 /// webid / verify_fp / msToken 等单值凭证的数据库读取。
 fn douyin_single_value(key: &str) -> Option<String> {
-    crate::credential_store::get(key).map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    crate::credential_store::get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 async fn set_douyin_single_value(key: &str, value: &str) -> Result<()> {
@@ -3795,7 +3754,13 @@ async fn clear_douyin_login_state_except(exclude: Option<&Path>) {
 static LAST_DOUYIN_COOKIE_RENEW_MS: AtomicU64 = AtomicU64::new(0);
 
 async fn capture_douyin_response_cookies(response: &reqwest::Response) {
-    if response.headers().get_all(reqwest::header::SET_COOKIE).iter().next().is_none() {
+    if response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .next()
+        .is_none()
+    {
         return;
     }
     let now_ms = std::time::SystemTime::now()
@@ -3806,11 +3771,7 @@ async fn capture_douyin_response_cookies(response: &reqwest::Response) {
         return;
     }
     LAST_DOUYIN_COOKIE_RENEW_MS.store(now_ms, AtomicOrdering::Relaxed);
-    let fallback_domain = response
-        .url()
-        .host_str()
-        .unwrap_or("www.douyin.com")
-        .to_string();
+    let fallback_domain = response.url().host_str().unwrap_or("www.douyin.com").to_string();
     if let Some(contents) = douyin_cookie_text() {
         if let Some(merged) = crate::utils::netscape_cookies::renew_cookie_text(
             &contents,
@@ -4166,9 +4127,8 @@ async fn extract_metadata_native(
         } else {
             // 图集真实时长是各段之和：视频段按原速、图片段固定秒数；
             // 任一段拿不到时长时回退到配乐时长（旧行为）。
-            slideshow_duration(&slides).or_else(|| {
-                detail.pointer("/music/duration").and_then(serde_json::Value::as_f64)
-            })
+            slideshow_duration(&slides)
+                .or_else(|| detail.pointer("/music/duration").and_then(serde_json::Value::as_f64))
         },
         formats,
         subtitles: HashMap::new(),
@@ -4354,8 +4314,7 @@ async fn probe_douyin_original_format(
         "Referer: https://www.douyin.com/\r\nUser-Agent: {}\r\nAccept: */*\r\n",
         crate::http::headers::CHROME_USER_AGENT
     );
-    let mut command =
-        crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffprobe"));
+    let mut command = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffprobe"));
     command.kill_on_drop(true);
     command.args([
         "-v",
@@ -4461,18 +4420,10 @@ async fn probe_douyin_original_format_candidate(
         (Some(width), Some(height)) if width > 0 && height > 0 => width * height,
         _ => 0,
     };
-    if !douyin_original_candidate_worth_probing(
-        file_size,
-        current_max_size,
-        source_area,
-        current_max_area,
-    ) {
+    if !douyin_original_candidate_worth_probing(file_size, current_max_size, source_area, current_max_area) {
         debug!(
             file_size,
-            current_max_size,
-            source_area,
-            current_max_area,
-            "跳过抖音原画候选：体积和标称分辨率均不高于现有最高档"
+            current_max_size, source_area, current_max_area, "跳过抖音原画候选：体积和标称分辨率均不高于现有最高档"
         );
         return None;
     }
@@ -5007,8 +4958,7 @@ pub(crate) async fn download_image_post(
         let ordinal = index + 1;
         if !segment.is_video() {
             let path = image_dir.join(format!("{ordinal:02}.jpg"));
-            download_image_segment(downloader, source, &segment.image_urls, &path, ordinal, platform)
-                .await?;
+            download_image_segment(downloader, source, &segment.image_urls, &path, ordinal, platform).await?;
             image_paths.push(path);
             continue;
         }
@@ -5090,10 +5040,7 @@ pub(crate) async fn download_image_post(
     // 视频段各自成页后，作品目录里不能再留上一版合并出来的 `<作品>.mp4`，
     // 否则媒体库里同一作品会同时出现「合并版」和「分页版」。
     cleanup_stale_image_post_pages(output_path, parent, stem, &page_paths).await?;
-    let primary = page_paths
-        .first()
-        .cloned()
-        .unwrap_or_else(|| output_path.to_path_buf());
+    let primary = page_paths.first().cloned().unwrap_or_else(|| output_path.to_path_buf());
     info!(
         aweme_id = %metadata.id,
         image_segments = image_paths.len(),
@@ -5142,21 +5089,22 @@ async fn download_image_post_segment(
                 "{platform}图集第 {} 段视频片段下载失败，改用该段封面静图生成静止片段",
                 ordinal
             );
-            download_image_segment(downloader, source, &segment.image_urls, fallback_image, ordinal, platform)
-                .await?;
+            download_image_segment(
+                downloader,
+                source,
+                &segment.image_urls,
+                fallback_image,
+                ordinal,
+                platform,
+            )
+            .await?;
             compose_still_page(fallback_image, target, width, height, platform).await
         }
     }
 }
 
 /// 用一张静态图生成固定时长的无声片段，编码规格与幻灯片保持一致。
-async fn compose_still_page(
-    image_path: &Path,
-    target: &Path,
-    width: i32,
-    height: i32,
-    platform: &str,
-) -> Result<()> {
+async fn compose_still_page(image_path: &Path, target: &Path, width: i32, height: i32, platform: &str) -> Result<()> {
     let temporary = target.with_extension("still.mp4");
     let result = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffmpeg"))
         .args(["-y", "-loop", "1", "-framerate", "30", "-i"])
@@ -5273,18 +5221,16 @@ async fn compose_image_slideshow(
     if let Some(music_path) = music_path {
         command.args(["-stream_loop", "-1", "-i"]).arg(music_path);
     }
-    command
-        .args(["-vf", &slideshow_video_filter(width, height)])
-        .args([
-            "-t",
-            &total_seconds.to_string(),
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-        ]);
+    command.args(["-vf", &slideshow_video_filter(width, height)]).args([
+        "-t",
+        &total_seconds.to_string(),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+    ]);
     if music_path.is_some() {
         command.args([
             "-map",
@@ -5468,12 +5414,10 @@ fn scan_mp4_boxes(
                     }
                 }
             }
-            b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"edts" | b"udta" | b"meta"
-            | b"ipro" | b"sinf" | b"schi" | b"moof" | b"traf" => {
+            b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"edts" | b"udta" | b"meta" | b"ipro" | b"sinf"
+            | b"schi" | b"moof" | b"traf" => {
                 // meta 是 FullBox，子盒从 version/flags 之后开始。
-                let child_start = pos
-                    + header_len as u64
-                    + if box_type == *b"meta" { 4 } else { 0 };
+                let child_start = pos + header_len as u64 + if box_type == *b"meta" { 4 } else { 0 };
                 if child_start < pos + box_size {
                     scan_mp4_boxes(file, child_start, pos + box_size, depth + 1, encrypted)?;
                 }
@@ -5764,10 +5708,7 @@ mod tests {
         assert_eq!(map.get("7604854055151635731"), Some(&2));
 
         let from_object = serde_json::json!({"item_id_to_episode": {"7604472777650785551": 3}});
-        assert_eq!(
-            mix_page_episode_map(&from_object).get("7604472777650785551"),
-            Some(&3)
-        );
+        assert_eq!(mix_page_episode_map(&from_object).get("7604472777650785551"), Some(&3));
 
         assert!(mix_page_episode_map(&serde_json::json!({})).is_empty());
     }
@@ -5779,8 +5720,12 @@ mod tests {
         tokio::fs::create_dir_all(&root).await.unwrap();
         let output = root.join("S01E01 - 测试.mp4");
         tokio::fs::write(&output, b"video").await.unwrap();
-        tokio::fs::write(output.with_extension("ass"), b"legacy-ass").await.unwrap();
-        tokio::fs::write(output.with_extension("danmaku.json"), b"{}").await.unwrap();
+        tokio::fs::write(output.with_extension("ass"), b"legacy-ass")
+            .await
+            .unwrap();
+        tokio::fs::write(output.with_extension("danmaku.json"), b"{}")
+            .await
+            .unwrap();
 
         super::migrate_douyin_sidecar_names(&output).await.unwrap();
 
@@ -5800,9 +5745,7 @@ mod tests {
         crate::config::init_config_with_database(db.clone())
             .await
             .expect("初始化配置失败");
-        crate::credential_store::init(&db)
-            .await
-            .expect("加载外部凭证失败");
+        crate::credential_store::init(&db).await.expect("加载外部凭证失败");
 
         let url = std::env::var("BILI_SYNC_TEST_DOUYIN_MIX_URL").expect("需要设置 BILI_SYNC_TEST_DOUYIN_MIX_URL");
         let id = resolve_mix_id(&url).await.expect("合集链接应能解析出 id");
@@ -5928,8 +5871,7 @@ mod tests {
         assert_eq!(parse_content_range_total("bytes 0-0/40087514"), Some(40_087_514));
         assert_eq!(parse_content_range_total("bytes 0-0/*"), None);
         assert!(
-            (parse_ffprobe_fps(Some("186000000/9249743")).unwrap_or_default() - 20.108_666_802_958_74).abs()
-                < 1e-9
+            (parse_ffprobe_fps(Some("186000000/9249743")).unwrap_or_default() - 20.108_666_802_958_74).abs() < 1e-9
         );
         assert_eq!(parse_ffprobe_fps(Some("60/1")), Some(60.0));
         assert_eq!(parse_ffprobe_fps(Some("0/0")), None);
@@ -6094,7 +6036,11 @@ mod tests {
                 {"aweme_id": "200", "desc": "目标剧集", "video": {"bit_rate": []}}
             ]
         });
-        let items = response.get("aweme_list").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let items = response
+            .get("aweme_list")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let detail = find_aweme_in_items(&items, "200").expect("应找到目标剧集");
         assert_eq!(text(&detail, &["desc"]).as_deref(), Some("目标剧集"));
         assert!(detail.get("video").is_some());
@@ -6223,13 +6169,7 @@ mod tests {
                 b"moov",
                 &mp4_box(
                     b"trak",
-                    &mp4_box(
-                        b"mdia",
-                        &mp4_box(
-                            b"minf",
-                            &mp4_box(b"stbl", &stbl_payload),
-                        ),
-                    ),
+                    &mp4_box(b"mdia", &mp4_box(b"minf", &mp4_box(b"stbl", &stbl_payload))),
                 ),
             )
         }
@@ -6258,7 +6198,13 @@ mod tests {
         // 付费视频：仅有 senc 盒（无 stsd 采样项时）也应识别。
         let senc_only = mp4_box(
             b"moov",
-            &mp4_box(b"trak", &mp4_box(b"mdia", &mp4_box(b"minf", &mp4_box(b"stbl", &mp4_box(b"senc", &[0u8; 8]))))),
+            &mp4_box(
+                b"trak",
+                &mp4_box(
+                    b"mdia",
+                    &mp4_box(b"minf", &mp4_box(b"stbl", &mp4_box(b"senc", &[0u8; 8]))),
+                ),
+            ),
         );
         let senc_path = temp_file("douyin-senc", &[mp4_box(b"ftyp", b"isom"), senc_only].concat());
         assert!(detect_cenc_encrypted_media_file(&senc_path).unwrap());
@@ -6288,14 +6234,20 @@ mod tests {
         let slide = image_slide(&video_slide).expect("视频片段应能解析");
         assert!(slide.is_video(), "带 video 的段应识别为视频片段");
         assert_eq!(slide.video_urls.len(), 2);
-        assert_eq!(slide.video_urls[0], "https://example.com/720.mp4", "应优先取最高码率档位");
+        assert_eq!(
+            slide.video_urls[0], "https://example.com/720.mp4",
+            "应优先取最高码率档位"
+        );
         assert_eq!(slide.duration, Some(3.967));
         assert!(slide.image_urls.is_empty());
 
-        let image_slide_value = image_slide(&serde_json::json!({"url_list": ["https://example.com/1.jpg"]}))
-            .expect("图片段应能解析");
+        let image_slide_value =
+            image_slide(&serde_json::json!({"url_list": ["https://example.com/1.jpg"]})).expect("图片段应能解析");
         assert!(!image_slide_value.is_video());
-        assert_eq!(image_slide_value.image_urls, vec!["https://example.com/1.jpg".to_string()]);
+        assert_eq!(
+            image_slide_value.image_urls,
+            vec!["https://example.com/1.jpg".to_string()]
+        );
 
         let detail = serde_json::json!({
             "images": [
@@ -6429,7 +6381,14 @@ mod tests {
 
     async fn probe_media_duration(path: &Path) -> f64 {
         let output = crate::utils::process::tokio_command(crate::downloader::resolve_media_tool_path("ffprobe"))
-            .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"])
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=nw=1:nk=1",
+            ])
             .arg(path)
             .output()
             .await
@@ -6455,9 +6414,7 @@ mod tests {
         crate::config::init_config_with_database(db.clone())
             .await
             .expect("初始化配置失败");
-        crate::credential_store::init(&db)
-            .await
-            .expect("加载外部凭证失败");
+        crate::credential_store::init(&db).await.expect("加载外部凭证失败");
 
         let metadata = extract_metadata_native(aweme_id, None)
             .await
@@ -6483,8 +6440,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).expect("创建输出目录失败");
         let stem = format!("20260101000000-{aweme_id}");
         let output_path = output_dir.join(format!("{stem}.mp4"));
-        let downloader =
-            crate::unified_downloader::UnifiedDownloader::new_native(crate::bilibili::Client::new());
+        let downloader = crate::unified_downloader::UnifiedDownloader::new_native(crate::bilibili::Client::new());
         let primary = download_image_post(
             &downloader,
             &metadata,
@@ -6525,10 +6481,7 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let expected_primary = expected_pages
-            .first()
-            .cloned()
-            .unwrap_or_else(|| output_path.clone());
+        let expected_primary = expected_pages.first().cloned().unwrap_or_else(|| output_path.clone());
         assert_eq!(primary, expected_primary, "应返回第一个分页作为主文件");
         assert_eq!(
             crate::douyin::image_post_page_paths(&primary).len(),
@@ -6602,14 +6555,8 @@ mod tests {
         let aweme_id = std::env::var("BILI_SYNC_TEST_DOUYIN_MIXED_AWEME_ID")
             .expect("需要设置 BILI_SYNC_TEST_DOUYIN_MIXED_AWEME_ID");
         let (_, segments) = run_douyin_image_post_e2e(&aweme_id).await;
-        assert!(
-            segments.iter().any(|segment| segment.is_video()),
-            "应解析出视频片段"
-        );
-        assert!(
-            segments.iter().any(|segment| !segment.is_video()),
-            "应解析出图片段"
-        );
+        assert!(segments.iter().any(|segment| segment.is_video()), "应解析出视频片段");
+        assert!(segments.iter().any(|segment| !segment.is_video()), "应解析出图片段");
     }
 
     /// 真实链路测试（默认 ignore）：纯图片图集与「整篇都是 live photo」的图集
@@ -6647,9 +6594,21 @@ pub(crate) async fn migrate_legacy_douyin_credentials() -> Result<()> {
     )
     .await?;
     for (key, name, valid) in [
-        (crate::credential_store::keys::DOUYIN_MSTOKEN, "douyin-mstoken.txt", valid_ms_token as fn(&str) -> bool),
-        (crate::credential_store::keys::DOUYIN_WEBID, "douyin-webid.txt", valid_webid as fn(&str) -> bool),
-        (crate::credential_store::keys::DOUYIN_VERIFY_FP, "douyin-verify-fp.txt", valid_verify_fp as fn(&str) -> bool),
+        (
+            crate::credential_store::keys::DOUYIN_MSTOKEN,
+            "douyin-mstoken.txt",
+            valid_ms_token as fn(&str) -> bool,
+        ),
+        (
+            crate::credential_store::keys::DOUYIN_WEBID,
+            "douyin-webid.txt",
+            valid_webid as fn(&str) -> bool,
+        ),
+        (
+            crate::credential_store::keys::DOUYIN_VERIFY_FP,
+            "douyin-verify-fp.txt",
+            valid_verify_fp as fn(&str) -> bool,
+        ),
     ] {
         if crate::credential_store::has(key) {
             continue;

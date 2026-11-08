@@ -192,9 +192,7 @@ impl MigratorTrait for Migrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{
-        ConnectionTrait, Database, DatabaseConnection, DbBackend, QueryResult, Statement,
-    };
+    use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, QueryResult, Statement};
 
     async fn query_all_sql(db: &DatabaseConnection, sql: String) -> Vec<QueryResult> {
         let backend: DbBackend = db.get_database_backend();
@@ -234,11 +232,7 @@ mod tests {
         query_all_sql(db, sql)
             .await
             .into_iter()
-            .filter(|row| {
-                row.try_get::<i64>("", "cid")
-                    .map(|cid| cid == -2)
-                    .unwrap_or(false)
-            })
+            .filter(|row| row.try_get::<i64>("", "cid").map(|cid| cid == -2).unwrap_or(false))
             .count()
     }
 
@@ -259,9 +253,7 @@ mod tests {
     // 故意用 ifnull 处理 NULL），它本来就有 cid=-2 的列，全库扫描会误伤。
     #[tokio::test]
     async fn test_fresh_migrations_index_is_correct() {
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("连接内存数据库失败");
+        let db = Database::connect("sqlite::memory:").await.expect("连接内存数据库失败");
         Migrator::up(&db, None).await.expect("执行迁移失败");
 
         // idx_page_status_query 的 SQL 必须含 download_status，且不含被误用的 "status"。
@@ -289,10 +281,7 @@ mod tests {
             .await
             .expect("VACUUM 失败，可能存在坏索引");
 
-        assert!(
-            integrity_check_is_ok(&db).await,
-            "PRAGMA integrity_check 未返回 ok"
-        );
+        assert!(integrity_check_is_ok(&db).await, "PRAGMA integrity_check 未返回 ok");
     }
 
     // 老库：手工造出历史坏索引，确认它是「表达式索引」形态，再用修复迁移修好。
@@ -306,9 +295,7 @@ mod tests {
     // 该判定在 3.46 与 3.50 上都成立。VACUUM 失败的证据见修复报告（真实数据 + 3.50.2 CLI）。
     #[tokio::test]
     async fn test_legacy_broken_index_is_repaired() {
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("连接内存数据库失败");
+        let db = Database::connect("sqlite::memory:").await.expect("连接内存数据库失败");
         Migrator::up(&db, None).await.expect("执行迁移失败");
 
         // 注入历史坏定义（列名写成 status）。
@@ -357,9 +344,7 @@ mod tests {
             .expect("修复迁移执行失败");
 
         // 修复后：SQL 含 download_status、无表达式列、VACUUM 成功。
-        let sql = index_sql(&db, "idx_page_status_query")
-            .await
-            .expect("修复后索引不存在");
+        let sql = index_sql(&db, "idx_page_status_query").await.expect("修复后索引不存在");
         assert!(
             sql.contains("download_status"),
             "修复后索引应引用 download_status，实际为: {sql}"
@@ -369,13 +354,10 @@ mod tests {
             0,
             "修复后 idx_page_status_query 仍存在表达式列"
         );
-        db.execute_unprepared("VACUUM")
-            .await
-            .expect("修复后 VACUUM 失败");
+        db.execute_unprepared("VACUUM").await.expect("修复后 VACUUM 失败");
         assert!(
             integrity_check_is_ok(&db).await,
             "修复后 PRAGMA integrity_check 未返回 ok"
         );
     }
 }
-

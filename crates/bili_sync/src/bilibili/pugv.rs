@@ -371,10 +371,7 @@ fn course_price(season_info: &serde_json::Value) -> Option<f64> {
         return Some(price);
     }
     let raw = season_info["payment"]["price_format"].as_str()?;
-    let cleaned: String = raw
-        .chars()
-        .filter(|ch| ch.is_ascii_digit() || *ch == '.')
-        .collect();
+    let cleaned: String = raw.chars().filter(|ch| ch.is_ascii_digit() || *ch == '.').collect();
     cleaned.parse::<f64>().ok()
 }
 

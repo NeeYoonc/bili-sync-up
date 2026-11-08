@@ -655,7 +655,6 @@ async fn ensure_ai_renamed_column(connection: &DatabaseConnection) -> Result<()>
     Ok(())
 }
 
-
 async fn ensure_video_skip_reason_column(connection: &DatabaseConnection) -> Result<()> {
     use sea_orm::ConnectionTrait;
 
@@ -786,9 +785,7 @@ async fn apply_pending_database_restore_at(config_dir: &std::path::Path) -> anyh
     if !marker.is_file() {
         return Ok(false);
     }
-    let source_name = tokio::fs::read_to_string(&marker)
-        .await
-        .unwrap_or_default();
+    let source_name = tokio::fs::read_to_string(&marker).await.unwrap_or_default();
     if !staged.is_file() {
         warn!(
             marker = %marker.display(),
@@ -1146,13 +1143,12 @@ mod restore_tests {
         tokio::fs::write(dir.join("data.sqlite-wal"), b"old-wal").await.unwrap();
         tokio::fs::write(dir.join("data.sqlite-shm"), b"old-shm").await.unwrap();
         // 暂存恢复文件 + 标记
-        tokio::fs::write(dir.join("data.restore.sqlite"), b"restored-main").await.unwrap();
-        tokio::fs::write(
-            dir.join("data.restore.marker"),
-            b"data-backup-20260824-123456.sqlite",
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(dir.join("data.restore.sqlite"), b"restored-main")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("data.restore.marker"), b"data-backup-20260824-123456.sqlite")
+            .await
+            .unwrap();
 
         let applied = apply_pending_database_restore_at(&dir).await.unwrap();
         assert!(applied, "应检测到恢复标记并应用");

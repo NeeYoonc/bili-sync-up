@@ -12,6 +12,7 @@ mod item;
 mod manager;
 
 use crate::bilibili::{Credential, DanmakuOption, FilterOption};
+pub(crate) use crate::config::bundle::validate_naming_template_syntax;
 pub use crate::config::bundle::ConfigBundle;
 pub use crate::config::clap::version;
 pub use crate::config::global::{
@@ -23,7 +24,6 @@ pub use crate::config::item::{
     DanmakuUpdatePolicy, EmptyUpperStrategy, NFOConfig, NFOTimeType, PathSafeTemplate, RateLimit,
     SubmissionRiskControlConfig, SubmissionScanStrategyConfig,
 };
-pub(crate) use crate::config::bundle::validate_naming_template_syntax;
 pub(crate) use crate::config::manager::describe_config_key;
 pub use crate::config::manager::ConfigManager;
 

@@ -1414,7 +1414,6 @@ pub struct ConfigMigrationReportResponse {
     pub notes: Vec<String>,
 }
 
-
 /// 网络代理连通性测试结果。
 #[derive(Serialize, ToSchema)]
 pub struct TestProxyResponse {

@@ -130,9 +130,8 @@ impl WebSocketHandler {
                                 download_handle = Some(tokio::spawn(async move {
                                     let mut stream = live_updates::subscribe_downloads_changed();
                                     loop {
-                                        let items = Arc::new(
-                                            crate::download_progress::DOWNLOAD_PROGRESS.snapshot().await,
-                                        );
+                                        let items =
+                                            Arc::new(crate::download_progress::DOWNLOAD_PROGRESS.snapshot().await);
                                         if tx_clone.send(ServerEvent::Downloads(items)).await.is_err() {
                                             break;
                                         }

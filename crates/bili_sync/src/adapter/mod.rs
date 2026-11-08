@@ -1,8 +1,8 @@
 pub mod bangumi;
-pub mod manga;
-pub mod pugv;
 mod collection;
 mod favorite;
+pub mod manga;
+pub mod pugv;
 mod submission;
 mod watch_later;
 
@@ -648,8 +648,8 @@ pub async fn pugv_from<'a>(
     VideoSourceEnum,
     Pin<Box<dyn Stream<Item = Result<VideoInfo>> + 'a + Send>>,
 )> {
-    let mut query = bili_sync_entity::video_source::Entity::find()
-        .filter(bili_sync_entity::video_source::Column::Type.eq(2));
+    let mut query =
+        bili_sync_entity::video_source::Entity::find().filter(bili_sync_entity::video_source::Column::Type.eq(2));
 
     if let Some(season_id_value) = season_id {
         query = query.filter(bili_sync_entity::video_source::Column::SeasonId.eq(season_id_value));

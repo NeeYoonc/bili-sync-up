@@ -12,7 +12,7 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::{DatabaseConnection, Unchanged};
 use tracing::{debug, info, warn};
 
-use crate::adapter::{VideoSource, VideoSourceEnum, _ActiveModel};
+use crate::adapter::{_ActiveModel, VideoSource, VideoSourceEnum};
 use crate::bilibili::{BiliClient, Dynamic, Submission, VideoInfo};
 use crate::error::{ErrorClassifier, ErrorType};
 
