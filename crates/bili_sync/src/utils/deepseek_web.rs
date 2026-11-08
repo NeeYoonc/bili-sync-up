@@ -465,6 +465,9 @@ impl DeepSeekWebClient {
         let mut message_id: Option<String> = None;
         let mut chunk_count = 0;
         let mut current_event_type: Option<String> = None;
+        // 记录最近一次非限频 hint 错误：如果整个响应没有任何正文，
+        // 用它给出真实失败原因，而不是笼统的「DeepSeek 响应为空」。
+        let mut last_hint_error: Option<String> = None;
 
         for line in body.lines() {
             // 解析 event 类型行
@@ -498,9 +501,12 @@ impl DeepSeekWebClient {
                         return Err(anyhow!("RATE_LIMITED: {}", content));
                     }
 
-                    // 其他 hint 错误也记录
+                    // 其他 hint 错误也记录，并留作「响应为空」时的真实原因
                     if hint_type == Some("error") {
                         warn!("DeepSeek hint 错误: {}", content);
+                        if !content.is_empty() {
+                            last_hint_error = Some(content.to_string());
+                        }
                     }
                 }
                 current_event_type = None;
@@ -628,6 +634,11 @@ impl DeepSeekWebClient {
         }
 
         if full_response.is_empty() {
+            // hint 里已经有明确错误原因时，把它带出来：日志能看到真实原因，
+            // 且错误串不带 HTTP 状态码，上层仍按可重试错误处理。
+            if let Some(content) = last_hint_error {
+                return Err(anyhow!("AI 返回错误: {}", content));
+            }
             return Err(anyhow!(
                 "DeepSeek 响应为空，原始响应: {}...",
                 &body[..body.len().min(200)]
@@ -752,10 +763,25 @@ data: {"v":"HY2020_2024-06-09\", \"三国bigbig_2024-06-09\"]"}
             assert!(message.contains(content), "错误串要保留原始 hint 内容: {message}");
         }
 
-        // 非限频 hint 仍然只记录告警，不打断解析
+        // 非限频 hint 且整段响应没有正文：应把 hint 的真实原因带出来，
+        // 但不能伪装成 RATE_LIMITED（否则 web 限频判断会把普通错误误当限频）。
         let body = "event: hint\ndata: {\"type\":\"error\",\"content\":\"对话生成出错，请重试其他问题\"}\n";
-        let (response, _) = client.parse_sse_response(body).expect("非限频 hint 不应报错");
-        assert!(response.is_empty(), "没有正文时响应为空: {response}");
+        let err = client
+            .parse_sse_response(body)
+            .expect_err("非限频 hint 且无正文时应返回错误");
+        let message = err.to_string();
+        assert!(
+            message.starts_with("AI 返回错误: "),
+            "应带上 hint 的真实错误原因: {message}"
+        );
+        assert!(
+            message.contains("对话生成出错，请重试其他问题"),
+            "错误串要保留原始 hint 内容: {message}"
+        );
+        assert!(
+            !message.starts_with("RATE_LIMITED:"),
+            "非限频 hint 不能伪装成限频错误: {message}"
+        );
     }
 
     #[test]
