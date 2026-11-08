@@ -800,8 +800,10 @@ impl NotificationClient {
             event: "test_notification".to_string(),
             sent_at: chrono::Local::now().to_rfc3339(),
         };
-        let mut config = NotificationConfig::default();
-        config.webhook_synology_chat_template = Some(template.to_string());
+        let config = NotificationConfig {
+            webhook_synology_chat_template: Some(template.to_string()),
+            ..Default::default()
+        };
         let client = Self::new(config);
         let rendered = client.render_synology_chat_text(&sample_payload);
         if rendered.trim().is_empty() {
@@ -831,7 +833,7 @@ impl NotificationClient {
             return content.to_string();
         }
 
-        let suffix_bytes = suffix.as_bytes().len();
+        let suffix_bytes = suffix.len();
         if suffix_bytes >= max_bytes {
             let mut end = max_bytes;
             while end > 0 && !content.is_char_boundary(end) {
@@ -937,7 +939,7 @@ impl NotificationClient {
                     let mut sorted_videos = source_result.new_videos.clone();
                     if source_result.source_type == "番剧" {
                         // 番剧按集数降序排列（最新的集数在前）
-                        sorted_videos.sort_by(|a, b| b.episode_number.unwrap_or(0).cmp(&a.episode_number.unwrap_or(0)));
+                        sorted_videos.sort_by_key(|video| std::cmp::Reverse(video.episode_number.unwrap_or(0)));
                     } else {
                         // 其他视频按发布时间降序排列（最新的在前）
                         sorted_videos.sort_by(|a, b| {
@@ -975,8 +977,10 @@ impl NotificationClient {
                         let mut video_line = format!("- [{}]({})", clean_title, video_url);
 
                         // 添加额外信息
-                        if source_result.source_type == "番剧" && video.episode_number.is_some() {
-                            video_line.push_str(&format!(" (第{}集", video.episode_number.unwrap()));
+                        if let (true, Some(episode_number)) =
+                            (source_result.source_type == "番剧", video.episode_number)
+                        {
+                            video_line.push_str(&format!(" (第{}集", episode_number));
                             if let Some(pubtime) = &video.pubtime {
                                 video_line.push_str(&format!(", {}", compact_pubtime_text(pubtime)));
                             }
@@ -1543,8 +1547,10 @@ mod tests {
 
     #[test]
     fn test_notification_config_validation() {
-        let mut config = NotificationConfig::default();
-        config.enable_scan_notifications = true;
+        let mut config = NotificationConfig {
+            enable_scan_notifications: true,
+            ..Default::default()
+        };
 
         // 未配置任何渠道应该失败
         assert!(config.validate().is_err());
@@ -1746,8 +1752,10 @@ mod tests {
     async fn test_send_to_webhook_sends_custom_headers() {
         let (url, captured) = spawn_capture_server("/notify").await.expect("start capture server");
 
-        let mut config = NotificationConfig::default();
-        config.active_channel = "webhook".to_string();
+        let mut config = NotificationConfig {
+            active_channel: "webhook".to_string(),
+            ..Default::default()
+        };
         config.webhook_url = Some(url);
         config.webhook_custom_headers =
             Some(r#"{"Authorization":"Bearer custom-token","X-Channel":"clawbot"}"#.to_string());
@@ -1783,8 +1791,10 @@ mod tests {
             .await
             .expect("start capture server");
 
-        let mut config = NotificationConfig::default();
-        config.active_channel = "webhook".to_string();
+        let mut config = NotificationConfig {
+            active_channel: "webhook".to_string(),
+            ..Default::default()
+        };
         config.webhook_url = Some(url);
         config.webhook_bearer_token = Some("default-token".to_string());
         config.webhook_custom_headers =
@@ -1824,8 +1834,10 @@ mod tests {
             .await
             .expect("start Synology Chat capture server");
 
-        let mut config = NotificationConfig::default();
-        config.active_channel = "webhook".to_string();
+        let mut config = NotificationConfig {
+            active_channel: "webhook".to_string(),
+            ..Default::default()
+        };
         config.webhook_url = Some(url);
         config.webhook_format = "synology_chat".to_string();
         config.webhook_custom_headers = Some(r#"{"Content-Type":"application/json"}"#.to_string());
@@ -1870,8 +1882,10 @@ mod tests {
     async fn test_send_error_skips_webhook_when_custom_body_missing() {
         let (url, captured) = spawn_capture_server("/notify").await.expect("start capture server");
 
-        let mut config = NotificationConfig::default();
-        config.active_channel = "webhook".to_string();
+        let mut config = NotificationConfig {
+            active_channel: "webhook".to_string(),
+            ..Default::default()
+        };
         config.webhook_url = Some(url);
         config.webhook_format = "custom".to_string();
 
@@ -1889,8 +1903,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_test_notification_errors_when_custom_body_missing() {
-        let mut config = NotificationConfig::default();
-        config.active_channel = "webhook".to_string();
+        let mut config = NotificationConfig {
+            active_channel: "webhook".to_string(),
+            ..Default::default()
+        };
         config.webhook_url = Some("http://127.0.0.1:65535/notify".to_string());
         config.webhook_format = "custom".to_string();
 

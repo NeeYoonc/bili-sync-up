@@ -11,9 +11,6 @@ use std::ffi::OsStr;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt as _;
-
 /// `tokio::process::Command::new` 的替代品：Windows 下顺带隐藏子进程控制台窗口。
 pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
     let command = tokio::process::Command::new(program);

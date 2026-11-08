@@ -345,8 +345,9 @@ mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
-static BETA_IMAGE_UPDATE_CACHE: Lazy<RwLock<Option<(DateTime<Utc>, BetaImageUpdateStatusResponse)>>> =
-    Lazy::new(|| RwLock::new(None));
+type BetaImageUpdateCacheEntry = (DateTime<Utc>, BetaImageUpdateStatusResponse);
+type BetaImageUpdateCache = Lazy<RwLock<Option<BetaImageUpdateCacheEntry>>>;
+static BETA_IMAGE_UPDATE_CACHE: BetaImageUpdateCache = Lazy::new(|| RwLock::new(None));
 const BETA_IMAGE_UPDATE_CACHE_TTL_SECONDS: i64 = 10 * 60;
 const IMAGE_PROXY_CACHE_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 const IMAGE_PROXY_CACHE_CLEANUP_INTERVAL_SECONDS: i64 = 6 * 60 * 60;
@@ -4054,16 +4055,28 @@ async fn build_queue_status_sse_event(last_snapshot: &mut String) -> Option<Even
     }
 }
 
-fn build_video_source_tag(
+struct VideoSourceTagInput<'a> {
     source_id: i32,
-    source_type: &str,
-    source_type_label: &str,
+    source_type: &'a str,
+    source_type_label: &'a str,
     source_name: String,
     split_chapters_after_download: bool,
     audio_only: bool,
     audio_only_m4a_only: bool,
     flat_folder: bool,
-) -> VideoSourceTag {
+}
+
+fn build_video_source_tag(p: VideoSourceTagInput<'_>) -> VideoSourceTag {
+    let VideoSourceTagInput {
+        source_id,
+        source_type,
+        source_type_label,
+        source_name,
+        split_chapters_after_download,
+        audio_only,
+        audio_only_m4a_only,
+        flat_folder,
+    } = p;
     VideoSourceTag {
         source_id,
         source_type: source_type.to_string(),
@@ -4093,16 +4106,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                     )
                 })
                 .unwrap_or_else(|| (format!("已删除漫画源 #{}", source_id), false, false, false, false));
-            return Ok(Some(build_video_source_tag(
+            return Ok(Some(build_video_source_tag(VideoSourceTagInput {
                 source_id,
-                "manga",
-                "漫画",
+                source_type: "manga",
+                source_type_label: "漫画",
                 source_name,
                 split_chapters_after_download,
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
-            )));
+            })));
         }
     }
 
@@ -4120,16 +4133,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                     )
                 })
                 .unwrap_or_else(|| (format!("已删除番剧源 #{}", source_id), false, false, false, false));
-            return Ok(Some(build_video_source_tag(
+            return Ok(Some(build_video_source_tag(VideoSourceTagInput {
                 source_id,
-                "bangumi",
-                "番剧",
+                source_type: "bangumi",
+                source_type_label: "番剧",
                 source_name,
                 split_chapters_after_download,
                 audio_only,
                 audio_only_m4a_only,
                 flat_folder,
-            )));
+            })));
         }
     }
 
@@ -4146,16 +4159,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                 )
             })
             .unwrap_or_else(|| (format!("已删除合集源 #{}", source_id), false, false, false, false));
-        return Ok(Some(build_video_source_tag(
+        return Ok(Some(build_video_source_tag(VideoSourceTagInput {
             source_id,
-            "collection",
-            "合集 / 列表",
+            source_type: "collection",
+            source_type_label: "合集 / 列表",
             source_name,
             split_chapters_after_download,
             audio_only,
             audio_only_m4a_only,
             flat_folder,
-        )));
+        })));
     }
 
     if let Some(source_id) = video.favorite_id {
@@ -4171,16 +4184,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                 )
             })
             .unwrap_or_else(|| (format!("已删除收藏夹源 #{}", source_id), false, false, false, false));
-        return Ok(Some(build_video_source_tag(
+        return Ok(Some(build_video_source_tag(VideoSourceTagInput {
             source_id,
-            "favorite",
-            "收藏夹",
+            source_type: "favorite",
+            source_type_label: "收藏夹",
             source_name,
             split_chapters_after_download,
             audio_only,
             audio_only_m4a_only,
             flat_folder,
-        )));
+        })));
     }
 
     if let Some(source_id) = video.submission_id {
@@ -4196,16 +4209,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                 )
             })
             .unwrap_or_else(|| (format!("已删除投稿源 #{}", source_id), false, false, false, false));
-        return Ok(Some(build_video_source_tag(
+        return Ok(Some(build_video_source_tag(VideoSourceTagInput {
             source_id,
-            "submission",
-            "UP主投稿",
+            source_type: "submission",
+            source_type_label: "UP主投稿",
             source_name,
             split_chapters_after_download,
             audio_only,
             audio_only_m4a_only,
             flat_folder,
-        )));
+        })));
     }
 
     if let Some(source_id) = video.watch_later_id {
@@ -4221,16 +4234,16 @@ async fn resolve_video_source_tag(db: &DatabaseConnection, video: &video::Model)
                 )
             })
             .unwrap_or_else(|| (format!("已删除稍后再看源 #{}", source_id), false, false, false, false));
-        return Ok(Some(build_video_source_tag(
+        return Ok(Some(build_video_source_tag(VideoSourceTagInput {
             source_id,
-            "watch_later",
-            "稍后再看",
+            source_type: "watch_later",
+            source_type_label: "稍后再看",
             source_name,
             split_chapters_after_download,
             audio_only,
             audio_only_m4a_only,
             flat_folder,
-        )));
+        })));
     }
 
     Ok(None)
@@ -8074,7 +8087,7 @@ async fn find_videos_by_source_relation(
         "watch_later" => video::Entity::find().filter(video::Column::WatchLaterId.eq(id)),
         "bangumi" | "pugv" | "manga" => video::Entity::find()
             .filter(video::Column::SourceId.eq(id))
-            .filter(video::Column::SourceType.eq(bili_source_type_code(&source_type).unwrap_or(1))),
+            .filter(video::Column::SourceType.eq(bili_source_type_code(source_type).unwrap_or(1))),
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type)),
     };
 
@@ -8134,7 +8147,7 @@ async fn clear_video_source_relation(conn: &impl ConnectionTrait, source_type: &
                     sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
                 )
                 .filter(video::Column::SourceId.eq(id))
-                .filter(video::Column::SourceType.eq(bili_source_type_code(&source_type).unwrap_or(1)))
+                .filter(video::Column::SourceType.eq(bili_source_type_code(source_type).unwrap_or(1)))
                 .exec(conn)
                 .await?;
         }
@@ -10205,12 +10218,14 @@ async fn backfill_submission_by_whitelist_keywords(
     submission_record: &submission::Model,
     whitelist_keywords: &[String],
 ) -> Result<SubmissionWhitelistBackfillStats> {
-    let mut stats = SubmissionWhitelistBackfillStats::default();
-    stats.total_keywords = whitelist_keywords
-        .iter()
-        .map(|k| k.trim())
-        .filter(|k| !k.is_empty())
-        .count();
+    let mut stats = SubmissionWhitelistBackfillStats {
+        total_keywords: whitelist_keywords
+            .iter()
+            .map(|k| k.trim())
+            .filter(|k| !k.is_empty())
+            .count(),
+        ..Default::default()
+    };
 
     if stats.total_keywords == 0 {
         return Ok(stats);
@@ -11869,11 +11884,10 @@ pub async fn preview_filename_templates(
         .map_err(|err| ApiError::from(InnerApiError::BadRequest(format!("命名模板解析失败: {}", err))))?;
 
     let mut warnings = Vec::new();
-    if preview_config.video_name.contains('/') || preview_config.video_name.contains('\\') {
-        if preview_config.multi_page_name.contains('/') || preview_config.multi_page_name.contains('\\') {
-            warnings
-                .push("视频文件名模板和多P视频文件名模板都包含路径分隔符，保存时会按路径冲突规则处理。".to_string());
-        }
+    if (preview_config.video_name.contains('/') || preview_config.video_name.contains('\\'))
+        && (preview_config.multi_page_name.contains('/') || preview_config.multi_page_name.contains('\\'))
+    {
+        warnings.push("视频文件名模板和多P视频文件名模板都包含路径分隔符，保存时会按路径冲突规则处理。".to_string());
     }
     if template_has_path_separator_outside_handlebars(&preview_config.page_name) {
         warnings.push("单P视频文件名模板包含路径分隔符，当前保存规则不允许这样配置。".to_string());
@@ -12368,8 +12382,10 @@ mod config_update_tests {
 
     #[test]
     fn sync_nfo_time_type_updates_legacy_and_effective_config() {
-        let mut config = Config::default();
-        config.nfo_time_type = NFOTimeType::PubTime;
+        let mut config = Config {
+            nfo_time_type: NFOTimeType::PubTime,
+            ..Default::default()
+        };
         config.nfo_config.time_type = NFOTimeType::FavTime;
         let mut updated_fields = Vec::new();
 
@@ -12382,8 +12398,10 @@ mod config_update_tests {
 
     #[test]
     fn sync_nfo_time_type_skips_when_both_values_match() {
-        let mut config = Config::default();
-        config.nfo_time_type = NFOTimeType::PubTime;
+        let mut config = Config {
+            nfo_time_type: NFOTimeType::PubTime,
+            ..Default::default()
+        };
         config.nfo_config.time_type = NFOTimeType::PubTime;
         let mut updated_fields = Vec::new();
 
@@ -13441,16 +13459,18 @@ pub async fn update_config_internal(
             match service.as_str() {
                 "2captcha" | "anticaptcha" => {
                     // 如果auto_solve配置不存在，创建一个新的
-                    if config.risk_control.auto_solve.is_none() {
+                    if let Some(auto_solve) = config.risk_control.auto_solve.as_mut() {
+                        if auto_solve.service != service {
+                            auto_solve.service = service;
+                            updated_fields.push("risk_control.auto_solve.service");
+                        }
+                    } else {
                         config.risk_control.auto_solve = Some(crate::config::AutoSolveConfig {
                             service: service.clone(),
                             api_key: String::new(),
                             max_retries: 3,
                             solve_timeout: 120,
                         });
-                        updated_fields.push("risk_control.auto_solve.service");
-                    } else if config.risk_control.auto_solve.as_ref().unwrap().service != service {
-                        config.risk_control.auto_solve.as_mut().unwrap().service = service;
                         updated_fields.push("risk_control.auto_solve.service");
                     }
                 }
@@ -13463,19 +13483,19 @@ pub async fn update_config_internal(
 
     if let Some(api_key) = params.risk_control_auto_solve_api_key {
         let normalized_api_key = api_key.trim().to_string();
-        if config.risk_control.auto_solve.is_none() {
-            if !normalized_api_key.is_empty() {
-                // 如果auto_solve配置不存在，创建一个新的
-                config.risk_control.auto_solve = Some(crate::config::AutoSolveConfig {
-                    service: "2captcha".to_string(),
-                    api_key: normalized_api_key.clone(),
-                    max_retries: 3,
-                    solve_timeout: 120,
-                });
+        if let Some(auto_solve) = config.risk_control.auto_solve.as_mut() {
+            if auto_solve.api_key != normalized_api_key {
+                auto_solve.api_key = normalized_api_key;
                 updated_fields.push("risk_control.auto_solve.api_key");
             }
-        } else if config.risk_control.auto_solve.as_ref().unwrap().api_key != normalized_api_key {
-            config.risk_control.auto_solve.as_mut().unwrap().api_key = normalized_api_key;
+        } else if !normalized_api_key.is_empty() {
+            // 如果auto_solve配置不存在，创建一个新的
+            config.risk_control.auto_solve = Some(crate::config::AutoSolveConfig {
+                service: "2captcha".to_string(),
+                api_key: normalized_api_key.clone(),
+                max_retries: 3,
+                solve_timeout: 120,
+            });
             updated_fields.push("risk_control.auto_solve.api_key");
         }
     }
@@ -13483,16 +13503,18 @@ pub async fn update_config_internal(
     if let Some(max_retries) = params.risk_control_auto_solve_max_retries {
         if (1..=10).contains(&max_retries) {
             // 如果auto_solve配置不存在，创建一个新的
-            if config.risk_control.auto_solve.is_none() {
+            if let Some(auto_solve) = config.risk_control.auto_solve.as_mut() {
+                if auto_solve.max_retries != max_retries {
+                    auto_solve.max_retries = max_retries;
+                    updated_fields.push("risk_control.auto_solve.max_retries");
+                }
+            } else {
                 config.risk_control.auto_solve = Some(crate::config::AutoSolveConfig {
                     service: "2captcha".to_string(),
                     api_key: String::new(),
                     max_retries,
                     solve_timeout: 120,
                 });
-                updated_fields.push("risk_control.auto_solve.max_retries");
-            } else if config.risk_control.auto_solve.as_ref().unwrap().max_retries != max_retries {
-                config.risk_control.auto_solve.as_mut().unwrap().max_retries = max_retries;
                 updated_fields.push("risk_control.auto_solve.max_retries");
             }
         }
@@ -13501,16 +13523,18 @@ pub async fn update_config_internal(
     if let Some(solve_timeout) = params.risk_control_auto_solve_timeout {
         if (30..=300).contains(&solve_timeout) {
             // 如果auto_solve配置不存在，创建一个新的
-            if config.risk_control.auto_solve.is_none() {
+            if let Some(auto_solve) = config.risk_control.auto_solve.as_mut() {
+                if auto_solve.solve_timeout != solve_timeout {
+                    auto_solve.solve_timeout = solve_timeout;
+                    updated_fields.push("risk_control.auto_solve.solve_timeout");
+                }
+            } else {
                 config.risk_control.auto_solve = Some(crate::config::AutoSolveConfig {
                     service: "2captcha".to_string(),
                     api_key: String::new(),
                     max_retries: 3,
                     solve_timeout,
                 });
-                updated_fields.push("risk_control.auto_solve.solve_timeout");
-            } else if config.risk_control.auto_solve.as_ref().unwrap().solve_timeout != solve_timeout {
-                config.risk_control.auto_solve.as_mut().unwrap().solve_timeout = solve_timeout;
                 updated_fields.push("risk_control.auto_solve.solve_timeout");
             }
         }
@@ -16250,7 +16274,7 @@ pub async fn get_log_files() -> Result<ApiResponse<LogFilesResponse>, ApiError> 
     }
 
     // 最新的放前面
-    files.sort_by(|a, b| b.modified.cmp(&a.modified));
+    files.sort_by_key(|file| std::cmp::Reverse(file.modified));
 
     Ok(ApiResponse::ok(LogFilesResponse { files }))
 }
@@ -18732,15 +18756,13 @@ pub async fn get_video_bvid(
         title: video_info.title.clone(),
         bilibili_url:
             // 根据视频类型生成正确的B站URL
-            if video_info.source_type == Some(1) && video_info.ep_id.is_some() {
+            match (video_info.source_type, video_info.ep_id.as_ref()) {
                 // 番剧类型：使用 ep_id 生成番剧专用URL
-                format!("https://www.bilibili.com/bangumi/play/ep{}", video_info.ep_id.as_ref().unwrap())
-            } else if video_info.source_type == Some(2) && video_info.ep_id.is_some() {
+                (Some(1), Some(ep_id)) => format!("https://www.bilibili.com/bangumi/play/ep{}", ep_id),
                 // 课程类型：使用 ep_id 生成课程专用URL
-                format!("https://www.bilibili.com/cheese/play/ep{}", video_info.ep_id.as_ref().unwrap())
-            } else {
+                (Some(2), Some(ep_id)) => format!("https://www.bilibili.com/cheese/play/ep{}", ep_id),
                 // 普通视频：使用 bvid 生成视频URL
-                format!("https://www.bilibili.com/video/{}", video_info.bvid)
+                _ => format!("https://www.bilibili.com/video/{}", video_info.bvid),
             },
     }))
 }
@@ -18953,21 +18975,13 @@ pub async fn get_video_play_info(
     let video_title = video_info.title.clone();
     let bilibili_url =
         // 根据视频类型生成正确的B站URL
-        if video_info.source_type == Some(1) && video_info.ep_id.is_some() {
+        match (video_info.source_type, video_info.ep_id.as_ref()) {
             // 番剧类型：使用 ep_id 生成番剧专用URL
-            format!(
-                "https://www.bilibili.com/bangumi/play/ep{}",
-                video_info.ep_id.as_ref().unwrap()
-            )
-        } else if video_info.source_type == Some(2) && video_info.ep_id.is_some() {
+            (Some(1), Some(ep_id)) => format!("https://www.bilibili.com/bangumi/play/ep{}", ep_id),
             // 课程类型：使用 ep_id 生成课程专用URL
-            format!(
-                "https://www.bilibili.com/cheese/play/ep{}",
-                video_info.ep_id.as_ref().unwrap()
-            )
-        } else {
+            (Some(2), Some(ep_id)) => format!("https://www.bilibili.com/cheese/play/ep{}", ep_id),
             // 普通视频：使用 bvid 生成视频URL
-            format!("https://www.bilibili.com/video/{}", video_info.bvid)
+            _ => format!("https://www.bilibili.com/video/{}", video_info.bvid),
         };
 
     let build_error_message = |err: &anyhow::Error| -> String {
@@ -19107,61 +19121,63 @@ pub async fn get_video_play_info(
     let min_qn = filter_option.video_min_quality as u32;
 
     // 获取视频播放链接 - 根据视频类型选择不同的API
-    let mut page_analyzer = if video_info.source_type == Some(1) && video_info.ep_id.is_some() {
-        // 使用番剧专用API
-        let ep_id = video_info.ep_id.as_ref().unwrap();
-        debug!("API播放使用番剧专用API: ep_id={}", ep_id);
-        match video
-            .get_bangumi_page_analyzer_with_fallback_in_range(&page_info, ep_id, max_qn, min_qn)
-            .await
-        {
-            Ok(analyzer) => analyzer,
-            Err(e) => {
-                let message = build_error_message(&e);
-                if is_charge_locked_error(&e) {
-                    info!(
-                        "充电视频未充电，无法获取在线播放信息: page_id={}, bvid={}",
-                        video_info.page_id, video_info.bvid
-                    );
-                } else {
-                    warn!("获取番剧视频分析器失败: {:#}", e);
+    let mut page_analyzer = match (video_info.source_type, video_info.ep_id.as_ref()) {
+        (Some(1), Some(ep_id)) => {
+            // 使用番剧专用API
+            debug!("API播放使用番剧专用API: ep_id={}", ep_id);
+            match video
+                .get_bangumi_page_analyzer_with_fallback_in_range(&page_info, ep_id, max_qn, min_qn)
+                .await
+            {
+                Ok(analyzer) => analyzer,
+                Err(e) => {
+                    let message = build_error_message(&e);
+                    if is_charge_locked_error(&e) {
+                        info!(
+                            "充电视频未充电，无法获取在线播放信息: page_id={}, bvid={}",
+                            video_info.page_id, video_info.bvid
+                        );
+                    } else {
+                        warn!("获取番剧视频分析器失败: {:#}", e);
+                    }
+                    return Ok(fail(message));
                 }
-                return Ok(fail(message));
             }
         }
-    } else if video_info.source_type == Some(2) && video_info.ep_id.is_some() {
-        // 使用课程（pugv）专用API
-        let ep_id = video_info.ep_id.as_ref().unwrap();
-        debug!("API播放使用课程专用API: ep_id={}", ep_id);
-        match video
-            .get_pugv_page_analyzer_with_fallback_in_range(&page_info, ep_id, max_qn, min_qn)
-            .await
-        {
-            Ok(analyzer) => analyzer,
-            Err(e) => {
-                let message = build_error_message(&e);
-                warn!("获取课程视频分析器失败: {:#}", e);
-                return Ok(fail(message));
+        (Some(2), Some(ep_id)) => {
+            // 使用课程（pugv）专用API
+            debug!("API播放使用课程专用API: ep_id={}", ep_id);
+            match video
+                .get_pugv_page_analyzer_with_fallback_in_range(&page_info, ep_id, max_qn, min_qn)
+                .await
+            {
+                Ok(analyzer) => analyzer,
+                Err(e) => {
+                    let message = build_error_message(&e);
+                    warn!("获取课程视频分析器失败: {:#}", e);
+                    return Ok(fail(message));
+                }
             }
         }
-    } else {
-        // 使用普通视频API
-        match video
-            .get_page_analyzer_with_fallback_in_range(&page_info, max_qn, min_qn)
-            .await
-        {
-            Ok(analyzer) => analyzer,
-            Err(e) => {
-                let message = build_error_message(&e);
-                if is_charge_locked_error(&e) {
-                    info!(
-                        "充电视频未充电，无法获取在线播放信息: page_id={}, bvid={}",
-                        video_info.page_id, video_info.bvid
-                    );
-                } else {
-                    warn!("获取视频分析器失败: {:#}", e);
+        _ => {
+            // 使用普通视频API
+            match video
+                .get_page_analyzer_with_fallback_in_range(&page_info, max_qn, min_qn)
+                .await
+            {
+                Ok(analyzer) => analyzer,
+                Err(e) => {
+                    let message = build_error_message(&e);
+                    if is_charge_locked_error(&e) {
+                        info!(
+                            "充电视频未充电，无法获取在线播放信息: page_id={}, bvid={}",
+                            video_info.page_id, video_info.bvid
+                        );
+                    } else {
+                        warn!("获取视频分析器失败: {:#}", e);
+                    }
+                    return Ok(fail(message));
                 }
-                return Ok(fail(message));
             }
         }
     };
@@ -23216,16 +23232,16 @@ pub async fn ai_rename_history(
     };
 
     // 执行批量重命名
-    let result = batch_rename_history_files(
-        db.as_ref(),
-        &source_key,
+    let result = batch_rename_history_files(crate::utils::ai_rename::BatchRenameHistoryInput {
+        connection: db.as_ref(),
+        source_key: &source_key,
         videos,
-        &ai_config,
-        &video_prompt,
-        &audio_prompt,
+        config: &ai_config,
+        video_prompt: &video_prompt,
+        audio_prompt: &audio_prompt,
         flat_folder,
         structure_hint,
-    )
+    })
     .await;
 
     match result {

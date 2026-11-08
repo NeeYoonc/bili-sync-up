@@ -7,13 +7,6 @@ use tokio::sync::Mutex;
 
 use crate::utils::time_format::now_standard_string;
 
-/// 首页「最新入库」展示用的内存事件（环形缓冲）。
-///
-/// 说明：
-/// - 事件只在进程生命周期内保留（不做 DB 迁移，避免破坏性变更）。
-/// - 下载速度为"媒体流下载平均速度"（视频/音频流累计）。
-/// - 当视频无需下载（已存在）或没有可用时长时，速度为 None。
-
 /// 入库状态
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +18,13 @@ pub enum IngestStatus {
     /// 视频已被删除
     Deleted,
 }
+
+/// 首页「最新入库」展示用的内存事件（环形缓冲）。
+///
+/// 说明：
+/// - 事件只在进程生命周期内保留（不做 DB 迁移，避免破坏性变更）。
+/// - 下载速度为"媒体流下载平均速度"（视频/音频流累计）。
+/// - 当视频无需下载（已存在）或没有可用时长时，速度为 None。
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestEvent {

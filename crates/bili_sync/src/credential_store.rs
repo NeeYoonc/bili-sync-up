@@ -175,7 +175,7 @@ fn shadow_dir() -> PathBuf {
 
 /// 某个凭证对应的影子文件路径。
 pub fn shadow_path(key: &str) -> PathBuf {
-    let name = key.replace('.', "_").replace('/', "_");
+    let name = key.replace(['.', '/'], "_");
     shadow_dir().join(format!("{name}.txt"))
 }
 
@@ -204,6 +204,19 @@ pub async fn migrate_file_to_db(key: &str, path: &Path, is_valid: impl Fn(&str) 
     let _ = tokio::fs::remove_file(path).await;
     info!(key, path = %path.display(), "已将旧版外部凭证文件迁移到数据库并删除");
     Ok(true)
+}
+
+/// 启动时把旧版单独文件凭证迁移到数据库（YouTube/抖音/TikTok）。
+pub async fn migrate_legacy_credentials_on_startup() {
+    if let Err(error) = crate::youtube::migrate_legacy_youtube_credentials().await {
+        warn!(error = %error, "迁移旧版 YouTube 凭证文件到数据库失败");
+    }
+    if let Err(error) = crate::douyin::migrate_legacy_douyin_credentials().await {
+        warn!(error = %error, "迁移旧版抖音凭证文件到数据库失败");
+    }
+    if let Err(error) = crate::tiktok::migrate_legacy_tiktok_credentials().await {
+        warn!(error = %error, "迁移旧版 TikTok 凭证文件到数据库失败");
+    }
 }
 
 #[cfg(test)]
@@ -237,18 +250,5 @@ mod tests {
         assert!(path.to_string_lossy().contains("bili-sync-external"));
         assert_eq!(shadow_path("youtube.cookies"), shadow_path("youtube.cookies"));
         assert_ne!(shadow_path("youtube.cookies"), shadow_path("tiktok.cookies"));
-    }
-}
-
-/// 启动时把旧版单独文件凭证迁移到数据库（YouTube/抖音/TikTok）。
-pub async fn migrate_legacy_credentials_on_startup() {
-    if let Err(error) = crate::youtube::migrate_legacy_youtube_credentials().await {
-        warn!(error = %error, "迁移旧版 YouTube 凭证文件到数据库失败");
-    }
-    if let Err(error) = crate::douyin::migrate_legacy_douyin_credentials().await {
-        warn!(error = %error, "迁移旧版抖音凭证文件到数据库失败");
-    }
-    if let Err(error) = crate::tiktok::migrate_legacy_tiktok_credentials().await {
-        warn!(error = %error, "迁移旧版 TikTok 凭证文件到数据库失败");
     }
 }

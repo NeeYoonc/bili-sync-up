@@ -849,7 +849,7 @@ pub(crate) async fn probe_tiktok_session() -> TikTokSessionState {
         return TikTokSessionState::Unknown;
     };
     match tiktok_impersonated_get("https://www.tiktok.com/passport/web/account/info/?aid=1988", &cookie).await {
-        Ok((status, body, _)) if status == 200 => {
+        Ok((200, body, _)) => {
             if body.contains("session_expired") || body.contains("\"error_code\":13") {
                 TikTokSessionState::Expired
             } else if body.contains("\"user_id\"") || body.contains("\"username\"") {
@@ -1135,6 +1135,7 @@ pub async fn update_tiktok_secuid(
 /// 依次尝试两个官方接口（都不需要签名参数）：
 ///  1. `node-webapp/api/common-app-context?lang=zh-Hans` -> `user.secUid`
 ///  2. `passport/web/account/info/?aid=1459&app_language=zh&app_name=tiktok_web` -> `data.sec_user_id`
+///
 /// 官方接口失败（常见于服务端出口被 TikTok 风控）时回退到手动设置的文件
 /// `tiktok-secuid.txt`，并返回是否使用了手动值。结果按账号 cookie 做进程内缓存。
 static TIKTOK_LOGIN_SEC_UID: OnceLock<tokio::sync::Mutex<Option<String>>> = OnceLock::new();
@@ -1351,7 +1352,7 @@ pub(crate) fn parse_tiktok_item(item: &serde_json::Value) -> Option<TikTokPost> 
             .map(|time| time.with_timezone(&Local).format("%Y-%m-%d").to_string())
             .unwrap_or_default()
     });
-    let is_image_post = item.as_object().is_some_and(|object| tiktok_item_is_image_post(object));
+    let is_image_post = item.as_object().is_some_and(tiktok_item_is_image_post);
     Some(TikTokPost {
         id: id.clone(),
         url: format!(
@@ -2086,8 +2087,7 @@ async fn sign_tiktok_url_with_sdk(url: &str, sdk: Option<&str>) -> Result<String
     let signed = stdout
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .last()
+        .rfind(|line| !line.is_empty())
         .unwrap_or("")
         .to_string();
     if !signed.starts_with("https://") {
@@ -2339,7 +2339,7 @@ async fn tiktok_login_account_unique_id() -> Option<String> {
     )
     .await
     {
-        Ok((status, body, _)) if status == 200 => {
+        Ok((200, body, _)) => {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                 let unique_id = json
                     .pointer("/user/uniqueId")
@@ -3746,7 +3746,7 @@ async fn extract_tiktok_media_detail_inner(url: &str, attempts: usize) -> Result
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    (!urls.is_empty()).then(|| (bitrate, codec, urls))
+                    (!urls.is_empty()).then_some((bitrate, codec, urls))
                 })
                 .collect::<Vec<_>>();
             ranked.sort_by_key(|(bitrate, _, _)| *bitrate);

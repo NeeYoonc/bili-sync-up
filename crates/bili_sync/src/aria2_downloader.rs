@@ -21,6 +21,19 @@ const ARIA2_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 static ARIA2_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+/// aria2 RPC 端点（端口 + token），用于把「往哪个实例提交任务」收成一个参数。
+struct Aria2Rpc<'a> {
+    port: u16,
+    secret: &'a str,
+}
+
+/// 下载请求附带的 HTTP 头线索，打包成一个参数，避免参数列表过长。
+struct RequestHints<'a> {
+    referer: Option<&'a str>,
+    cookie: Option<&'a str>,
+    proxy: Option<&'a str>,
+}
+
 #[derive(Clone, Copy)]
 struct Aria2Package {
     target_key: &'static str,
@@ -1126,7 +1139,16 @@ impl Aria2Downloader {
 
         // 构建aria2 RPC请求
         let gid = self
-            .add_download_task_to_instance(urls, dir, file_name, rpc_port, &rpc_secret, referer, cookie, proxy)
+            .add_download_task_to_instance(
+                urls,
+                dir,
+                file_name,
+                &Aria2Rpc {
+                    port: rpc_port,
+                    secret: &rpc_secret,
+                },
+                &RequestHints { referer, cookie, proxy },
+            )
             .await?;
 
         // 等待下载完成
@@ -1157,12 +1179,14 @@ impl Aria2Downloader {
         urls: &[&str],
         dir: &str,
         file_name: &str,
-        rpc_port: u16,
-        rpc_secret: &str,
-        referer: Option<&str>,
-        cookie: Option<&str>,
-        proxy: Option<&str>,
+        rpc: &Aria2Rpc<'_>,
+        hints: &RequestHints<'_>,
     ) -> Result<String> {
+        let rpc_port = rpc.port;
+        let rpc_secret = rpc.secret;
+        let referer = hints.referer;
+        let cookie = hints.cookie;
+        let proxy = hints.proxy;
         let url = format!("http://127.0.0.1:{}/jsonrpc", rpc_port);
 
         // 智能计算当前实例的线程数

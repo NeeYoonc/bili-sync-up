@@ -85,10 +85,9 @@ impl QRLoginService {
                 tracing::warn!("B站主页访问失败，继续尝试生成二维码 - 错误: {}", e);
                 e
             })
-            .map(|resp| {
+            .inspect(|resp| {
                 tracing::debug!("B站主页访问成功 - 状态码: {}", resp.status());
                 tracing::debug!("B站主页响应头: {:?}", resp.headers());
-                resp
             });
 
         // 调用B站API生成二维码
@@ -146,7 +145,7 @@ impl QRLoginService {
         {
             let sessions = self.sessions.read().await;
             tracing::debug!("当前会话数量: {}", sessions.len());
-            for (id, _) in sessions.iter() {
+            for id in sessions.keys() {
                 tracing::debug!("存储的会话ID: {}", id);
             }
         }
@@ -162,7 +161,7 @@ impl QRLoginService {
         {
             let sessions = self.sessions.read().await;
             tracing::debug!("轮询时会话数量: {}", sessions.len());
-            for (id, _) in sessions.iter() {
+            for id in sessions.keys() {
                 tracing::debug!("存储的会话ID: {}", id);
             }
         }

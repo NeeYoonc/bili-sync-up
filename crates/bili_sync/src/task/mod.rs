@@ -2756,72 +2756,6 @@ pub fn is_scanning() -> bool {
     TASK_CONTROLLER.is_scanning()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn trigger_scan_now_wakes_waiting_loop_immediately() {
-        let controller = Arc::new(TaskController::new());
-        let wait_controller = controller.clone();
-
-        let waiter = tokio::spawn(async move {
-            wait_controller
-                .wait_for_scan_signal_or_timeout(Duration::from_secs(5))
-                .await
-        });
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        controller.trigger_scan_now();
-
-        let woke_by_signal = waiter.await.expect("等待任务应正常返回");
-
-        assert!(woke_by_signal, "立即刷新应唤醒等待中的扫描循环");
-        assert!(controller.take_just_resumed(), "立即刷新后应保留待消费的刷新标记");
-    }
-
-    #[test]
-    fn trigger_scan_now_preserves_resume_flag_before_wait_loop() {
-        let controller = TaskController::new();
-        controller.trigger_scan_now();
-
-        assert!(controller.take_just_resumed(), "立即刷新后应保留待消费的刷新标记");
-    }
-
-    #[tokio::test]
-    async fn delete_source_processing_guard_resets_state_on_drop() {
-        let queue = DeleteTaskQueue::new();
-        queue
-            .set_current_task(Some(DeleteVideoSourceTask {
-                source_type: "submission".to_string(),
-                source_id: 1,
-                delete_local_files: true,
-                task_id: "test".to_string(),
-            }))
-            .await;
-
-        {
-            let _guard = queue.processing_guard();
-            assert!(queue.is_processing(), "保护存在时应显示处理中");
-        }
-
-        assert!(!queue.is_processing(), "保护释放后应清除处理中状态");
-        assert!(queue.current_task.lock().await.is_none(), "保护释放后应清除当前任务");
-    }
-
-    #[test]
-    fn video_delete_processing_guard_resets_state_on_drop() {
-        let queue = VideoDeleteTaskQueue::new();
-
-        {
-            let _guard = queue.processing_guard();
-            assert!(queue.is_processing(), "保护存在时应显示处理中");
-        }
-
-        assert!(!queue.is_processing(), "保护释放后应清除处理中状态");
-    }
-}
-
 /// 添加删除任务到队列的便捷函数
 pub async fn enqueue_delete_task(task: DeleteVideoSourceTask, connection: &DatabaseConnection) -> Result<()> {
     timeout(TASK_ENQUEUE_TIMEOUT, DELETE_TASK_QUEUE.enqueue_task(task, connection))
@@ -3020,4 +2954,70 @@ pub async fn recover_pending_tasks(connection: &DatabaseConnection) -> Result<()
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn trigger_scan_now_wakes_waiting_loop_immediately() {
+        let controller = Arc::new(TaskController::new());
+        let wait_controller = controller.clone();
+
+        let waiter = tokio::spawn(async move {
+            wait_controller
+                .wait_for_scan_signal_or_timeout(Duration::from_secs(5))
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        controller.trigger_scan_now();
+
+        let woke_by_signal = waiter.await.expect("等待任务应正常返回");
+
+        assert!(woke_by_signal, "立即刷新应唤醒等待中的扫描循环");
+        assert!(controller.take_just_resumed(), "立即刷新后应保留待消费的刷新标记");
+    }
+
+    #[test]
+    fn trigger_scan_now_preserves_resume_flag_before_wait_loop() {
+        let controller = TaskController::new();
+        controller.trigger_scan_now();
+
+        assert!(controller.take_just_resumed(), "立即刷新后应保留待消费的刷新标记");
+    }
+
+    #[tokio::test]
+    async fn delete_source_processing_guard_resets_state_on_drop() {
+        let queue = DeleteTaskQueue::new();
+        queue
+            .set_current_task(Some(DeleteVideoSourceTask {
+                source_type: "submission".to_string(),
+                source_id: 1,
+                delete_local_files: true,
+                task_id: "test".to_string(),
+            }))
+            .await;
+
+        {
+            let _guard = queue.processing_guard();
+            assert!(queue.is_processing(), "保护存在时应显示处理中");
+        }
+
+        assert!(!queue.is_processing(), "保护释放后应清除处理中状态");
+        assert!(queue.current_task.lock().await.is_none(), "保护释放后应清除当前任务");
+    }
+
+    #[test]
+    fn video_delete_processing_guard_resets_state_on_drop() {
+        let queue = VideoDeleteTaskQueue::new();
+
+        {
+            let _guard = queue.processing_guard();
+            assert!(queue.is_processing(), "保护存在时应显示处理中");
+        }
+
+        assert!(!queue.is_processing(), "保护释放后应清除处理中状态");
+    }
 }

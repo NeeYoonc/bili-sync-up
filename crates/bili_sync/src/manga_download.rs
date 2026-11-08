@@ -4,7 +4,7 @@
 //! 1. 调 sidecar 拿到一话全部页面的带 token 直链（token 短时效，必须立刻下载）；
 //! 2. 逐页落盘到隐藏暂存目录 `系列目录/.pages/<话名>/`，复用 `page.download_status`
 //!    实现断点续传；其中「加密原图」（`hit_encrpyt = true`，直链走 `mangaup.hdslb.com`
-//!    + `cpx`）拿到的不是图片而是逐次改写的 DRM 载荷，改由 sidecar 用站点 wasm 解成
+//!    `cpx`）拿到的不是图片而是逐次改写的 DRM 载荷，改由 sidecar 用站点 wasm 解成
 //!    明文 JPEG 再落盘（见 `download_encrypted_page`）；
 //! 3. 全部页面就绪后写成 `ComicInfo.xml` 并打包成 store 模式的 CBZ；
 //! 4. 更新 `page.path` / `page.image` / `video.path` 与状态位，并清理暂存目录。

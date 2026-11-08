@@ -95,6 +95,7 @@ async fn table_has_column(manager: &SchemaManager<'_>, table_name: &str, column_
 }
 
 #[derive(Iden, Clone)]
+#[allow(clippy::enum_variant_names, reason = "Iden 变体名即数据库列名，不能改名")]
 enum Video {
     Table,
     IsChargeVideo,

@@ -685,10 +685,8 @@ fn youtube_playlist_url_from_item(item: &serde_json::Value) -> Option<String> {
         .or_else(|| item.get("url"))
         .and_then(|value| value.as_str());
     if let Some(value) = explicit {
-        if value.starts_with("http") {
-            if value.contains("playlist?list=") || value.contains("/playlist/") {
-                return Some(value.to_string());
-            }
+        if value.starts_with("http") && (value.contains("playlist?list=") || value.contains("/playlist/")) {
+            return Some(value.to_string());
         }
     }
     let id = item
@@ -2158,7 +2156,6 @@ fn youtube_upper_paths(uploader: &str) -> (PathBuf, PathBuf) {
 /// 视频级：[视频封面, 视频信息(NFO), UP头像, UP主信息, 分P下载]；
 /// 分页级：[视频封面, 视频内容, 单集NFO, 弹幕/直播, 字幕]。
 /// 数值 0=未开始，1..=4=失败次数，7(STATUS_OK)=已完成。
-
 fn youtube_video_status(video: &youtube_video::Model) -> VideoStatus {
     VideoStatus::from(video.video_task_status)
 }
@@ -2582,6 +2579,7 @@ async fn prune_empty_external_dirs(source: &youtube_source::Model, output_path: 
 ///
 /// - force=true：重置所有非 0 状态（含已完成）；
 /// - force=false：只重置失败状态；文本 failed/付费不可播的旧任务也视为需要重置。
+///
 /// 返回是否发生了重置。
 async fn reset_youtube_video_task_bits(
     db: &DatabaseConnection,
@@ -3571,11 +3569,11 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
     notify_video_sources_changed();
     if added > 0 {
         info!(
-            platform = source_platform_label(&source),
+            platform = source_platform_label(source),
             source_id = source.id,
             added,
             "{}视频源「{}」发现 {} 个新视频",
-            source_platform_label(&source),
+            source_platform_label(source),
             source.name,
             added
         );
@@ -4026,7 +4024,7 @@ async fn download_pending(
             .all(db)
             .await?
             .into_iter()
-            .filter(|source| crate::tiktok::is_tiktok_source(source))
+            .filter(crate::tiktok::is_tiktok_source)
             .map(|source| source.id)
             .collect::<std::collections::HashSet<_>>(),
     );
@@ -4800,7 +4798,7 @@ pub async fn ai_rename_external_history(
     let source_key = format!("{}_{}", source_platform(source), source.id);
     // 抖音短剧/放映厅/合集按番剧结构命名（S01E01 + Season 01），不允许 AI
     // 重命名，避免破坏剧集组织与媒体库识别。
-    if is_episodic_douyin_source(&source) {
+    if is_episodic_douyin_source(source) {
         let skipped = youtube_video::Entity::find()
             .filter(youtube_video::Column::SourceId.eq(source.id))
             .filter(youtube_video::Column::DownloadStatus.eq("completed"))
@@ -5141,7 +5139,7 @@ async fn download_youtube_media(
     } else if source.audio_only {
         let selected = selected.as_ref().context("图文作品不应进入音频流选择")?;
         if let Some(audio) = selected.audio.as_ref() {
-            let urls = format_urls(&audio, platform)?;
+            let urls = format_urls(audio, platform)?;
             let temporary = output_path.with_extension("download.m4a");
             if let Err(error) = fetch_platform_asset(downloader, source, &urls, &temporary)
                 .await
@@ -5152,7 +5150,7 @@ async fn download_youtube_media(
             }
             if audio.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&temporary).await {
                 let _ = remove_file_if_exists(&temporary).await;
-                return Ok(paid_placeholder_result(output_path, &metadata, title, uploader, platform).await?);
+                return paid_placeholder_result(output_path, &metadata, title, uploader, platform).await;
             }
             if let Some(key) = audio.decryption_key.as_deref() {
                 let decrypted = output_path.with_extension("decrypted.m4a");
@@ -5173,7 +5171,7 @@ async fn download_youtube_media(
                 .mixed
                 .as_ref()
                 .ok_or_else(|| anyhow!("{platform}未返回可用音频流"))?;
-            let urls = format_urls(&mixed, platform)?;
+            let urls = format_urls(mixed, platform)?;
             let source_temporary = output_path.with_extension("audio-source.mp4");
             let audio_temporary = output_path.with_extension("download.m4a");
             if let Err(error) = fetch_platform_asset(downloader, source, &urls, &source_temporary)
@@ -5185,7 +5183,7 @@ async fn download_youtube_media(
             }
             if mixed.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&source_temporary).await {
                 let _ = remove_file_if_exists(&source_temporary).await;
-                return Ok(paid_placeholder_result(output_path, &metadata, title, uploader, platform).await?);
+                return paid_placeholder_result(output_path, &metadata, title, uploader, platform).await;
             }
             let decrypted_source = output_path.with_extension("audio-source-decrypted.mp4");
             let extract_source = if let Some(key) = mixed.decryption_key.as_deref() {
@@ -5213,8 +5211,8 @@ async fn download_youtube_media(
         selected.as_ref().and_then(|streams| streams.video.as_ref()),
         selected.as_ref().and_then(|streams| streams.audio.as_ref()),
     ) {
-        let video_urls = format_urls(&video_stream, platform)?;
-        let audio_urls = format_urls(&audio_stream, platform)?;
+        let video_urls = format_urls(video_stream, platform)?;
+        let audio_urls = format_urls(audio_stream, platform)?;
         let video_temporary =
             output_path.with_extension(format!("video.{}", video_stream.ext.as_deref().unwrap_or("mp4")));
         let audio_temporary =
@@ -5300,7 +5298,7 @@ async fn download_youtube_media(
             .mixed
             .as_ref()
             .ok_or_else(|| anyhow!("{platform}未返回可用的音视频流"))?;
-        let urls = format_urls(&mixed, platform)?;
+        let urls = format_urls(mixed, platform)?;
         let temporary = output_path.with_extension(format!("download.{}", mixed.ext.as_deref().unwrap_or("mp4")));
         if let Err(error) = fetch_platform_asset(downloader, source, &urls, &temporary)
             .await
@@ -5311,7 +5309,7 @@ async fn download_youtube_media(
         }
         if mixed.decryption_key.is_none() && crate::douyin::is_cenc_encrypted_media(&temporary).await {
             let _ = remove_file_if_exists(&temporary).await;
-            return Ok(paid_placeholder_result(output_path, &metadata, title, uploader, platform).await?);
+            return paid_placeholder_result(output_path, &metadata, title, uploader, platform).await;
         }
         if let Some(key) = mixed.decryption_key.as_deref() {
             let decrypted = output_path.with_extension("decrypted.mp4");
@@ -5335,16 +5333,16 @@ async fn download_youtube_media(
     let sidecars = if source.audio_only && source.audio_only_m4a_only && !metadata.is_slideshow() {
         YoutubeSidecarOutcome::default()
     } else {
-        ensure_youtube_sidecars(
+        ensure_youtube_sidecars(YoutubeSidecarInput {
             downloader,
-            &metadata,
-            &output_path,
-            &video.url,
-            &title,
-            &uploader,
+            metadata: &metadata,
+            output_path: &output_path,
+            video_url: &video.url,
+            title: &title,
+            uploader: &uploader,
             source,
-            video.episode_number,
-        )
+            episode_number: video.episode_number,
+        })
         .await
     };
 
@@ -6247,31 +6245,35 @@ fn path_leaf_matches(path: &Path, expected: &str) -> bool {
 }
 
 /// 附属文件子任务的结果：告警文案 + 本次解析到的头像地址。
+#[derive(Default)]
 struct YoutubeSidecarOutcome {
     warning: Option<String>,
     /// 本轮解析到的 UP 头像地址，透传给图集分页 NFO，避免重复请求平台接口。
     avatar_url: Option<String>,
 }
 
-impl Default for YoutubeSidecarOutcome {
-    fn default() -> Self {
-        Self {
-            warning: None,
-            avatar_url: None,
-        }
-    }
+struct YoutubeSidecarInput<'a> {
+    downloader: &'a UnifiedDownloader,
+    metadata: &'a ExternalMediaMetadata,
+    output_path: &'a Path,
+    video_url: &'a str,
+    title: &'a str,
+    uploader: &'a str,
+    source: &'a youtube_source::Model,
+    episode_number: Option<i32>,
 }
 
-async fn ensure_youtube_sidecars(
-    downloader: &UnifiedDownloader,
-    metadata: &ExternalMediaMetadata,
-    output_path: &Path,
-    video_url: &str,
-    title: &str,
-    uploader: &str,
-    source: &youtube_source::Model,
-    episode_number: Option<i32>,
-) -> YoutubeSidecarOutcome {
+async fn ensure_youtube_sidecars(p: YoutubeSidecarInput<'_>) -> YoutubeSidecarOutcome {
+    let YoutubeSidecarInput {
+        downloader,
+        metadata,
+        output_path,
+        video_url,
+        title,
+        uploader,
+        source,
+        episode_number,
+    } = p;
     let mut warnings = Vec::new();
     let platform = source_platform_label(source);
     let profile_url = metadata.channel_url.as_deref().or(metadata.uploader_url.as_deref());
@@ -7135,6 +7137,20 @@ fn youtube_co_creators(metadata: &ExternalMediaMetadata, uploader: &str) -> Vec<
     extras
 }
 
+struct YoutubeMovieNfoInput<'a> {
+    title: &'a str,
+    description: &'a str,
+    platform: &'a str,
+    studio: &'a str,
+    id: &'a str,
+    aired: chrono::NaiveDateTime,
+    uploader: &'a str,
+    co_creators: &'a [String],
+    thumbnail: &'a str,
+    video_url: &'a str,
+    avatar_url: Option<&'a str>,
+}
+
 /// 构建单视频（movie）NFO XML。
 ///
 /// - `studio`：平台名（如 YouTube/抖音），写入 `<studio>`；
@@ -7142,21 +7158,23 @@ fn youtube_co_creators(metadata: &ExternalMediaMetadata, uploader: &str) -> Vec<
 /// - `uploader`：主频道，写入 `<director>` 并作为第一个 `<actor>`；
 /// - `co_creators`：联合投稿的合作频道名，逐个补写 `<actor>`；
 /// - `avatar_url`：主频道头像地址，写进 `<actor><thumb>`，媒体库里才有作者头像。
+///
 /// 注意 `<aired>` 与 `<studio>` 两个标签的参数顺序不能写反，
 /// 否则会出现"工作室=日期、首播=平台名"的错位。
-fn build_youtube_movie_nfo_xml(
-    title: &str,
-    description: &str,
-    platform: &str,
-    studio: &str,
-    id: &str,
-    aired: chrono::NaiveDateTime,
-    uploader: &str,
-    co_creators: &[String],
-    thumbnail: &str,
-    video_url: &str,
-    avatar_url: Option<&str>,
-) -> String {
+fn build_youtube_movie_nfo_xml(p: YoutubeMovieNfoInput<'_>) -> String {
+    let YoutubeMovieNfoInput {
+        title,
+        description,
+        platform,
+        studio,
+        id,
+        aired,
+        uploader,
+        co_creators,
+        thumbnail,
+        video_url,
+        avatar_url,
+    } = p;
     let escape = |value: &str| quick_xml::escape::escape(value).into_owned();
     let avatar = avatar_url.filter(|url| !url.trim().is_empty());
     let actor_role = if platform == "douyin" { "UP主" } else { "频道" };
@@ -7250,19 +7268,19 @@ async fn generate_youtube_nfo(
     let platform = source_platform(source);
     let studio = source_platform_label(source);
     let co_creators = youtube_co_creators(metadata, uploader);
-    let xml = build_youtube_movie_nfo_xml(
+    let xml = build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
         title,
         description,
         platform,
         studio,
-        &metadata.id,
+        id: &metadata.id,
         aired,
         uploader,
-        &co_creators,
+        co_creators: &co_creators,
         thumbnail,
         video_url,
         avatar_url,
-    );
+    });
     let temporary = nfo_path.with_extension("nfo.download");
     tokio::fs::write(&temporary, xml.as_bytes()).await.with_context(|| {
         format!(
@@ -7832,10 +7850,11 @@ async fn youtube_subtitle_exists(output_path: &Path) -> Result<bool> {
             continue;
         };
         let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
-        if name.starts_with(&format!("{stem}.")) && matches!(extension, "vtt" | "srt" | "ass") {
-            if tokio::fs::metadata(path).await.is_ok_and(|metadata| metadata.len() > 0) {
-                return Ok(true);
-            }
+        if name.starts_with(&format!("{stem}."))
+            && matches!(extension, "vtt" | "srt" | "ass")
+            && tokio::fs::metadata(path).await.is_ok_and(|metadata| metadata.len() > 0)
+        {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -8106,8 +8125,7 @@ fn external_source_identity(source_type: &str, url: &str) -> String {
     let query_param = |key: &str| {
         lower
             .split_once('?')
-            .map(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix(&format!("{key}="))))
-            .flatten()
+            .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix(&format!("{key}="))))
             .unwrap_or("")
     };
     match source_type {
@@ -9335,9 +9353,21 @@ fn trim_output(text: &str) -> String {
     }
 }
 
+/// 迁移旧版 YouTube 凭证文件到数据库（升级兼容；成功后删除旧文件）。
+pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
+    let _ = crate::credential_store::migrate_file_to_db(
+        crate::credential_store::keys::YOUTUBE_COOKIES,
+        &CONFIG_DIR.join("youtube-cookies.txt"),
+        is_netscape_youtube_cookie_file,
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
+    #[allow(invalid_from_utf8, reason = "测试故意用 GBK 字节序列验证非 UTF-8 解码路径")]
     fn decodes_gbk_command_error_text() {
         // GBK 编码的“远程主机强迫关闭了一个现有的连接”（Windows 10054 错误文本）
         let gbk: &[u8] = &[
@@ -10131,19 +10161,19 @@ mod tests {
             .expect("有效日期")
             .and_hms_opt(0, 0, 0)
             .expect("有效时间");
-        let xml = super::build_youtube_movie_nfo_xml(
-            "测试视频",
-            "简介",
-            "YouTube",
-            "YouTube",
-            "dQw4w9WgXcQ",
+        let xml = super::build_youtube_movie_nfo_xml(super::YoutubeMovieNfoInput {
+            title: "测试视频",
+            description: "简介",
+            platform: "YouTube",
+            studio: "YouTube",
+            id: "dQw4w9WgXcQ",
             aired,
-            "测试频道",
-            &[],
-            "https://example.com/thumb.jpg",
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            None,
-        );
+            uploader: "测试频道",
+            co_creators: &[],
+            thumbnail: "https://example.com/thumb.jpg",
+            video_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            avatar_url: None,
+        });
         assert!(xml.contains("<studio>YouTube</studio>"), "studio 应为平台名: {xml}");
         assert!(xml.contains("<aired>2026-09-01</aired>"), "aired 应为日期: {xml}");
         assert!(
@@ -10166,19 +10196,19 @@ mod tests {
             .expect("有效日期")
             .and_hms_opt(0, 0, 0)
             .expect("有效时间");
-        let xml = super::build_youtube_movie_nfo_xml(
-            "联合投稿测试",
-            "简介",
-            "YouTube",
-            "YouTube",
-            "vid123",
+        let xml = super::build_youtube_movie_nfo_xml(super::YoutubeMovieNfoInput {
+            title: "联合投稿测试",
+            description: "简介",
+            platform: "YouTube",
+            studio: "YouTube",
+            id: "vid123",
             aired,
-            "主频道",
-            &["合作频道A".to_string(), "合作频道B".to_string()],
-            "https://example.com/thumb.jpg",
-            "https://www.youtube.com/watch?v=vid123",
-            None,
-        );
+            uploader: "主频道",
+            co_creators: &["合作频道A".to_string(), "合作频道B".to_string()],
+            thumbnail: "https://example.com/thumb.jpg",
+            video_url: "https://www.youtube.com/watch?v=vid123",
+            avatar_url: None,
+        });
         assert_eq!(
             xml.matches("<actor>").count(),
             3,
@@ -10215,19 +10245,19 @@ mod tests {
             .expect("有效日期")
             .and_hms_opt(0, 0, 0)
             .expect("有效时间");
-        let xml = super::build_youtube_movie_nfo_xml(
-            "抖音作品",
-            "简介",
-            "douyin",
-            "抖音",
-            "7515762262805777727",
+        let xml = super::build_youtube_movie_nfo_xml(super::YoutubeMovieNfoInput {
+            title: "抖音作品",
+            description: "简介",
+            platform: "douyin",
+            studio: "抖音",
+            id: "7515762262805777727",
             aired,
-            "古德末泥(高智版)",
-            &[],
-            "https://example.com/cover.jpg",
-            "https://www.douyin.com/video/7515762262805777727",
-            Some("https://p3.douyinpic.com/avatar.jpeg"),
-        );
+            uploader: "古德末泥(高智版)",
+            co_creators: &[],
+            thumbnail: "https://example.com/cover.jpg",
+            video_url: "https://www.douyin.com/video/7515762262805777727",
+            avatar_url: Some("https://p3.douyinpic.com/avatar.jpeg"),
+        });
         assert!(
             xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role><thumb>https://p3.douyinpic.com/avatar.jpeg</thumb></actor>"),
             "主频道 actor 应带 <thumb> 头像: {xml}"
@@ -10247,19 +10277,19 @@ mod tests {
         );
 
         // 空白头像地址不写 <thumb>，避免生成空标签
-        let xml = super::build_youtube_movie_nfo_xml(
-            "抖音作品",
-            "简介",
-            "douyin",
-            "抖音",
-            "7515762262805777727",
+        let xml = super::build_youtube_movie_nfo_xml(super::YoutubeMovieNfoInput {
+            title: "抖音作品",
+            description: "简介",
+            platform: "douyin",
+            studio: "抖音",
+            id: "7515762262805777727",
             aired,
-            "古德末泥(高智版)",
-            &[],
-            "https://example.com/cover.jpg",
-            "https://www.douyin.com/video/7515762262805777727",
-            Some("   "),
-        );
+            uploader: "古德末泥(高智版)",
+            co_creators: &[],
+            thumbnail: "https://example.com/cover.jpg",
+            video_url: "https://www.douyin.com/video/7515762262805777727",
+            avatar_url: Some("   "),
+        });
         assert!(
             xml.contains("<actor><name>古德末泥(高智版)</name><role>UP主</role></actor>"),
             "{xml}"
@@ -10317,8 +10347,10 @@ mod tests {
     async fn youtube_artifact_status_reads_task_bits_not_files() {
         // 已下载完成的外源视频：即使媒体文件被移走，任务位仍是完成，
         // 卡片状态保持“全部完成”（与 B 站一致），不会重新显示“未下载”。
-        let mut video = super::youtube_video::Model::default();
-        video.download_status = "completed".to_string();
+        let mut video = super::youtube_video::Model {
+            download_status: "completed".to_string(),
+            ..Default::default()
+        };
         video.output_path = Some("Z:/__not_exists__/abc123.mp4".to_string());
         let ok = super::youtube_all_tasks_ok_bits();
         video.video_task_status = ok;
@@ -10329,7 +10361,6 @@ mod tests {
         assert_eq!(page_status, [7, 7, 7, 7, 7], "分页状态同样应保持全部完成");
 
         // 只重置“视频信息”(视频1/分页2) → 仅该任务回到未开始，媒体(视频4)仍完成。
-        let mut video = video;
         let mut vstatus = super::VideoStatus::from(video.video_task_status);
         let mut pstatus = super::PageStatus::from(video.page_task_status);
         vstatus.set(1, 0);
@@ -10659,8 +10690,10 @@ mod tests {
         use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
-        let mut source = youtube_source::Model::default();
-        source.id = 42;
+        let mut source = youtube_source::Model {
+            id: 42,
+            ..Default::default()
+        };
         source.source_type = "douyin_series".to_string();
         source.name = "测试短剧/带斜杠".to_string();
         source.path = "F:/Downloads/测试".to_string();
@@ -10705,14 +10738,18 @@ mod tests {
         use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
-        let mut source = youtube_source::Model::default();
-        source.id = 9;
+        let mut source = youtube_source::Model {
+            id: 9,
+            ..Default::default()
+        };
         source.source_type = "douyin_mix".to_string();
         source.name = "传奇剧场（剧情）".to_string();
         source.path = "F:/Downloads/测试".to_string();
 
-        let mut video = youtube_video::Model::default();
-        video.episode_number = Some(12);
+        let video = youtube_video::Model {
+            episode_number: Some(12),
+            ..Default::default()
+        };
 
         let metadata = ExternalMediaMetadata {
             id: "7604472777650785551".to_string(),
@@ -10758,8 +10795,10 @@ mod tests {
         use crate::external_media::ExternalMediaMetadata;
         use bili_sync_entity::{youtube_source, youtube_video};
 
-        let mut source = youtube_source::Model::default();
-        source.id = 9;
+        let mut source = youtube_source::Model {
+            id: 9,
+            ..Default::default()
+        };
         source.source_type = "douyin_mix".to_string();
         source.name = "外卖小哥修仙记".to_string();
         source.path = "J:/EMBY/DY收藏夹合集/外卖小哥修仙记".to_string();
@@ -10782,8 +10821,10 @@ mod tests {
         use crate::external_media::ExternalMediaMetadata;
         use bili_sync_entity::{youtube_source, youtube_video};
 
-        let mut collection_source = youtube_source::Model::default();
-        collection_source.id = 6;
+        let mut collection_source = youtube_source::Model {
+            id: 6,
+            ..Default::default()
+        };
         collection_source.source_type = "douyin_collection".to_string();
         collection_source.name = "收藏夹".to_string();
         collection_source.path = "F:/Downloads/收藏夹douyin".to_string();
@@ -10823,8 +10864,10 @@ mod tests {
         use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
-        let mut source = youtube_source::Model::default();
-        source.id = 7;
+        let mut source = youtube_source::Model {
+            id: 7,
+            ..Default::default()
+        };
         source.source_type = "douyin_user".to_string();
         source.name = "白铭(想接正片)".to_string();
         source.path = "F:/Downloads/关注douyin".to_string();
@@ -10869,8 +10912,10 @@ mod tests {
         use bili_sync_entity::{youtube_source, youtube_video};
         use std::collections::HashMap;
 
-        let mut source = youtube_source::Model::default();
-        source.id = 8;
+        let mut source = youtube_source::Model {
+            id: 8,
+            ..Default::default()
+        };
         source.source_type = "douyin_user".to_string();
         source.name = "作者".to_string();
         source.path = "F:/Downloads/关注douyin".to_string();
@@ -10924,8 +10969,10 @@ mod tests {
         let media = root.join("20260101000000-7573135187270192425.mp4");
         tokio::fs::write(&media, vec![0u8; 4096]).await.unwrap();
 
-        let mut video = super::youtube_video::Model::default();
-        video.output_path = Some(media.display().to_string());
+        let video = super::youtube_video::Model {
+            output_path: Some(media.display().to_string()),
+            ..Default::default()
+        };
         let source = super::youtube_source::Model::default();
 
         // 视频子任务 4 = 分P下载
@@ -10958,8 +11005,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let mut video = super::youtube_video::Model::default();
-        video.output_path = Some(output.display().to_string());
+        let mut video = super::youtube_video::Model {
+            output_path: Some(output.display().to_string()),
+            ..Default::default()
+        };
         video.episode_number = Some(1);
         let mut source = sample_external_source("douyin_mix");
         source.path = root.display().to_string();
@@ -11171,15 +11220,4 @@ mod tests {
             ]
         );
     }
-}
-
-/// 迁移旧版 YouTube 凭证文件到数据库（升级兼容；成功后删除旧文件）。
-pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
-    let _ = crate::credential_store::migrate_file_to_db(
-        crate::credential_store::keys::YOUTUBE_COOKIES,
-        &CONFIG_DIR.join("youtube-cookies.txt"),
-        is_netscape_youtube_cookie_file,
-    )
-    .await?;
-    Ok(())
 }

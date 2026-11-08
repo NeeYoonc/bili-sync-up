@@ -62,7 +62,7 @@ impl<'a> Dynamic<'a> {
                 if request_count > 0 && risk_config.enable_dynamic_api_delay {
                     let delay = Self::calculate_dynamic_api_delay(request_count, &risk_config);
                     if !delay.is_zero() {
-                        if request_count % 10 == 0 {
+                        if request_count.is_multiple_of(10) {
                             info!(
                                 "动态API请求节流：UP主={}，已请求={}次，当前延迟={}ms",
                                 self.upper_id,

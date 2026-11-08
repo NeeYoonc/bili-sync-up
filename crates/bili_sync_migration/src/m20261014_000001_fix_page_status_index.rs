@@ -11,7 +11,7 @@
 //!      no such column: "status" - should this be a string literal in single-quotes?
 //!      打断后台「备份数据库（VACUUM INTO）」与自动 VACUUM；
 //!      （注：app 自带的 SQLite 3.46 因 DQS 默认开启，VACUUM 能通过，但索引照样无效——
-//!       所以此 bug 必现，只是 VACUUM 报错会因 SQLite 版本/编译开关而时隐时现。）
+//!      所以此 bug 必现，只是 VACUUM 报错会因 SQLite 版本/编译开关而时隐时现。）
 //!   3) PRAGMA integrity_check / quick_check 都不报，所以能潜伏很久。
 //!
 //! 本迁移负责把老库上已经建坏的索引删掉并按真实列名重建，使新库/老库最终定义一致。

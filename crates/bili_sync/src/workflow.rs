@@ -352,17 +352,17 @@ struct LargeSourceDownloadPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LargeSourceDownloadTrigger {
-    SourceVideoCount,
-    SourcePageCount,
-    PendingPageCount,
+    SourceVideo,
+    SourcePage,
+    PendingPage,
 }
 
 impl LargeSourceDownloadTrigger {
     fn label(self) -> &'static str {
         match self {
-            Self::SourceVideoCount => "源内视频数超过阈值",
-            Self::SourcePageCount => "源内分P数超过阈值",
-            Self::PendingPageCount => "本轮待处理分P数超过阈值",
+            Self::SourceVideo => "源内视频数超过阈值",
+            Self::SourcePage => "源内分P数超过阈值",
+            Self::PendingPage => "本轮待处理分P数超过阈值",
         }
     }
 }
@@ -379,13 +379,13 @@ impl LargeSourceDownloadPolicy {
         let mut trigger_reasons = Vec::new();
         if config.enable_large_source_download_limit {
             if source_video_count > config.large_source_download_threshold {
-                trigger_reasons.push(LargeSourceDownloadTrigger::SourceVideoCount);
+                trigger_reasons.push(LargeSourceDownloadTrigger::SourceVideo);
             }
             if config.large_source_download_page_threshold > 0 {
                 if source_page_count > config.large_source_download_page_threshold {
-                    trigger_reasons.push(LargeSourceDownloadTrigger::SourcePageCount);
+                    trigger_reasons.push(LargeSourceDownloadTrigger::SourcePage);
                 } else if pending_page_count > config.large_source_download_page_threshold {
-                    trigger_reasons.push(LargeSourceDownloadTrigger::PendingPageCount);
+                    trigger_reasons.push(LargeSourceDownloadTrigger::PendingPage);
                 }
             }
         }
@@ -2273,7 +2273,7 @@ pub async fn fetch_video_details(
                                     use crate::utils::notification::send_error_notification;
                                     if let Err(notify_err) = send_error_notification(
                                         "API请求失败",
-                                        &format!("获取视频详细信息失败"),
+                                        "获取视频详细信息失败",
                                         Some(&format!("视频: {}\nBVID: {}\n错误: {}", video_name, bvid, error_msg)),
                                     )
                                     .await
@@ -3183,7 +3183,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
 
     for (video_model, pages) in &videos_with_pages {
         // 检查多P视频开关（使用视频源自己的配置）
-        let is_multi_page = video_model.single_page.unwrap_or(true) == false;
+        let is_multi_page = !video_model.single_page.unwrap_or(true);
         if is_multi_page && !video_source.ai_rename_enable_multi_page() {
             debug!(
                 "[{}] 跳过多P视频: {} (多P视频AI重命名已禁用)",
@@ -3361,7 +3361,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
             "[{}] 处理视频批次 {}/{}: {} 个文件",
             source_key,
             batch_idx + 1,
-            (video_files.len() + batch_size - 1) / batch_size,
+            video_files.len().div_ceil(batch_size),
             batch.len()
         );
 
@@ -3391,7 +3391,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
             "[{}] 处理音频批次 {}/{}: {} 个文件",
             source_key,
             batch_idx + 1,
-            (audio_files.len() + batch_size - 1) / batch_size,
+            audio_files.len().div_ceil(batch_size),
             batch.len()
         );
 
@@ -3427,7 +3427,7 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
                 "[{}] 处理文件夹批次 {}/{}: {} 个文件夹",
                 source_key,
                 batch_idx + 1,
-                (folder_renames.len() + batch_size - 1) / batch_size,
+                folder_renames.len().div_ceil(batch_size),
                 batch.len()
             );
             match ai_rename::ai_generate_folder_names_batch(&cfg.ai_rename, &source_key, batch, video_prompt_hint).await
@@ -3586,7 +3586,7 @@ async fn apply_ai_rename(
                 };
                 let mut target_dir = parent_dir.join(&folder_stem);
                 if target_dir.exists() && target_dir != old_dir {
-                    target_dir = parent_dir.join(format!("{}-{}", &folder_stem, file.bvid));
+                    target_dir = parent_dir.join(format!("{}-{}", folder_stem, file.bvid));
                 }
 
                 if target_dir != old_dir {
@@ -4190,8 +4190,7 @@ async fn download_video_pages(
     let is_collection = is_collection_source || is_submission_collection_video;
 
     // 为番剧获取API数据用于NFO生成
-    let season_info = if is_bangumi && video_model.season_id.is_some() {
-        let season_id = video_model.season_id.as_ref().unwrap();
+    let season_info = if let (true, Some(season_id)) = (is_bangumi, video_model.season_id.as_ref()) {
         match get_season_info_from_api(bili_client, season_id, token.clone()).await {
             Ok(info) => {
                 debug!("成功获取番剧 {} 的API信息用于NFO生成", info.title);
@@ -5001,13 +5000,13 @@ async fn download_video_pages(
         };
 
     // 先处理NFO生成（独立执行，避免tokio::join!类型问题）
-    let nfo_result = if is_bangumi && season_info.is_some() {
+    let nfo_result = if let (true, Some(season_info)) = (is_bangumi, season_info.as_ref()) {
         // 番剧且有API数据：使用API驱动的NFO生成
         // 注意：启用Season结构时，bangumi_folder_path已经指向系列根目录
         generate_bangumi_video_nfo(
             should_run_video_nfo && bangumi_folder_path.is_some() && should_download_bangumi_nfo,
             &video_model,
-            season_info.as_ref().unwrap(),
+            season_info,
             bangumi_folder_path.as_ref().unwrap().join("tvshow.nfo"),
         )
         .await
@@ -5290,20 +5289,20 @@ async fn download_video_pages(
             let season_uniqueid_override = season_lists_link_override.clone();
             let suppress_collection_season_label_in_title = season_folder.is_some();
 
-            generate_collection_video_nfo(
-                should_generate_collection_tvshow_nfo,
-                should_generate_collection_season_nfo,
-                suppress_collection_season_label_in_title,
-                &video_model,
-                collection_name.as_deref(),
-                season_collection_name.as_deref(),
-                collection_cover.as_deref(),
-                tvshow_intro.as_deref(),
-                collection_plot_link_override.as_deref(),
-                collection_uniqueid_override.as_deref(),
-                season_lists_link_override.as_deref(),
-                season_uniqueid_override.as_deref(),
-                if let Some(ref bangumi_path) = bangumi_folder_path {
+            generate_collection_video_nfo(CollectionNfoInput {
+                should_generate_tvshow_nfo: should_generate_collection_tvshow_nfo,
+                should_generate_season_nfo: should_generate_collection_season_nfo,
+                suppress_season_label_in_title: suppress_collection_season_label_in_title,
+                video_model: &video_model,
+                collection_name: collection_name.as_deref(),
+                season_collection_name: season_collection_name.as_deref(),
+                collection_cover: collection_cover.as_deref(),
+                upper_intro: tvshow_intro.as_deref(),
+                plot_link_override: collection_plot_link_override.as_deref(),
+                uniqueid_override: collection_uniqueid_override.as_deref(),
+                season_plot_link_override: season_lists_link_override.as_deref(),
+                season_uniqueid_override: season_uniqueid_override.as_deref(),
+                nfo_path: if let Some(ref bangumi_path) = bangumi_folder_path {
                     // 多P视频或合集使用Season结构时，tvshow.nfo放在视频根目录
                     if multi_page_like_use_season_structure || collection_use_root_season_structure {
                         bangumi_path.join("tvshow.nfo")
@@ -5324,16 +5323,16 @@ async fn download_video_pages(
                         base_path.join(format!("{}.nfo", video_base_name))
                     }
                 },
-                current_nfo_season_number,
-                Some(nfo_stats.total_seasons),
-                Some(nfo_stats.total_episodes),
-                Some(nfo_stats.season_total_episodes),
-                if season_folder.is_some() {
+                season_number: current_nfo_season_number,
+                total_seasons: Some(nfo_stats.total_seasons),
+                total_episodes: Some(nfo_stats.total_episodes),
+                season_total_episodes: Some(nfo_stats.season_total_episodes),
+                season_nfo_path: if season_folder.is_some() {
                     Some(base_path.join("season.nfo"))
                 } else {
                     None
                 },
-            )
+            })
             .await
         } else {
             // 普通视频或番剧：使用原有逻辑
@@ -5496,50 +5495,53 @@ async fn download_video_pages(
         };
 
     // 为有Season文件夹的番剧生成season.nfo（无论是否启用统一结构）
-    let season_nfo_result = if is_bangumi && season_info.is_some() && season_folder.is_some() {
-        let config = crate::config::reload_config();
+    let season_nfo_result =
+        if let (true, Some(season_info)) = (is_bangumi && season_folder.is_some(), season_info.as_ref()) {
+            let config = crate::config::reload_config();
 
-        // 确定使用的season_number
-        let season_number = if config.bangumi_use_season_structure {
-            // 启用统一结构：使用从番剧名称提取的季度编号
-            let series_title = season_info.as_ref().unwrap().title.as_str();
-            let (_, extracted_season_number) =
-                crate::utils::bangumi_name_extractor::BangumiNameExtractor::extract_series_name_and_season(
-                    series_title,
-                    None, // 不提供season_title，让提取器从完整标题中识别
-                );
-            extracted_season_number
+            // 确定使用的season_number
+            let season_number = if config.bangumi_use_season_structure {
+                // 启用统一结构：使用从番剧名称提取的季度编号
+                let series_title = season_info.title.as_str();
+                let (_, extracted_season_number) =
+                    crate::utils::bangumi_name_extractor::BangumiNameExtractor::extract_series_name_and_season(
+                        series_title,
+                        None, // 不提供season_title，让提取器从完整标题中识别
+                    );
+                extracted_season_number
+            } else {
+                // 未启用统一结构：使用video_model中的原始season_number
+                video_model.season_number.unwrap_or(1) as u32
+            };
+
+            let series_title = season_info.title.as_str();
+            info!("番剧「{}」使用季度编号: {}", series_title, season_number);
+
+            // season.nfo 属于视频级 NFO，跟随 VideoStatus[1] 重置。
+            let should_generate_season_nfo = should_run_video_nfo;
+
+            generate_bangumi_season_nfo(
+                should_generate_season_nfo,
+                &video_model,
+                season_info,
+                base_path.clone(),
+                season_number,
+            )
+            .await
         } else {
-            // 未启用统一结构：使用video_model中的原始season_number
-            video_model.season_number.unwrap_or(1) as u32
+            Ok(ExecutionStatus::Skipped)
         };
-
-        let series_title = season_info.as_ref().unwrap().title.as_str();
-        info!("番剧「{}」使用季度编号: {}", series_title, season_number);
-
-        // season.nfo 属于视频级 NFO，跟随 VideoStatus[1] 重置。
-        let should_generate_season_nfo = should_run_video_nfo;
-
-        generate_bangumi_season_nfo(
-            should_generate_season_nfo,
-            &video_model,
-            season_info.as_ref().unwrap(),
-            base_path.clone(),
-            season_number,
-        )
-        .await
-    } else {
-        Ok(ExecutionStatus::Skipped)
-    };
 
     // 为启用Season结构的番剧下载季度级图片
     // 只有第一个集（should_download_upper=true）才负责下载Season级别图片
-    let season_images_result = if is_bangumi && season_info.is_some() && should_download_upper && !disable_tvshow_assets
-    {
+    let season_images_result = if let (true, Some(season_info)) = (
+        is_bangumi && should_download_upper && !disable_tvshow_assets,
+        season_info.as_ref(),
+    ) {
         let config = crate::config::reload_config();
         if config.bangumi_use_season_structure {
             // 启用统一结构：使用从番剧名称提取的季度编号
-            let series_title = season_info.as_ref().unwrap().title.as_str();
+            let series_title = season_info.title.as_str();
             let (_, extracted_season_number) =
                 crate::utils::bangumi_name_extractor::BangumiNameExtractor::extract_series_name_and_season(
                     series_title,
@@ -5568,7 +5570,7 @@ async fn download_video_pages(
             );
 
             // 季度级图片：thumb使用横版封面，fanart使用竖版封面
-            let season_info_ref = season_info.as_ref().unwrap();
+            let season_info_ref = season_info;
             // thumb使用横版封面（优先级：横版封面 > 专门背景图 > 竖版封面 > 新EP封面截图）
             let season_thumb_url = season_info_ref
                 .horizontal_cover_169
@@ -5707,19 +5709,16 @@ async fn download_video_pages(
             },
             &video_model,
             downloader,
-            if is_bangumi && bangumi_folder_path.is_some() {
+            if let (true, Some(bangumi_folder)) = (is_bangumi, bangumi_folder_path.as_ref()) {
                 // 番剧封面放在番剧文件夹根目录
                 let config = crate::config::reload_config();
                 if config.bangumi_use_season_structure {
                     // 启用统一Season结构时，跳过带番剧名的图片下载
                     // 使用一个不存在的路径，这样下载会被跳过
-                    bangumi_folder_path.as_ref().unwrap().join("__skip_download__")
+                    bangumi_folder.join("__skip_download__")
                 } else {
                     // 未启用统一Season结构时，保持原有逻辑
-                    bangumi_folder_path
-                        .as_ref()
-                        .unwrap()
-                        .join(format!("{}-thumb.jpg", bangumi_base_name))
+                    bangumi_folder.join(format!("{}-thumb.jpg", bangumi_base_name))
                 }
             } else {
                 // 多P视频或合集使用Season结构时，封面放在视频根目录
@@ -5734,19 +5733,16 @@ async fn download_video_pages(
                     base_path.join(format!("{}-thumb.jpg", video_base_name))
                 }
             },
-            if is_bangumi && bangumi_folder_path.is_some() {
+            if let (true, Some(bangumi_folder)) = (is_bangumi, bangumi_folder_path.as_ref()) {
                 // 番剧fanart放在番剧文件夹根目录
                 let config = crate::config::reload_config();
                 if config.bangumi_use_season_structure {
                     // 启用统一Season结构时，跳过带番剧名的图片下载
                     // 使用一个不存在的路径，这样下载会被跳过
-                    bangumi_folder_path.as_ref().unwrap().join("__skip_download__")
+                    bangumi_folder.join("__skip_download__")
                 } else {
                     // 未启用统一Season结构时，保持原有逻辑
-                    bangumi_folder_path
-                        .as_ref()
-                        .unwrap()
-                        .join(format!("{}-fanart.jpg", bangumi_base_name))
+                    bangumi_folder.join(format!("{}-fanart.jpg", bangumi_base_name))
                 }
             } else {
                 // 多P视频或合集使用Season结构时，fanart放在视频根目录
@@ -5763,8 +5759,7 @@ async fn download_video_pages(
             },
             token.clone(),
             // thumb URL选择逻辑：番剧使用横版封面，合集和普通视频使用默认封面
-            if is_bangumi && season_info.is_some() {
-                let season = season_info.as_ref().unwrap();
+            if let (true, Some(season)) = (is_bangumi, season_info.as_ref()) {
                 let thumb_url = season
                     .horizontal_cover_169
                     .as_deref()
@@ -5794,8 +5789,7 @@ async fn download_video_pages(
                 None
             },
             // fanart URL选择逻辑：番剧使用竖版封面，普通视频复用poster
-            if is_bangumi && season_info.is_some() {
-                let season = season_info.as_ref().unwrap();
+            if let (true, Some(season)) = (is_bangumi, season_info.as_ref()) {
                 let fanart_url = season.cover.as_deref().filter(|s| !s.is_empty());
 
                 debug!("番剧「{}」fanart选择逻辑:", video_model.name);
@@ -5826,9 +5820,9 @@ async fn download_video_pages(
             },
             &video_model,
             downloader,
-            if is_bangumi && bangumi_folder_path.is_some() {
+            if let (true, Some(bangumi_folder)) = (is_bangumi, bangumi_folder_path.as_ref()) {
                 // 番剧根目录的 poster.jpg
-                bangumi_folder_path.as_ref().unwrap().join("poster.jpg")
+                bangumi_folder.join("poster.jpg")
             } else {
                 // 多P视频或合集根目录的 poster.jpg
                 if multi_page_like_use_season_structure || collection_use_root_season_structure {
@@ -5842,8 +5836,7 @@ async fn download_video_pages(
             },
             token.clone(),
             // 使用竖版封面作为主封面
-            if is_bangumi && season_info.is_some() {
-                let season = season_info.as_ref().unwrap();
+            if let (true, Some(season)) = (is_bangumi, season_info.as_ref()) {
                 let poster_url = season
                     .series_cover
                     .as_deref()
@@ -5879,9 +5872,9 @@ async fn download_video_pages(
             },
             &video_model,
             downloader,
-            if is_bangumi && bangumi_folder_path.is_some() {
+            if let (true, Some(bangumi_folder)) = (is_bangumi, bangumi_folder_path.as_ref()) {
                 // 番剧根目录的 folder.jpg
-                bangumi_folder_path.as_ref().unwrap().join("folder.jpg")
+                bangumi_folder.join("folder.jpg")
             } else {
                 // 多P视频或合集根目录的 folder.jpg
                 if multi_page_like_use_season_structure || collection_use_root_season_structure {
@@ -5895,8 +5888,7 @@ async fn download_video_pages(
             },
             token.clone(),
             // 使用竖版封面作为主封面
-            if is_bangumi && season_info.is_some() {
-                let season = season_info.as_ref().unwrap();
+            if let (true, Some(season)) = (is_bangumi, season_info.as_ref()) {
                 let folder_url = season
                     .series_cover
                     .as_deref()
@@ -7415,33 +7407,33 @@ async fn download_page(
 
     let (poster_path, video_path, nfo_path, danmaku_path, fanart_path, subtitle_path) = if is_single_page {
         (
-            base_path.join(format!("{}-thumb.jpg", &base_name)),
-            base_path.join(format!("{}.{}", &base_name, media_ext)),
-            base_path.join(format!("{}.nfo", &base_name)),
-            base_path.join(format!("{}.zh-CN.default.ass", &base_name)),
-            Some(base_path.join(format!("{}-fanart.jpg", &base_name))),
-            base_path.join(format!("{}.srt", &base_name)),
+            base_path.join(format!("{}-thumb.jpg", base_name)),
+            base_path.join(format!("{}.{}", base_name, media_ext)),
+            base_path.join(format!("{}.nfo", base_name)),
+            base_path.join(format!("{}.zh-CN.default.ass", base_name)),
+            Some(base_path.join(format!("{}-fanart.jpg", base_name))),
+            base_path.join(format!("{}.srt", base_name)),
         )
     } else if is_bangumi {
         // 番剧直接使用基础路径，不创建子文件夹结构
         (
-            base_path.join(format!("{}-thumb.jpg", &base_name)),
-            base_path.join(format!("{}.{}", &base_name, media_ext)),
-            base_path.join(format!("{}.nfo", &base_name)),
-            base_path.join(format!("{}.zh-CN.default.ass", &base_name)),
+            base_path.join(format!("{}-thumb.jpg", base_name)),
+            base_path.join(format!("{}.{}", base_name, media_ext)),
+            base_path.join(format!("{}.nfo", base_name)),
+            base_path.join(format!("{}.zh-CN.default.ass", base_name)),
             None,
-            base_path.join(format!("{}.srt", &base_name)),
+            base_path.join(format!("{}.srt", base_name)),
         )
     } else {
         // 非番剧的多P视频直接使用基础路径，不创建子文件夹
         (
-            base_path.join(format!("{}-thumb.jpg", &base_name)),
-            base_path.join(format!("{}.{}", &base_name, media_ext)),
-            base_path.join(format!("{}.nfo", &base_name)),
-            base_path.join(format!("{}.zh-CN.default.ass", &base_name)),
+            base_path.join(format!("{}-thumb.jpg", base_name)),
+            base_path.join(format!("{}.{}", base_name, media_ext)),
+            base_path.join(format!("{}.nfo", base_name)),
+            base_path.join(format!("{}.zh-CN.default.ass", base_name)),
             // 多P视频的每个分页都应该有自己的fanart
-            Some(base_path.join(format!("{}-fanart.jpg", &base_name))),
-            base_path.join(format!("{}.srt", &base_name)),
+            Some(base_path.join(format!("{}-fanart.jpg", base_name))),
+            base_path.join(format!("{}.srt", base_name)),
         )
     };
     let dimension = match (page_model.width, page_model.height) {
@@ -7528,20 +7520,20 @@ async fn download_page(
         fanart_path,
         token.clone(),
     ));
-    let res_2_fut = Box::pin(fetch_page_video(
-        separate_status[1],
+    let res_2_fut = Box::pin(fetch_page_video(FetchPageVideoInput {
+        should_run: separate_status[1],
         bili_client,
         video_model,
         connection,
-        page_model.id,
+        page_id: page_model.id,
         downloader,
-        &page_info,
-        &video_path,
+        page_info: &page_info,
+        page_path: &video_path,
         audio_only,
-        video_source.download_charge_videos(),
+        download_charge_videos: video_source.download_charge_videos(),
         filter_option,
-        token.clone(),
-    ));
+        token: token.clone(),
+    }));
     let res_3_fut = Box::pin(generate_page_nfo(
         separate_status[2],
         video_model,
@@ -7559,27 +7551,27 @@ async fn download_page(
         collection_page_episode_number.or(submission_page_episode_number),
     ));
     let danmaku_config = crate::config::reload_config();
-    let res_4_fut = Box::pin(fetch_page_danmaku(
-        separate_status[3],
+    let res_4_fut = Box::pin(fetch_page_danmaku(FetchPageDanmakuInput {
+        should_run: separate_status[3],
         bili_client,
         video_model,
-        &page_model_for_sidecars,
-        connection,
-        &danmaku_config,
-        &page_info,
+        page_model: &page_model_for_sidecars,
+        _connection: connection,
+        config: &danmaku_config,
+        page_info: &page_info,
         danmaku_path,
-        token.clone(),
-    ));
-    let res_5_fut = Box::pin(fetch_page_subtitle(
-        separate_status[4],
+        token: token.clone(),
+    }));
+    let res_5_fut = Box::pin(fetch_page_subtitle(FetchPageSubtitleInput {
+        should_run: separate_status[4],
         bili_client,
         video_model,
-        &page_info,
-        &subtitle_path,
-        video_source.download_ai_subtitle(),
-        video_source.ai_subtitle_language().to_string(),
-        token.clone(),
-    ));
+        page_info: &page_info,
+        subtitle_path: &subtitle_path,
+        download_ai_subtitle: video_source.download_ai_subtitle(),
+        ai_subtitle_language: video_source.ai_subtitle_language().to_string(),
+        token: token.clone(),
+    }));
 
     // 先执行视频下载任务：若视频因未达到最低下载标准被主动跳过，
     // 则封面/NFO/弹幕/字幕等附属文件本轮不下载，避免为跳过视频生成多余文件。
@@ -7812,25 +7804,25 @@ async fn download_page(
                 bail!(DownloadAbortError::rate_limited());
             }
         }
-        ExecutionStatus::ClassifiedFailed(ref classified_error) => {
-            if classified_error.error_type == crate::error::ErrorType::RiskControl {
-                bail!(download_abort_from_classified_risk_control(classified_error));
-            }
+        ExecutionStatus::ClassifiedFailed(ref classified_error)
+            if classified_error.error_type == crate::error::ErrorType::RiskControl =>
+        {
+            bail!(download_abort_from_classified_risk_control(classified_error));
         }
         _ => {}
     }
 
-    if let Some(updated_file_size_bytes) = maybe_embed_cover_into_audio(
+    if let Some(updated_file_size_bytes) = maybe_embed_cover_into_audio(EmbedCoverAudioInput {
         audio_only,
         m4a_only_mode,
         video_model,
-        &page_model,
+        page_model: &page_model,
         downloader,
-        &video_path,
-        &poster_path_for_chapters,
-        &results,
-        token.clone(),
-    )
+        media_path: &video_path,
+        poster_path: &poster_path_for_chapters,
+        results: &results,
+        token: token.clone(),
+    })
     .await
     {
         page_file_size_bytes = Some(updated_file_size_bytes);
@@ -8022,16 +8014,16 @@ async fn download_page(
         .await;
         let planned_chapters = chapter_episode_plan.as_ref().and_then(|plan| plan.chapters.clone());
         let bili_video = Video::new(bili_client, video_model.bvid.clone());
-        match split_page_chapters_after_download(
-            &bili_video,
+        match split_page_chapters_after_download(SplitChaptersInput {
+            bili_video: &bili_video,
             video_model,
-            &page_model,
-            &page_info,
-            &video_path,
-            chapter_output_naming,
+            source_page: &page_model,
+            page_info: &page_info,
+            page_path: &video_path,
+            naming: chapter_output_naming,
             planned_chapters,
-            token.clone(),
-        )
+            token: token.clone(),
+        })
         .await
         {
             Ok(Some(mut outcome)) if !outcome.files.is_empty() => {
@@ -8050,17 +8042,17 @@ async fn download_page(
                 };
                 match sidecar_result {
                     Ok(_) => {
-                        maybe_embed_cover_into_chapter_audio_outputs(
+                        maybe_embed_cover_into_chapter_audio_outputs(EmbedCoverChapterInput {
                             audio_only,
                             m4a_only_mode,
                             video_model,
-                            &page_model,
+                            page_model: &page_model,
                             downloader,
-                            &mut outcome,
-                            &poster_path_for_chapters,
-                            &video_path,
-                            token.clone(),
-                        )
+                            outcome: &mut outcome,
+                            poster_path: &poster_path_for_chapters,
+                            temp_base_media_path: &video_path,
+                            token: token.clone(),
+                        })
                         .await;
 
                         match sync_chapter_pages_after_split(connection, video_model, &page_model, &outcome).await {
@@ -8240,20 +8232,32 @@ impl Drop for DownloadProgressGuard {
     }
 }
 
+struct DownloadStreamInput<'a> {
+    downloader: &'a UnifiedDownloader,
+    progress_key: &'a str,
+    progress_platform: &'a str,
+    progress_title: &'a str,
+    progress_phase: &'a str,
+    progress_file_name: &'a str,
+    urls: &'a [&'a str],
+    path: &'a Path,
+}
+
 /// 下载单个流文件并返回文件大小（使用UnifiedDownloader智能选择下载方式）
 ///
 /// 同时会把本次下载的 bytes 与耗时写入内存「入库事件」统计，用于首页展示平均下载速度；
 /// 并在首页「正在下载」进度区注册实时进度（分片下载器会持续上报字节）。
-async fn download_stream(
-    downloader: &UnifiedDownloader,
-    progress_key: &str,
-    progress_platform: &str,
-    progress_title: &str,
-    progress_phase: &str,
-    progress_file_name: &str,
-    urls: &[&str],
-    path: &Path,
-) -> Result<u64> {
+async fn download_stream(p: DownloadStreamInput<'_>) -> Result<u64> {
+    let DownloadStreamInput {
+        downloader,
+        progress_key,
+        progress_platform,
+        progress_title,
+        progress_phase,
+        progress_file_name,
+        urls,
+        path,
+    } = p;
     // 注册首页下载进度：幂等，每个流下载前刷新任务阶段
     let path_str = path.display().to_string();
     crate::download_progress::DOWNLOAD_PROGRESS
@@ -8653,23 +8657,36 @@ fn page_cover_url_for_embedding<'a>(video_model: &'a video::Model, page_model: &
     }
 }
 
-async fn maybe_embed_cover_into_audio(
+struct EmbedCoverAudioInput<'a> {
     audio_only: bool,
     m4a_only_mode: bool,
-    video_model: &video::Model,
-    page_model: &page::Model,
-    downloader: &UnifiedDownloader,
-    media_path: &Path,
-    poster_path: &Path,
-    results: &[ExecutionStatus],
+    video_model: &'a video::Model,
+    page_model: &'a page::Model,
+    downloader: &'a UnifiedDownloader,
+    media_path: &'a Path,
+    poster_path: &'a Path,
+    results: &'a [ExecutionStatus],
     token: CancellationToken,
-) -> Option<i64> {
+}
+
+async fn maybe_embed_cover_into_audio(p: EmbedCoverAudioInput<'_>) -> Option<i64> {
+    let EmbedCoverAudioInput {
+        audio_only,
+        m4a_only_mode,
+        video_model,
+        page_model,
+        downloader,
+        media_path,
+        poster_path,
+        results,
+        token,
+    } = p;
     if !audio_only || token.is_cancelled() {
         return None;
     }
 
     let media_downloaded = matches!(results.get(1), Some(ExecutionStatus::Succeeded));
-    let cover_downloaded_or_repaired = matches!(results.get(0), Some(ExecutionStatus::Succeeded));
+    let cover_downloaded_or_repaired = matches!(results.first(), Some(ExecutionStatus::Succeeded));
     if !media_downloaded && !cover_downloaded_or_repaired {
         return None;
     }
@@ -8819,17 +8836,30 @@ async fn maybe_prepare_audio_cover_for_embedding(
     Some((temp_cover_path, true))
 }
 
-async fn maybe_embed_cover_into_chapter_audio_outputs(
+struct EmbedCoverChapterInput<'a> {
     audio_only: bool,
     m4a_only_mode: bool,
-    video_model: &video::Model,
-    page_model: &page::Model,
-    downloader: &UnifiedDownloader,
-    outcome: &mut ChapterSplitOutcome,
-    poster_path: &Path,
-    temp_base_media_path: &Path,
+    video_model: &'a video::Model,
+    page_model: &'a page::Model,
+    downloader: &'a UnifiedDownloader,
+    outcome: &'a mut ChapterSplitOutcome,
+    poster_path: &'a Path,
+    temp_base_media_path: &'a Path,
     token: CancellationToken,
-) {
+}
+
+async fn maybe_embed_cover_into_chapter_audio_outputs(p: EmbedCoverChapterInput<'_>) {
+    let EmbedCoverChapterInput {
+        audio_only,
+        m4a_only_mode,
+        video_model,
+        page_model,
+        downloader,
+        outcome,
+        poster_path,
+        temp_base_media_path,
+        token,
+    } = p;
     if !audio_only || token.is_cancelled() || outcome.files.is_empty() {
         return;
     }
@@ -8908,17 +8938,30 @@ async fn maybe_embed_cover_into_chapter_audio_outputs(
     }
 }
 
-async fn download_page_video_from_streams(
-    streams: &mut PageAnalyzer,
-    connection: &DatabaseConnection,
+struct DownloadPageStreamsInput<'a> {
+    streams: &'a mut PageAnalyzer,
+    connection: &'a DatabaseConnection,
     page_id: i32,
-    downloader: &UnifiedDownloader,
-    video_model: &video::Model,
-    page_info_for_download: &PageInfo,
-    page_path: &Path,
+    downloader: &'a UnifiedDownloader,
+    video_model: &'a video::Model,
+    page_info_for_download: &'a PageInfo,
+    page_path: &'a Path,
     audio_only: bool,
-    filter_option: &FilterOption,
-) -> Result<PageVideoFetchResult> {
+    filter_option: &'a FilterOption,
+}
+
+async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Result<PageVideoFetchResult> {
+    let DownloadPageStreamsInput {
+        streams,
+        connection,
+        page_id,
+        downloader,
+        video_model,
+        page_info_for_download,
+        page_path,
+        audio_only,
+        filter_option,
+    } = p;
     // 首页「正在下载」进度：任务键 = 视频ID:分页ID，标题/文件名用于展示
     let progress_key = format!("bilibili:{}:{}", video_model.id, page_id);
     let progress_title = video_model.name.clone();
@@ -9112,16 +9155,16 @@ async fn download_page_video_from_streams(
                 // 混合流无法提取纯音频，警告并使用混合流
                 warn!("混合流不支持纯音频提取，将下载完整内容");
                 let urls = mix_stream.urls();
-                let downloaded_size = download_stream(
+                let downloaded_size = download_stream(DownloadStreamInput {
                     downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载中",
-                    &progress_file_name,
-                    &urls,
-                    page_path,
-                )
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载中",
+                    progress_file_name: &progress_file_name,
+                    urls: &urls,
+                    path: page_path,
+                })
                 .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
@@ -9131,16 +9174,16 @@ async fn download_page_video_from_streams(
             } => {
                 // 直接下载音频流
                 let audio_urls = audio_stream.urls();
-                let downloaded_size = download_stream(
+                let downloaded_size = download_stream(DownloadStreamInput {
                     downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载音频流",
-                    &progress_file_name,
-                    &audio_urls,
-                    page_path,
-                )
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载音频流",
+                    progress_file_name: &progress_file_name,
+                    urls: &audio_urls,
+                    path: page_path,
+                })
                 .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
             }
@@ -9151,16 +9194,16 @@ async fn download_page_video_from_streams(
                 // 没有独立音频流，警告并使用视频流（可能包含音频）
                 warn!("未找到独立音频流，将下载视频流");
                 let urls = video_stream.urls();
-                let downloaded_size = download_stream(
+                let downloaded_size = download_stream(DownloadStreamInput {
                     downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载中",
-                    &progress_file_name,
-                    &urls,
-                    page_path,
-                )
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载中",
+                    progress_file_name: &progress_file_name,
+                    urls: &urls,
+                    path: page_path,
+                })
                 .await?;
                 // 单流下载完成即最终文件，清理可能遗留的断点续传状态
                 let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(page_path)).await;
@@ -9176,16 +9219,16 @@ async fn download_page_video_from_streams(
                     crate::bilibili::Stream::Flv(_) => {
                         let tmp_mix_path = page_path.with_extension("tmp_flv");
                         let urls = mix_stream.urls();
-                        let downloaded_size = download_stream(
+                        let downloaded_size = download_stream(DownloadStreamInput {
                             downloader,
-                            &progress_key,
-                            "bilibili",
-                            &progress_title,
-                            "下载中",
-                            &progress_file_name,
-                            &urls,
-                            &tmp_mix_path,
-                        )
+                            progress_key: &progress_key,
+                            progress_platform: "bilibili",
+                            progress_title: &progress_title,
+                            progress_phase: "下载中",
+                            progress_file_name: &progress_file_name,
+                            urls: &urls,
+                            path: &tmp_mix_path,
+                        })
                         .await?;
                         crate::download_progress::DOWNLOAD_PROGRESS
                             .set_phase(&progress_key, "转封装中")
@@ -9213,16 +9256,16 @@ async fn download_page_video_from_streams(
                     }
                     _ => {
                         let urls = mix_stream.urls();
-                        let downloaded_size = download_stream(
+                        let downloaded_size = download_stream(DownloadStreamInput {
                             downloader,
-                            &progress_key,
-                            "bilibili",
-                            &progress_title,
-                            "下载中",
-                            &progress_file_name,
-                            &urls,
-                            page_path,
-                        )
+                            progress_key: &progress_key,
+                            progress_platform: "bilibili",
+                            progress_title: &progress_title,
+                            progress_phase: "下载中",
+                            progress_file_name: &progress_file_name,
+                            urls: &urls,
+                            path: page_path,
+                        })
                         .await?;
                         (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
                     }
@@ -9233,16 +9276,16 @@ async fn download_page_video_from_streams(
                 audio: None,
             } => {
                 let urls = video_stream.urls();
-                let downloaded_size = download_stream(
+                let downloaded_size = download_stream(DownloadStreamInput {
                     downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载中",
-                    &progress_file_name,
-                    &urls,
-                    page_path,
-                )
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载中",
+                    progress_file_name: &progress_file_name,
+                    urls: &urls,
+                    path: page_path,
+                })
                 .await?;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
             }
@@ -9256,16 +9299,16 @@ async fn download_page_video_from_streams(
                 );
 
                 let video_urls = video_stream.urls();
-                let video_size = download_stream(
+                let video_size = download_stream(DownloadStreamInput {
                     downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载视频流",
-                    &progress_file_name,
-                    &video_urls,
-                    &tmp_video_path,
-                )
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载视频流",
+                    progress_file_name: &progress_file_name,
+                    urls: &video_urls,
+                    path: &tmp_video_path,
+                })
                 .await
                 .map_err(|e| {
                     // 使用错误分类器进行统一处理
@@ -9285,16 +9328,16 @@ async fn download_page_video_from_streams(
                 })?;
 
                 let audio_urls = audio_stream.urls();
-                let audio_size = download_stream(
+                let audio_size = download_stream(DownloadStreamInput {
                     downloader,
-                    &progress_key,
-                    "bilibili",
-                    &progress_title,
-                    "下载音频流",
-                    &progress_file_name,
-                    &audio_urls,
-                    &tmp_audio_path,
-                )
+                    progress_key: &progress_key,
+                    progress_platform: "bilibili",
+                    progress_title: &progress_title,
+                    progress_phase: "下载音频流",
+                    progress_file_name: &progress_file_name,
+                    urls: &audio_urls,
+                    path: &tmp_audio_path,
+                })
                 .await
                 .map_err(|e| {
                     // 使用错误分类器进行统一处理
@@ -9419,20 +9462,36 @@ fn stream_filter_for_download(filter_option: &FilterOption, audio_only: bool) ->
     effective
 }
 
-async fn fetch_page_video(
+struct FetchPageVideoInput<'a> {
     should_run: bool,
-    bili_client: &BiliClient,
-    video_model: &video::Model,
-    connection: &DatabaseConnection,
+    bili_client: &'a BiliClient,
+    video_model: &'a video::Model,
+    connection: &'a DatabaseConnection,
     page_id: i32,
-    downloader: &UnifiedDownloader,
-    page_info: &PageInfo,
-    page_path: &Path,
+    downloader: &'a UnifiedDownloader,
+    page_info: &'a PageInfo,
+    page_path: &'a Path,
     audio_only: bool,
     download_charge_videos: bool,
-    filter_option: &FilterOption,
+    filter_option: &'a FilterOption,
     token: CancellationToken,
-) -> Result<PageVideoFetchResult> {
+}
+
+async fn fetch_page_video(p: FetchPageVideoInput<'_>) -> Result<PageVideoFetchResult> {
+    let FetchPageVideoInput {
+        should_run,
+        bili_client,
+        video_model,
+        connection,
+        page_id,
+        downloader,
+        page_info,
+        page_path,
+        audio_only,
+        download_charge_videos,
+        filter_option,
+        token,
+    } = p;
     if !should_run {
         return Ok(PageVideoFetchResult {
             status: ExecutionStatus::Skipped,
@@ -9498,16 +9557,14 @@ async fn fetch_page_video(
                 _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
                 res = async {
                     // 检查是否为番剧视频
-                    if video_model.source_type == Some(1) && video_model.ep_id.is_some() {
+                    if let (Some(1), Some(ep_id)) = (video_model.source_type, video_model.ep_id.as_ref()) {
                         // 番剧视频使用番剧专用API的回退机制
-                        let ep_id = video_model.ep_id.as_ref().unwrap();
                         debug!("使用带质量回退的番剧API获取播放地址: ep_id={}", ep_id);
                         bili_video
                             .get_bangumi_page_analyzer_with_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)
                             .await
-                    } else if video_model.source_type == Some(2) && video_model.ep_id.is_some() {
+                    } else if let (Some(2), Some(ep_id)) = (video_model.source_type, video_model.ep_id.as_ref()) {
                         // 课程（pugv）使用课程专用API
-                        let ep_id = video_model.ep_id.as_ref().unwrap();
                         debug!("使用带质量回退的课程API获取播放地址: ep_id={}", ep_id);
                         bili_video
                             .get_pugv_page_analyzer_with_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)
@@ -9573,17 +9630,17 @@ async fn fetch_page_video(
             }
         };
 
-        let download_result = download_page_video_from_streams(
-            &mut streams,
+        let download_result = download_page_video_from_streams(DownloadPageStreamsInput {
+            streams: &mut streams,
             connection,
             page_id,
             downloader,
             video_model,
-            &page_info_for_download,
+            page_info_for_download: &page_info_for_download,
             page_path,
             audio_only,
             filter_option,
-        )
+        })
         .await;
 
         match download_result {
@@ -9865,12 +9922,10 @@ async fn preallocate_chapter_episode_plans(
             let semaphore = semaphore.clone();
             let token = token.clone();
             async move {
-                let _permit = match tokio::select! {
+                let _permit = tokio::select! {
                     biased;
                     _ = token.cancelled() => return None,
                     permit = semaphore.acquire_owned() => permit.ok()?,
-                } {
-                    permit => permit,
                 };
 
                 let original_first_episode_number = match video_source {
@@ -10227,16 +10282,28 @@ fn chapter_output_path(
     Ok(parent.join(format!("{stem} - {:02} - {}.{}", index + 1, chapter_name, ext)))
 }
 
-async fn split_page_chapters_after_download(
-    bili_video: &Video<'_>,
-    video_model: &video::Model,
-    source_page: &page::Model,
-    page_info: &PageInfo,
-    page_path: &Path,
+struct SplitChaptersInput<'a> {
+    bili_video: &'a Video<'a>,
+    video_model: &'a video::Model,
+    source_page: &'a page::Model,
+    page_info: &'a PageInfo,
+    page_path: &'a Path,
     naming: ChapterOutputNaming,
     planned_chapters: Option<Vec<ValidChapter>>,
     token: CancellationToken,
-) -> Result<Option<ChapterSplitOutcome>> {
+}
+
+async fn split_page_chapters_after_download(p: SplitChaptersInput<'_>) -> Result<Option<ChapterSplitOutcome>> {
+    let SplitChaptersInput {
+        bili_video,
+        video_model,
+        source_page,
+        page_info,
+        page_path,
+        naming,
+        planned_chapters,
+        token,
+    } = p;
     if !page_path.exists() {
         bail!("downloaded media file does not exist: {}", page_path.display());
     }
@@ -10743,17 +10810,30 @@ pub struct PageDanmakuFetchResult {
     pub sync_update: Option<crate::workflow_danmaku::PageDanmakuSyncUpdate>,
 }
 
-pub async fn fetch_page_danmaku(
+pub(crate) struct FetchPageDanmakuInput<'a> {
     should_run: bool,
-    bili_client: &BiliClient,
-    video_model: &video::Model,
-    page_model: &page::Model,
-    _connection: &DatabaseConnection,
-    config: &crate::config::Config,
-    page_info: &PageInfo,
+    bili_client: &'a BiliClient,
+    video_model: &'a video::Model,
+    page_model: &'a page::Model,
+    _connection: &'a DatabaseConnection,
+    config: &'a crate::config::Config,
+    page_info: &'a PageInfo,
     danmaku_path: PathBuf,
     token: CancellationToken,
-) -> Result<PageDanmakuFetchResult> {
+}
+
+pub async fn fetch_page_danmaku(p: FetchPageDanmakuInput<'_>) -> Result<PageDanmakuFetchResult> {
+    let FetchPageDanmakuInput {
+        should_run,
+        bili_client,
+        video_model,
+        page_model,
+        _connection,
+        config,
+        page_info,
+        danmaku_path,
+        token,
+    } = p;
     const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     if !should_run {
@@ -10807,17 +10887,17 @@ pub async fn fetch_page_danmaku(
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
         res = tokio::time::timeout(
             SIDECAR_REQUEST_TIMEOUT,
-            crate::workflow_danmaku::sync_page_danmaku(
-                &bili_video,
+            crate::workflow_danmaku::sync_page_danmaku(crate::workflow_danmaku::SyncPageDanmakuInput {
+                bili_video: &bili_video,
                 config,
                 video_model,
-                page_model,
-                page_info,
-                &danmaku_path,
-                None,
-                Utc::now(),
-                token.clone(),
-            ),
+                db_page: page_model,
+                fresh: page_info,
+                danmaku_path: &danmaku_path,
+                next_stage: None,
+                now: Utc::now(),
+                token: token.clone(),
+            }),
         ) => match res {
             Ok(inner) => inner?,
             Err(_) => {
@@ -10836,16 +10916,28 @@ pub async fn fetch_page_danmaku(
     })
 }
 
-pub async fn fetch_page_subtitle(
+pub(crate) struct FetchPageSubtitleInput<'a> {
     should_run: bool,
-    bili_client: &BiliClient,
-    video_model: &video::Model,
-    page_info: &PageInfo,
-    subtitle_path: &Path,
+    bili_client: &'a BiliClient,
+    video_model: &'a video::Model,
+    page_info: &'a PageInfo,
+    subtitle_path: &'a Path,
     download_ai_subtitle: bool,
     ai_subtitle_language: String,
     token: CancellationToken,
-) -> Result<ExecutionStatus> {
+}
+
+pub async fn fetch_page_subtitle(p: FetchPageSubtitleInput<'_>) -> Result<ExecutionStatus> {
+    let FetchPageSubtitleInput {
+        should_run,
+        bili_client,
+        video_model,
+        page_info,
+        subtitle_path,
+        download_ai_subtitle,
+        ai_subtitle_language,
+        token,
+    } = p;
     const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     if !should_run {
@@ -10998,7 +11090,10 @@ pub async fn generate_page_nfo(
                 } else {
                     // 普通单页视频生成Movie
                     use crate::utils::nfo::Movie;
-                    NFO::Movie(Movie::from_video_with_pages(video_model, &[page_model.clone()]))
+                    NFO::Movie(Movie::from_video_with_pages(
+                        video_model,
+                        std::slice::from_ref(page_model),
+                    ))
                 }
             } else {
                 use crate::utils::nfo::Episode;
@@ -11069,7 +11164,7 @@ pub async fn fetch_video_poster(
     debug!("  custom_fanart_url: {:?}", custom_fanart_url);
 
     // 下载thumb封面（依赖should_run参数，重置状态后会强制重新下载）
-    let Some(thumb_url) = custom_cover_url.or_else(|| {
+    let Some(thumb_url) = custom_cover_url.or({
         if allow_video_cover_fallback {
             Some(video_model.cover.as_str())
         } else {
@@ -11340,7 +11435,7 @@ pub async fn fetch_bangumi_poster(
     // 下载 poster.jpg 文件（依赖should_run参数，重置状态后会强制重新下载）
     ensure_parent_dir_for_file(&poster_path).await?;
 
-    let Some(poster_url) = custom_poster_url.or_else(|| {
+    let Some(poster_url) = custom_poster_url.or({
         if allow_video_cover_fallback {
             Some(video_model.cover.as_str())
         } else {
@@ -11446,27 +11541,49 @@ pub async fn generate_video_nfo(
     Ok(ExecutionStatus::Succeeded)
 }
 
-/// 为合集生成带有合集信息的TVShow NFO
-pub async fn generate_collection_video_nfo(
+pub(crate) struct CollectionNfoInput<'a> {
     should_generate_tvshow_nfo: bool,
     should_generate_season_nfo: bool,
     suppress_season_label_in_title: bool,
-    video_model: &video::Model,
-    collection_name: Option<&str>,
-    season_collection_name: Option<&str>,
-    collection_cover: Option<&str>,
-    upper_intro: Option<&str>,
-    plot_link_override: Option<&str>,
-    uniqueid_override: Option<&str>,
-    season_plot_link_override: Option<&str>,
-    season_uniqueid_override: Option<&str>,
+    video_model: &'a video::Model,
+    collection_name: Option<&'a str>,
+    season_collection_name: Option<&'a str>,
+    collection_cover: Option<&'a str>,
+    upper_intro: Option<&'a str>,
+    plot_link_override: Option<&'a str>,
+    uniqueid_override: Option<&'a str>,
+    season_plot_link_override: Option<&'a str>,
+    season_uniqueid_override: Option<&'a str>,
     nfo_path: PathBuf,
     season_number: i32,
     total_seasons: Option<i32>,
     total_episodes: Option<i32>,
     season_total_episodes: Option<i32>,
     season_nfo_path: Option<PathBuf>,
-) -> Result<ExecutionStatus> {
+}
+
+/// 为合集生成带有合集信息的TVShow NFO
+pub async fn generate_collection_video_nfo(p: CollectionNfoInput<'_>) -> Result<ExecutionStatus> {
+    let CollectionNfoInput {
+        should_generate_tvshow_nfo,
+        should_generate_season_nfo,
+        suppress_season_label_in_title,
+        video_model,
+        collection_name,
+        season_collection_name,
+        collection_cover,
+        upper_intro,
+        plot_link_override,
+        uniqueid_override,
+        season_plot_link_override,
+        season_uniqueid_override,
+        nfo_path,
+        season_number,
+        total_seasons,
+        total_episodes,
+        season_total_episodes,
+        season_nfo_path,
+    } = p;
     if !should_generate_tvshow_nfo && !should_generate_season_nfo {
         return Ok(ExecutionStatus::Skipped);
     }
@@ -13128,8 +13245,8 @@ async fn get_submission_single_collection_like_season_number(
             .and_then(|v| i32::try_from(v).ok())
             .filter(|v| *v > 0);
         let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
-        if mapped_season_id.is_some() && mapped_up_mid == Some(up_mid) {
-            mapped_season_id.unwrap()
+        if let Some(mapped_season_id) = mapped_season_id.filter(|_| mapped_up_mid == Some(up_mid)) {
+            mapped_season_id
         } else {
             let max_row = connection
                 .query_one(Statement::from_sql_and_values(
@@ -13250,8 +13367,8 @@ async fn get_submission_multipage_season_number(
             .and_then(|v| i32::try_from(v).ok())
             .filter(|v| *v > 0);
         let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
-        if mapped_season_id.is_some() && mapped_up_mid == Some(up_mid) {
-            mapped_season_id.unwrap()
+        if let Some(mapped_season_id) = mapped_season_id.filter(|_| mapped_up_mid == Some(up_mid)) {
+            mapped_season_id
         } else {
             let max_row = connection
                 .query_one(Statement::from_sql_and_values(
@@ -14351,8 +14468,8 @@ async fn get_submission_source_season_number(
             .and_then(|v| i32::try_from(v).ok())
             .filter(|v| *v > 0);
         let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
-        if mapped_season_id.is_some() && mapped_up_mid == Some(up_mid) {
-            mapped_season_id.unwrap()
+        if let Some(mapped_season_id) = mapped_season_id.filter(|_| mapped_up_mid == Some(up_mid)) {
+            mapped_season_id
         } else {
             let max_row = connection
                 .query_one(Statement::from_sql_and_values(
@@ -14546,8 +14663,8 @@ async fn get_collection_source_season_number(
             .and_then(|v| i32::try_from(v).ok())
             .filter(|v| *v > 0);
         let mapped_up_mid = row.try_get_by_index::<i64>(1).ok();
-        if mapped_season_id.is_some() && mapped_up_mid == Some(collection_source.m_id) {
-            mapped_season_id.unwrap()
+        if let Some(mapped_season_id) = mapped_season_id.filter(|_| mapped_up_mid == Some(collection_source.m_id)) {
+            mapped_season_id
         } else {
             let max_row = connection
                 .query_one(Statement::from_sql_and_values(
@@ -15550,7 +15667,7 @@ fn resolve_sidecar_base_name(base_path: &std::path::Path, rendered_name: Option<
     });
 
     let from_rendered_name = rendered_name.and_then(|name| {
-        name.rsplit(|c| c == '/' || c == '\\').find_map(|segment| {
+        name.rsplit(['/', '\\']).find_map(|segment| {
             let value = segment.trim();
             (!value.is_empty()).then_some(value.to_string())
         })
@@ -16166,10 +16283,7 @@ mod tests {
 
         let large = LargeSourceDownloadPolicy::from_config(&config, 1001, 10, 10, 3, 2);
         assert!(large.active);
-        assert_eq!(
-            large.trigger_reasons,
-            vec![LargeSourceDownloadTrigger::SourceVideoCount]
-        );
+        assert_eq!(large.trigger_reasons, vec![LargeSourceDownloadTrigger::SourceVideo]);
         assert_eq!(large.video_concurrency, 1);
         assert_eq!(large.page_concurrency, 1);
         assert_eq!(large.max_videos_per_round, None);
@@ -16191,14 +16305,14 @@ mod tests {
         assert!(source_page_large.active);
         assert_eq!(
             source_page_large.trigger_reasons,
-            vec![LargeSourceDownloadTrigger::SourcePageCount]
+            vec![LargeSourceDownloadTrigger::SourcePage]
         );
 
         let pending_page_large = LargeSourceDownloadPolicy::from_config(&config, 10, 0, 1001, 3, 2);
         assert!(pending_page_large.active);
         assert_eq!(
             pending_page_large.trigger_reasons,
-            vec![LargeSourceDownloadTrigger::PendingPageCount]
+            vec![LargeSourceDownloadTrigger::PendingPage]
         );
     }
 
@@ -16361,20 +16475,20 @@ mod tests {
             ..Default::default()
         };
 
-        let result = fetch_page_video(
-            true,
-            &bili_client,
-            &video_model,
-            &db,
-            1,
-            &downloader,
-            &page_info,
-            &page_path,
-            false,
-            false,
-            &FilterOption::default(),
-            CancellationToken::new(),
-        )
+        let result = fetch_page_video(FetchPageVideoInput {
+            should_run: true,
+            bili_client: &bili_client,
+            video_model: &video_model,
+            connection: &db,
+            page_id: 1,
+            downloader: &downloader,
+            page_info: &page_info,
+            page_path: &page_path,
+            audio_only: false,
+            download_charge_videos: false,
+            filter_option: &FilterOption::default(),
+            token: CancellationToken::new(),
+        })
         .await
         .expect("关闭源级充电视频下载时应直接跳过媒体下载");
 
@@ -17564,26 +17678,26 @@ mod tests {
         let tvshow_path = dir.join("tvshow.nfo");
         let season_path = dir.join("Season 01").join("season.nfo");
 
-        let status = generate_collection_video_nfo(
-            true,
-            true,
-            true,
-            &video,
-            Some("多P系列根目录"),
-            Some("测试多P视频"),
-            None,
-            Some("测试简介"),
-            None,
-            None,
-            None,
-            None,
-            tvshow_path.clone(),
-            1,
-            Some(1),
-            Some(3),
-            Some(3),
-            Some(season_path.clone()),
-        )
+        let status = generate_collection_video_nfo(CollectionNfoInput {
+            should_generate_tvshow_nfo: true,
+            should_generate_season_nfo: true,
+            suppress_season_label_in_title: true,
+            video_model: &video,
+            collection_name: Some("多P系列根目录"),
+            season_collection_name: Some("测试多P视频"),
+            collection_cover: None,
+            upper_intro: Some("测试简介"),
+            plot_link_override: None,
+            uniqueid_override: None,
+            season_plot_link_override: None,
+            season_uniqueid_override: None,
+            nfo_path: tvshow_path.clone(),
+            season_number: 1,
+            total_seasons: Some(1),
+            total_episodes: Some(3),
+            season_total_episodes: Some(3),
+            season_nfo_path: Some(season_path.clone()),
+        })
         .await
         .expect("生成多P Season 结构 NFO不应失败");
 

@@ -82,7 +82,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const DOUYIN_SCAN_PROGRESS_LOG_EVERY: usize = 10;
 
 fn log_douyin_scan_progress(kind: &str, source_id: &str, page: usize, loaded: usize, has_more: bool) {
-    if page == 1 || page % DOUYIN_SCAN_PROGRESS_LOG_EVERY == 0 || !has_more {
+    if page == 1 || page.is_multiple_of(DOUYIN_SCAN_PROGRESS_LOG_EVERY) || !has_more {
         info!(
             "抖音{}扫描进度: source_id={}, 第 {} 页, 已获取 {} 条, 还有更多={}",
             kind, source_id, page, loaded, has_more
@@ -1612,6 +1612,7 @@ pub async fn fetch_source_posts(
 /// 移动端/网页分享链接常见两种形态：
 ///   - https://www.douyin.com/collection/{id}（可带 ?modal_id=... 等参数）
 ///   - https://v.douyin.com/xxxxx/（短链，需跟随跳转后再解析）
+///
 /// 优先精确匹配 path 中的 /collection/{数字id}，避免被 modal_id 等 query 参数误导；
 /// 短链先跟随重定向拿到最终链接再解析。
 async fn resolve_collection_id(source_url: &str) -> Result<String> {
@@ -1654,9 +1655,8 @@ fn collection_id_from_url(value: &str) -> Option<&str> {
 fn query_collection_id(value: &str) -> Option<&str> {
     let query = value.split('?').nth(1)?;
     query.split('&').find_map(|pair| {
-        let mut parts = pair.splitn(2, '=');
-        let key = parts.next()?;
-        let value = parts.next()?;
+        let (key, value) = pair.split_once('=')?;
+
         (key == "collection_id" && !value.is_empty() && value.chars().all(|character| character.is_ascii_digit()))
             .then_some(value)
     })
@@ -1712,9 +1712,8 @@ fn mix_id_from_url(value: &str) -> Option<&str> {
     }
     let query = value.split('?').nth(1)?;
     query.split('&').find_map(|pair| {
-        let mut parts = pair.splitn(2, '=');
-        let key = parts.next()?;
-        let value = parts.next()?;
+        let (key, value) = pair.split_once('=')?;
+
         (matches!(key, "mix_id" | "collection_id")
             && !value.is_empty()
             && value.chars().all(|character| character.is_ascii_digit()))
@@ -3232,7 +3231,7 @@ async fn signed_get_impl(
         let mut request = client()?
             .get(url.clone())
             .header(reqwest::header::REFERER, "https://www.douyin.com/");
-        if let Some(uifid) = uifid.as_deref() {
+        if let Some(uifid) = uifid {
             request = request.header("uifid", uifid);
         }
         let response = request.send().await.context("请求抖音 Web API 失败")?;
@@ -4853,7 +4852,7 @@ pub(crate) fn image_post_page_paths(output_path: &Path) -> Vec<PathBuf> {
     if pages.is_empty() {
         return single();
     }
-    pages.sort_by(|left, right| left.0.cmp(&right.0));
+    pages.sort_by_key(|left| left.0);
     pages.into_iter().map(|(_, path)| path).collect()
 }
 
@@ -5592,6 +5591,55 @@ fn integer(value: &serde_json::Value, keys: &[&str]) -> Option<i64> {
     keys.iter()
         .find_map(|key| value.get(*key))
         .and_then(serde_json::Value::as_i64)
+}
+
+/// 迁移旧版抖音凭证文件到数据库（升级兼容；成功后删除旧文件）。
+pub(crate) async fn migrate_legacy_douyin_credentials() -> Result<()> {
+    let _ = crate::credential_store::migrate_file_to_db(
+        crate::credential_store::keys::DOUYIN_COOKIES,
+        &CONFIG_DIR.join("douyin-cookies.txt"),
+        is_netscape_douyin_cookie_file,
+    )
+    .await?;
+    let _ = crate::credential_store::migrate_file_to_db(
+        crate::credential_store::keys::DOUYIN_SECSDK,
+        &douyin_secsdk_path(),
+        |contents| serde_json::from_str::<serde_json::Value>(contents).is_ok(),
+    )
+    .await?;
+    for (key, name, valid) in [
+        (
+            crate::credential_store::keys::DOUYIN_MSTOKEN,
+            "douyin-mstoken.txt",
+            valid_ms_token as fn(&str) -> bool,
+        ),
+        (
+            crate::credential_store::keys::DOUYIN_WEBID,
+            "douyin-webid.txt",
+            valid_webid as fn(&str) -> bool,
+        ),
+        (
+            crate::credential_store::keys::DOUYIN_VERIFY_FP,
+            "douyin-verify-fp.txt",
+            valid_verify_fp as fn(&str) -> bool,
+        ),
+    ] {
+        if crate::credential_store::has(key) {
+            continue;
+        }
+        let path = CONFIG_DIR.join(name);
+        let Ok(value) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        let value = value.trim();
+        if !valid(value) {
+            continue;
+        }
+        crate::credential_store::set(key, value).await?;
+        let _ = tokio::fs::remove_file(&path).await;
+        info!(target: "bili_sync_rs::douyin", key, "已将旧版抖音凭证文件迁移到数据库并删除");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -6524,53 +6572,4 @@ mod tests {
             output_path.display()
         );
     }
-}
-
-/// 迁移旧版抖音凭证文件到数据库（升级兼容；成功后删除旧文件）。
-pub(crate) async fn migrate_legacy_douyin_credentials() -> Result<()> {
-    let _ = crate::credential_store::migrate_file_to_db(
-        crate::credential_store::keys::DOUYIN_COOKIES,
-        &CONFIG_DIR.join("douyin-cookies.txt"),
-        is_netscape_douyin_cookie_file,
-    )
-    .await?;
-    let _ = crate::credential_store::migrate_file_to_db(
-        crate::credential_store::keys::DOUYIN_SECSDK,
-        &douyin_secsdk_path(),
-        |contents| serde_json::from_str::<serde_json::Value>(contents).is_ok(),
-    )
-    .await?;
-    for (key, name, valid) in [
-        (
-            crate::credential_store::keys::DOUYIN_MSTOKEN,
-            "douyin-mstoken.txt",
-            valid_ms_token as fn(&str) -> bool,
-        ),
-        (
-            crate::credential_store::keys::DOUYIN_WEBID,
-            "douyin-webid.txt",
-            valid_webid as fn(&str) -> bool,
-        ),
-        (
-            crate::credential_store::keys::DOUYIN_VERIFY_FP,
-            "douyin-verify-fp.txt",
-            valid_verify_fp as fn(&str) -> bool,
-        ),
-    ] {
-        if crate::credential_store::has(key) {
-            continue;
-        }
-        let path = CONFIG_DIR.join(name);
-        let Ok(value) = tokio::fs::read_to_string(&path).await else {
-            continue;
-        };
-        let value = value.trim();
-        if !valid(value) {
-            continue;
-        }
-        crate::credential_store::set(key, value).await?;
-        let _ = tokio::fs::remove_file(&path).await;
-        info!(target: "bili_sync_rs::douyin", key, "已将旧版抖音凭证文件迁移到数据库并删除");
-    }
-    Ok(())
 }

@@ -414,17 +414,30 @@ fn danmaku_subtask_completed(status: u32) -> bool {
     slot == STATUS_OK
 }
 
-pub async fn sync_page_danmaku(
-    bili_video: &Video<'_>,
-    config: &Config,
-    video_model: &video::Model,
-    db_page: &page::Model,
-    fresh: &BiliPageInfo,
-    danmaku_path: &Path,
-    next_stage: Option<Stage>,
-    now: DateTime<Utc>,
-    token: CancellationToken,
-) -> Result<PageDanmakuSyncUpdate> {
+pub(crate) struct SyncPageDanmakuInput<'a> {
+    pub(crate) bili_video: &'a Video<'a>,
+    pub(crate) config: &'a Config,
+    pub(crate) video_model: &'a video::Model,
+    pub(crate) db_page: &'a page::Model,
+    pub(crate) fresh: &'a BiliPageInfo,
+    pub(crate) danmaku_path: &'a Path,
+    pub(crate) next_stage: Option<Stage>,
+    pub(crate) now: DateTime<Utc>,
+    pub(crate) token: CancellationToken,
+}
+
+pub async fn sync_page_danmaku(p: SyncPageDanmakuInput<'_>) -> Result<PageDanmakuSyncUpdate> {
+    let SyncPageDanmakuInput {
+        bili_video,
+        config,
+        video_model,
+        db_page,
+        fresh,
+        danmaku_path,
+        next_stage,
+        now,
+        token,
+    } = p;
     if fresh.cid <= 0 {
         bail!("分页 pid={} 返回了无效 cid", fresh.page);
     }
@@ -476,8 +489,8 @@ pub async fn sync_page_danmaku(
     let file_exists = tokio::fs::metadata(&danmaku_path).await.is_ok();
     let fetched_danmaku_count = danmaku_elems.len() as u32;
     let last_write_count = if file_exists && !cid_changed {
-        let existing_cursor = load_existing_danmaku_cursor(&danmaku_path).await?;
-        let cutoff = incremental_cutoff_timestamp(&danmaku_path, last_synced, &existing_cursor).await?;
+        let existing_cursor = load_existing_danmaku_cursor(danmaku_path).await?;
+        let cutoff = incremental_cutoff_timestamp(danmaku_path, last_synced, &existing_cursor).await?;
         let incremental_elems = filter_incremental_danmaku(danmaku_elems, cutoff, &existing_cursor);
         let incremental_count = incremental_elems.len() as u32;
         if !incremental_elems.is_empty() {
@@ -489,7 +502,7 @@ pub async fn sync_page_danmaku(
         }
         incremental_count
     } else {
-        let tmp_path = make_tmp_path(&danmaku_path);
+        let tmp_path = make_tmp_path(danmaku_path);
         let writer = DanmakuWriter::new(
             &page_info_for_danmaku,
             danmaku_elems.into_iter().map(Into::into).collect(),
@@ -787,6 +800,8 @@ mod tests {
         .expect("应能插入测试视频");
     }
 
+    /// 测试辅助：插入一条分页记录。参数全列出来更好读，故豁免参数个数检查。
+    #[allow(clippy::too_many_arguments, reason = "测试夹具，参数列出来比结构体更直观")]
     async fn insert_test_page(
         db: &DatabaseConnection,
         id: i32,

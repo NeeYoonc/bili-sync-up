@@ -156,7 +156,7 @@ fn calc_submission_next_delay_secs(base_interval_secs: u64, streak: i32, max_hou
     let multipliers: [u64; 5] = [1, 3, 9, 36, 72];
     let idx = (streak.max(0) as usize).min(multipliers.len() - 1);
     let delay = base_interval_secs.saturating_mul(multipliers[idx]);
-    let cap = max_hours.max(1).min(168).saturating_mul(3600);
+    let cap = max_hours.clamp(1, 168).saturating_mul(3600);
     delay.min(cap).max(base_interval_secs)
 }
 
@@ -1945,7 +1945,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             }
 
             // 显示剩余等待时间（只在较长等待时显示）
-            if remaining_time > 0 && remaining_time % 30 == 0 && remaining_time >= 30 {
+            if remaining_time > 0 && remaining_time.is_multiple_of(30) && remaining_time >= 30 {
                 debug!("距离下一轮扫描还有 {} 秒", remaining_time);
             }
         }

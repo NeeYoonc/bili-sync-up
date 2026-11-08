@@ -443,7 +443,7 @@ impl NFO<'_> {
                                 })
                                 .await?;
                         }
-                    } else if let Some(ref staff_info) = movie.staff_info {
+                    } else if let Some(staff_info) = movie.staff_info {
                         // 使用联合投稿的staff信息（包含头像）
                         let staff_list = Self::parse_staff_info(staff_info);
                         for (index, (mid, name, title, face)) in staff_list.iter().enumerate() {
@@ -852,7 +852,7 @@ impl NFO<'_> {
                                 })
                                 .await?;
                         }
-                    } else if let Some(ref staff_info) = tvshow.staff_info {
+                    } else if let Some(staff_info) = tvshow.staff_info {
                         // 使用联合投稿的staff信息（包含头像）
                         let staff_list = Self::parse_staff_info(staff_info);
                         for (index, (mid, name, title, face)) in staff_list.iter().enumerate() {
@@ -1218,7 +1218,7 @@ impl NFO<'_> {
                                 })
                                 .await?;
                         }
-                    } else if let Some(ref staff_info) = episode.staff_info {
+                    } else if let Some(staff_info) = episode.staff_info {
                         let staff_list = Self::parse_staff_info(staff_info);
                         for (index, (mid, name, title, face)) in staff_list.iter().enumerate() {
                             let mid_value = *mid;
@@ -1579,7 +1579,7 @@ impl NFO<'_> {
                                 })
                                 .await?;
                         }
-                    } else if let Some(ref staff_info) = season.staff_info {
+                    } else if let Some(staff_info) = season.staff_info {
                         // 使用联合投稿的staff信息（包含头像）
                         let staff_list = Self::parse_staff_info(staff_info);
                         for (index, (mid, name, title, face)) in staff_list.iter().enumerate() {

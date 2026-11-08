@@ -1158,7 +1158,7 @@ impl<'a> Video<'a> {
         // 生成弹幕防挡参数（使用会话固定的硬件指纹）
         let dm_img_str = hardware.generate_dm_img_str();
         let dm_cover_img_str = hardware.generate_dm_cover_img_str();
-        let dm_img_list = fingerprint.generate_dm_img_list(page.duration as u32);
+        let dm_img_list = fingerprint.generate_dm_img_list(page.duration);
         let dm_img_inter = fingerprint.generate_dm_img_inter();
 
         // 增强的API参数配置，包含硬件指纹和弹幕防挡参数
@@ -1551,7 +1551,7 @@ impl<'a> Video<'a> {
         // 生成弹幕防挡参数（使用会话固定的硬件指纹）
         let dm_img_str = hardware.generate_dm_img_str();
         let dm_cover_img_str = hardware.generate_dm_cover_img_str();
-        let dm_img_list = fingerprint.generate_dm_img_list(page.duration as u32);
+        let dm_img_list = fingerprint.generate_dm_img_list(page.duration);
         let dm_img_inter = fingerprint.generate_dm_img_inter();
 
         // 增强的番剧API参数配置，包含硬件指纹和弹幕防挡参数
@@ -1731,7 +1731,7 @@ impl<'a> Video<'a> {
         let hardware = fingerprint.get_hardware();
         let dm_img_str = hardware.generate_dm_img_str();
         let dm_cover_img_str = hardware.generate_dm_cover_img_str();
-        let dm_img_list = fingerprint.generate_dm_img_list(page.duration as u32);
+        let dm_img_list = fingerprint.generate_dm_img_list(page.duration);
         let dm_img_inter = fingerprint.generate_dm_img_inter();
 
         let params = [
@@ -1848,7 +1848,7 @@ impl<'a> Video<'a> {
         let mut res = self
             .client
             .client // 这里可以直接使用 inner_client，因为该请求不需要鉴权
-            .request(Method::GET, format!("https:{}", &info.subtitle_url).as_str(), None)
+            .request(Method::GET, format!("https:{}", info.subtitle_url).as_str(), None)
             .send()
             .await?
             .error_for_status()?
@@ -2035,6 +2035,19 @@ pub fn aid_from_bvid_or_av(value: &str) -> String {
     "0".to_string()
 }
 
+pub(crate) fn effective_playurl_qn_range(
+    max_qn: u32,
+    min_qn: u32,
+    audio_only: bool,
+    audio_only_use_low_qn_for_playurl: bool,
+) -> (u32, u32) {
+    if audio_only && audio_only_use_low_qn_for_playurl {
+        (16, 16)
+    } else {
+        (max_qn, min_qn)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2080,18 +2093,5 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(40));
 
         *PLAYURL_RISK_COOLDOWN_UNTIL.lock().await = None;
-    }
-}
-
-pub(crate) fn effective_playurl_qn_range(
-    max_qn: u32,
-    min_qn: u32,
-    audio_only: bool,
-    audio_only_use_low_qn_for_playurl: bool,
-) -> (u32, u32) {
-    if audio_only && audio_only_use_low_qn_for_playurl {
-        (16, 16)
-    } else {
-        (max_qn, min_qn)
     }
 }

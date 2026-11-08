@@ -243,11 +243,7 @@ impl Default for Client {
 }
 
 fn response_body_preview(text: &str) -> String {
-    text.chars()
-        .take(200)
-        .collect::<String>()
-        .replace('\r', " ")
-        .replace('\n', " ")
+    text.chars().take(200).collect::<String>().replace(['\r', '\n'], " ")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -535,12 +531,12 @@ impl BiliClient {
         page_size: u32,
     ) -> Result<SearchResponseWrapper> {
         match self.search_via_legacy_type(keyword, search_type, page, page_size).await {
-            Ok(wrapper) => return Ok(wrapper),
+            Ok(wrapper) => Ok(wrapper),
             Err(err) => {
                 warn!("旧搜索接口失败，回退 WBI 搜索接口: {:#}", err);
                 let legacy_error = err;
                 match self.search_via_wbi_type(keyword, search_type, page, page_size).await {
-                    Ok(wrapper) => return Ok(wrapper),
+                    Ok(wrapper) => Ok(wrapper),
                     Err(err) => {
                         warn!("WBI 搜索接口失败，最后回退 all/v2 搜索接口: {:#}", err);
                         return self

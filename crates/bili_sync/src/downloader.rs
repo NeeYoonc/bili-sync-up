@@ -339,16 +339,16 @@ impl Downloader {
         };
         let (_, ranges) = build_parallel_ranges(total_size, 1, true, segment, 1);
         for (start, end) in ranges {
-            download_range_to_file_with_retry(
-                self.client.clone(),
+            download_range_to_file_with_retry(DownloadRangeInput {
+                client: self.client.clone(),
                 url,
                 path,
                 start,
                 end,
-                RANGE_DOWNLOAD_ATTEMPTS,
+                attempts: RANGE_DOWNLOAD_ATTEMPTS,
                 referer,
-                None,
-            )
+                cookie: None,
+            })
             .await?;
         }
         Ok(())
@@ -419,16 +419,16 @@ impl Downloader {
         let mut progress_done = progress_base;
         let progress_path = path.display().to_string();
         for (start, end) in pending {
-            download_range_to_file_with_retry(
-                self.client.clone(),
+            download_range_to_file_with_retry(DownloadRangeInput {
+                client: self.client.clone(),
                 url,
                 path,
                 start,
                 end,
-                RANGE_DOWNLOAD_ATTEMPTS,
+                attempts: RANGE_DOWNLOAD_ATTEMPTS,
                 referer,
                 cookie,
-            )
+            })
             .await?;
             append_completed_range(&sidecar, start, end).await;
             progress_done = progress_done.saturating_add(end.saturating_sub(start) + 1);
@@ -618,16 +618,16 @@ impl Downloader {
             file.set_len(total_size).await?;
             drop(file);
             let (part_start, part_end) = ranges[0];
-            download_range_to_file_with_retry(
-                self.client.clone(),
+            download_range_to_file_with_retry(DownloadRangeInput {
+                client: self.client.clone(),
                 url,
                 path,
-                part_start,
-                part_end,
-                RANGE_DOWNLOAD_ATTEMPTS,
+                start: part_start,
+                end: part_end,
+                attempts: RANGE_DOWNLOAD_ATTEMPTS,
                 referer,
                 cookie,
-            )
+            })
             .await?;
             crate::download_progress::DOWNLOAD_PROGRESS
                 .report_bytes(&path.display().to_string(), total_size)
@@ -719,16 +719,16 @@ impl Downloader {
             let downloaded_counter = downloaded_counter.clone();
             let progress_path = progress_path.clone();
             async move {
-                let result = download_range_to_file_with_retry(
+                let result = download_range_to_file_with_retry(DownloadRangeInput {
                     client,
-                    &url,
-                    &path,
-                    part_start,
-                    part_end,
-                    RANGE_DOWNLOAD_ATTEMPTS,
-                    referer.as_deref(),
-                    cookie.as_deref(),
-                )
+                    url: &url,
+                    path: &path,
+                    start: part_start,
+                    end: part_end,
+                    attempts: RANGE_DOWNLOAD_ATTEMPTS,
+                    referer: referer.as_deref(),
+                    cookie: cookie.as_deref(),
+                })
                 .await;
                 if result.is_ok() {
                     // 记录已完成分片：失败时保留状态，下次可断点续传
@@ -767,16 +767,16 @@ impl Downloader {
             // 通常能过；已经下完的分片不会白下，也不用整体重来。
             tokio::time::sleep(Duration::from_secs(3)).await;
             for (start, end) in failed_ranges {
-                let bytes = download_range_to_file_with_retry(
-                    self.client.clone(),
+                let bytes = download_range_to_file_with_retry(DownloadRangeInput {
+                    client: self.client.clone(),
                     url,
                     path,
                     start,
                     end,
-                    RANGE_DOWNLOAD_ATTEMPTS,
+                    attempts: RANGE_DOWNLOAD_ATTEMPTS,
                     referer,
                     cookie,
-                )
+                })
                 .await
                 .with_context(|| format!("Range 分片补下仍失败: bytes={start}-{end}"))?;
                 append_completed_range(&sidecar, start, end).await;
@@ -1288,10 +1288,10 @@ fn build_parallel_ranges(
         return (concurrency, ranges);
     }
 
-    let max_segments = ((total_size + MIN_SEGMENT_SIZE - 1) / MIN_SEGMENT_SIZE) as usize;
+    let max_segments = total_size.div_ceil(MIN_SEGMENT_SIZE) as usize;
     // 大文件不按「并发数」均分，而是限制单个分片的大小上限：限速 CDN 上小分片
     // 才能靠断点续传逐步推进（见 DEFAULT_SEGMENT_SIZE 的说明）。
-    let max_by_size = ((total_size + DEFAULT_SEGMENT_SIZE - 1) / DEFAULT_SEGMENT_SIZE) as usize;
+    let max_by_size = total_size.div_ceil(DEFAULT_SEGMENT_SIZE) as usize;
     let segment_count = concurrency.max(max_by_size).min(max_segments).max(1);
     let base = total_size / segment_count as u64;
     let mut ranges = Vec::with_capacity(segment_count);
@@ -1308,16 +1308,28 @@ fn build_parallel_ranges(
     (concurrency, ranges)
 }
 
-async fn download_range_to_file_with_retry(
+struct DownloadRangeInput<'a> {
     client: Client,
-    url: &str,
-    path: &Path,
+    url: &'a str,
+    path: &'a Path,
     start: u64,
     end: u64,
     attempts: usize,
-    referer: Option<&str>,
-    cookie: Option<&str>,
-) -> Result<u64> {
+    referer: Option<&'a str>,
+    cookie: Option<&'a str>,
+}
+
+async fn download_range_to_file_with_retry(p: DownloadRangeInput<'_>) -> Result<u64> {
+    let DownloadRangeInput {
+        client,
+        url,
+        path,
+        start,
+        end,
+        attempts,
+        referer,
+        cookie,
+    } = p;
     let mut last_error = None;
     for attempt in 1..=attempts.max(1) {
         match download_range_to_file(client.clone(), url, path, start, end, referer, cookie).await {
@@ -1939,7 +1951,7 @@ mod tests {
         let (concurrency, ranges) = build_parallel_ranges(total_size, 16, false, 0, 16);
 
         assert_eq!(concurrency, 16, "并发数不应被放大");
-        let expected = ((total_size + DEFAULT_SEGMENT_SIZE - 1) / DEFAULT_SEGMENT_SIZE) as usize;
+        let expected = total_size.div_ceil(DEFAULT_SEGMENT_SIZE) as usize;
         assert_eq!(ranges.len(), expected);
         // 除最后一片外都不超过上限
         for range in &ranges[..ranges.len() - 1] {
@@ -2191,8 +2203,10 @@ mod tests {
         assert_eq!(written, data, "续传后文件内容应与源完全一致");
 
         // 续传只请求了缺失的首个分片
-        let reqs = requested.lock().unwrap();
-        let second_round = &reqs[requested_before..];
+        let second_round: Vec<_> = {
+            let reqs = requested.lock().unwrap();
+            reqs[requested_before..].to_vec()
+        };
         assert!(!second_round.is_empty(), "续传应至少请求一次缺失分片");
         assert!(
             second_round.iter().all(|(s, _)| *s == 0),
@@ -2234,7 +2248,7 @@ mod tests {
     async fn parallel_download_resumes_after_connection_drop() {
         let data: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         // 服务器 A：收到首个分片 (0..2MB) 请求时直接断开连接并停止服务（模拟节点挂掉）
-        let (url_a, requested, _fail_start, _fail_left) = spawn_range_test_server(data.clone(), Some(0)).await;
+        let (url_a, _requested, _fail_start, _fail_left) = spawn_range_test_server(data.clone(), Some(0)).await;
         let dir = std::env::temp_dir().join(format!("bili-resume-drop-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir).await;
         let path = dir.join("video.tmp_video");
@@ -2287,7 +2301,10 @@ mod tests {
         assert_eq!(written, data, "重连续传后文件内容应与源完全一致");
 
         // 服务器 B 只收到了缺失分片的请求
-        let reqs = requested_b.lock().unwrap();
+        let reqs: Vec<_> = {
+            let guard = requested_b.lock().unwrap();
+            guard.clone()
+        };
         assert!(!reqs.is_empty(), "重连后应至少请求一次缺失分片");
         assert!(
             reqs.iter().all(|(s, _)| *s == 0),
