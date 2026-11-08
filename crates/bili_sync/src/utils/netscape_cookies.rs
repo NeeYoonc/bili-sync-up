@@ -5,12 +5,10 @@
 //! 本模块把响应里的 `Set-Cookie` 合并写回 cookies.txt，让工具像浏览器一样
 //! 持续续约，而不是等到过期后才提示重新导入。
 
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cookie::Cookie;
 use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
-use tracing::{debug, warn};
 
 /// cookies.txt 中的一行 Cookie。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,63 +202,6 @@ pub fn renew_cookie_text(
         return None;
     }
     Some(serialized)
-}
-
-/// 把响应头里的 `Set-Cookie` 合并写回 cookies.txt（浏览器式被动续约）。
-/// 没有变化时不会触碰文件；读取/写入失败只告警，不阻断请求。
-pub async fn renew_cookie_file(
-    path: &Path,
-    headers: &HeaderMap,
-    fallback_domain: &str,
-    allowed_domain: impl Fn(&str) -> bool,
-) {
-    let values = headers.get_all(SET_COOKIE).iter().collect::<Vec<&HeaderValue>>();
-    if values.is_empty() {
-        return;
-    }
-    let Ok(contents) = tokio::fs::read_to_string(path).await else {
-        return;
-    };
-    let mut rows = parse_netscape(&contents);
-    let mut changed = false;
-    for value in values {
-        let Ok(text) = value.to_str() else {
-            continue;
-        };
-        changed |= merge_set_cookie(&mut rows, text, fallback_domain, &allowed_domain);
-    }
-    if !changed {
-        return;
-    }
-    let serialized = serialize_netscape(&rows);
-    if serialized == contents {
-        return;
-    }
-    // 先写临时文件再替换，避免写入一半留下损坏的 cookies.txt。
-    let temporary = path.with_extension("txt.renewing");
-    if let Err(error) = tokio::fs::write(&temporary, serialized.as_bytes()).await {
-        warn!(path = %path.display(), error = %error, "写入续约后的 Cookie 文件失败");
-        return;
-    }
-    match replace_atomic(&temporary, path).await {
-        Ok(()) => debug!(path = %path.display(), "Cookie 续约完成（合并服务端 Set-Cookie）"),
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            warn!(path = %path.display(), error = %error, "替换续约后的 Cookie 文件失败");
-        }
-    }
-}
-
-async fn replace_atomic(temporary: &Path, target: &Path) -> std::io::Result<()> {
-    match tokio::fs::rename(temporary, target).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            // Windows 下目标已存在时 rename 会拒绝；先删除旧文件再替换。
-            let _ = tokio::fs::remove_file(target).await;
-            tokio::fs::rename(temporary, target).await
-        }
-        Err(error) => Err(error),
-    }
 }
 
 #[cfg(test)]

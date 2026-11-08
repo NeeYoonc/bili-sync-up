@@ -277,8 +277,6 @@ pub struct MangaComic {
 /// B 漫一页。
 #[derive(Debug, Clone)]
 pub struct MangaPage {
-    pub index: u32,
-    pub path: String,
     pub url: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -697,21 +695,13 @@ fn with_cdn_code(url: String) -> String {
 pub async fn fetch_chapter_pages(ep_id: &str) -> Result<(Vec<MangaPage>, Option<String>)> {
     let result = run_sidecar("chapter-pages", serde_json::json!({ "ep_id": ep_id })).await?;
     let mut pages = Vec::new();
-    for (index, item) in result["pages"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-    {
+    for item in result["pages"].as_array().cloned().unwrap_or_default().iter() {
         let raw_url = item["url"].as_str().unwrap_or_default().to_string();
         if raw_url.is_empty() {
             continue;
         }
         let url = with_cdn_code(raw_url);
         pages.push(MangaPage {
-            index: item["index"].as_u64().map(|v| v as u32).unwrap_or(index as u32),
-            path: item["path"].as_str().unwrap_or_default().to_string(),
             url,
             width: item["x"].as_u64().map(|v| v as u32).filter(|v| *v > 0),
             height: item["y"].as_u64().map(|v| v as u32).filter(|v| *v > 0),
@@ -818,7 +808,6 @@ impl Manga {
                 emitted += 1;
                 yield VideoInfo::Manga {
                     title: comic.title.clone(),
-                    media_id: comic.comic_id.clone(),
                     ep_id: episode.ep_id.clone(),
                     bvid: episode.ep_id.clone(),
                     cover: first_non_empty(&[episode.cover.as_str(), comic.cover.as_str()]),
@@ -828,9 +817,6 @@ impl Manga {
                     episode_number: episode.episode_number(),
                     share_copy,
                     author: Some(comic.author.clone()).filter(|value| !value.is_empty()),
-                    is_special: episode.is_special(),
-                    page_count: Some(episode.image_count as i32),
-                    is_finish: Some(comic.is_finish),
                 };
             }
 

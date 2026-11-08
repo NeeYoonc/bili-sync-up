@@ -577,10 +577,6 @@ async fn copy_tiktok_sdk_dir(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-fn has_tiktok_session(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|contents| is_netscape_tiktok_cookie_file(&contents))
-}
-
 /// TikTok 是否已导入会话（cookies 有效）。
 fn tiktok_has_session() -> bool {
     tiktok_cookie_text().is_some_and(|contents| is_netscape_tiktok_cookie_file(&contents))
@@ -651,31 +647,6 @@ async fn clear_tiktok_login_state_files_except(exclude: Option<&Path>) {
     }
     if removed > 0 {
         info!(removed, "已清理旧版 TikTok 登录状态文件，重新导入新会话");
-    }
-}
-
-async fn replace_cookie_file(temporary: &Path, target: &Path) -> Result<()> {
-    let backup = target.with_extension("txt.backup");
-    let had_target = tokio::fs::try_exists(target).await?;
-    if tokio::fs::try_exists(&backup).await? {
-        tokio::fs::remove_file(&backup).await?;
-    }
-    if had_target {
-        tokio::fs::rename(target, &backup).await?;
-    }
-    match tokio::fs::rename(temporary, target).await {
-        Ok(()) => {
-            if had_target {
-                let _ = tokio::fs::remove_file(&backup).await;
-            }
-            Ok(())
-        }
-        Err(error) => {
-            if had_target {
-                let _ = tokio::fs::rename(&backup, target).await;
-            }
-            Err(error).context("保存 TikTok cookies.txt 失败")
-        }
     }
 }
 
@@ -3779,7 +3750,7 @@ async fn extract_tiktok_media_detail_inner(url: &str, attempts: usize) -> Result
                 })
                 .collect::<Vec<_>>();
             ranked.sort_by_key(|(bitrate, _, _)| *bitrate);
-            if let Some((bitrate, codec, urls)) = ranked.last() {
+            if let Some((bitrate, codec, _)) = ranked.last() {
                 best_bitrate = *bitrate;
                 best_codec = codec.clone();
             }

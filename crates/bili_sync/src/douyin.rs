@@ -358,7 +358,6 @@ pub(crate) struct DouyinDanmaku {
 
 struct PostPage {
     posts: Vec<DouyinPost>,
-    profile: Option<DouyinProfile>,
     has_more: bool,
     cursor: i64,
 }
@@ -2527,11 +2526,6 @@ pub async fn resolve_sec_user_id(value: &str) -> Result<String> {
     bail!("无法从抖音作者链接中识别 sec_user_id，请使用作者主页链接")
 }
 
-pub async fn fetch_all_posts(source_url: &str) -> Result<Vec<DouyinPost>> {
-    let sec_uid = resolve_sec_user_id(source_url).await?;
-    fetch_posts_until(&sec_uid, usize::MAX, None).await
-}
-
 pub async fn fetch_profile(source_url: &str) -> Result<DouyinProfile> {
     let sec_uid = resolve_sec_user_id(source_url).await?;
     let mut pairs = common_query_pairs();
@@ -2807,16 +2801,9 @@ async fn fetch_post_page(sec_uid: &str, cursor: i64, count: i32) -> Result<PostP
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let profile = awemes
-        .first()
-        .and_then(|item| item.get("author"))
-        .map(|author| DouyinProfile {
-            avatar_url: image_url(author.get("avatar_larger").or_else(|| author.get("avatar_thumb"))),
-        });
     let posts = awemes.iter().filter_map(parse_post).collect::<Vec<_>>();
     Ok(PostPage {
         posts,
-        profile,
         has_more: response
             .get("has_more")
             .and_then(serde_json::Value::as_i64)
@@ -3434,10 +3421,6 @@ async fn stable_verify_fp() -> Result<String> {
     Ok(value)
 }
 
-fn ms_token_path() -> PathBuf {
-    CONFIG_DIR.join("douyin-mstoken.txt")
-}
-
 fn valid_ms_token(value: &str) -> bool {
     matches!(value.trim().len(), 164 | 184)
 }
@@ -3840,10 +3823,6 @@ fn ensure_session() -> Result<()> {
     }
 }
 
-fn has_douyin_session(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|contents| is_netscape_douyin_cookie_file(&contents))
-}
-
 fn is_netscape_douyin_cookie_file(contents: &str) -> bool {
     let has_header = contents
         .lines()
@@ -3904,38 +3883,6 @@ fn is_douyin_cookie_domain(domain: &str) -> bool {
         || domain.ends_with(".douyin.com")
         || domain == "bytedance.com"
         || domain.ends_with(".bytedance.com")
-}
-
-async fn replace_cookie_file(temporary: &Path, target: &Path) -> Result<()> {
-    let backup = target.with_extension("txt.backup");
-    let had_target = tokio::fs::try_exists(target).await?;
-    if tokio::fs::try_exists(&backup).await? {
-        tokio::fs::remove_file(&backup).await?;
-    }
-    if had_target {
-        tokio::fs::rename(target, &backup).await?;
-    }
-    match tokio::fs::rename(temporary, target).await {
-        Ok(()) => {
-            if had_target {
-                let _ = tokio::fs::remove_file(&backup).await;
-            }
-            Ok(())
-        }
-        Err(error) => {
-            if had_target {
-                let _ = tokio::fs::rename(&backup, target).await;
-            }
-            Err(error.into())
-        }
-    }
-}
-
-async fn persist_session_value(path: &Path, value: &str) -> Result<()> {
-    tokio::fs::create_dir_all(&*CONFIG_DIR).await?;
-    let temporary = path.with_extension("txt.importing");
-    tokio::fs::write(&temporary, value.as_bytes()).await?;
-    replace_cookie_file(&temporary, path).await
 }
 
 fn image_url(value: Option<&serde_json::Value>) -> Option<String> {

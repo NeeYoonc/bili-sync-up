@@ -44,21 +44,6 @@ pub mod keys {
     pub const TIKTOK_ODIN_ID: &str = "tiktok.odin_id";
     /// TikTok 手动设置的设备 ID（webid）
     pub const TIKTOK_WEBID: &str = "tiktok.webid";
-
-    /// 所有平台凭证键，供启动加载与迁移扫描使用。
-    pub const ALL: &[&str] = &[
-        YOUTUBE_COOKIES,
-        DOUYIN_COOKIES,
-        DOUYIN_SECSDK,
-        DOUYIN_MSTOKEN,
-        DOUYIN_WEBID,
-        DOUYIN_VERIFY_FP,
-        TIKTOK_COOKIES,
-        TIKTOK_LOCALSTORAGE,
-        TIKTOK_SECUID,
-        TIKTOK_ODIN_ID,
-        TIKTOK_WEBID,
-    ];
 }
 
 struct CredentialEntry {

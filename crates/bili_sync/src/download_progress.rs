@@ -63,22 +63,6 @@ struct TaskState {
     streams: HashMap<String, StreamState>,
 }
 
-impl TaskState {
-    fn total_bytes(&self) -> u64 {
-        self.streams
-            .values()
-            .map(|s| s.total_bytes.load(Ordering::Relaxed))
-            .sum()
-    }
-
-    fn downloaded_bytes(&self) -> u64 {
-        self.streams
-            .values()
-            .map(|s| s.downloaded_bytes.load(Ordering::Relaxed))
-            .sum()
-    }
-}
-
 pub struct DownloadProgress {
     /// key -> 任务
     tasks: RwLock<HashMap<String, TaskState>>,
@@ -274,26 +258,6 @@ impl DownloadProgress {
             drop(last);
             live_updates::notify_downloads_changed();
         }
-    }
-}
-
-/// 兜底：任务被异常跳过（未显式 finish）时，清理其绑定的流路径。
-pub async fn cleanup_stale_paths(paths: &[String]) {
-    if paths.is_empty() {
-        return;
-    }
-    let mut map = DOWNLOAD_PROGRESS.path_to_key.write().await;
-    let mut keys_to_finish = Vec::new();
-    for path in paths {
-        if let Some(key) = map.remove(path) {
-            if !keys_to_finish.contains(&key) {
-                keys_to_finish.push(key);
-            }
-        }
-    }
-    drop(map);
-    for key in keys_to_finish {
-        DOWNLOAD_PROGRESS.finish_task(&key).await;
     }
 }
 
