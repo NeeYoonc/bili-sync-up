@@ -68,12 +68,14 @@ docker run -d \
   qq1582185982/bili-sync:latest
 ```
 
+> 镜像同时发布在 Docker Hub（`qq1582185982/bili-sync`）和 CNB（`docker.cnb.cool/sviplk.com/docker/bili-sync`）两个仓库：首选 Docker Hub，国内网络拉不动时把上面的镜像名换成 CNB 地址即可（tag 相同）。
+
 ### docker-compose
 ```yaml
 services:
 
   bili-sync:
-    image: docker.cnb.cool/sviplk.com/docker/bili-sync:latest
+    image: qq1582185982/bili-sync:latest   # 国内网络拉不动 Docker Hub 时，换成 docker.cnb.cool/sviplk.com/docker/bili-sync:latest
     # build:
     #   context: .
     #   dockerfile: Dockerfile
