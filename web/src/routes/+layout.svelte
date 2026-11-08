@@ -3,6 +3,7 @@
 	import AppSidebar from '$lib/components/app-sidebar.svelte';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { Toaster } from '$lib/components/ui/sonner/index.js';
 	import { breadcrumbStore } from '$lib/stores/breadcrumb';
 	import BreadCrumb from '$lib/components/bread-crumb.svelte';
@@ -32,7 +33,7 @@
 	function handleLogout() {
 		api.setAuthToken('');
 		isAuthenticated = false;
-		goto('/');
+		goto(resolve('/'));
 		window.location.reload(); // 重新加载页面以清除状态
 	}
 
@@ -274,7 +275,7 @@
 							<ResponsiveButton
 								size="sm"
 								variant="outline"
-								onclick={() => goto('/changelog')}
+								onclick={() => goto(resolve('/changelog'))}
 								icon={ScrollText}
 								text="更新记录"
 								showTextFrom="lg"

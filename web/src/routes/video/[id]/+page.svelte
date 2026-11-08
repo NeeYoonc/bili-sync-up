@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { SvelteSet } from 'svelte/reactivity';
 	import { page } from '$app/stores';
 	import api from '$lib/api';
 	import StatusEditor from '$lib/components/status-editor.svelte';
@@ -13,7 +15,6 @@
 		setVideoIds,
 		setCurrentPage,
 		setVideoListInfo,
-		setTotalCount,
 		setPlatform,
 		ToQuery
 	} from '$lib/stores/filter';
@@ -98,7 +99,7 @@
 		imageUrls.length > 0 ? Math.min(Math.max(currentImageIndex, 0), imageUrls.length - 1) : 0;
 
 	function videoDetailHref(videoId: number) {
-		return isExternal ? `/video/${externalPlatform}-${videoId}` : `/video/${videoId}`;
+		return resolve(isExternal ? `/video/${externalPlatform}-${videoId}` : `/video/${videoId}`);
 	}
 
 	function showChargeLockedToast(mode: 'local') {
@@ -333,7 +334,7 @@
 	}
 
 	async function handleRefreshPageDanmaku(pageId: number) {
-		refreshingPageIds = new Set(refreshingPageIds).add(pageId);
+		refreshingPageIds = new SvelteSet(refreshingPageIds).add(pageId);
 		try {
 			const result = await api.refreshPageDanmaku(pageId);
 			toast.success('分页弹幕刷新完成', {
@@ -346,7 +347,7 @@
 				description: (error as ApiError).message
 			});
 		} finally {
-			const next = new Set(refreshingPageIds);
+			const next = new SvelteSet(refreshingPageIds);
 			next.delete(pageId);
 			refreshingPageIds = next;
 		}
@@ -355,6 +356,7 @@
 	// 响应式相关
 	const isMobileQuery = new IsMobile();
 	let isMobile: boolean = false;
+	// eslint-disable-next-line svelte/no-immutable-reactive-statements -- isMobileQuery.current 是 MediaQuery 的响应式 getter（svelte/reactivity），规则看不到，属误报
 	$: isMobile = isMobileQuery.current;
 
 	// 视频导航相关
@@ -586,7 +588,7 @@
 				label: '视频管理',
 				onClick: () => {
 					const query = ToQuery($appStateStore);
-					goto(query ? `/videos?${query}` : '/videos');
+					goto(resolve(query ? `/videos?${query}` : '/videos'));
 				}
 			},
 			{ label: '视频详情', isActive: true }
@@ -749,13 +751,13 @@
 							} else {
 								// 没有更多视频，返回视频管理页面
 								const query = ToQuery(state);
-								goto(query ? `/videos?${query}` : '/videos');
+								goto(resolve(query ? `/videos?${query}` : '/videos'));
 								return;
 							}
 						} else {
 							// 没有更多视频，返回视频管理页面
 							const query = ToQuery(state);
-							goto(query ? `/videos?${query}` : '/videos');
+							goto(resolve(query ? `/videos?${query}` : '/videos'));
 							return;
 						}
 					}
@@ -771,7 +773,7 @@
 				} else {
 					// 列表为空或没有更多视频，返回视频管理页面
 					const query = ToQuery(state);
-					goto(query ? `/videos?${query}` : '/videos');
+					goto(resolve(query ? `/videos?${query}` : '/videos'));
 				}
 			} else {
 				toast.error('视频删除失败', {
@@ -801,7 +803,7 @@
 			<p class="text-destructive">{error}</p>
 			<button
 				class="text-muted-foreground hover:text-foreground text-sm transition-colors"
-				onclick={() => goto('/')}
+				onclick={() => goto(resolve('/'))}
 			>
 				返回首页
 			</button>

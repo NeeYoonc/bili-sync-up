@@ -149,7 +149,8 @@
 				description: response.data.message
 			});
 		} finally {
-			const { [taskId]: _removed, ...rest } = cancellingTaskIds;
+			const rest = { ...cancellingTaskIds };
+			delete rest[taskId];
 			cancellingTaskIds = rest;
 		}
 	}

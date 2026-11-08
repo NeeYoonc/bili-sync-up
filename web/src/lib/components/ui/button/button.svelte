@@ -1,6 +1,7 @@
 <script lang="ts" module>
 	import { cn, type WithElementRef } from '$lib/utils.js';
 	import type { HTMLAnchorAttributes, HTMLButtonAttributes } from 'svelte/elements';
+	import type { ResolvedPathname } from '$app/types';
 	import { type VariantProps, tv } from 'tailwind-variants';
 
 	export const buttonVariants = tv({
@@ -32,10 +33,13 @@
 	export type ButtonVariant = VariantProps<typeof buttonVariants>['variant'];
 	export type ButtonSize = VariantProps<typeof buttonVariants>['size'];
 
+	// Button 的 href 分支用于应用内跳转，统一用 resolve() 结果（ResolvedPathname），
+	// 外部链接请用普通 <a> 标签，避免把 SvelteKit 的 base path 拼错。
 	export type ButtonProps = WithElementRef<HTMLButtonAttributes> &
-		WithElementRef<HTMLAnchorAttributes> & {
+		Omit<WithElementRef<HTMLAnchorAttributes>, 'href'> & {
 			variant?: ButtonVariant;
 			size?: ButtonSize;
+			href?: ResolvedPathname;
 		};
 </script>
 

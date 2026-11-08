@@ -2,6 +2,8 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { SvelteSet } from 'svelte/reactivity';
 	import VideoCard from '$lib/components/video-card.svelte';
 	import Pagination from '$lib/components/pagination.svelte';
 	import SearchBar from '$lib/components/search-bar.svelte';
@@ -212,7 +214,7 @@
 
 	// 批量选择状态
 	let selectionMode = false;
-	let selectedVideos: Set<number> = new Set();
+	let selectedVideos: Set<number> = new SvelteSet();
 	let batchDeleting = false;
 	let batchDeleteDialogOpen = false;
 
@@ -246,7 +248,7 @@
 
 	function buildVideosUrl() {
 		const query = ToQuery($appStateStore);
-		return query ? `/videos?${query}` : '/videos';
+		return resolve(query ? `/videos?${query}` : '/videos');
 	}
 
 	async function applyPageSize(value: number) {
@@ -465,8 +467,10 @@
 		pendingInsertedCount = 0;
 
 		if (selectionMode) {
-			const visibleIds = new Set(data.videos.map((video) => video.id));
-			const nextSelected = new Set(Array.from(selectedVideos).filter((id) => visibleIds.has(id)));
+			const visibleIds = new SvelteSet(data.videos.map((video) => video.id));
+			const nextSelected = new SvelteSet(
+				Array.from(selectedVideos).filter((id) => visibleIds.has(id))
+			);
 			if (nextSelected.size !== selectedVideos.size) {
 				selectedVideos = nextSelected;
 			}
@@ -526,7 +530,7 @@
 	async function handlePendingInsertedClick() {
 		pendingInsertedCount = 0;
 		setCurrentPage(0);
-		await goto(`/videos?${ToQuery($appStateStore)}`);
+		await goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 	}
 
 	async function loadVideos(
@@ -605,7 +609,7 @@
 
 	async function handlePageChange(pageNum: number) {
 		setCurrentPage(pageNum);
-		goto(`/videos?${ToQuery($appStateStore)}`);
+		goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 	}
 
 	async function handleSearchParamsChange(searchParams: URLSearchParams) {
@@ -670,7 +674,7 @@
 		showFailedOnly = false;
 		selectionMode = false;
 		clearSelection();
-		goto(platform === 'bilibili' ? '/videos' : `/videos?platform=${platform}`);
+		goto(resolve(platform === 'bilibili' ? '/videos' : `/videos?platform=${platform}`));
 	}
 
 	async function handleResetVideo(video: VideoInfo, forceReset: boolean) {
@@ -855,7 +859,7 @@
 			range ? range.min : null,
 			range ? range.max : null
 		);
-		goto(`/videos?${ToQuery($appStateStore)}`);
+		goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 	}
 
 	function clearFilters() {
@@ -867,7 +871,7 @@
 		currentSortOrder = 'desc';
 		setAll('', 0, null, false, 'id', 'desc', null, null);
 		const query = ToQuery($appStateStore);
-		goto(query ? `/videos?${query}` : '/videos');
+		goto(resolve(query ? `/videos?${query}` : '/videos'));
 	}
 
 	function handleSortChange(sortBy: SortBy, sortOrder: SortOrder) {
@@ -875,7 +879,7 @@
 		currentSortOrder = sortOrder;
 		setSort(sortBy, sortOrder);
 		resetCurrentPage();
-		goto(`/videos?${ToQuery($appStateStore)}`);
+		goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 	}
 
 	function handleResolutionChange(value: string) {
@@ -906,7 +910,7 @@
 			maxHeight: nextMaxHeight
 		};
 		const nextQuery = ToQuery(nextState);
-		goto(nextQuery ? `/videos?${nextQuery}` : '/videos');
+		goto(resolve(nextQuery ? `/videos?${nextQuery}` : '/videos'));
 	}
 
 	// 处理重置任务选择
@@ -1105,7 +1109,7 @@
 							onSearch={(value) => {
 								setQuery(value);
 								resetCurrentPage();
-								goto(`/videos?${ToQuery($appStateStore)}`);
+								goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 							}}
 						/>
 					</div>
@@ -1188,7 +1192,7 @@
 									showFailedOnly = !showFailedOnly;
 									setShowFailedOnly(showFailedOnly);
 									resetCurrentPage();
-									goto(`/videos?${ToQuery($appStateStore)}`);
+									goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 								}}
 							>
 								<span class="hidden sm:inline">只显示错误视频</span>
@@ -1429,7 +1433,7 @@
 									showFailedOnly = false;
 									setShowFailedOnly(false);
 									resetCurrentPage();
-									goto(`/videos?${ToQuery($appStateStore)}`);
+									goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 								}}
 								class="hover:bg-muted-foreground/20 ml-1 rounded"
 							>

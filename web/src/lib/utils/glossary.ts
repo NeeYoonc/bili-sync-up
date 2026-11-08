@@ -713,7 +713,7 @@ const GLOSSARY_ENTRIES: GlossaryEntry[] = [
 	}
 ];
 
-const NORMALIZE_REGEXP = /[\s:：()（）【】\[\]{}<>《》·•,，。.!！?？'"`~\/\\|]/g;
+const NORMALIZE_REGEXP = /[\s:：()（）【】[\]{}<>《》·•,，。.!！?？'"`~/\\|]/g;
 const TRAILING_SYMBOL_REGEXP = /[：:]+$|[.。…]+$/g;
 const LEADING_SYMBOL_REGEXP = /^[^A-Za-z0-9\u4e00-\u9fff]+/g;
 const STEP_PREFIX_REGEXP = /^(步骤\s*)?\d+[.、:：)\]]\s*/g;

@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { page } from '$app/stores';
 	import api from '$lib/api';
 	import BatchCheckbox from '$lib/components/batch-checkbox.svelte';
@@ -26,15 +28,12 @@
 		UserFollowing,
 		BangumiSeasonInfo,
 		BangumiSourceOption,
-		BangumiSourceListResponse,
 		PugvCourseItem,
 		MangaComicResponse,
-		VideoSourcesResponse,
 		ValidateFavoriteResponse,
 		ConfigResponse,
 		UserCollectionInfo,
 		AddVideoSourceRequest,
-		KeywordFilterMode,
 		FilterOption,
 		VideoQuality,
 		AudioQuality,
@@ -260,23 +259,19 @@
 
 	// 番剧合并相关
 	let existingBangumiSources: BangumiSourceOption[] = [];
-	let loadingBangumiSources = false;
 	let mergeToSourceId: number | null = null;
-	let showMergeOptions = false;
 	let cachedNameBeforeMerge = '';
 	let cachedPathBeforeMerge = '';
 	let isUsingMergedSourceMeta = false;
 
 	// 过滤已有视频源相关
-	let existingVideoSources: VideoSourcesResponse | null = null;
 	let existingDouyinSources: YouTubeSource[] = [];
 	let existingYouTubeSources: YouTubeSource[] = [];
 	let existingTikTokSources: YouTubeSource[] = [];
-	let existingCollectionIds: Set<string> = new Set();
-	let existingFavoriteIds: Set<number> = new Set();
-	let existingSubmissionIds: Set<number> = new Set();
-	let existingBangumiSeasonIds: Set<string> = new Set();
-	let loadingExistingSources = false;
+	let existingCollectionIds: Set<string> = new SvelteSet();
+	let existingFavoriteIds: Set<number> = new SvelteSet();
+	let existingSubmissionIds: Set<number> = new SvelteSet();
+	let existingBangumiSeasonIds: Set<string> = new SvelteSet();
 	let isMergingBangumi = false;
 
 	// 关键词过滤器相关（双列表模式）
@@ -299,8 +294,24 @@
 
 	// 批量添加相关
 	let batchMode = false; // 是否为批量模式
-	type BatchSelectedItem = { type: string; data: any; name: string };
-	let batchSelectedItems = new Map<string, BatchSelectedItem>(); // 存储选中项 {key: {type, data, name}}
+	// 批量选择项在「搜索/关注/收藏夹/合集/番剧」分支里分别是不同接口的返回值，这里只声明实际用到的字段
+	type BatchSelectedItemData = {
+		title?: string;
+		name?: string;
+		season_title?: string;
+		full_title?: string;
+		mid?: number | string;
+		up_mid?: number | string;
+		bvid?: string;
+		season_id?: number | string;
+		id?: number | string;
+		fid?: number | string;
+		sid?: number | string;
+		collection_type?: string;
+		cover?: string;
+	};
+	type BatchSelectedItem = { type: string; data: BatchSelectedItemData; name: string };
+	let batchSelectedItems: Map<string, BatchSelectedItem> = new SvelteMap(); // 存储选中项 {key: {type, data, name}}
 	let batchCheckboxStates: Record<string, boolean> = {}; // 存储checkbox状态的响应式对象
 	let batchBasePath = '/Downloads'; // 批量基础路径
 	let batchCollectionAggregateEnabled = false; // 批量添加合集时是否启用合集聚合
@@ -336,7 +347,9 @@
 	let isMobile: boolean = false;
 	let isTablet: boolean = false;
 	let isCompactLayout: boolean = false;
+	// eslint-disable-next-line svelte/no-immutable-reactive-statements -- isMobileQuery.current 是 MediaQuery 的响应式 getter（svelte/reactivity），规则看不到，属误报
 	$: isMobile = isMobileQuery.current;
+	// eslint-disable-next-line svelte/no-immutable-reactive-statements -- isTabletQuery.current 是 MediaQuery 的响应式 getter（svelte/reactivity），规则看不到，属误报
 	$: isTablet = isTabletQuery.current;
 	$: isCompactLayout = isMobile || isTablet;
 
@@ -659,6 +672,7 @@
 								: '';
 
 	function sanitizeQuickSubscriptionName(value: string): string {
+		// eslint-disable-next-line no-control-regex -- 文件名净化需要过滤控制字符，非笔误
 		return value.trim().replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '_');
 	}
 
@@ -687,6 +701,7 @@
 		return '';
 	}
 
+	// eslint-disable-next-line svelte/no-immutable-reactive-statements -- 函数内部读取了 $state 变量，规则不追踪函数体，属误报
 	$: downloadFilePathPreview = buildDownloadFilePathPreview();
 
 	function applyQuickSubscriptionPath(
@@ -801,7 +816,7 @@
 
 	// 投稿选择详细状态
 	let submissionVideos: SubmissionVideoInfo[] = [];
-	let selectedSubmissionVideos: Set<string> = new Set();
+	let selectedSubmissionVideos: Set<string> = new SvelteSet();
 	let submissionLoading = false;
 	let submissionError: string | null = null;
 	let submissionTotalCount = 0;
@@ -1725,7 +1740,7 @@
 			toast.success('添加成功', {
 				description: `${isDouyin ? '抖音' : isTiktok ? 'TikTok' : 'YouTube'}视频源“${result.data.name}”已创建`
 			});
-			goto(`/video-sources?platform=${sourcePlatform}`);
+			goto(resolve(`/video-sources?platform=${sourcePlatform}`));
 			return;
 		}
 
@@ -1909,7 +1924,7 @@
 					description:
 						failed.length > 0 ? `另有 ${failed.length} 门失败：${failed[0]}` : '可在视频源页查看'
 				});
-				goto('/video-sources');
+				goto(resolve('/video-sources'));
 			} else if (failed.length > 0) {
 				toast.error('添加课程失败', { description: failed[0] });
 			} else {
@@ -2043,7 +2058,7 @@
 			aiRenameEnableBangumi = false;
 			aiRenameRenameParentDir = false;
 			// 跳转到视频源管理页面
-			goto('/video-sources');
+			goto(resolve('/video-sources'));
 		} else {
 			toast.error('添加失败', { description: result.data.message });
 		}
@@ -2449,7 +2464,6 @@
 	// 获取现有番剧源列表（用于合并选择）
 	async function fetchExistingBangumiSources() {
 		const result = await runRequest(() => api.getBangumiSourcesForMerge(), {
-			setLoading: (value) => (loadingBangumiSources = value),
 			context: '获取现有番剧源失败',
 			onError: () => {
 				existingBangumiSources = [];
@@ -2597,12 +2611,9 @@
 	// 加载已有视频源（用于过滤）
 	async function loadExistingVideoSources() {
 		const result = await runRequest(() => api.getVideoSources(), {
-			setLoading: (value) => (loadingExistingSources = value),
 			context: '加载已有视频源失败'
 		});
 		if (!result?.data) return;
-
-		existingVideoSources = result.data;
 
 		// 处理合集：存储 s_id_m_id_type 的组合
 		existingCollectionIds.clear();
@@ -2768,7 +2779,6 @@
 		bangumiSeasonsFetchAttempted = false;
 		bangumiSeasons = [];
 		selectedSeasons = [];
-		showMergeOptions = false;
 		mergeToSourceId = null;
 	}
 
@@ -3091,7 +3101,7 @@
 	// 重置投稿选择状态
 	function resetSubmissionState() {
 		submissionVideos = [];
-		selectedSubmissionVideos = new Set(selectedVideos);
+		selectedSubmissionVideos = new SvelteSet(selectedVideos);
 		submissionLoading = false;
 		submissionError = null;
 		submissionTotalCount = 0;
@@ -3221,7 +3231,7 @@
 	}
 
 	// 搜索过滤投稿 - 使用后端API搜索
-	// eslint-disable-next-line svelte/infinite-reactive-loop
+
 	$: {
 		if (submissionSearchQuery.trim()) {
 			// 清除之前的搜索定时器
@@ -3582,7 +3592,7 @@
 				return sourceType;
 		}
 	}
-	function toggleBatchSelection(itemKey: string, item: any, itemType: string) {
+	function toggleBatchSelection(itemKey: string, item: BatchSelectedItemData, itemType: string) {
 		console.log('🔵 toggleBatchSelection called with:', {
 			itemKey,
 			itemType,
@@ -3600,6 +3610,7 @@
 			const newItemSourceType = resolveBatchItemSourceTypeByRawType(itemType);
 			if (batchSelectedItems.size > 0) {
 				const first = batchSelectedItems.values().next().value;
+				if (!first) return;
 				const currentBatchSourceType = getSourceTypeFromBatchItem(first);
 				if (newItemSourceType !== currentBatchSourceType) {
 					console.log('❌ Cross-type selection rejected');
@@ -3615,19 +3626,19 @@
 
 			switch (itemType) {
 				case 'search':
-					itemName = cleanTitle(item.title);
+					itemName = cleanTitle(item.title ?? '');
 					break;
 				case 'favorite':
 					itemName = getFavoriteDisplayName(item);
 					break;
 				case 'collection':
-					itemName = item.name || item.title;
+					itemName = item.name || item.title || '';
 					break;
 				case 'following':
-					itemName = item.name;
+					itemName = item.name || '';
 					break;
 				case 'bangumi':
-					itemName = item.season_title || item.title || item.full_title;
+					itemName = item.season_title || item.title || item.full_title || '';
 					break;
 			}
 
@@ -3644,7 +3655,7 @@
 			allKeys: Array.from(batchSelectedItems.keys())
 		});
 
-		batchSelectedItems = new Map(batchSelectedItems);
+		batchSelectedItems = new SvelteMap(batchSelectedItems);
 		console.log('✅ New Map created for reactivity');
 	}
 
@@ -3654,15 +3665,8 @@
 
 	function clearBatchSelection() {
 		console.log('🧹 Clearing batch selection');
-		batchSelectedItems = new Map<string, BatchSelectedItem>();
+		batchSelectedItems = new SvelteMap<string, BatchSelectedItem>();
 		console.log('✅ New empty Map created');
-	}
-
-	function getBatchSelectedTemplate(): string {
-		const selectedSourceType = getBatchSelectedSourceType();
-		return selectedSourceType
-			? getQuickSubscriptionTemplate(selectedSourceType as VideoCategory).trim()
-			: '';
 	}
 
 	$: batchSelectedTemplate = (() => {
@@ -3790,7 +3794,7 @@
 
 		// 校验所有被选项是否属于同一视频源类型，防止跨源类型批量添加
 		const resolvedTypes = new Set(
-			Array.from(batchSelectedItems.values()).map((it: any) => getSourceTypeFromBatchItem(it))
+			Array.from(batchSelectedItems.values()).map((it) => getSourceTypeFromBatchItem(it))
 		);
 		if (resolvedTypes.size > 1) {
 			toast.error('不能跨源类型批量添加', {
@@ -3849,7 +3853,7 @@
 					// 添加特定类型的额外参数
 					if (item.type === 'following') {
 						if (sourceType === 'collection') {
-							params.up_id = item.data.mid.toString();
+							params.up_id = (item.data.mid ?? '').toString();
 							params.collection_type = 'season';
 							params.collection_aggregate_enabled = batchCollectionAggregateEnabled;
 						} else if (sourceType === 'submission') {
@@ -3859,12 +3863,12 @@
 						// 区分普通合集和关注的合集
 						if (itemKey.startsWith('subscribed-collection_')) {
 							// 关注的合集使用 up_mid
-							params.up_id = item.data.up_mid.toString();
+							params.up_id = (item.data.up_mid ?? '').toString();
 							params.collection_type = item.data.collection_type || 'season';
 							params.collection_aggregate_enabled = batchCollectionAggregateEnabled;
 						} else {
 							// 普通合集使用 mid
-							params.up_id = item.data.mid.toString();
+							params.up_id = (item.data.mid ?? '').toString();
 							params.collection_type = item.data.collection_type || 'season';
 							params.collection_aggregate_enabled = batchCollectionAggregateEnabled;
 						}
@@ -3930,13 +3934,13 @@
 				context: '触发立即扫描失败'
 			});
 			setTimeout(() => {
-				goto('/video-sources');
+				goto(resolve('/video-sources'));
 			}, 1000);
 		}
 	}
 
 	// 根据批量选择项获取视频源类型
-	function getSourceTypeFromBatchItem(item: any): string {
+	function getSourceTypeFromBatchItem(item: BatchSelectedItem): string {
 		switch (item.type) {
 			case 'search':
 				return sourceType; // 使用当前选择的源类型
@@ -3970,22 +3974,22 @@
 	}
 
 	// 根据批量选择项获取视频源ID
-	function getSourceIdFromBatchItem(item: any): string {
+	function getSourceIdFromBatchItem(item: BatchSelectedItem): string {
 		switch (item.type) {
 			case 'search':
 				if (sourceType === 'submission') {
 					return item.data.mid?.toString() || '';
 				}
-				return item.data.bvid || item.data.season_id || item.data.mid?.toString() || '';
+				return item.data.bvid || item.data.season_id?.toString() || item.data.mid?.toString() || '';
 			case 'following':
-				return item.data.mid.toString();
+				return item.data.mid?.toString() || '';
 			case 'favorite':
 				// 优先使用完整收藏夹ID，短ID仅作兜底
-				return (item.data.id || item.data.fid).toString();
+				return (item.data.id ?? item.data.fid ?? '').toString();
 			case 'collection':
-				return item.data.sid.toString();
+				return item.data.sid?.toString() || '';
 			case 'bangumi':
-				return item.data.season_id || '';
+				return item.data.season_id?.toString() || '';
 			default:
 				return '';
 		}
@@ -5788,7 +5792,7 @@
 														暂无白名单关键词
 													</p>
 												{:else}
-													{#each whitelistKeywords as keyword, index}
+													{#each whitelistKeywords as keyword, index (keyword)}
 														<div
 															class="flex items-center justify-between rounded bg-green-100 px-2 py-1 dark:bg-green-900"
 														>
@@ -5852,7 +5856,7 @@
 														暂无黑名单关键词
 													</p>
 												{:else}
-													{#each blacklistKeywords as keyword, index}
+													{#each blacklistKeywords as keyword, index (keyword)}
 														<div
 															class="flex items-center justify-between rounded bg-red-100 px-2 py-1 dark:bg-red-900"
 														>
@@ -5924,9 +5928,11 @@
 								variant="outline"
 								onclick={() =>
 									goto(
-										sourcePlatform !== 'bilibili'
-											? `/video-sources?platform=${sourcePlatform}`
-											: '/video-sources'
+										resolve(
+											sourcePlatform !== 'bilibili'
+												? `/video-sources?platform=${sourcePlatform}`
+												: '/video-sources'
+										)
 									)}
 								class={isMobile ? 'w-full' : ''}
 							>
@@ -7240,7 +7246,7 @@
 									{isSearching}
 									statusText={isSearching
 										? '搜索中...'
-										: `搜索模式：在${youtubeChannelSelection ? '已订阅频道' : isYouTubeHistorySource() ? (isDouyin ? '当前抖音来源' : '当前 YouTube 来源') : 'UP主所有视频'}中搜索 \"${submissionSearchQuery}\"`}
+										: `搜索模式：在${youtubeChannelSelection ? '已订阅频道' : isYouTubeHistorySource() ? (isDouyin ? '当前抖音来源' : '当前 YouTube 来源') : 'UP主所有视频'}中搜索 "${submissionSearchQuery}"`}
 									selectedCount={selectedSubmissionCount}
 									totalCount={filteredSubmissionVideos.length}
 									itemLabel={isYouTubeHistorySource() ? youtubeSelectionNounLabel : '视频'}
@@ -7745,7 +7751,7 @@
 
 				<div class="max-h-60 overflow-y-auto rounded border">
 					<div class="space-y-2 p-3">
-						{#each Array.from(batchSelectedItems.values()) as item, index}
+						{#each Array.from(batchSelectedItems.entries()) as [itemKey, item] (itemKey)}
 							<div class="bg-muted flex items-center justify-between rounded p-2 text-sm">
 								<div class="min-w-0 flex-1">
 									<div class="truncate font-medium">{item.name}</div>

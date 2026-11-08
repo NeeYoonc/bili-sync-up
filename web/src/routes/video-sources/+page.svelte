@@ -1588,7 +1588,7 @@
 		platform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok' = 'bilibili'
 	) {
 		const path = resolve('/add-source');
-		goto(platform === 'bilibili' ? path : `${path}?platform=${platform}`);
+		goto(platform === 'bilibili' ? path : resolve(`/add-source?platform=${platform}`));
 	}
 
 	function sourceEntriesForPlatform() {

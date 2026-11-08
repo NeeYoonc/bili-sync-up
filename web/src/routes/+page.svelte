@@ -870,8 +870,7 @@
 										{dayMultiCounts.reduce(
 											(sum, v) => sum + v.bilibili + v.youtube + v.douyin + v.tiktok,
 											0
-										)}{' '}
-										个
+										)}&nbsp; 个
 									</span>
 								</div>
 								<div class="flex flex-wrap gap-3 text-xs">

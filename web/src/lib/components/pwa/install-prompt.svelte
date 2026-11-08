@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { Download, X } from 'lucide-svelte';
+	import { SvelteDate } from 'svelte/reactivity';
 
 	interface BeforeInstallPromptEvent extends Event {
 		prompt: () => Promise<void>;
@@ -21,7 +22,7 @@
 		}
 
 		// 检查iOS Safari
-		if ((navigator as any).standalone === true) {
+		if ((navigator as Navigator & { standalone?: boolean }).standalone === true) {
 			isInstalled = true;
 			return;
 		}
@@ -91,7 +92,7 @@
 	function dismissBanner() {
 		showBanner = false;
 		// 记住用户已经关闭过横幅，7天内不再显示
-		const expiryDate = new Date();
+		const expiryDate = new SvelteDate();
 		expiryDate.setDate(expiryDate.getDate() + 7);
 		localStorage.setItem('pwa-install-dismissed', 'true');
 		localStorage.setItem('pwa-install-dismissed-expiry', expiryDate.toISOString());

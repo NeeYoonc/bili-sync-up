@@ -56,7 +56,7 @@
 	let imageUrl = $derived(resolveImageUrl(src));
 
 	$effect(() => {
-		src;
+		void src;
 		hasError = false;
 	});
 </script>

@@ -8,6 +8,8 @@
 	import InfoIcon from '@lucide/svelte/icons/info';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import type { Pathname } from '$app/types';
 	import api from '$lib/api';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
 	import { toast } from 'svelte-sonner';
@@ -201,7 +203,7 @@
 	}
 
 	function handleViewDetail() {
-		goto(detailHref || `/video/${video.id}`);
+		goto(detailHref ? resolve(detailHref as Pathname) : resolve(`/video/${video.id}`));
 	}
 
 	function handleSelectionChange(event: Event) {

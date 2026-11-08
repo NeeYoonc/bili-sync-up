@@ -62,6 +62,7 @@
 		fitWidth = false;
 		retryToken = 0;
 		resetImageState();
+		// eslint-disable-next-line svelte/infinite-reactive-loop -- 有 loadedVideoId 守卫，只在 videoId 变化时执行一次，不会死循环
 		loadChapter();
 	}
 
@@ -92,6 +93,7 @@
 			manifest = result.data;
 			pageElements = new Array(result.data.pages.length).fill(null);
 			const saved = readProgress(result.data.pages.length);
+			// eslint-disable-next-line svelte/infinite-reactive-loop -- 只在 loadChapter() 内赋值，不是响应式语句，不会构成循环
 			pageIndex = saved ?? 0;
 			resetImageState();
 			saveProgress();

@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import api from '$lib/api';
+	import { asset } from '$app/paths';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -138,7 +139,7 @@
 
 					<a
 						class="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-9 items-center rounded-md px-3 text-sm font-medium"
-						href="/youtube-login-helper.zip"
+						href={asset('/youtube-login-helper.zip')}
 						download="youtube-login-helper.zip"
 					>
 						<Download class="mr-1 h-4 w-4" />

@@ -31,6 +31,7 @@
 	<Card.Root class="min-h-[600px]">
 		<Card.Content class="max-h-[calc(100vh-250px)] overflow-auto p-6">
 			<article class="changelog-content prose prose-sm dark:prose-invert max-w-none">
+				<!-- eslint-disable-next-line svelte/no-at-html-tags -- CHANGELOG_HTML 是构建时从 docs/changelog.md 生成的模块常量，不是用户输入 -->
 				{@html CHANGELOG_HTML}
 			</article>
 		</Card.Content>

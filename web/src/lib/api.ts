@@ -65,7 +65,6 @@ import type {
 	DatabaseStatusResponse,
 	DatabaseMaintenanceAction,
 	DatabaseMaintenanceResponse,
-	DatabaseBackupInfo,
 	DatabaseBackupListResponse,
 	DatabaseRestoreResponse,
 	YouTubeSearchRequest,
