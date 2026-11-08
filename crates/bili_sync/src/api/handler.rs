@@ -23227,16 +23227,16 @@ pub async fn ai_rename_history(
     };
 
     // 执行批量重命名
-    let result = batch_rename_history_files(
-        db.as_ref(),
-        &source_key,
+    let result = batch_rename_history_files(crate::utils::ai_rename::BatchRenameHistoryInput {
+        connection: db.as_ref(),
+        source_key: &source_key,
         videos,
-        &ai_config,
-        &video_prompt,
-        &audio_prompt,
+        config: &ai_config,
+        video_prompt: &video_prompt,
+        audio_prompt: &audio_prompt,
         flat_folder,
         structure_hint,
-    )
+    })
     .await;
 
     match result {

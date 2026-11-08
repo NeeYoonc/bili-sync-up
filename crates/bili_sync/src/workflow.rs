@@ -10295,7 +10295,7 @@ fn chapter_output_path(
 }
 
 struct SplitChaptersInput<'a> {
-    bili_video: &'a Video<'_>,
+    bili_video: &'a Video<'a>,
     video_model: &'a video::Model,
     source_page: &'a page::Model,
     page_info: &'a PageInfo,
@@ -10899,17 +10899,17 @@ pub async fn fetch_page_danmaku(p: FetchPageDanmakuInput<'_>) -> Result<PageDanm
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
         res = tokio::time::timeout(
             SIDECAR_REQUEST_TIMEOUT,
-            crate::workflow_danmaku::sync_page_danmaku(
-                &bili_video,
+            crate::workflow_danmaku::sync_page_danmaku(crate::workflow_danmaku::SyncPageDanmakuInput {
+                bili_video: &bili_video,
                 config,
                 video_model,
-                page_model,
-                page_info,
-                &danmaku_path,
-                None,
-                Utc::now(),
-                token.clone(),
-            ),
+                db_page: page_model,
+                fresh: page_info,
+                danmaku_path: &danmaku_path,
+                next_stage: None,
+                now: Utc::now(),
+                token: token.clone(),
+            }),
         ) => match res {
             Ok(inner) => inner?,
             Err(_) => {

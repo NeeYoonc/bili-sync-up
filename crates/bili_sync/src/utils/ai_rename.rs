@@ -1725,14 +1725,14 @@ pub async fn apply_ai_rename_folder(
 }
 
 pub(crate) struct BatchRenameHistoryInput<'a> {
-    connection: &'a DatabaseConnection,
-    source_key: &'a str,
-    videos: Vec<(bili_sync_entity::video::Model, Vec<bili_sync_entity::page::Model>)>,
-    config: &'a AiRenameConfig,
-    video_prompt: &'a str,
-    audio_prompt: &'a str,
-    flat_folder: bool,
-    structure_hint: &'a str,
+    pub(crate) connection: &'a DatabaseConnection,
+    pub(crate) source_key: &'a str,
+    pub(crate) videos: Vec<(bili_sync_entity::video::Model, Vec<bili_sync_entity::page::Model>)>,
+    pub(crate) config: &'a AiRenameConfig,
+    pub(crate) video_prompt: &'a str,
+    pub(crate) audio_prompt: &'a str,
+    pub(crate) flat_folder: bool,
+    pub(crate) structure_hint: &'a str,
 }
 
 /// 批量重命名视频源下的历史文件

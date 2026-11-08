@@ -10159,7 +10159,7 @@ mod tests {
             .expect("有效日期")
             .and_hms_opt(0, 0, 0)
             .expect("有效时间");
-        let xml = super::build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
+        let xml = super::build_youtube_movie_nfo_xml(super::YoutubeMovieNfoInput {
             title: "测试视频",
             description: "简介",
             platform: "YouTube",
@@ -10194,7 +10194,7 @@ mod tests {
             .expect("有效日期")
             .and_hms_opt(0, 0, 0)
             .expect("有效时间");
-        let xml = super::build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
+        let xml = super::build_youtube_movie_nfo_xml(super::YoutubeMovieNfoInput {
             title: "联合投稿测试",
             description: "简介",
             platform: "YouTube",
@@ -10243,7 +10243,7 @@ mod tests {
             .expect("有效日期")
             .and_hms_opt(0, 0, 0)
             .expect("有效时间");
-        let xml = super::build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
+        let xml = super::build_youtube_movie_nfo_xml(super::YoutubeMovieNfoInput {
             title: "抖音作品",
             description: "简介",
             platform: "douyin",
@@ -10275,7 +10275,7 @@ mod tests {
         );
 
         // 空白头像地址不写 <thumb>，避免生成空标签
-        let xml = super::build_youtube_movie_nfo_xml(YoutubeMovieNfoInput {
+        let xml = super::build_youtube_movie_nfo_xml(super::YoutubeMovieNfoInput {
             title: "抖音作品",
             description: "简介",
             platform: "douyin",

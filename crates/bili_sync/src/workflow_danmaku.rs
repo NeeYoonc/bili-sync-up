@@ -415,15 +415,15 @@ fn danmaku_subtask_completed(status: u32) -> bool {
 }
 
 pub(crate) struct SyncPageDanmakuInput<'a> {
-    bili_video: &'a Video<'_>,
-    config: &'a Config,
-    video_model: &'a video::Model,
-    db_page: &'a page::Model,
-    fresh: &'a BiliPageInfo,
-    danmaku_path: &'a Path,
-    next_stage: Option<Stage>,
-    now: DateTime<Utc>,
-    token: CancellationToken,
+    pub(crate) bili_video: &'a Video<'a>,
+    pub(crate) config: &'a Config,
+    pub(crate) video_model: &'a video::Model,
+    pub(crate) db_page: &'a page::Model,
+    pub(crate) fresh: &'a BiliPageInfo,
+    pub(crate) danmaku_path: &'a Path,
+    pub(crate) next_stage: Option<Stage>,
+    pub(crate) now: DateTime<Utc>,
+    pub(crate) token: CancellationToken,
 }
 
 pub async fn sync_page_danmaku(p: SyncPageDanmakuInput<'_>) -> Result<PageDanmakuSyncUpdate> {
