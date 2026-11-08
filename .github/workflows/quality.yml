@@ -1,13 +1,11 @@
 # 质量门禁 v1（2026-11-08）
 #
-# 四道：Rust 格式检查 / Clippy / 前端 svelte-check / 文档站构建。
+# 五道：Rust 格式检查 / Clippy / 前端 svelte-check / 前端 lint（prettier + eslint）/ 文档站构建。
 # cargo test 暂缓，原因和启用方式见文件末尾的注释块。
 #
 # 几个刻意不做的事：
 # - 不用 `npm run check:node20` / `build:node20`：那是 Windows 本地给 npx 用的包装脚本，
-#   CI 里 setup-node 已经钉了 Node 版本，直接 `npm run check` 才和 build.yml 的构建方式一致。
-# - 不加 `npm run lint`：prettier 3.9.5 与本仓库锁定的 prettier-plugin-svelte 3.5.2 不兼容，
-#   134 个 .svelte 文件全崩（getVisitorKeys is not a function），修工具链之前放进来只会全红。
+#   CI 里 setup-node 已经钉了 Node 版本，直接 `npm run check` / `npm run lint` 才和 build.yml 的构建方式一致。
 # - fmt 关不装 cargo 缓存：只跑 rustfmt、不编译，装缓存比它省下的时间还贵。
 name: 质量门禁
 
@@ -67,6 +65,25 @@ jobs:
       - name: svelte-check
         working-directory: web
         run: npm run check
+
+  lint:
+    name: 前端 lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+      - name: 安装 Node 20
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 安装依赖
+        working-directory: web
+        run: npm ci
+      - name: prettier --check + eslint
+        working-directory: web
+        run: npm run lint
 
   docs:
     name: 文档站构建
