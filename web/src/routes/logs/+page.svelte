@@ -470,10 +470,7 @@
 		// 自动在切换 Tab 后选择“最新一轮”的同级别日志文件
 		if (visibleLogFiles.length === 0) {
 			selectedLogFile = '';
-		} else if (
-			!selectedLogFile ||
-			!visibleLogFiles.some((f) => f.file_name === selectedLogFile)
-		) {
+		} else if (!selectedLogFile || !visibleLogFiles.some((f) => f.file_name === selectedLogFile)) {
 			selectedLogFile = visibleLogFiles[0].file_name;
 		}
 	}
@@ -818,7 +815,12 @@
 						{/if}
 					</Badge>
 					{#if pendingLiveCount > 0}
-						<Button variant="ghost" size="sm" class="h-7 px-2 text-xs" onclick={handlePendingLiveClick}>
+						<Button
+							variant="ghost"
+							size="sm"
+							class="h-7 px-2 text-xs"
+							onclick={handlePendingLiveClick}
+						>
 							{#if currentPage === 1}
 								当前有 {pendingLiveCount} 条新日志，点击更新查看
 							{:else}

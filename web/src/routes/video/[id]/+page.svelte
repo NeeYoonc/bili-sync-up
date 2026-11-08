@@ -18,7 +18,12 @@
 		ToQuery
 	} from '$lib/stores/filter';
 	import { buildVideosRequest } from '$lib/utils/videos.js';
-	import type { ApiError, UpdateVideoStatusRequest, VideoResponse, VideoSourceTag } from '$lib/types';
+	import type {
+		ApiError,
+		UpdateVideoStatusRequest,
+		VideoResponse,
+		VideoSourceTag
+	} from '$lib/types';
 	import { IsMobile } from '$lib/hooks/is-mobile.svelte.js';
 	import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
@@ -64,7 +69,13 @@
 	$: isTikTok = routeResourceId.startsWith('tiktok-');
 	$: isExternal = isYouTube || isDouyin || isTikTok;
 	let externalPlatform: 'bilibili' | 'youtube' | 'douyin' | 'tiktok' = 'bilibili';
-	$: externalPlatform = isTikTok ? 'tiktok' : isDouyin ? 'douyin' : isYouTube ? 'youtube' : 'bilibili';
+	$: externalPlatform = isTikTok
+		? 'tiktok'
+		: isDouyin
+			? 'douyin'
+			: isYouTube
+				? 'youtube'
+				: 'bilibili';
 	$: platformLabel = isTikTok ? 'TikTok' : isDouyin ? '抖音' : isYouTube ? 'YouTube' : 'B站';
 	// 内嵌播放器尺寸：TikTok 竖屏固定尺寸居中；B站/YouTube 16:9 横屏铺满。抖音已取消在线播放。
 	$: embeddedFrameStyle = isTikTok
@@ -79,8 +90,12 @@
 	$: imagePostVideoEnabled = videoData?.source?.generate_image_post_video ?? true;
 	// 纯图片作品关闭合成后没有本地 MP4；混排作品的分页仍是平台视频，照常可播。
 	$: showLocalVideoButton =
-		!isImagePost || imagePostVideoEnabled || imagePostVideoOnly || (videoData?.pages?.length ?? 0) > 1;
-	$: safeImageIndex = imageUrls.length > 0 ? Math.min(Math.max(currentImageIndex, 0), imageUrls.length - 1) : 0;
+		!isImagePost ||
+		imagePostVideoEnabled ||
+		imagePostVideoOnly ||
+		(videoData?.pages?.length ?? 0) > 1;
+	$: safeImageIndex =
+		imageUrls.length > 0 ? Math.min(Math.max(currentImageIndex, 0), imageUrls.length - 1) : 0;
 
 	function videoDetailHref(videoId: number) {
 		return isExternal ? `/video/${externalPlatform}-${videoId}` : `/video/${videoId}`;
@@ -626,8 +641,8 @@
 					(isTikTok
 						? `https://www.tiktok.com/video/${encodeURIComponent(externalId)}`
 						: isDouyin
-						? `https://www.douyin.com/video/${encodeURIComponent(externalId)}`
-						: `https://www.youtube.com/watch?v=${encodeURIComponent(externalId)}`);
+							? `https://www.douyin.com/video/${encodeURIComponent(externalId)}`
+							: `https://www.youtube.com/watch?v=${encodeURIComponent(externalId)}`);
 				window.open(sourceUrl, '_blank');
 				return;
 			}
@@ -900,8 +915,11 @@
 		</div>
 
 		{#if videoData.video.skip_reason}
-			<div class="mb-4 rounded-lg border border-yellow-500/60 bg-yellow-50 p-3 text-sm text-yellow-900 dark:bg-yellow-950/30 dark:text-yellow-200">
-				⚠️ 该视频未达到设定的最低下载标准，已跳过下载，不会生成本地媒体文件。详情：{videoData.video.skip_reason}
+			<div
+				class="mb-4 rounded-lg border border-yellow-500/60 bg-yellow-50 p-3 text-sm text-yellow-900 dark:bg-yellow-950/30 dark:text-yellow-200"
+			>
+				⚠️ 该视频未达到设定的最低下载标准，已跳过下载，不会生成本地媒体文件。详情：{videoData.video
+					.skip_reason}
 			</div>
 		{/if}
 		<!-- 下载路径信息 -->
@@ -913,9 +931,9 @@
 						<div class="space-y-1">
 							<div class="text-muted-foreground text-xs">保存路径</div>
 							<div
-								class="bg-card rounded border {isMobile ? 'px-2 py-2' : 'px-3 py-2'} font-mono {isMobile
-									? 'text-xs'
-									: 'text-sm'} break-all"
+								class="bg-card rounded border {isMobile
+									? 'px-2 py-2'
+									: 'px-3 py-2'} font-mono {isMobile ? 'text-xs' : 'text-sm'} break-all"
 							>
 								{normalizeDisplayPath(videoData.video.path)}
 							</div>
@@ -925,9 +943,9 @@
 						<div class="space-y-1">
 							<div class="text-muted-foreground text-xs">视频文件路径</div>
 							<div
-								class="bg-card rounded border {isMobile ? 'px-2 py-2' : 'px-3 py-2'} font-mono {isMobile
-									? 'text-xs'
-									: 'text-sm'} break-all"
+								class="bg-card rounded border {isMobile
+									? 'px-2 py-2'
+									: 'px-3 py-2'} font-mono {isMobile ? 'text-xs' : 'text-sm'} break-all"
 							>
 								{normalizeDisplayPath(videoData.pages[0].path)}
 							</div>
@@ -941,7 +959,9 @@
 	<section>
 		{#if videoData.pages && videoData.pages.length > 0}
 			<div class="mb-4 flex {isMobile ? 'flex-col gap-2' : 'items-center justify-between'}">
-				<h2 class="{isMobile ? 'text-lg' : 'text-xl'} font-semibold">{isMangaChapter ? '漫画分页' : '分页列表'}</h2>
+				<h2 class="{isMobile ? 'text-lg' : 'text-xl'} font-semibold">
+					{isMangaChapter ? '漫画分页' : '分页列表'}
+				</h2>
 				<div class="flex {isMobile ? 'flex-col gap-2' : 'items-center gap-2'}">
 					<div class="text-muted-foreground text-sm">
 						{isMangaChapter
@@ -967,17 +987,17 @@
 						</Button>
 					{/if}
 					{#if !isExternal}
-					<Button
-						size="sm"
-						variant="outline"
-						class={isMobile ? 'w-full' : ''}
-						title={getRefreshVideoDanmakuTitle()}
-						onclick={handleRefreshVideoDanmaku}
-						disabled={refreshingVideoDanmaku}
-					>
-						<RefreshCwIcon class="mr-2 h-4 w-4 {refreshingVideoDanmaku ? 'animate-spin' : ''}" />
-						{refreshingVideoDanmaku ? '刷新中...' : '刷新全部弹幕'}
-					</Button>
+						<Button
+							size="sm"
+							variant="outline"
+							class={isMobile ? 'w-full' : ''}
+							title={getRefreshVideoDanmakuTitle()}
+							onclick={handleRefreshVideoDanmaku}
+							disabled={refreshingVideoDanmaku}
+						>
+							<RefreshCwIcon class="mr-2 h-4 w-4 {refreshingVideoDanmaku ? 'animate-spin' : ''}" />
+							{refreshingVideoDanmaku ? '刷新中...' : '刷新全部弹幕'}
+						</Button>
 					{:else}
 						<div class="text-muted-foreground text-sm">
 							字幕和直播聊天随下载任务同步；源站未提供时按跳过完成
@@ -1019,74 +1039,84 @@
 									customTitle="P{pageInfo.pid}: {pageInfo.name}"
 									customSubtitle=""
 									taskNames={isExternal
-										? ['视频封面', '视频内容', '视频 NFO', isDouyin || isTikTok ? '作品信息' : '直播聊天', '视频字幕']
+										? [
+												'视频封面',
+												'视频内容',
+												'视频 NFO',
+												isDouyin || isTikTok ? '作品信息' : '直播聊天',
+												'视频字幕'
+											]
 										: ['视频封面', '视频内容', '视频信息', '视频弹幕', '视频字幕']}
 									showProgress={true}
 								/>
 
 								{#if !isExternal}
-								<div
-									class="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-3 py-2"
-								>
-									<div class="min-w-0">
-										<div
-											class="text-muted-foreground cursor-help text-xs"
-											title={getDanmakuSyncTitle(
-												pageInfo.danmaku_sync_generation,
-												pageInfo.danmaku_last_synced_at
-											)}
-										>
-											弹幕同步
-										</div>
-										<div
-											class="cursor-help truncate text-sm font-medium"
-											title={getDanmakuSyncTitle(
-												pageInfo.danmaku_sync_generation,
-												pageInfo.danmaku_last_synced_at
-											)}
-										>
-											{getDanmakuStageLabel(pageInfo.danmaku_sync_generation)}
+									<div
+										class="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-3 py-2"
+									>
+										<div class="min-w-0">
+											<div
+												class="text-muted-foreground cursor-help text-xs"
+												title={getDanmakuSyncTitle(
+													pageInfo.danmaku_sync_generation,
+													pageInfo.danmaku_last_synced_at
+												)}
+											>
+												弹幕同步
+											</div>
+											<div
+												class="cursor-help truncate text-sm font-medium"
+												title={getDanmakuSyncTitle(
+													pageInfo.danmaku_sync_generation,
+													pageInfo.danmaku_last_synced_at
+												)}
+											>
+												{getDanmakuStageLabel(pageInfo.danmaku_sync_generation)}
+												{#if pageInfo.danmaku_last_synced_at}
+													· {getRelativeDanmakuTime(pageInfo.danmaku_last_synced_at)}
+												{:else}
+													· 未同步
+												{/if}
+											</div>
 											{#if pageInfo.danmaku_last_synced_at}
-												· {getRelativeDanmakuTime(pageInfo.danmaku_last_synced_at)}
-											{:else}
-												· 未同步
+												<div
+													class="text-muted-foreground cursor-help text-[11px]"
+													title={getDanmakuLastSyncedTitle(pageInfo.danmaku_last_synced_at)}
+												>
+													上次刷新：{pageInfo.danmaku_last_synced_at}
+												</div>
+												<div class="text-muted-foreground flex items-center gap-1 text-[11px]">
+													<span
+														class="cursor-help"
+														title="显示最近一次写入到弹幕文件的条数。首次刷新通常是全量写入，之后会按日期增量追加。"
+													>
+														上次写入：{formatDanmakuWriteCount(pageInfo.danmaku_last_write_count)}
+													</span>
+												</div>
 											{/if}
 										</div>
-										{#if pageInfo.danmaku_last_synced_at}
-											<div
-												class="text-muted-foreground cursor-help text-[11px]"
-												title={getDanmakuLastSyncedTitle(pageInfo.danmaku_last_synced_at)}
-											>
-												上次刷新：{pageInfo.danmaku_last_synced_at}
-											</div>
-											<div class="text-muted-foreground flex items-center gap-1 text-[11px]">
-												<span
-													class="cursor-help"
-													title="显示最近一次写入到弹幕文件的条数。首次刷新通常是全量写入，之后会按日期增量追加。"
-												>
-													上次写入：{formatDanmakuWriteCount(pageInfo.danmaku_last_write_count)}
-												</span>
-											</div>
-										{/if}
+										<Button
+											size="sm"
+											variant="outline"
+											class="shrink-0"
+											title={getRefreshPageDanmakuTitle(pageInfo.path)}
+											onclick={() => handleRefreshPageDanmaku(pageInfo.id)}
+											disabled={isRefreshingPage(pageInfo.id) || !pageInfo.path}
+										>
+											<RefreshCwIcon
+												class="mr-2 h-4 w-4 {isRefreshingPage(pageInfo.id) ? 'animate-spin' : ''}"
+											/>
+											{isRefreshingPage(pageInfo.id) ? '刷新中...' : '刷新弹幕'}
+										</Button>
 									</div>
-									<Button
-										size="sm"
-										variant="outline"
-										class="shrink-0"
-										title={getRefreshPageDanmakuTitle(pageInfo.path)}
-										onclick={() => handleRefreshPageDanmaku(pageInfo.id)}
-										disabled={isRefreshingPage(pageInfo.id) || !pageInfo.path}
-									>
-										<RefreshCwIcon
-											class="mr-2 h-4 w-4 {isRefreshingPage(pageInfo.id) ? 'animate-spin' : ''}"
-										/>
-										{isRefreshingPage(pageInfo.id) ? '刷新中...' : '刷新弹幕'}
-									</Button>
-								</div>
 								{:else}
 									<div class="bg-muted/40 rounded-lg border px-3 py-2 text-sm">
 										<div class="font-medium">
-											{isDouyin ? '抖音作品附属文件' : isTikTok ? 'TikTok 作品附属文件' : 'YouTube 字幕 / 直播聊天'}
+											{isDouyin
+												? '抖音作品附属文件'
+												: isTikTok
+													? 'TikTok 作品附属文件'
+													: 'YouTube 字幕 / 直播聊天'}
 										</div>
 										<div class="text-muted-foreground text-xs">
 											{isDouyin || isTikTok
@@ -1099,8 +1129,7 @@
 								<!-- 播放按钮区域 -->
 								{#if imagePostVideoOnly}
 									<div class="text-muted-foreground mb-2 text-center text-xs">
-										本条作品由 {(videoData?.pages?.length ?? 1)} 段动态组成，没有可查看的原图；
-										每一段都是独立视频，点对应分段的「播放视频」即可逐段查看。
+										本条作品由 {videoData?.pages?.length ?? 1} 段动态组成，没有可查看的原图； 每一段都是独立视频，点对应分段的「播放视频」即可逐段查看。
 									</div>
 								{:else if isImagePost && !imagePostVideoEnabled}
 									<div class="text-muted-foreground mb-2 text-center text-xs">
@@ -1113,7 +1142,9 @@
 											size="sm"
 											variant="default"
 											class="flex-1"
-											title={imageUrls.length > 0 ? `查看 ${imageUrls.length} 张已下载原图` : '原图尚未下载完成'}
+											title={imageUrls.length > 0
+												? `查看 ${imageUrls.length} 张已下载原图`
+												: '原图尚未下载完成'}
 											onclick={showImageGallery}
 											disabled={imageUrls.length === 0}
 										>
@@ -1141,22 +1172,22 @@
 										</Button>
 									{/if}
 									{#if getEmbeddedPlayerUrl() && !isMangaChapter && (!isImagePost || isExternal)}
-									<Button
-										size="sm"
-										variant="outline"
-										class="flex-1"
-										title="{platformLabel}内嵌播放（清晰度由平台控制）"
-										onclick={() => {
-											currentPlayingPageIndex = index;
-											imageViewMode = false;
-											onlinePlayMode = true;
-											chargeLockedDisplayMode = null;
-											showVideoPlayer = true;
-										}}
-									>
-										<PlayIcon class="mr-2 h-4 w-4" />
-										在线播放
-									</Button>
+										<Button
+											size="sm"
+											variant="outline"
+											class="flex-1"
+											title="{platformLabel}内嵌播放（清晰度由平台控制）"
+											onclick={() => {
+												currentPlayingPageIndex = index;
+												imageViewMode = false;
+												onlinePlayMode = true;
+												chargeLockedDisplayMode = null;
+												showVideoPlayer = true;
+											}}
+										>
+											<PlayIcon class="mr-2 h-4 w-4" />
+											在线播放
+										</Button>
 									{/if}
 								</div>
 							</div>
@@ -1166,21 +1197,33 @@
 
 				<!-- 右侧/下方：视频播放器 -->
 				{#if showVideoPlayer && videoData}
-					<div class="w-full shrink-0 {isMangaChapter ? 'xl:w-[60%] 2xl:w-[55%]' : 'xl:w-[45%] 2xl:w-[40%]'}">
+					<div
+						class="w-full shrink-0 {isMangaChapter
+							? 'xl:w-[60%] 2xl:w-[55%]'
+							: 'xl:w-[45%] 2xl:w-[40%]'}"
+					>
 						<div class="sticky top-4">
 							<div class="mb-4 flex items-center justify-between">
 								<div class="flex items-center gap-2">
-									<h3 class="text-lg font-semibold">{imageViewMode ? '图片查看' : isMangaChapter ? '漫画阅读' : '视频播放'}</h3>
+									<h3 class="text-lg font-semibold">
+										{imageViewMode ? '图片查看' : isMangaChapter ? '漫画阅读' : '视频播放'}
+									</h3>
 									<span
 										class="rounded px-2 py-1 text-sm {isMangaChapter
 											? 'bg-emerald-100 text-emerald-700'
 											: imageViewMode
-											? 'bg-fuchsia-100 text-fuchsia-700'
-											: onlinePlayMode
-											? 'bg-blue-100 text-blue-700'
-											: 'bg-gray-100 text-gray-700'}"
+												? 'bg-fuchsia-100 text-fuchsia-700'
+												: onlinePlayMode
+													? 'bg-blue-100 text-blue-700'
+													: 'bg-gray-100 text-gray-700'}"
 									>
-										{isMangaChapter ? '漫画阅读' : imageViewMode ? `图文原图 ${safeImageIndex + 1}/${imageUrls.length}` : onlinePlayMode ? `${platformLabel}内嵌播放` : '本地播放'}
+										{isMangaChapter
+											? '漫画阅读'
+											: imageViewMode
+												? `图文原图 ${safeImageIndex + 1}/${imageUrls.length}`
+												: onlinePlayMode
+													? `${platformLabel}内嵌播放`
+													: '本地播放'}
 									</span>
 								</div>
 								<div class="flex items-center gap-2">
@@ -1212,7 +1255,9 @@
 							{/if}
 
 							{#if videoData.video.skip_reason}
-								<div class="mb-3 rounded-lg border border-yellow-500/60 bg-yellow-50 p-3 text-sm text-yellow-900 dark:bg-yellow-950/30 dark:text-yellow-200">
+								<div
+									class="mb-3 rounded-lg border border-yellow-500/60 bg-yellow-50 p-3 text-sm text-yellow-900 dark:bg-yellow-950/30 dark:text-yellow-200"
+								>
 									⚠️ 该视频未达到最低下载标准，未下载本地媒体，无法进行本地播放。
 								</div>
 							{/if}
@@ -1232,13 +1277,21 @@
 										/>
 									{:else if chargeLockedDisplayMode === 'local' && !onlinePlayMode}
 										<div class="flex h-64 items-center justify-center text-white">
-											<div>{isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频未付费' : '充电视频未充电'}</div>
+											<div>
+												{isTikTok
+													? '你所在国家或地区无法下载此视频'
+													: isDouyin
+														? '付费视频未付费'
+														: '充电视频未充电'}
+											</div>
 										</div>
 									{:else if onlinePlayMode}
 										{#if getEmbeddedPlayerUrl()}
 											{#key `${currentVideoId}-${currentPlayingPageIndex}-${onlinePlayMode}`}
 												<iframe
-													class="embedded-player-frame block border-0 {isDouyin || isTikTok ? 'mx-auto w-auto' : 'h-auto w-full'}"
+													class="embedded-player-frame block border-0 {isDouyin || isTikTok
+														? 'mx-auto w-auto'
+														: 'h-auto w-full'}"
 													style={embeddedFrameStyle}
 													src={getEmbeddedPlayerUrl() ?? undefined}
 													title={getEmbeddedPlayerTitle()}
@@ -1286,11 +1339,23 @@
 							{#if imageViewMode && imageUrls.length > 0}
 								<div class="mt-3 space-y-3">
 									<div class="flex items-center justify-between gap-3">
-										<Button size="sm" variant="outline" onclick={showPreviousImage} disabled={imageUrls.length <= 1}>
+										<Button
+											size="sm"
+											variant="outline"
+											onclick={showPreviousImage}
+											disabled={imageUrls.length <= 1}
+										>
 											<ChevronLeftIcon class="mr-1 h-4 w-4" />上一张
 										</Button>
-										<span class="text-muted-foreground text-sm">第 {safeImageIndex + 1} / {imageUrls.length} 张</span>
-										<Button size="sm" variant="outline" onclick={showNextImage} disabled={imageUrls.length <= 1}>
+										<span class="text-muted-foreground text-sm"
+											>第 {safeImageIndex + 1} / {imageUrls.length} 张</span
+										>
+										<Button
+											size="sm"
+											variant="outline"
+											onclick={showNextImage}
+											disabled={imageUrls.length <= 1}
+										>
 											下一张<ChevronRightIcon class="ml-1 h-4 w-4" />
 										</Button>
 									</div>
@@ -1298,11 +1363,19 @@
 										{#each imageUrls as imageUrl, imageIndex (imageUrl)}
 											<button
 												type="button"
-												class="shrink-0 overflow-hidden rounded border-2 transition-colors {safeImageIndex === imageIndex ? 'border-primary' : 'border-transparent'}"
+												class="shrink-0 overflow-hidden rounded border-2 transition-colors {safeImageIndex ===
+												imageIndex
+													? 'border-primary'
+													: 'border-transparent'}"
 												onclick={() => (currentImageIndex = imageIndex)}
 												title={`查看第 ${imageIndex + 1} 张原图`}
 											>
-												<img src={imageUrl} alt={`第 ${imageIndex + 1} 张缩略图`} class="h-16 w-16 object-cover" loading="lazy" />
+												<img
+													src={imageUrl}
+													alt={`第 ${imageIndex + 1} 张缩略图`}
+													class="h-16 w-16 object-cover"
+													loading="lazy"
+												/>
 											</button>
 										{/each}
 									</div>
@@ -1367,7 +1440,7 @@
 			video={videoData.video}
 			pages={videoData.pages}
 			loading={statusEditorLoading}
-			isExternal={isExternal}
+			{isExternal}
 			onsubmit={handleStatusEditorSubmit}
 		/>
 	{/if}

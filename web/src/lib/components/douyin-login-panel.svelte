@@ -72,7 +72,9 @@
 			<div class="space-y-4 rounded-lg border p-3">
 				<div class="flex flex-wrap items-center gap-3">
 					<Badge variant={status?.logged_in ? 'default' : 'secondary'} class="gap-1">
-						{#if status?.logged_in}<CheckCircle2 class="h-3.5 w-3.5" />{:else}<CircleAlert class="h-3.5 w-3.5" />{/if}
+						{#if status?.logged_in}<CheckCircle2 class="h-3.5 w-3.5" />{:else}<CircleAlert
+								class="h-3.5 w-3.5"
+							/>{/if}
 						{status?.logged_in ? '抖音 Cookie 可用' : '需要导入抖音 Cookie'}
 					</Badge>
 					<a
@@ -83,9 +85,19 @@
 						<Download class="mr-1 h-4 w-4" />下载电脑端登录助手
 					</a>
 					<label class="inline-flex">
-						<input class="hidden" type="file" accept=".txt,text/plain" onchange={importCookieFile} disabled={importing} />
-						<span class="border-input bg-background hover:bg-accent inline-flex h-9 cursor-pointer items-center rounded-md border px-3 text-sm font-medium">
-							{#if importing}<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />{:else}<Upload class="mr-1 h-4 w-4" />{/if}
+						<input
+							class="hidden"
+							type="file"
+							accept=".txt,text/plain"
+							onchange={importCookieFile}
+							disabled={importing}
+						/>
+						<span
+							class="border-input bg-background hover:bg-accent inline-flex h-9 cursor-pointer items-center rounded-md border px-3 text-sm font-medium"
+						>
+							{#if importing}<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />{:else}<Upload
+									class="mr-1 h-4 w-4"
+								/>{/if}
 							手动导入 cookies.txt
 						</span>
 					</label>
@@ -93,19 +105,26 @@
 						<RefreshCw class="mr-1 h-4 w-4" />刷新状态
 					</Button>
 				</div>
-				<div class="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-100">
+				<div
+					class="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-100"
+				>
 					<p class="font-medium">电脑端登录后直接传输</p>
 					<ol class="mt-2 list-decimal space-y-1 pl-5">
 						<li>加载登录助手并连接当前 Bili Sync-up 设置页。</li>
 						<li>点击“打开抖音”，在同一电脑浏览器登录抖音。</li>
-						<li>点击“传输抖音登录状态”。Docker 会直接收到 Cookie 与「我的喜欢/收藏夹」签名会话，不需要内嵌浏览器。</li>
+						<li>
+							点击“传输抖音登录状态”。Docker 会直接收到 Cookie
+							与「我的喜欢/收藏夹」签名会话，不需要内嵌浏览器。
+						</li>
 					</ol>
 					<p class="mt-2">
-						提示：仅手动导入 cookies.txt 可用于作者作品扫描；「我的喜欢」「收藏夹」需要用上面的登录助手完整传输一次。
+						提示：仅手动导入 cookies.txt
+						可用于作者作品扫描；「我的喜欢」「收藏夹」需要用上面的登录助手完整传输一次。
 					</p>
 				</div>
 				<p class="text-muted-foreground text-xs">
-					抖音作者作品接口需要新鲜 Cookie；登录凭证已保存到数据库，导入后自动维护、重启不丢失，无需手动管理文件。
+					抖音作者作品接口需要新鲜
+					Cookie；登录凭证已保存到数据库，导入后自动维护、重启不丢失，无需手动管理文件。
 				</p>
 			</div>
 		</CardContent>

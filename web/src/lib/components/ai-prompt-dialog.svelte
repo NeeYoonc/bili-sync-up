@@ -14,12 +14,12 @@
 	export let sourceId = 0;
 	export let initialVideoPrompt = '';
 	export let initialAudioPrompt = '';
-export let initialAiRename = false;
-// 高级选项初始值
-export let initialEnableMultiPage = false;
-export let initialEnableCollection = false;
-export let initialEnableBangumi = false;
-export let initialRenameParentDir = false;
+	export let initialAiRename = false;
+	// 高级选项初始值
+	export let initialEnableMultiPage = false;
+	export let initialEnableCollection = false;
+	export let initialEnableBangumi = false;
+	export let initialRenameParentDir = false;
 
 	const dispatch = createEventDispatcher<{
 		save: {
@@ -41,26 +41,29 @@ export let initialRenameParentDir = false;
 	let isClearing = false;
 
 	// 高级选项
-let showAdvancedOptions = false;
-let enableMultiPage = false;
-let enableCollection = false;
-let enableBangumi = false;
-let renameParentDir = false;
+	let showAdvancedOptions = false;
+	let enableMultiPage = false;
+	let enableCollection = false;
+	let enableBangumi = false;
+	let renameParentDir = false;
 
 	// 重置状态
 	function resetState() {
 		videoPrompt = initialVideoPrompt;
 		audioPrompt = initialAudioPrompt;
-	aiRename = initialAiRename;
-	enableMultiPage = initialEnableMultiPage;
-	enableCollection = initialEnableCollection;
-	enableBangumi = initialEnableBangumi;
-	renameParentDir = initialRenameParentDir;
-	showAdvancedOptions =
-		initialEnableMultiPage || initialEnableCollection || initialEnableBangumi || initialRenameParentDir;
-	isSaving = false;
-	isClearing = false;
-}
+		aiRename = initialAiRename;
+		enableMultiPage = initialEnableMultiPage;
+		enableCollection = initialEnableCollection;
+		enableBangumi = initialEnableBangumi;
+		renameParentDir = initialRenameParentDir;
+		showAdvancedOptions =
+			initialEnableMultiPage ||
+			initialEnableCollection ||
+			initialEnableBangumi ||
+			initialRenameParentDir;
+		isSaving = false;
+		isClearing = false;
+	}
 
 	// 当对话框打开时重置状态
 	$: if (isOpen) {

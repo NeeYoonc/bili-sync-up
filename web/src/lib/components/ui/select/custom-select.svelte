@@ -106,7 +106,10 @@
 			return;
 		}
 
-		activeIndex = selectedIndex >= 0 && !options[selectedIndex]?.disabled ? selectedIndex : firstEnabledIndex(-1, 1);
+		activeIndex =
+			selectedIndex >= 0 && !options[selectedIndex]?.disabled
+				? selectedIndex
+				: firstEnabledIndex(-1, 1);
 		dropdownReady = updatePosition();
 		open = true;
 		await tick();

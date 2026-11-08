@@ -47,7 +47,9 @@
 	$: imagePostBadgeTitle = imagePostVideoOnly
 		? `${imagePostPlatformLabel}多段视频作品，没有可查看的原图`
 		: `${imagePostPlatformLabel}图文作品`;
-	$: imagePostBadgeColor = imagePostVideoOnly ? 'bg-violet-600 hover:bg-violet-600' : 'bg-fuchsia-600 hover:bg-fuchsia-600';
+	$: imagePostBadgeColor = imagePostVideoOnly
+		? 'bg-violet-600 hover:bg-violet-600'
+		: 'bg-fuchsia-600 hover:bg-fuchsia-600';
 	export let detailHref: string = ''; // 详情页地址；不传时沿用 B 站地址
 	let coverFailed = false;
 	let lastVideoId: number | null = null;
@@ -131,14 +133,22 @@
 			return taskNames[index] || `任务${index + 1}`;
 		}
 		if (/^(youtube|douyin|tiktok)-/.test(String(resourceId ?? ''))) {
-			return ['视频封面', '视频信息', 'UP主头像', 'UP主信息', '视频下载'][index] || `任务${index + 1}`;
+			return (
+				['视频封面', '视频信息', 'UP主头像', 'UP主信息', '视频下载'][index] || `任务${index + 1}`
+			);
 		}
 
 		// 根据视频类型返回不同的任务名称
 		const isBangumi = video.bangumi_title !== undefined;
 
 		if (isBangumi) {
-			const bangumiTaskNames = ['视频封面', 'tvshow.nfo / season.nfo', 'UP主头像', 'UP主信息', '分P下载'];
+			const bangumiTaskNames = [
+				'视频封面',
+				'tvshow.nfo / season.nfo',
+				'UP主头像',
+				'UP主信息',
+				'分P下载'
+			];
 			return bangumiTaskNames[index] || `任务${index + 1}`;
 		} else {
 			// 普通视频任务名称：VideoStatus[2] 对应 UP主头像下载
@@ -305,7 +315,12 @@
 			target.src = getProxiedImageUrl(video.cover);
 			return;
 		}
-		if (!isExternalVideo && video.valid !== false && video.cover && target.dataset.coverFallback !== 'local') {
+		if (
+			!isExternalVideo &&
+			video.valid !== false &&
+			video.cover &&
+			target.dataset.coverFallback !== 'local'
+		) {
 			target.dataset.coverFallback = 'local';
 			target.src = getLocalCoverUrl(video.id);
 			return;
@@ -344,30 +359,44 @@
 			/>
 			<!-- 类型标识和选择框统一排列在封面左上角 -->
 			{#if selectionMode || video.is_image_post || video.is_story || video.is_charge_video || video.skip_reason}
-				<div class="absolute top-2 left-2 z-20 flex max-w-[calc(100%-88px)] flex-wrap items-center gap-1.5">
+				<div
+					class="absolute top-2 left-2 z-20 flex max-w-[calc(100%-88px)] flex-wrap items-center gap-1.5"
+				>
 					{#if selectionMode}
-					<input
-						type="checkbox"
-						checked={selected}
-						on:change={handleSelectionChange}
-						on:click|stopPropagation
-						class="h-5 w-5 rounded border-2 border-white bg-white/80 text-blue-600 shadow-lg backdrop-blur-sm focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
-					/>
+						<input
+							type="checkbox"
+							checked={selected}
+							on:change={handleSelectionChange}
+							on:click|stopPropagation
+							class="h-5 w-5 rounded border-2 border-white bg-white/80 text-blue-600 shadow-lg backdrop-blur-sm focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
+						/>
 					{/if}
 					{#if video.is_image_post}
-						<Badge class="{imagePostBadgeColor} text-xs text-white shadow-md" title={imagePostBadgeTitle}>
+						<Badge
+							class="{imagePostBadgeColor} text-xs text-white shadow-md"
+							title={imagePostBadgeTitle}
+						>
 							{imagePostBadgeLabel}
 						</Badge>
 					{/if}
 					{#if video.is_story}
-						<Badge class="bg-cyan-600 text-xs text-white shadow-md hover:bg-cyan-600" title="抖音日常作品">
+						<Badge
+							class="bg-cyan-600 text-xs text-white shadow-md hover:bg-cyan-600"
+							title="抖音日常作品"
+						>
 							日常
 						</Badge>
 					{/if}
 					{#if video.is_charge_video}
 						<Badge
-							class="{isTikTok ? 'bg-yellow-500 text-xs text-white shadow-md hover:bg-yellow-500' : 'bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500'}"
-							title={isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
+							class={isTikTok
+								? 'bg-yellow-500 text-xs text-white shadow-md hover:bg-yellow-500'
+								: 'bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500'}
+							title={isTikTok
+								? '你所在国家或地区无法下载此视频'
+								: isDouyin
+									? '付费视频，需购买后才能观看'
+									: '充电专属视频，播放前需先为 UP 主充电'}
 						>
 							{isTikTok ? '无法下载视频' : isDouyin ? '付费' : '充电视频'}
 						</Badge>
@@ -416,19 +445,31 @@
 				/>
 			{/if}
 			{#if (coverFailed || mode !== 'default') && (video.is_image_post || video.is_story)}
-				<Badge class="mt-0.5 shrink-0 {imagePostBadgeColor} text-xs text-white" title={imagePostBadgeTitle}>
+				<Badge
+					class="mt-0.5 shrink-0 {imagePostBadgeColor} text-xs text-white"
+					title={imagePostBadgeTitle}
+				>
 					{imagePostBadgeLabel}
 				</Badge>
 			{/if}
 			{#if (coverFailed || mode !== 'default') && video.is_story}
-				<Badge class="mt-0.5 shrink-0 bg-cyan-600 text-xs text-white hover:bg-cyan-600" title="抖音日常作品">
+				<Badge
+					class="mt-0.5 shrink-0 bg-cyan-600 text-xs text-white hover:bg-cyan-600"
+					title="抖音日常作品"
+				>
 					日常
 				</Badge>
 			{/if}
 			{#if (coverFailed || mode !== 'default') && video.is_charge_video}
 				<Badge
-					class="mt-0.5 shrink-0 {isTikTok ? 'bg-yellow-500 text-xs text-white hover:bg-yellow-500' : 'bg-amber-500 text-xs text-white hover:bg-amber-500'}"
-					title={isTikTok ? '你所在国家或地区无法下载此视频' : isDouyin ? '付费视频，需购买后才能观看' : '充电专属视频，播放前需先为 UP 主充电'}
+					class="mt-0.5 shrink-0 {isTikTok
+						? 'bg-yellow-500 text-xs text-white hover:bg-yellow-500'
+						: 'bg-amber-500 text-xs text-white hover:bg-amber-500'}"
+					title={isTikTok
+						? '你所在国家或地区无法下载此视频'
+						: isDouyin
+							? '付费视频，需购买后才能观看'
+							: '充电专属视频，播放前需先为 UP 主充电'}
 				>
 					{isTikTok ? '无法下载视频' : isDouyin ? '付费' : '充电视频'}
 				</Badge>
@@ -491,7 +532,7 @@
 			<div class="flex flex-wrap gap-2">
 				{#each customMetaBadges as badge (`${badge.label}-${badge.value}`)}
 					<div
-						class="bg-muted/70 flex min-w-0 max-w-full items-center gap-1 rounded-md border px-2 py-1 text-xs"
+						class="bg-muted/70 flex max-w-full min-w-0 items-center gap-1 rounded-md border px-2 py-1 text-xs"
 						title={badge.title ?? `${badge.label}：${badge.value}`}
 					>
 						<span class="text-muted-foreground shrink-0">{badge.label}</span>
@@ -565,7 +606,6 @@
 					</Button>
 				</div>
 			{/if}
-
 		</div>
 	</CardContent>
 </Card>

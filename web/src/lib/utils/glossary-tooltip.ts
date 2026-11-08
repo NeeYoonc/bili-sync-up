@@ -46,7 +46,11 @@ function shouldSkipElement(element: HTMLElement): boolean {
 	if (existingTitle) {
 		const normalizedTitle = normalizeTextContent(existingTitle);
 		// 已有较长/结构化说明时保持原样，避免覆盖业务自定义提示
-		if (normalizedTitle.length >= 30 || normalizedTitle.includes('\n') || normalizedTitle.includes('：')) {
+		if (
+			normalizedTitle.length >= 30 ||
+			normalizedTitle.includes('\n') ||
+			normalizedTitle.includes('：')
+		) {
 			return true;
 		}
 	}

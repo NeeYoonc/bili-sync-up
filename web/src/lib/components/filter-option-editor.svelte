@@ -65,7 +65,6 @@
 			value.codecs.filter((_, currentIndex) => currentIndex !== index)
 		);
 	}
-
 </script>
 
 <div class="space-y-5">
@@ -121,7 +120,9 @@
 
 	<div class="space-y-2">
 		<Label>编解码器优先级</Label>
-		<p class="text-muted-foreground text-xs">越靠前优先级越高；至少保留一个编码，避免没有可用视频流。</p>
+		<p class="text-muted-foreground text-xs">
+			越靠前优先级越高；至少保留一个编码，避免没有可用视频流。
+		</p>
 		<div class="space-y-2">
 			{#each value.codecs as codec, index (codec)}
 				<div class="flex items-center gap-2 rounded-lg border bg-gray-50 p-2 dark:bg-gray-900">
@@ -189,7 +190,8 @@
 				type="checkbox"
 				checked={value.no_dolby_video}
 				{disabled}
-				onchange={(event) => updateBoolean('no_dolby_video', (event.currentTarget as HTMLInputElement).checked)}
+				onchange={(event) =>
+					updateBoolean('no_dolby_video', (event.currentTarget as HTMLInputElement).checked)}
 				class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
 			/>
 			禁用杜比视界
@@ -199,7 +201,8 @@
 				type="checkbox"
 				checked={value.no_dolby_audio}
 				{disabled}
-				onchange={(event) => updateBoolean('no_dolby_audio', (event.currentTarget as HTMLInputElement).checked)}
+				onchange={(event) =>
+					updateBoolean('no_dolby_audio', (event.currentTarget as HTMLInputElement).checked)}
 				class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
 			/>
 			禁用杜比全景声
@@ -209,7 +212,8 @@
 				type="checkbox"
 				checked={value.no_hdr}
 				{disabled}
-				onchange={(event) => updateBoolean('no_hdr', (event.currentTarget as HTMLInputElement).checked)}
+				onchange={(event) =>
+					updateBoolean('no_hdr', (event.currentTarget as HTMLInputElement).checked)}
 				class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
 			/>
 			禁用HDR
@@ -219,7 +223,8 @@
 				type="checkbox"
 				checked={value.no_hires}
 				{disabled}
-				onchange={(event) => updateBoolean('no_hires', (event.currentTarget as HTMLInputElement).checked)}
+				onchange={(event) =>
+					updateBoolean('no_hires', (event.currentTarget as HTMLInputElement).checked)}
 				class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
 			/>
 			禁用Hi-Res音频

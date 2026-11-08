@@ -72,7 +72,8 @@
 		}
 	}
 
-	$: selectedPage = selectedPageId === null ? null : pages.find((page) => page.id === selectedPageId) ?? null;
+	$: selectedPage =
+		selectedPageId === null ? null : (pages.find((page) => page.id === selectedPageId) ?? null);
 	$: if (activeView === 'page' && pages.length === 0) activeView = 'video';
 	$: buttonEnabled = updateTrigger >= 0 && hasAnyChanges();
 
@@ -234,13 +235,19 @@
 				</div>
 				{#if isExternal}
 					<div class="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-blue-800">
-						💡 外源视频与 B 站一致按“子任务状态”调度：把<strong>封面 / 视频信息 / UP头像 / UP主信息</strong>设为“未开始”后，下载任务会只重新生成对应附属文件，不会重下媒体、也不会动已完成的分P下载；只有把<strong>“分P下载”</strong>设为未开始才会触发媒体重新下载。
+						💡 外源视频与 B 站一致按“子任务状态”调度：把<strong
+							>封面 / 视频信息 / UP头像 / UP主信息</strong
+						>设为“未开始”后，下载任务会只重新生成对应附属文件，不会重下媒体、也不会动已完成的分P下载；只有把<strong
+							>“分P下载”</strong
+						>设为未开始才会触发媒体重新下载。
 					</div>
 				{/if}
 				<div class="status-editor-desktop-warning hidden font-medium text-red-600 sm:block">
 					⚠️ 已完成任务被重置为未开始，任务重新执行时会覆盖现存文件。
 				</div>
-				<div class="rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-orange-800 sm:hidden">
+				<div
+					class="rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-orange-800 sm:hidden"
+				>
 					<div class="space-y-1 text-[11px] leading-4">
 						<div class="font-medium text-red-600">
 							⚠️ 已完成任务被重置为未开始，任务重新执行时会覆盖现存文件。
@@ -251,7 +258,9 @@
 						</div>
 					</div>
 				</div>
-				<div class="status-editor-desktop-reminder hidden rounded-md border border-orange-200 bg-orange-50 p-3 text-orange-800 sm:block">
+				<div
+					class="status-editor-desktop-reminder hidden rounded-md border border-orange-200 bg-orange-50 p-3 text-orange-800 sm:block"
+				>
 					<div class="flex items-start gap-2">
 						<span class="font-bold text-orange-600">💡</span>
 						<div class="space-y-1">
@@ -263,7 +272,9 @@
 						</div>
 					</div>
 				</div>
-				<div class="status-editor-short-warning rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-xs leading-4 text-orange-800">
+				<div
+					class="status-editor-short-warning rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-xs leading-4 text-orange-800"
+				>
 					<div class="font-medium text-red-600">
 						⚠️ 重置已完成任务会覆盖现存文件；只有重置“分P下载”才会重新触发分页下载。
 					</div>
@@ -272,13 +283,14 @@
 		</DialogHeader>
 
 		<div class="status-editor-body flex-1 overflow-hidden px-2 pb-2 sm:px-6 sm:pb-5">
-			<Tabs bind:value={activeView} class="status-editor-tabs flex h-full min-h-0 flex-col gap-2 sm:gap-4">
-				<TabsList class="status-editor-tabs-list grid h-9 w-full grid-cols-[minmax(0,1fr)_minmax(0,1fr)] sm:h-10">
-					<TabsTrigger
-						value="video"
-						class="min-w-0"
-						title="查看和修改视频级任务状态"
-					>
+			<Tabs
+				bind:value={activeView}
+				class="status-editor-tabs flex h-full min-h-0 flex-col gap-2 sm:gap-4"
+			>
+				<TabsList
+					class="status-editor-tabs-list grid h-9 w-full grid-cols-[minmax(0,1fr)_minmax(0,1fr)] sm:h-10"
+				>
+					<TabsTrigger value="video" class="min-w-0" title="查看和修改视频级任务状态">
 						视频状态
 					</TabsTrigger>
 					<TabsTrigger
@@ -292,7 +304,9 @@
 				</TabsList>
 
 				<TabsContent value="video" class="min-h-0 flex-1 overflow-hidden">
-					<div class="status-editor-panel bg-card h-full min-h-0 overflow-y-auto overscroll-contain rounded-lg border p-2.5 sm:p-4">
+					<div
+						class="status-editor-panel bg-card h-full min-h-0 overflow-y-auto overscroll-contain rounded-lg border p-2.5 sm:p-4"
+					>
 						<div class="status-editor-panel-list space-y-2.5 sm:space-y-3">
 							{#each videoTaskNames as taskName, index (index)}
 								<StatusTaskCard
@@ -329,7 +343,9 @@
 								</div>
 							{/if}
 
-							<div class="status-editor-page-summary rounded-lg border bg-muted/30 px-2.5 py-2 sm:px-3">
+							<div
+								class="status-editor-page-summary bg-muted/30 rounded-lg border px-2.5 py-2 sm:px-3"
+							>
 								<div class="text-sm font-medium">P{selectedPage.pid}</div>
 								<div
 									class="text-muted-foreground truncate text-xs sm:text-sm"
@@ -339,12 +355,15 @@
 								</div>
 							</div>
 
-							<div class="status-editor-panel bg-card min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-lg border p-2.5 sm:p-4">
+							<div
+								class="status-editor-panel bg-card min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-lg border p-2.5 sm:p-4"
+							>
 								<div class="status-editor-panel-list space-y-2.5 sm:space-y-3">
 									{#each pageTaskNames as taskName, index (index)}
 										<StatusTaskCard
 											{taskName}
-											currentStatus={(pageStatuses[selectedPage.id] || selectedPage.download_status)[index] ?? 0}
+											currentStatus={(pageStatuses[selectedPage.id] ||
+												selectedPage.download_status)[index] ?? 0}
 											originalStatus={originalPageStatuses[selectedPage.id]?.[index] ?? 0}
 											onStatusChange={(newStatus) =>
 												handlePageStatusChange(selectedPage.id, index, newStatus)}
@@ -360,7 +379,9 @@
 			</Tabs>
 		</div>
 
-		<DialogFooter class="status-editor-footer bg-background !grid !grid-cols-2 gap-2 border-t px-2 py-2 sm:!flex sm:px-6 sm:pt-4 sm:pb-5">
+		<DialogFooter
+			class="status-editor-footer bg-background !grid !grid-cols-2 gap-2 border-t px-2 py-2 sm:!flex sm:px-6 sm:pt-4 sm:pb-5"
+		>
 			<Button
 				variant="outline"
 				onclick={resetAllStatuses}

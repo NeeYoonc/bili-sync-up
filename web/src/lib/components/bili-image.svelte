@@ -33,9 +33,13 @@
 	function isYouTubeImageUrl(url: string): boolean {
 		try {
 			const hostname = new URL(url).hostname.toLowerCase();
-			return ['ytimg.com', 'ggpht.com', 'googleusercontent.com', 'youtube.com', 'googlevideo.com'].some(
-				(domain) => hostname === domain || hostname.endsWith(`.${domain}`)
-			);
+			return [
+				'ytimg.com',
+				'ggpht.com',
+				'googleusercontent.com',
+				'youtube.com',
+				'googlevideo.com'
+			].some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
 		} catch {
 			return false;
 		}

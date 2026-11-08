@@ -36,10 +36,10 @@
 	import FolderIcon from '@lucide/svelte/icons/folder';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import ClockIcon from '@lucide/svelte/icons/clock';
-		import VideoIcon from '@lucide/svelte/icons/video';
+	import VideoIcon from '@lucide/svelte/icons/video';
 	import TvIcon from '@lucide/svelte/icons/tv';
 	import GraduationCapIcon from '@lucide/svelte/icons/graduation-cap';
-import BookOpenIcon from '@lucide/svelte/icons/book-open';
+	import BookOpenIcon from '@lucide/svelte/icons/book-open';
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
 	import CpuIcon from '@lucide/svelte/icons/cpu';
 	import MemoryStickIcon from '@lucide/svelte/icons/memory-stick';
@@ -762,42 +762,54 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 													<LayersIcon class="text-muted-foreground h-4 w-4" />
 													<span class="text-sm">合集</span>
 												</div>
-												<Badge variant="outline">{dashboardData.enabled_douyin_mixes} / {dashboardData.total_douyin_mixes}</Badge>
+												<Badge variant="outline"
+													>{dashboardData.enabled_douyin_mixes} / {dashboardData.total_douyin_mixes}</Badge
+												>
 											</div>
 											<div class="flex items-center justify-between">
 												<div class="flex items-center gap-2">
 													<HeartIcon class="text-muted-foreground h-4 w-4" />
 													<span class="text-sm">我的喜欢</span>
 												</div>
-												<Badge variant="outline">{dashboardData.enabled_douyin_liked} / {dashboardData.total_douyin_liked}</Badge>
+												<Badge variant="outline"
+													>{dashboardData.enabled_douyin_liked} / {dashboardData.total_douyin_liked}</Badge
+												>
 											</div>
 											<div class="flex items-center justify-between">
 												<div class="flex items-center gap-2">
 													<FolderIcon class="text-muted-foreground h-4 w-4" />
 													<span class="text-sm">收藏夹</span>
 												</div>
-												<Badge variant="outline">{dashboardData.enabled_douyin_collections} / {dashboardData.total_douyin_collections}</Badge>
+												<Badge variant="outline"
+													>{dashboardData.enabled_douyin_collections} / {dashboardData.total_douyin_collections}</Badge
+												>
 											</div>
 											<div class="flex items-center justify-between">
 												<div class="flex items-center gap-2">
 													<ClockIcon class="text-muted-foreground h-4 w-4" />
 													<span class="text-sm">稍后再看</span>
 												</div>
-												<Badge variant="outline">{dashboardData.enabled_douyin_watch_later} / {dashboardData.total_douyin_watch_later}</Badge>
+												<Badge variant="outline"
+													>{dashboardData.enabled_douyin_watch_later} / {dashboardData.total_douyin_watch_later}</Badge
+												>
 											</div>
 											<div class="flex items-center justify-between">
 												<div class="flex items-center gap-2">
 													<TvIcon class="text-muted-foreground h-4 w-4" />
 													<span class="text-sm">放映厅</span>
 												</div>
-												<Badge variant="outline">{dashboardData.enabled_douyin_theaters} / {dashboardData.total_douyin_theaters}</Badge>
+												<Badge variant="outline"
+													>{dashboardData.enabled_douyin_theaters} / {dashboardData.total_douyin_theaters}</Badge
+												>
 											</div>
 											<div class="flex items-center justify-between">
 												<div class="flex items-center gap-2">
 													<ListVideoIcon class="text-muted-foreground h-4 w-4" />
 													<span class="text-sm">短剧</span>
 												</div>
-												<Badge variant="outline">{dashboardData.enabled_douyin_series} / {dashboardData.total_douyin_series}</Badge>
+												<Badge variant="outline"
+													>{dashboardData.enabled_douyin_series} / {dashboardData.total_douyin_series}</Badge
+												>
 											</div>
 										</div>
 									{:else}
@@ -830,7 +842,7 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 												</Badge>
 											</div>
 										</div>
-{/if}
+									{/if}
 								</Tabs.Root>
 							</div>
 						{:else}
@@ -867,7 +879,8 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 										<span class="flex items-center gap-1">
 											<span
 												class="inline-block h-2 w-2 rounded-sm"
-												style="background:{videoChartConfig[key as keyof typeof videoChartConfig].color}"
+												style="background:{videoChartConfig[key as keyof typeof videoChartConfig]
+													.color}"
 											></span>
 											<span class="text-muted-foreground"
 												>{videoChartConfig[key as keyof typeof videoChartConfig].label}</span
@@ -1010,52 +1023,68 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 									</div>
 								</div>
 
-																<!-- 正在下载实时进度 -->
+								<!-- 正在下载实时进度 -->
 								<div class="mt-4 space-y-2 border-t pt-3">
 									<div class="flex items-center justify-between">
-										<span class="text-sm">正在下载{downloads.length > 0 ? `（${downloads.length}）` : ''}</span>
-										{#if downloads.length > 0}
-										<Button
-										size="sm"
-										variant="ghost"
-										class="h-6 w-6 p-0"
-										title="查看全部下载"
-										onclick={() => (showDownloadsSheet = true)}
+										<span class="text-sm"
+											>正在下载{downloads.length > 0 ? `（${downloads.length}）` : ''}</span
 										>
-										<MoreHorizontalIcon class="h-4 w-4" />
-										</Button>
+										{#if downloads.length > 0}
+											<Button
+												size="sm"
+												variant="ghost"
+												class="h-6 w-6 p-0"
+												title="查看全部下载"
+												onclick={() => (showDownloadsSheet = true)}
+											>
+												<MoreHorizontalIcon class="h-4 w-4" />
+											</Button>
 										{/if}
 									</div>
 									{#if primaryDownload}
 										<div class="hover:bg-muted/40 rounded-md border p-2 transition-colors">
-										<div class="flex items-center justify-between gap-2">
-										<span class="truncate text-xs font-medium" title={primaryDownload.title}>
-										{primaryDownload.title}
-										</span>
-										{#if primaryDownload.phase}
-										<Badge variant="secondary" class="shrink-0 px-1.5 py-0 text-[10px]">
-										{primaryDownload.phase}
-										</Badge>
-										{/if}
-										</div>
-										<div class="mt-1.5 flex items-center gap-2">
-										<Progress value={downloadPercent(primaryDownload)} class="h-1.5 flex-1" />
-										<span class="text-muted-foreground w-10 shrink-0 text-right text-[10px]">
-										{primaryDownload.total_bytes > 0 ? `${downloadPercent(primaryDownload)}%` : '--'}
-										</span>
-										</div>
-										<div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-[10px]">
-										<span>{formatBytes(primaryDownload.downloaded_bytes)}{primaryDownload.total_bytes > 0 ? ` / ${formatBytes(primaryDownload.total_bytes)}` : ''}</span>
-										{#if primaryDownload.speed_bps > 0}<span>{formatSpeed(primaryDownload.speed_bps)}</span>{/if}
-										{#if primaryDownload.eta_seconds}<span>剩余约 {formatEta(primaryDownload.eta_seconds)}</span>{/if}
-										</div>
+											<div class="flex items-center justify-between gap-2">
+												<span class="truncate text-xs font-medium" title={primaryDownload.title}>
+													{primaryDownload.title}
+												</span>
+												{#if primaryDownload.phase}
+													<Badge variant="secondary" class="shrink-0 px-1.5 py-0 text-[10px]">
+														{primaryDownload.phase}
+													</Badge>
+												{/if}
+											</div>
+											<div class="mt-1.5 flex items-center gap-2">
+												<Progress value={downloadPercent(primaryDownload)} class="h-1.5 flex-1" />
+												<span class="text-muted-foreground w-10 shrink-0 text-right text-[10px]">
+													{primaryDownload.total_bytes > 0
+														? `${downloadPercent(primaryDownload)}%`
+														: '--'}
+												</span>
+											</div>
+											<div
+												class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-[10px]"
+											>
+												<span
+													>{formatBytes(
+														primaryDownload.downloaded_bytes
+													)}{primaryDownload.total_bytes > 0
+														? ` / ${formatBytes(primaryDownload.total_bytes)}`
+														: ''}</span
+												>
+												{#if primaryDownload.speed_bps > 0}<span
+														>{formatSpeed(primaryDownload.speed_bps)}</span
+													>{/if}
+												{#if primaryDownload.eta_seconds}<span
+														>剩余约 {formatEta(primaryDownload.eta_seconds)}</span
+													>{/if}
+											</div>
 										</div>
 									{:else}
 										<div class="text-muted-foreground text-xs">当前无下载任务</div>
 									{/if}
 								</div>
 
-<!-- 任务控制按钮 -->
+								<!-- 任务控制按钮 -->
 								{#if taskControlStatus}
 									<div class="grid grid-cols-2 gap-2">
 										<Button
@@ -1297,7 +1326,10 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 			</div>
 			<div class="mt-2 max-h-[60vh] space-y-2 overflow-auto">
 				{#if latestIngests.length === 0}
-					<EmptyState title={`暂无${getIngestViewTitle()}记录`} class="border-0 bg-transparent py-8" />
+					<EmptyState
+						title={`暂无${getIngestViewTitle()}记录`}
+						class="border-0 bg-transparent py-8"
+					/>
 				{:else}
 					{#each latestIngests as item (item.platform + '-' + item.video_id)}
 						<div class="hover:bg-muted/30 rounded-lg border p-3 transition-colors">
@@ -1378,7 +1410,9 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 										{INGEST_PLATFORM_LABEL[item.platform]}
 									</Badge>
 									{#if item.phase}
-										<Badge variant="secondary" class="shrink-0 px-1.5 py-0 text-[10px]">{item.phase}</Badge>
+										<Badge variant="secondary" class="shrink-0 px-1.5 py-0 text-[10px]"
+											>{item.phase}</Badge
+										>
 									{/if}
 								</div>
 								<div class="mt-2 flex items-center gap-2">
@@ -1388,7 +1422,11 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 									</span>
 								</div>
 								<div class="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 text-xs">
-									<span>{formatBytes(item.downloaded_bytes)}{item.total_bytes > 0 ? ` / ${formatBytes(item.total_bytes)}` : ''}</span>
+									<span
+										>{formatBytes(item.downloaded_bytes)}{item.total_bytes > 0
+											? ` / ${formatBytes(item.total_bytes)}`
+											: ''}</span
+									>
 									{#if item.speed_bps > 0}<span>{formatSpeed(item.speed_bps)}</span>{/if}
 									{#if item.eta_seconds}<span>剩余约 {formatEta(item.eta_seconds)}</span>{/if}
 									<span>·</span>

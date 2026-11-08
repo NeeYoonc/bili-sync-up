@@ -252,7 +252,10 @@
 			return;
 		}
 		const element = readerRoot as FullscreenElement | null;
-		const request = element?.requestFullscreen ?? element?.webkitRequestFullscreen ?? element?.webkitRequestFullScreen;
+		const request =
+			element?.requestFullscreen ??
+			element?.webkitRequestFullscreen ??
+			element?.webkitRequestFullScreen;
 		if (element && request) {
 			try {
 				await request.call(element);
@@ -270,7 +273,8 @@
 	function handleKeydown(event: KeyboardEvent) {
 		const target = event.target as HTMLElement | null;
 		const tag = target?.tagName?.toLowerCase();
-		if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
+		if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable)
+			return;
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
 		if (event.key === 'Escape' && pseudoFullscreen) {
 			event.preventDefault();
@@ -371,7 +375,7 @@
 	</div>
 {:else if loadError}
 	<div
-		class="flex flex-col items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-10 text-center"
+		class="border-destructive/40 bg-destructive/5 flex flex-col items-center gap-3 rounded-lg border px-4 py-10 text-center"
 	>
 		<AlertCircleIcon class="text-destructive h-8 w-8" />
 		<div class="text-sm font-medium">漫画读取失败</div>

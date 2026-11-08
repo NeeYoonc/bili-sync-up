@@ -206,7 +206,13 @@ export interface YouTubeQueueStatusResponse {
 
 // 排序字段枚举
 export type SortBy =
-	'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime' | 'is_charge_video' | 'file_size';
+	| 'id'
+	| 'name'
+	| 'upper_name'
+	| 'created_at'
+	| 'pubtime'
+	| 'is_charge_video'
+	| 'file_size';
 
 // 排序顺序枚举
 export type SortOrder = 'asc' | 'desc';
@@ -1570,7 +1576,6 @@ export interface BetaImageUpdateStatusResponse {
 	error?: string;
 }
 
-
 // 网络代理连通性测试结果
 export interface TestProxyResponse {
 	success: boolean;
@@ -1578,7 +1583,6 @@ export interface TestProxyResponse {
 	status?: number | null;
 	error?: string | null;
 }
-
 
 // ===== 数据库管理 =====
 
@@ -1620,7 +1624,6 @@ export interface DatabaseMaintenanceResponse {
 	size_before_bytes?: number | null;
 	size_after_bytes?: number | null;
 }
-
 
 export interface DatabaseBackupInfo {
 	name: string;

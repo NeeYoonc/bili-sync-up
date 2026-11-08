@@ -340,7 +340,9 @@ class ApiClient {
 	async getTikTokSecUid(): Promise<ApiResponse<TikTokSecUidStatusResponse>> {
 		return this.get<TikTokSecUidStatusResponse>('/tiktok/secuid');
 	}
-	async setTikTokSecUid(secUid: string): Promise<ApiResponse<{ success: boolean; message: string }>> {
+	async setTikTokSecUid(
+		secUid: string
+	): Promise<ApiResponse<{ success: boolean; message: string }>> {
 		return this.put<{ success: boolean; message: string }>('/tiktok/secuid', { sec_uid: secUid });
 	}
 	async getTikTokSourceVideos(params: {
@@ -1064,9 +1066,9 @@ class ApiClient {
 	/**
 	 * 获取讲师（UP 主）名下的全部课程
 	 */
-	async getPugvUpCourses(upId: string): Promise<
-		ApiResponse<import('./types').PugvUpCoursesResponse>
-	> {
+	async getPugvUpCourses(
+		upId: string
+	): Promise<ApiResponse<import('./types').PugvUpCoursesResponse>> {
 		return this.get<import('./types').PugvUpCoursesResponse>('/pugv/up-courses', { up_id: upId });
 	}
 
@@ -1394,25 +1396,23 @@ class ApiClient {
 	/**
 	 * 测试推送通知
 	 */
-	async testNotification(
-		params?: {
-			custom_message?: string;
-			active_channel?: string;
-			serverchan_key?: string;
-			serverchan3_uid?: string;
-			serverchan3_sendkey?: string;
-			wecom_webhook_url?: string;
-			wecom_msgtype?: string;
-			wecom_mention_all?: boolean;
-			wecom_mentioned_list?: string[];
-			webhook_url?: string;
-			webhook_bearer_token?: string;
-			webhook_custom_headers?: string;
-			webhook_format?: string;
-			webhook_custom_body?: string;
-			webhook_synology_chat_template?: string;
-		}
-	): Promise<
+	async testNotification(params?: {
+		custom_message?: string;
+		active_channel?: string;
+		serverchan_key?: string;
+		serverchan3_uid?: string;
+		serverchan3_sendkey?: string;
+		wecom_webhook_url?: string;
+		wecom_msgtype?: string;
+		wecom_mention_all?: boolean;
+		wecom_mentioned_list?: string[];
+		webhook_url?: string;
+		webhook_bearer_token?: string;
+		webhook_custom_headers?: string;
+		webhook_format?: string;
+		webhook_custom_body?: string;
+		webhook_synology_chat_template?: string;
+	}): Promise<
 		ApiResponse<{
 			success: boolean;
 			message: string;
@@ -1457,7 +1457,10 @@ class ApiClient {
 		return this.post<DatabaseRestoreResponse>('/database/restore', { backup_file: backupFile });
 	}
 
-	async uploadRestoreBackup(file: File, filename?: string): Promise<ApiResponse<DatabaseRestoreResponse>> {
+	async uploadRestoreBackup(
+		file: File,
+		filename?: string
+	): Promise<ApiResponse<DatabaseRestoreResponse>> {
 		const form = new FormData();
 		form.append('file', file, filename ?? file.name);
 		return this.request<DatabaseRestoreResponse>('/database/restore-upload', {
@@ -1469,7 +1472,6 @@ class ApiClient {
 	async testProxy(proxy?: string): Promise<ApiResponse<TestProxyResponse>> {
 		return this.post<TestProxyResponse>('/proxy/test', proxy !== undefined ? { proxy } : {});
 	}
-
 }
 
 // 创建默认的 API 客户端实例
@@ -1995,7 +1997,8 @@ export const api = {
 		apiClient.runDatabaseMaintenance(action, keepDays),
 	getDatabaseBackups: () => apiClient.getDatabaseBackups(),
 	restoreDatabase: (backupFile: string) => apiClient.restoreDatabase(backupFile),
-	uploadRestoreBackup: (file: File, filename?: string) => apiClient.uploadRestoreBackup(file, filename),
+	uploadRestoreBackup: (file: File, filename?: string) =>
+		apiClient.uploadRestoreBackup(file, filename),
 	/**
 	 * 订阅系统信息WebSocket事件
 	 */

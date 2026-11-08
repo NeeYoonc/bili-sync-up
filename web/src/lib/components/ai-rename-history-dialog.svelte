@@ -11,13 +11,13 @@
 	export let sourceName = '';
 	export let sourceType = '';
 	export let sourceId = 0;
-export let initialVideoPrompt = '';
-export let initialAudioPrompt = '';
-// 高级选项初始值（从视频源加载）
-export let initialEnableMultiPage = false;
-export let initialEnableCollection = false;
-export let initialEnableBangumi = false;
-export let initialRenameParentDir = false;
+	export let initialVideoPrompt = '';
+	export let initialAudioPrompt = '';
+	// 高级选项初始值（从视频源加载）
+	export let initialEnableMultiPage = false;
+	export let initialEnableCollection = false;
+	export let initialEnableBangumi = false;
+	export let initialRenameParentDir = false;
 
 	const dispatch = createEventDispatcher<{
 		complete: { renamed: number; skipped: number; failed: number };
@@ -28,24 +28,27 @@ export let initialRenameParentDir = false;
 	let audioPrompt = '';
 
 	// 高级选项
-let showAdvancedOptions = false;
-let enableMultiPage = false;
-let enableCollection = false;
-let enableBangumi = false;
-let renameParentDir = false;
+	let showAdvancedOptions = false;
+	let enableMultiPage = false;
+	let enableCollection = false;
+	let enableBangumi = false;
+	let renameParentDir = false;
 
 	// 重置状态
 	function resetState() {
 		videoPrompt = initialVideoPrompt;
 		audioPrompt = initialAudioPrompt;
-	enableMultiPage = initialEnableMultiPage;
-	enableCollection = initialEnableCollection;
-	enableBangumi = initialEnableBangumi;
-	renameParentDir = initialRenameParentDir;
-	// 如果有任何高级选项被启用，自动展开高级选项面板
-	showAdvancedOptions =
-		initialEnableMultiPage || initialEnableCollection || initialEnableBangumi || initialRenameParentDir;
-}
+		enableMultiPage = initialEnableMultiPage;
+		enableCollection = initialEnableCollection;
+		enableBangumi = initialEnableBangumi;
+		renameParentDir = initialRenameParentDir;
+		// 如果有任何高级选项被启用，自动展开高级选项面板
+		showAdvancedOptions =
+			initialEnableMultiPage ||
+			initialEnableCollection ||
+			initialEnableBangumi ||
+			initialRenameParentDir;
+	}
 
 	// 当对话框打开时重置状态
 	$: if (isOpen) {
@@ -86,12 +89,12 @@ let renameParentDir = false;
 				sourceType,
 				sourceId,
 				videoPrompt.trim(),
-			audioPrompt.trim(),
-			enableMultiPage,
-			enableCollection,
-			enableBangumi,
-			renameParentDir
-		);
+				audioPrompt.trim(),
+				enableMultiPage,
+				enableCollection,
+				enableBangumi,
+				renameParentDir
+			);
 
 			if (result.data.success) {
 				// 重命名成功后，同步更新该源的 AI 重命名设置（包括提示词、开关和高级选项）

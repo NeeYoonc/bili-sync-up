@@ -354,7 +354,8 @@
 		{
 			value: 'pugv',
 			label: '课程',
-			description: 'B站课程（含付费课）。season_id 在课程链接 cheese/play/ss 后面，可直接粘贴整条链接'
+			description:
+				'B站课程（含付费课）。season_id 在课程链接 cheese/play/ss 后面，可直接粘贴整条链接'
 		},
 		{
 			value: 'manga',
@@ -387,12 +388,28 @@
 		},
 		{ value: 'douyin_liked', label: '我的喜欢', description: '同步当前登录账号点赞的视频和图文' },
 		{ value: 'douyin_collection', label: '收藏夹', description: '从右侧选择当前账号的抖音收藏夹' },
-		{ value: 'douyin_watch_later', label: '稍后再看', description: '同步当前登录账号的稍后再看列表' },
-		{ value: 'douyin_theater', label: '放映厅', description: '搜索并选择放映厅专辑，按当前账号可见权限同步' },
-		{ value: 'douyin_series', label: '短剧', description: '搜索并选择短剧，按当前账号可见权限同步剧集' }
+		{
+			value: 'douyin_watch_later',
+			label: '稍后再看',
+			description: '同步当前登录账号的稍后再看列表'
+		},
+		{
+			value: 'douyin_theater',
+			label: '放映厅',
+			description: '搜索并选择放映厅专辑，按当前账号可见权限同步'
+		},
+		{
+			value: 'douyin_series',
+			label: '短剧',
+			description: '搜索并选择短剧，按当前账号可见权限同步剧集'
+		}
 	];
 	const tiktokSourceTypeOptions = [
-		{ value: 'tiktok', label: 'TikTok 作者', description: '同步指定 TikTok 作者主页发布的视频；公开内容无需登录' },
+		{
+			value: 'tiktok',
+			label: 'TikTok 作者',
+			description: '同步指定 TikTok 作者主页发布的视频；公开内容无需登录'
+		},
 		{
 			value: 'tiktok_favorite',
 			label: '我的喜欢',
@@ -428,7 +445,8 @@
 	function normalizePugvSeasonId(raw: string): string {
 		const text = raw.trim();
 		if (!text) return '';
-		const matched = text.match(/cheese\/play\/ss(\d+)/i) ?? text.match(/\bss(\d+)\b/i) ?? text.match(/^(\d+)$/);
+		const matched =
+			text.match(/cheese\/play\/ss(\d+)/i) ?? text.match(/\bss(\d+)\b/i) ?? text.match(/^(\d+)$/);
 		return matched ? matched[1] : text;
 	}
 
@@ -487,13 +505,13 @@
 				? '我的喜欢'
 				: youtubeSourceType === 'douyin_watch_later'
 					? '稍后再看'
-				: youtubeSourceType === 'subscriptions'
-				? '我的订阅'
-				: youtubeSourceType === 'liked'
-					? '喜欢的视频'
-					: youtubeSourceType === 'watch_later'
-						? '稍后再看'
-						: '';
+					: youtubeSourceType === 'subscriptions'
+						? '我的订阅'
+						: youtubeSourceType === 'liked'
+							? '喜欢的视频'
+							: youtubeSourceType === 'watch_later'
+								? '稍后再看'
+								: '';
 		applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
 		showSubmissionSelection =
 			youtubeSourceType === 'subscriptions' ||
@@ -508,9 +526,13 @@
 	}
 
 	function douyinSourceNeedsSelection(): boolean {
-		return ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series', 'douyin_mix'].includes(
-			youtubeSourceType
-		);
+		return [
+			'douyin',
+			'douyin_collection',
+			'douyin_theater',
+			'douyin_series',
+			'douyin_mix'
+		].includes(youtubeSourceType);
 	}
 
 	async function loadDouyinCatalog(keyword?: string): Promise<boolean> {
@@ -620,9 +642,7 @@
 	}
 
 	$: currentQuickSubscriptionType =
-		sourcePlatform !== 'bilibili'
-			? getYouTubeQuickSubscriptionType(youtubeSourceType)
-			: sourceType;
+		sourcePlatform !== 'bilibili' ? getYouTubeQuickSubscriptionType(youtubeSourceType) : sourceType;
 	$: currentQuickSubscriptionTemplate =
 		currentQuickSubscriptionType === 'favorite'
 			? favoriteQuickSubscribePathTemplate.trim()
@@ -723,11 +743,15 @@
 	}
 
 	function normalizeVideoQuality(value: string | undefined, fallback: VideoQuality): VideoQuality {
-		return value && VALID_VIDEO_QUALITIES.has(value as VideoQuality) ? (value as VideoQuality) : fallback;
+		return value && VALID_VIDEO_QUALITIES.has(value as VideoQuality)
+			? (value as VideoQuality)
+			: fallback;
 	}
 
 	function normalizeAudioQuality(value: string | undefined, fallback: AudioQuality): AudioQuality {
-		return value && VALID_AUDIO_QUALITIES.has(value as AudioQuality) ? (value as AudioQuality) : fallback;
+		return value && VALID_AUDIO_QUALITIES.has(value as AudioQuality)
+			? (value as AudioQuality)
+			: fallback;
 	}
 
 	function normalizeVideoCodecs(values: string[] | undefined): VideoCodec[] {
@@ -975,8 +999,8 @@
 						? api.getDouyinCatalog(youtubeSourceType, searchKeyword.trim())
 						: api.searchDouyin(searchKeyword.trim()),
 				{
-				setLoading: (value) => (searchLoading = value),
-				context: isCatalogSearch ? '搜索抖音内容失败' : '搜索抖音作者失败'
+					setLoading: (value) => (searchLoading = value),
+					context: isCatalogSearch ? '搜索抖音内容失败' : '搜索抖音作者失败'
 				}
 			);
 			if (!response) return;
@@ -1025,7 +1049,11 @@
 					`${isPlaylistSearch ? '获取' : '搜索完成，共找到'} ${response.data.results.length} 个${isPlaylistSearch ? '收藏夹' : ' TikTok 作者'}`
 				);
 			} else {
-				toast.info(isPlaylistSearch ? '未找到可用的播放列表（当前账号未创建收藏夹，或该作者未开放公开收藏夹）' : '未找到匹配的 TikTok 作者');
+				toast.info(
+					isPlaylistSearch
+						? '未找到可用的播放列表（当前账号未创建收藏夹，或该作者未开放公开收藏夹）'
+						: '未找到匹配的 TikTok 作者'
+				);
 			}
 			return;
 		}
@@ -1084,7 +1112,7 @@
 				case 'collection':
 				case 'submission':
 				case 'favorite': // 收藏夹类型也搜索UP主
-			case 'pugv': // 课程先按讲师（UP 主）搜索，再列出其名下课程
+				case 'pugv': // 课程先按讲师（UP 主）搜索，再列出其名下课程
 					searchType = 'bili_user';
 					break;
 				case 'bangumi':
@@ -1187,7 +1215,11 @@
 	function selectSearchResult(result: SearchResultItem) {
 		clearFollowingsPanel();
 
-		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin' || sourcePlatform === 'tiktok') {
+		if (
+			sourcePlatform === 'youtube' ||
+			sourcePlatform === 'douyin' ||
+			sourcePlatform === 'tiktok'
+		) {
 			// “播放列表/收藏”来源：先按 UP 主搜索频道，选择频道后加载其全部播放列表
 			if (
 				sourcePlatform === 'youtube' &&
@@ -1265,20 +1297,20 @@
 			}
 			const sourceLabel =
 				sourcePlatform === 'tiktok'
-						? youtubeSourceType === 'tiktok_collection'
-							? 'TikTok 收藏夹'
-							: 'TikTok 作者'
+					? youtubeSourceType === 'tiktok_collection'
+						? 'TikTok 收藏夹'
+						: 'TikTok 作者'
 					: sourcePlatform !== 'douyin'
 						? 'YouTube 来源'
 						: youtubeSourceType === 'douyin_theater'
-						? '抖音放映厅'
-						: youtubeSourceType === 'douyin_series'
-							? '抖音短剧'
-							: youtubeSourceType === 'douyin_collection'
-								? '抖音收藏夹'
-								: youtubeSourceType === 'douyin_mix'
-									? '抖音合集'
-								: '抖音作者';
+							? '抖音放映厅'
+							: youtubeSourceType === 'douyin_series'
+								? '抖音短剧'
+								: youtubeSourceType === 'douyin_collection'
+									? '抖音收藏夹'
+									: youtubeSourceType === 'douyin_mix'
+										? '抖音合集'
+										: '抖音作者';
 			toast.success(`已选择${sourceLabel}`, {
 				description: shouldSelectHistory ? '正在加载历史视频…' : '已填充来源信息'
 			});
@@ -1571,7 +1603,11 @@
 			return;
 		}
 
-		if (sourcePlatform === 'youtube' || sourcePlatform === 'douyin' || sourcePlatform === 'tiktok') {
+		if (
+			sourcePlatform === 'youtube' ||
+			sourcePlatform === 'douyin' ||
+			sourcePlatform === 'tiktok'
+		) {
 			const isDouyin = sourcePlatform === 'douyin';
 			const isTiktokPlatform = sourcePlatform === 'tiktok';
 			if (
@@ -1582,12 +1618,11 @@
 				!youtubeUrl.trim()
 			) {
 				toast.error(isDouyin ? '请先选择抖音来源' : '请输入 YouTube 链接', {
-					description:
-						isDouyin
-							? '作者、合集、收藏夹、放映厅或短剧需要从右侧选择，也可填写对应详情链接'
-							: youtubeSourceType === 'channel'
+					description: isDouyin
+						? '作者、合集、收藏夹、放映厅或短剧需要从右侧选择，也可填写对应详情链接'
+						: youtubeSourceType === 'channel'
 							? '频道投稿需要提供频道链接'
-								: '播放列表来源需要提供播放列表链接'
+							: '播放列表来源需要提供播放列表链接'
 				});
 				return;
 			}
@@ -1657,8 +1692,7 @@
 						generate_image_post_video: generateImagePostVideo,
 						download_danmaku: downloadDanmaku,
 						download_subtitle: downloadSubtitle,
-						ai_subtitle_language:
-							aiSubtitleLanguage.trim() || DEFAULT_AI_SUBTITLE_LANGUAGE,
+						ai_subtitle_language: aiSubtitleLanguage.trim() || DEFAULT_AI_SUBTITLE_LANGUAGE,
 						filter_option: filterOptionInheritGlobal
 							? undefined
 							: cloneFilterOption(filterOptionDraft),
@@ -1672,20 +1706,14 @@
 						ai_rename: aiRename,
 						ai_rename_video_prompt: aiRenameVideoPrompt.trim() || undefined,
 						ai_rename_audio_prompt: aiRenameAudioPrompt.trim() || undefined,
-						ai_rename_enable_multi_page: showAiRenameAdvanced
-							? aiRenameEnableMultiPage
-							: undefined,
+						ai_rename_enable_multi_page: showAiRenameAdvanced ? aiRenameEnableMultiPage : undefined,
 						ai_rename_enable_collection: showAiRenameAdvanced
 							? aiRenameEnableCollection
 							: undefined,
 						ai_rename_enable_bangumi: showAiRenameAdvanced ? aiRenameEnableBangumi : undefined,
-						ai_rename_rename_parent_dir: showAiRenameAdvanced
-							? aiRenameRenameParentDir
-							: undefined,
-						selected_videos:
-							youtubeSourceType === 'subscriptions' ? [] : selectedVideos,
-						selected_channels:
-							youtubeSourceType === 'subscriptions' ? selectedVideos : []
+						ai_rename_rename_parent_dir: showAiRenameAdvanced ? aiRenameRenameParentDir : undefined,
+						selected_videos: youtubeSourceType === 'subscriptions' ? [] : selectedVideos,
+						selected_channels: youtubeSourceType === 'subscriptions' ? selectedVideos : []
 					}),
 				{
 					setLoading: (value) => (loading = value),
@@ -2028,9 +2056,8 @@
 					? douyinSourceTypeOptions
 					: sourcePlatform === 'tiktok'
 						? tiktokSourceTypeOptions
-						: youtubeSourceTypeOptions).find(
-					(opt) => opt.value === youtubeSourceType
-				)?.description || ''
+						: youtubeSourceTypeOptions
+				).find((opt) => opt.value === youtubeSourceType)?.description || ''
 			: sourceTypeOptions.find((opt) => opt.value === sourceType)?.description || '';
 
 	// 获取收藏夹列表
@@ -2451,8 +2478,14 @@
 	// 加载已有 YouTube / TikTok 源（外源互斥置灰用）
 	async function loadExistingExternalSources() {
 		const [youtube, tiktok] = await Promise.all([
-			runRequest(() => api.getYouTubeSources(), { showErrorToast: false, context: '加载已有 YouTube 源失败' }),
-			runRequest(() => api.getTikTokSources(), { showErrorToast: false, context: '加载已有 TikTok 源失败' })
+			runRequest(() => api.getYouTubeSources(), {
+				showErrorToast: false,
+				context: '加载已有 YouTube 源失败'
+			}),
+			runRequest(() => api.getTikTokSources(), {
+				showErrorToast: false,
+				context: '加载已有 TikTok 源失败'
+			})
 		]);
 		if (youtube && Array.isArray(youtube.data)) existingYouTubeSources = youtube.data;
 		if (tiktok && Array.isArray(tiktok.data)) existingTikTokSources = tiktok.data;
@@ -2467,7 +2500,9 @@
 		const withoutQuery = lower.split(/[?#]/)[0];
 		const segments = withoutQuery.split('/').filter(Boolean);
 		const last = segments.length > 0 ? segments[segments.length - 1] : '';
-		const query = new URLSearchParams(lower.includes('?') ? lower.slice(lower.indexOf('?') + 1) : '');
+		const query = new URLSearchParams(
+			lower.includes('?') ? lower.slice(lower.indexOf('?') + 1) : ''
+		);
 		switch (sourceType) {
 			case 'douyin':
 				return `douyin:user:${last}`;
@@ -3108,28 +3143,28 @@
 				: youtubeSourceType === 'douyin_watch_later'
 					? '选择稍后再看作品'
 					: '选择历史作品'
-		: sourcePlatform === 'tiktok'
-			? youtubeSourceType === 'tiktok_favorite'
-				? '选择喜欢的作品'
-				: '选择历史视频'
-		: youtubeSourceType === 'liked'
-			? '选择喜欢的视频'
-			: youtubeSourceType === 'watch_later'
-				? '选择稍后再看视频'
-			: '选择历史视频';
+			: sourcePlatform === 'tiktok'
+				? youtubeSourceType === 'tiktok_favorite'
+					? '选择喜欢的作品'
+					: '选择历史视频'
+				: youtubeSourceType === 'liked'
+					? '选择喜欢的视频'
+					: youtubeSourceType === 'watch_later'
+						? '选择稍后再看视频'
+						: '选择历史视频';
 	$: youtubeSelectionDescriptionText = youtubeChannelSelection
 		? '仅同步勾选频道以后发布的视频。'
 		: sourcePlatform === 'douyin'
 			? '首次仅下载勾选的现有作品，之后该来源新增的视频或图文会自动同步。统计数字为真实点赞数。'
-		: sourcePlatform === 'tiktok'
-			? youtubeSourceType === 'tiktok_favorite'
-				? '首次仅下载勾选的历史视频，之后新点赞的作品会自动同步。'
-				: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。'
-		: youtubeSourceType === 'liked'
-			? '首次仅下载勾选的历史视频，之后新加入“喜欢”的视频会自动同步。'
-			: youtubeSourceType === 'watch_later'
-				? '首次仅下载勾选的历史视频，之后新加入“稍后再看”的视频会自动同步。'
-			: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。';
+			: sourcePlatform === 'tiktok'
+				? youtubeSourceType === 'tiktok_favorite'
+					? '首次仅下载勾选的历史视频，之后新点赞的作品会自动同步。'
+					: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。'
+				: youtubeSourceType === 'liked'
+					? '首次仅下载勾选的历史视频，之后新加入“喜欢”的视频会自动同步。'
+					: youtubeSourceType === 'watch_later'
+						? '首次仅下载勾选的历史视频，之后新加入“稍后再看”的视频会自动同步。'
+						: '未选择的视频不会下载和显示，新发布或新加入的视频会自动下载。';
 
 	function openYouTubeHistorySelection() {
 		if (
@@ -3232,17 +3267,17 @@
 									keyword: submissionSearchQuery.trim()
 								})
 							: api.getYouTubeSourceVideos({
-							url: youtubeUrl.trim() || undefined,
-							source_type: youtubeSourceType as
-								| 'subscriptions'
-								| 'channel'
-								| 'playlist'
-								| 'liked'
-								| 'watch_later',
-							page: 1,
-							page_size: 100,
-							keyword: submissionSearchQuery.trim()
-						})
+									url: youtubeUrl.trim() || undefined,
+									source_type: youtubeSourceType as
+										| 'subscriptions'
+										| 'channel'
+										| 'playlist'
+										| 'liked'
+										| 'watch_later',
+									page: 1,
+									page_size: 100,
+									keyword: submissionSearchQuery.trim()
+								})
 					: api.getSubmissionVideos({
 							up_id: sourceId,
 							page: 1,
@@ -3350,16 +3385,16 @@
 								page_size: pageSize
 							})
 						: await api.getYouTubeSourceVideos({
-						url: youtubeUrl.trim() || undefined,
-						source_type: youtubeSourceType as
-							| 'subscriptions'
-							| 'channel'
-							| 'playlist'
-							| 'liked'
-							| 'watch_later',
-						page,
-						page_size: pageSize
-					})
+								url: youtubeUrl.trim() || undefined,
+								source_type: youtubeSourceType as
+									| 'subscriptions'
+									| 'channel'
+									| 'playlist'
+									| 'liked'
+									| 'watch_later',
+								page,
+								page_size: pageSize
+							})
 				: await api.getSubmissionVideos({
 						up_id: sourceId,
 						page,
@@ -3375,11 +3410,7 @@
 
 			// 添加新视频（去重）
 			const newVideos = response.data.videos || [];
-			if (
-				isYouTubeHistorySource() &&
-				!name.trim() &&
-				newVideos[0]?.author?.trim()
-			) {
+			if (isYouTubeHistorySource() && !name.trim() && newVideos[0]?.author?.trim()) {
 				name = cleanTitle(newVideos[0].author);
 				applyQuickSubscriptionPath(getYouTubeQuickSubscriptionType(youtubeSourceType), name, true);
 			}
@@ -3807,16 +3838,12 @@
 						filter_option: filterOptionInheritGlobal
 							? undefined
 							: cloneFilterOption(filterOptionDraft),
-						ai_rename_enable_multi_page: showAiRenameAdvanced
-							? aiRenameEnableMultiPage
-							: undefined,
+						ai_rename_enable_multi_page: showAiRenameAdvanced ? aiRenameEnableMultiPage : undefined,
 						ai_rename_enable_collection: showAiRenameAdvanced
 							? aiRenameEnableCollection
 							: undefined,
 						ai_rename_enable_bangumi: showAiRenameAdvanced ? aiRenameEnableBangumi : undefined,
-						ai_rename_rename_parent_dir: showAiRenameAdvanced
-							? aiRenameRenameParentDir
-							: undefined
+						ai_rename_rename_parent_dir: showAiRenameAdvanced ? aiRenameRenameParentDir : undefined
 					};
 
 					// 添加特定类型的额外参数
@@ -3974,13 +4001,15 @@
 </script>
 
 <svelte:head>
-	<title>{sourcePlatform === 'youtube'
+	<title
+		>{sourcePlatform === 'youtube'
 			? '添加 YouTube 视频源'
 			: sourcePlatform === 'douyin'
 				? '添加抖音视频源'
 				: sourcePlatform === 'tiktok'
 					? '添加 TikTok 视频源'
-					: '添加视频源'} - Bili Sync-up</title>
+					: '添加视频源'} - Bili Sync-up</title
+	>
 </svelte:head>
 
 <div class="py-2">
@@ -4002,7 +4031,7 @@
 							? '沿用 B 站添加源表单，搜索作者、选择历史作品，并复用质量、路径和过滤设置。'
 							: sourcePlatform === 'tiktok'
 								? '粘贴 TikTok 作者主页链接，扫描并同步其发布的视频；公开内容无需登录，导入登录状态后可同步私密/受限内容。'
-							: '搜索并配置收藏夹、合集、投稿、番剧或稍后再看等视频源。'}
+								: '搜索并配置收藏夹、合集、投稿、番剧或稍后再看等视频源。'}
 					titleClass="text-2xl font-bold"
 					descriptionClass="text-muted-foreground mt-1 text-sm"
 					class="flex-1"
@@ -4071,7 +4100,11 @@
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
 								>
-									<div class="flex {isMobile ? 'flex-col gap-2' : 'items-center justify-between'} gap-2">
+									<div
+										class="flex {isMobile
+											? 'flex-col gap-2'
+											: 'items-center justify-between'} gap-2"
+									>
 										<div class="space-y-1">
 											<Label>获取 TikTok 收藏夹</Label>
 											<p class="text-muted-foreground text-xs">
@@ -4096,116 +4129,116 @@
 								</div>
 							{/if}
 							{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series', 'douyin_mix'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && (youtubeSourceType === 'tiktok' || youtubeSourceType === 'tiktok_collection'))}
-{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series', 'douyin_mix'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok')}
-								<div
-									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
-								>
-									<div class="space-y-2">
-										<Label for="youtube-search">
-											{sourcePlatform === 'tiktok'
-												? '搜索 TikTok 作者'
-												: sourcePlatform === 'douyin'
-													? youtubeSourceType === 'douyin_theater'
-													? '搜索抖音放映厅'
-													: youtubeSourceType === 'douyin_series'
-														? '搜索抖音短剧'
-														: youtubeSourceType === 'douyin_collection'
-															? '搜索抖音 UP 的收藏夹'
-															: youtubeSourceType === 'douyin_mix'
-																? '搜索抖音 UP 的合集'
-																: '搜索抖音作者'
-												: youtubeSourceType === 'channel'
-												? '搜索 YouTube 频道'
-												: '搜索 YouTube 播放列表'}
-										</Label>
-										<div class="mt-2 flex {isMobile ? 'flex-col gap-2' : 'gap-2'}">
-											<Input
-												id="youtube-search"
-												bind:value={searchKeyword}
-												placeholder={sourcePlatform === 'tiktok'
-													? '输入 TikTok 作者昵称或 @用户名...'
+								{#if (sourcePlatform === 'douyin' && ['douyin', 'douyin_collection', 'douyin_theater', 'douyin_series', 'douyin_mix'].includes(youtubeSourceType)) || youtubeSourceType === 'channel' || youtubeSourceType === 'playlist' || (sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok')}
+									<div
+										class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
+									>
+										<div class="space-y-2">
+											<Label for="youtube-search">
+												{sourcePlatform === 'tiktok'
+													? '搜索 TikTok 作者'
 													: sourcePlatform === 'douyin'
 														? youtubeSourceType === 'douyin_theater'
-															? '输入放映厅名称、分类或作者...'
+															? '搜索抖音放映厅'
 															: youtubeSourceType === 'douyin_series'
-																? '输入短剧名称或作者...'
+																? '搜索抖音短剧'
 																: youtubeSourceType === 'douyin_collection'
-																	? '输入 UP 昵称或抖音号，获取其公开收藏夹...'
+																	? '搜索抖音 UP 的收藏夹'
 																	: youtubeSourceType === 'douyin_mix'
-																		? '输入 UP 昵称或抖音号，获取其合集...'
-																		: '输入抖音作者昵称或抖音号...'
+																		? '搜索抖音 UP 的合集'
+																		: '搜索抖音作者'
 														: youtubeSourceType === 'channel'
-														? '输入频道名称或 @用户名...'
-														: '输入播放列表名称...'}
-												onkeydown={(event) => {
-													if (event.key === 'Enter') {
-														event.preventDefault();
-														handleSearch();
-													}
-												}}
-											/>
-											<Button
-												type="button"
-												onclick={() => handleSearch()}
-												disabled={searchLoading || !searchKeyword.trim()}
-												size="sm"
-												class={isMobile ? 'w-full' : ''}
-											>
-												{#if searchLoading}
-													搜索中...
-												{:else}
-													<Search class="h-4 w-4" />
-													搜索
+															? '搜索 YouTube 频道'
+															: '搜索 YouTube 播放列表'}
+											</Label>
+											<div class="mt-2 flex {isMobile ? 'flex-col gap-2' : 'gap-2'}">
+												<Input
+													id="youtube-search"
+													bind:value={searchKeyword}
+													placeholder={sourcePlatform === 'tiktok'
+														? '输入 TikTok 作者昵称或 @用户名...'
+														: sourcePlatform === 'douyin'
+															? youtubeSourceType === 'douyin_theater'
+																? '输入放映厅名称、分类或作者...'
+																: youtubeSourceType === 'douyin_series'
+																	? '输入短剧名称或作者...'
+																	: youtubeSourceType === 'douyin_collection'
+																		? '输入 UP 昵称或抖音号，获取其公开收藏夹...'
+																		: youtubeSourceType === 'douyin_mix'
+																			? '输入 UP 昵称或抖音号，获取其合集...'
+																			: '输入抖音作者昵称或抖音号...'
+															: youtubeSourceType === 'channel'
+																? '输入频道名称或 @用户名...'
+																: '输入播放列表名称...'}
+													onkeydown={(event) => {
+														if (event.key === 'Enter') {
+															event.preventDefault();
+															handleSearch();
+														}
+													}}
+												/>
+												<Button
+													type="button"
+													onclick={() => handleSearch()}
+													disabled={searchLoading || !searchKeyword.trim()}
+													size="sm"
+													class={isMobile ? 'w-full' : ''}
+												>
+													{#if searchLoading}
+														搜索中...
+													{:else}
+														<Search class="h-4 w-4" />
+														搜索
+													{/if}
+												</Button>
+												{#if sourcePlatform === 'youtube' && youtubeSourceType === 'playlist'}
+													<Button
+														type="button"
+														onclick={loadYoutubeOwnPlaylists}
+														disabled={loadingYoutubeChannelPlaylists}
+														size="sm"
+														variant="outline"
+														class={isMobile ? 'w-full' : ''}
+													>
+														{loadingYoutubeChannelPlaylists ? '获取中...' : '获取自己的列表'}
+													</Button>
 												{/if}
-											</Button>
-											{#if sourcePlatform === 'youtube' && youtubeSourceType === 'playlist'}
-												<Button
-													type="button"
-													onclick={loadYoutubeOwnPlaylists}
-													disabled={loadingYoutubeChannelPlaylists}
-													size="sm"
-													variant="outline"
-													class={isMobile ? 'w-full' : ''}
-												>
-													{loadingYoutubeChannelPlaylists ? '获取中...' : '获取自己的列表'}
-												</Button>
-											{/if}
-											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_mix'}
-												<Button
-													type="button"
-													onclick={() => loadOwnDouyinCatalog()}
-													disabled={loadingDouyinCatalog}
-													size="sm"
-													variant="outline"
-													class={isMobile ? 'w-full' : ''}
-												>
-													{loadingDouyinCatalog ? '获取中...' : '获取收藏的合集'}
-												</Button>
-											{/if}
-											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection'}
-												<Button
-													type="button"
-													onclick={() => loadOwnDouyinCatalog()}
-													disabled={loadingDouyinCatalog}
-													size="sm"
-													variant="outline"
-													class={isMobile ? 'w-full' : ''}
-												>
-													{loadingDouyinCatalog ? '获取中...' : '获取自己的收藏夹'}
-												</Button>
-											{/if}
-											{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin'}
-												<Button
-													type="button"
-													onclick={fetchDouyinFollowings}
-													disabled={loadingDouyinFollowings}
-													size="sm"
-													variant="outline"
-													class={isMobile ? 'w-full' : ''}
-												>
-													{loadingDouyinFollowings ? '获取中...' : '获取关注'}
-												</Button>
-											{/if}
+												{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_mix'}
+													<Button
+														type="button"
+														onclick={() => loadOwnDouyinCatalog()}
+														disabled={loadingDouyinCatalog}
+														size="sm"
+														variant="outline"
+														class={isMobile ? 'w-full' : ''}
+													>
+														{loadingDouyinCatalog ? '获取中...' : '获取收藏的合集'}
+													</Button>
+												{/if}
+												{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection'}
+													<Button
+														type="button"
+														onclick={() => loadOwnDouyinCatalog()}
+														disabled={loadingDouyinCatalog}
+														size="sm"
+														variant="outline"
+														class={isMobile ? 'w-full' : ''}
+													>
+														{loadingDouyinCatalog ? '获取中...' : '获取自己的收藏夹'}
+													</Button>
+												{/if}
+												{#if sourcePlatform === 'douyin' && youtubeSourceType === 'douyin'}
+													<Button
+														type="button"
+														onclick={fetchDouyinFollowings}
+														disabled={loadingDouyinFollowings}
+														size="sm"
+														variant="outline"
+														class={isMobile ? 'w-full' : ''}
+													>
+														{loadingDouyinFollowings ? '获取中...' : '获取关注'}
+													</Button>
+												{/if}
 												{#if sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok'}
 													<Button
 														type="button"
@@ -4218,83 +4251,91 @@
 														{loadingTikTokFollowings ? '获取中...' : '获取关注'}
 													</Button>
 												{/if}
+											</div>
+											<p class="text-muted-foreground text-xs">
+												{sourcePlatform === 'tiktok'
+													? '可搜索 TikTok 作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
+													: sourcePlatform === 'douyin'
+														? youtubeSourceType === 'douyin'
+															? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
+															: youtubeSourceType === 'douyin_collection'
+																? '点击“获取自己的收藏夹”展示当前账号的收藏夹；也可搜索 UP 主，选择后加载其公开收藏夹，再选收藏夹自动填充名称和链接。'
+																: youtubeSourceType === 'douyin_mix'
+																	? '点击“获取收藏的合集”展示当前账号收藏的合集；也可搜索 UP 主后选择该作者创建的合集，或直接粘贴合集链接。'
+																	: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
+														: '点击“获取自己的列表”展示自己的播放列表；也可按名称搜索公开播放列表，选择后自动填充名称、链接和快捷路径模板。'}
+											</p>
 										</div>
-										<p class="text-muted-foreground text-xs">
-											{sourcePlatform === 'tiktok'
-												? '可搜索 TikTok 作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
-												: sourcePlatform === 'douyin'
-													? youtubeSourceType === 'douyin'
-														? '可搜索作者，也可获取当前账号已关注作者；选择后自动填充名称、链接和快捷路径模板。'
-														: youtubeSourceType === 'douyin_collection'
-															? '点击“获取自己的收藏夹”展示当前账号的收藏夹；也可搜索 UP 主，选择后加载其公开收藏夹，再选收藏夹自动填充名称和链接。'
-															: youtubeSourceType === 'douyin_mix'
-																? '点击“获取收藏的合集”展示当前账号收藏的合集；也可搜索 UP 主后选择该作者创建的合集，或直接粘贴合集链接。'
-															: '输入关键词后才查询，不再进入页面就直接加载全部内容；选择结果后自动填充名称、链接和快捷路径模板。'
-													: '点击“获取自己的列表”展示自己的播放列表；也可按名称搜索公开播放列表，选择后自动填充名称、链接和快捷路径模板。'}
-										</p>
 									</div>
-								</div>
-
 								{/if}
 								{#if !(sourcePlatform === 'douyin' && youtubeSourceType === 'douyin_collection')}
-								<div class="space-y-2">
-									<Label for="youtube-url">
-										{sourcePlatform === 'douyin'
-											? youtubeSourceType === 'douyin_theater'
-												? '放映厅详情链接'
-												: youtubeSourceType === 'douyin_series'
-													? '短剧详情链接'
-													: youtubeSourceType === 'douyin_collection'
-														? '抖音收藏夹链接'
-														: youtubeSourceType === 'douyin_mix'
-															? '抖音合集链接（可选，也可从右侧选择）'
-															: '抖音作者主页链接'
-											: sourcePlatform === 'tiktok' ? (youtubeSourceType === 'tiktok_favorite' ? '无需填写链接' : youtubeSourceType === 'tiktok_collection' ? 'TikTok 主页链接（可选，仅读取他人收藏夹时填写）' : 'TikTok 作者链接，如 https://www.tiktok.com/@user') : youtubeSourceType === 'playlist' ? 'YouTube 播放列表链接' : 'YouTube 频道链接'}
-									</Label>
-									{#if !(sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_favorite')}
-									<Input
-										id="youtube-url"
-										bind:value={youtubeUrl}
-										oninput={scheduleYouTubeHistorySelection}
-										placeholder={sourcePlatform === 'tiktok'
-											? youtubeSourceType === 'tiktok_collection'
-												? '留空获取自己的收藏夹；或填他人主页链接'
-												: 'https://www.tiktok.com/@user'
-											: sourcePlatform === 'douyin'
+									<div class="space-y-2">
+										<Label for="youtube-url">
+											{sourcePlatform === 'douyin'
 												? youtubeSourceType === 'douyin_theater'
-													? 'https://www.douyin.com/lvdetail/...'
+													? '放映厅详情链接'
 													: youtubeSourceType === 'douyin_series'
-														? 'https://www.douyin.com/series/...'
+														? '短剧详情链接'
 														: youtubeSourceType === 'douyin_collection'
-															? 'https://www.douyin.com/collection/...'
+															? '抖音收藏夹链接'
 															: youtubeSourceType === 'douyin_mix'
-																? 'https://www.douyin.com/collection/...'
-																: 'https://www.douyin.com/user/...'
-												: youtubeSourceType === 'channel'
-												? 'https://www.youtube.com/@channel/videos'
-												: 'https://www.youtube.com/playlist?list=...'}
-										required
-									/>
-									{/if}
-									{#if sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_favorite'}
+																? '抖音合集链接（可选，也可从右侧选择）'
+																: '抖音作者主页链接'
+												: sourcePlatform === 'tiktok'
+													? youtubeSourceType === 'tiktok_favorite'
+														? '无需填写链接'
+														: youtubeSourceType === 'tiktok_collection'
+															? 'TikTok 主页链接（可选，仅读取他人收藏夹时填写）'
+															: 'TikTok 作者链接，如 https://www.tiktok.com/@user'
+													: youtubeSourceType === 'playlist'
+														? 'YouTube 播放列表链接'
+														: 'YouTube 频道链接'}
+										</Label>
+										{#if !(sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_favorite')}
+											<Input
+												id="youtube-url"
+												bind:value={youtubeUrl}
+												oninput={scheduleYouTubeHistorySelection}
+												placeholder={sourcePlatform === 'tiktok'
+													? youtubeSourceType === 'tiktok_collection'
+														? '留空获取自己的收藏夹；或填他人主页链接'
+														: 'https://www.tiktok.com/@user'
+													: sourcePlatform === 'douyin'
+														? youtubeSourceType === 'douyin_theater'
+															? 'https://www.douyin.com/lvdetail/...'
+															: youtubeSourceType === 'douyin_series'
+																? 'https://www.douyin.com/series/...'
+																: youtubeSourceType === 'douyin_collection'
+																	? 'https://www.douyin.com/collection/...'
+																	: youtubeSourceType === 'douyin_mix'
+																		? 'https://www.douyin.com/collection/...'
+																		: 'https://www.douyin.com/user/...'
+														: youtubeSourceType === 'channel'
+															? 'https://www.youtube.com/@channel/videos'
+															: 'https://www.youtube.com/playlist?list=...'}
+												required
+											/>
+										{/if}
+										{#if sourcePlatform === 'tiktok' && youtubeSourceType === 'tiktok_favorite'}
+											<p class="text-muted-foreground text-xs">
+												同步当前登录账号点赞的视频。请先在“设置 → TikTok 登录状态”导入
+												cookies.txt；公开内容无需登录。
+											</p>
+										{/if}
 										<p class="text-muted-foreground text-xs">
-											同步当前登录账号点赞的视频。请先在“设置 → TikTok 登录状态”导入 cookies.txt；公开内容无需登录。
+											{sourcePlatform === 'tiktok'
+												? youtubeSourceType === 'tiktok_collection'
+													? '无需填写链接，直接点击“获取自己的列表”读取当前登录账号的收藏夹；填写他人主页链接可读取其公开收藏夹。需要导入 TikTok 登录状态。'
+													: '支持 https://www.tiktok.com/@user 作者主页链接，公开内容无需登录。'
+												: sourcePlatform === 'douyin'
+													? youtubeSourceType === 'douyin'
+														? '支持抖音作者主页链接和 v.douyin.com 分享链接；需要在设置中导入新鲜 Cookie。'
+														: '可以从搜索结果选择，也可以手动填写对应详情链接。'
+													: youtubeSourceType === 'channel'
+														? '支持频道主页、@用户名、/videos 等 YouTube 频道链接。'
+														: '请填写包含 list= 的 YouTube 播放列表链接。'}
 										</p>
-									{/if}
-									<p class="text-muted-foreground text-xs">
-										{sourcePlatform === 'tiktok'
-											? youtubeSourceType === 'tiktok_collection'
-												? '无需填写链接，直接点击“获取自己的列表”读取当前登录账号的收藏夹；填写他人主页链接可读取其公开收藏夹。需要导入 TikTok 登录状态。'
-												: '支持 https://www.tiktok.com/@user 作者主页链接，公开内容无需登录。'
-											: sourcePlatform === 'douyin'
-												? youtubeSourceType === 'douyin'
-													? '支持抖音作者主页链接和 v.douyin.com 分享链接；需要在设置中导入新鲜 Cookie。'
-													: '可以从搜索结果选择，也可以手动填写对应详情链接。'
-												: youtubeSourceType === 'channel'
-												? '支持频道主页、@用户名、/videos 等 YouTube 频道链接。'
-												: '请填写包含 list= 的 YouTube 播放列表链接。'}
-									</p>
-								</div>
+									</div>
 								{/if}
 							{:else if sourcePlatform === 'douyin' && douyinSourceNeedsSelection()}
 								<div class="space-y-2">
@@ -4307,7 +4348,11 @@
 													? '抖音合集链接'
 													: '短剧详情链接'}
 									</Label>
-									<Input id="youtube-url" bind:value={youtubeUrl} oninput={scheduleYouTubeHistorySelection} />
+									<Input
+										id="youtube-url"
+										bind:value={youtubeUrl}
+										oninput={scheduleYouTubeHistorySelection}
+									/>
 									<p class="text-muted-foreground text-xs">
 										可直接填写链接，也可在右侧使用与 B 站源一致的列表选择方式。
 									</p>
@@ -4316,437 +4361,450 @@
 								<div
 									class="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
 								>
-									此来源使用“设置 → {sourcePlatform === 'tiktok' ? 'TikTok 登录状态' : sourcePlatform === 'douyin' ? '抖音' : 'YouTube'} 登录”中保存的账号状态，不需要另外填写链接。
+									此来源使用“设置 → {sourcePlatform === 'tiktok'
+										? 'TikTok 登录状态'
+										: sourcePlatform === 'douyin'
+											? '抖音'
+											: 'YouTube'} 登录”中保存的账号状态，不需要另外填写链接。
 								</div>
 							{/if}
 						{/if}
 
 						{#if sourcePlatform === 'bilibili'}
-						<!-- 搜索功能 -->
-						{#if sourceType !== 'favorite' && sourceType !== 'watch_later'}
-							<div
-								class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
-							>
-								<div class="space-y-2">
-									<div>
-										<Label for="search">
-											{#if sourceType === 'collection'}
-												搜索UP主
-											{:else if sourceType === 'submission'}
-												搜索UP主
-											{:else if sourceType === 'bangumi'}
-												搜索番剧
-											{:else if sourceType === 'pugv'}
-												搜索UP主（讲师）
-											{:else if sourceType === 'manga'}
-												搜索漫画
-											{:else}
-												搜索B站内容
-											{/if}
-										</Label>
-										<div class="flex {isMobile ? 'flex-col gap-2' : 'gap-2'} mt-2">
-											<Input
-												id="search"
-												bind:value={searchKeyword}
-												placeholder={sourceType === 'submission' || sourceType === 'collection'
-													? '搜索UP主...'
-													: sourceType === 'bangumi'
-														? '搜索番剧...'
-														: sourceType === 'pugv'
-															? '搜索UP主（讲师）...'
-															: sourceType === 'manga'
-																? '搜索漫画名或作者，例如：碧蓝之海'
-																: '搜索视频...'}
-												onkeydown={(e) => {
-													if (e.key === 'Enter') {
-														// 阻止表单隐式提交，避免在「漫画 ID」等必填项上弹出校验提示
-														e.preventDefault();
-														handleSearch();
-													}
-												}}
-											/>
-											<div class="flex gap-2">
+							<!-- 搜索功能 -->
+							{#if sourceType !== 'favorite' && sourceType !== 'watch_later'}
+								<div
+									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
+								>
+									<div class="space-y-2">
+										<div>
+											<Label for="search">
+												{#if sourceType === 'collection'}
+													搜索UP主
+												{:else if sourceType === 'submission'}
+													搜索UP主
+												{:else if sourceType === 'bangumi'}
+													搜索番剧
+												{:else if sourceType === 'pugv'}
+													搜索UP主（讲师）
+												{:else if sourceType === 'manga'}
+													搜索漫画
+												{:else}
+													搜索B站内容
+												{/if}
+											</Label>
+											<div class="flex {isMobile ? 'flex-col gap-2' : 'gap-2'} mt-2">
+												<Input
+													id="search"
+													bind:value={searchKeyword}
+													placeholder={sourceType === 'submission' || sourceType === 'collection'
+														? '搜索UP主...'
+														: sourceType === 'bangumi'
+															? '搜索番剧...'
+															: sourceType === 'pugv'
+																? '搜索UP主（讲师）...'
+																: sourceType === 'manga'
+																	? '搜索漫画名或作者，例如：碧蓝之海'
+																	: '搜索视频...'}
+													onkeydown={(e) => {
+														if (e.key === 'Enter') {
+															// 阻止表单隐式提交，避免在「漫画 ID」等必填项上弹出校验提示
+															e.preventDefault();
+															handleSearch();
+														}
+													}}
+												/>
+												<div class="flex gap-2">
+													<Button
+														onclick={() => handleSearch()}
+														disabled={searchLoading || !searchKeyword.trim()}
+														size="sm"
+														class={isMobile ? 'flex-1' : ''}
+													>
+														{#if searchLoading}
+															搜索中...
+														{:else}
+															<Search class="h-4 w-4" />
+														{/if}
+													</Button>
+													{#if sourceType === 'collection' || sourceType === 'submission'}
+														<Button
+															onclick={sourceType === 'collection'
+																? fetchSubscribedCollections
+																: fetchUserFollowings}
+															disabled={sourceType === 'collection'
+																? loadingSubscribedCollections
+																: loadingFollowings}
+															size="sm"
+															variant="outline"
+															class={isMobile ? 'flex-1' : ''}
+														>
+															{sourceType === 'collection'
+																? loadingSubscribedCollections
+																	? '获取中...'
+																	: '获取关注的合集'
+																: loadingFollowings
+																	? '获取中...'
+																	: '获取关注'}
+														</Button>
+													{/if}
+												</div>
+											</div>
+											<p class="text-muted-foreground mt-1 text-xs">
+												{#if sourceType === 'collection'}
+													搜索UP主后会自动填充UP主ID，并显示该UP主的所有合集供选择
+												{:else if sourceType === 'submission'}
+													搜索并选择UP主，将自动填充UP主ID
+												{:else if sourceType === 'bangumi'}
+													搜索并选择番剧，将自动填充Season ID
+												{:else if sourceType === 'manga'}
+													搜索并选择漫画，将自动填充漫画 ID（也可以直接粘贴漫画链接）
+												{:else}
+													根据当前选择的视频源类型搜索对应内容
+												{/if}
+											</p>
+										</div>
+									</div>
+								</div>
+							{/if}
+
+							<!-- 收藏夹列表（仅收藏夹类型时显示） -->
+							{#if sourceType === 'favorite'}
+								<div class="space-y-4">
+									<!-- 我的收藏夹 -->
+									<div
+										class="rounded-lg border border-yellow-200 bg-yellow-50 p-4 dark:border-yellow-800 dark:bg-yellow-950"
+									>
+										<div
+											class="flex {isMobile
+												? 'flex-col gap-2'
+												: 'items-center justify-between'} mb-2"
+										>
+											<span class="text-sm font-medium text-yellow-800 dark:text-yellow-200"
+												>我的收藏夹</span
+											>
+											<Button
+												size="sm"
+												variant="outline"
+												onclick={fetchUserFavorites}
+												disabled={loadingFavorites}
+												class={isMobile ? 'w-full' : ''}
+											>
+												{loadingFavorites ? '加载中...' : '获取收藏夹'}
+											</Button>
+										</div>
+
+										{#if userFavorites.length > 0}
+											<p class="text-xs text-yellow-600 dark:text-yellow-400">
+												已获取 {userFavorites.length} 个收藏夹，请在{isCompactLayout
+													? '下方'
+													: '右侧'}选择
+											</p>
+										{:else}
+											<p class="text-xs text-yellow-600 dark:text-yellow-400">
+												点击右侧按钮获取您的收藏夹列表
+											</p>
+										{/if}
+									</div>
+
+									<!-- 他人的公开收藏夹 -->
+									<div
+										class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
+									>
+										<div class="mb-3">
+											<span class="text-sm font-medium text-blue-800 dark:text-blue-200"
+												>他人的公开收藏夹</span
+											>
+										</div>
+
+										<!-- 搜索UP主的收藏夹 -->
+										<div class="bg-card mb-4 rounded border border-gray-200 p-3">
+											<div class="mb-2">
+												<Label class="text-foreground text-sm font-medium">搜索UP主的收藏夹</Label>
+											</div>
+											<div class="flex {isMobile ? 'flex-col gap-2' : 'gap-2'}">
+												<Input
+													placeholder="搜索UP主名称..."
+													bind:value={searchKeyword}
+													onkeydown={(e) => e.key === 'Enter' && handleSearch()}
+												/>
 												<Button
 													onclick={() => handleSearch()}
 													disabled={searchLoading || !searchKeyword.trim()}
 													size="sm"
-													class={isMobile ? 'flex-1' : ''}
+													class={isMobile ? 'w-full' : ''}
 												>
-													{#if searchLoading}
-														搜索中...
-													{:else}
-														<Search class="h-4 w-4" />
-													{/if}
+													{#if searchLoading}搜索中...{:else}搜索{/if}
 												</Button>
-												{#if sourceType === 'collection' || sourceType === 'submission'}
-													<Button
-														onclick={sourceType === 'collection'
-															? fetchSubscribedCollections
-															: fetchUserFollowings}
-														disabled={sourceType === 'collection'
-															? loadingSubscribedCollections
-															: loadingFollowings}
-														size="sm"
-														variant="outline"
-														class={isMobile ? 'flex-1' : ''}
-													>
-														{sourceType === 'collection'
-															? loadingSubscribedCollections
-																? '获取中...'
-																: '获取关注的合集'
-															: loadingFollowings
-																? '获取中...'
-																: '获取关注'}
-													</Button>
+											</div>
+
+											<p class="text-muted-foreground mt-2 text-xs">
+												{#if showSearchResults && searchResults.length > 0}
+													找到 {searchResults.length} 个UP主，请在{isCompactLayout
+														? '下方'
+														: '右侧'}列表中选择
+												{:else}
+													输入UP主名称后点击搜索，结果将在{isCompactLayout ? '下方' : '右侧'}显示
+												{/if}
+											</p>
+										</div>
+
+										<!-- 手动输入收藏夹ID -->
+										<div class="text-xs text-blue-600 dark:text-blue-400">
+											<strong>或者手动输入收藏夹ID：</strong><br />
+											1. 打开想要添加的收藏夹页面<br />
+											2. 复制URL中 "fid=" 后面的数字<br />
+											3. 在下方输入框中填写该数字
+										</div>
+									</div>
+								</div>
+							{/if}
+
+							<!-- 合集类型（仅合集时显示，且手动输入） -->
+							{#if sourceType === 'collection' && isManualInput}
+								<div class="space-y-2">
+									<Label for="collection-type">合集类型</Label>
+									<CustomSelect
+										id="collection-type"
+										value={collectionType}
+										options={collectionTypeOptions}
+										onChange={(nextValue) => (collectionType = String(nextValue ?? 'season'))}
+										class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+									/>
+									<p class="text-sm text-orange-600">
+										⚠️ 手动输入合集ID时需要指定类型，建议从{isCompactLayout
+											? '下方'
+											: '右侧'}合集列表中选择
+									</p>
+								</div>
+							{/if}
+
+							<!-- UP主ID（仅合集时显示） -->
+							{#if sourceType === 'collection'}
+								<div class="space-y-2">
+									<Label for="up-id">UP主ID</Label>
+									<Input
+										id="up-id"
+										bind:value={upId}
+										placeholder="请输入UP主ID"
+										onblur={handleUpIdChange}
+										required
+									/>
+									{#if userCollections.length > 0}
+										<p class="mt-1 text-xs text-green-600">
+											✓ 已获取合集列表，请在{isCompactLayout ? '下方' : '右侧'}选择
+										</p>
+									{/if}
+								</div>
+
+								<div class="space-y-2">
+									<Label>合集聚合</Label>
+									<div
+										class="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-800 dark:bg-blue-950/30"
+									>
+										<div class="pr-3">
+											<div class="text-sm font-medium text-blue-800 dark:text-blue-200">
+												按同UP合集绝对顺序聚合
+											</div>
+											<p class="mt-1 text-xs text-blue-600 dark:text-blue-300">
+												开启后，该合集会归并到“同UP合集根目录”，并按该UP远端全部合集/系列列表的绝对顺序映射
+												Season xx。
+											</p>
+										</div>
+										<label class="relative inline-flex cursor-pointer items-center">
+											<input
+												type="checkbox"
+												bind:checked={collectionAggregateEnabled}
+												class="peer sr-only"
+											/>
+											<div
+												class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+											></div>
+										</label>
+									</div>
+									<p class="text-muted-foreground text-xs">
+										关闭时保持合集源独立目录；开启时不压缩季号，远端排第几就是 Season 几。
+									</p>
+								</div>
+							{/if}
+
+							<!-- 视频源ID（稍后观看除外） -->
+							{#if sourceType !== 'watch_later'}
+								<div class="space-y-2">
+									<Label for="source-id">
+										{#if sourceType === 'collection'}合集ID
+										{:else if sourceType === 'favorite'}收藏夹ID
+										{:else if sourceType === 'submission'}UP主ID
+										{:else if sourceType === 'bangumi'}Season ID
+										{:else if sourceType === 'pugv'}课程 Season ID
+										{:else if sourceType === 'manga'}漫画 ID
+										{:else}ID{/if}
+									</Label>
+									<Input
+										id="source-id"
+										bind:value={sourceId}
+										placeholder={sourceType === 'manga'
+											? '粘贴漫画链接或 comic_id，例如 https://manga.bilibili.com/detail/mc25969'
+											: `请输入${sourceType === 'collection' ? '合集' : sourceType === 'favorite' ? '任意公开收藏夹' : sourceType === 'submission' ? 'UP主' : sourceType === 'bangumi' ? 'Season' : sourceType === 'pugv' ? '课程 Season' : ''}ID`}
+										oninput={() => {
+											if (sourceType === 'collection') {
+												isManualInput = true;
+											} else if (sourceType === 'favorite') {
+												handleFavoriteIdChange();
+											} else if (sourceType === 'pugv') {
+												sourceId = normalizePugvSeasonId(sourceId);
+											}
+										}}
+										required={!(sourceType === 'pugv' && !!pugvUpMid)}
+									/>
+									{#if sourceType === 'pugv'}
+										<p class="text-muted-foreground text-xs">
+											{#if pugvUpMid}
+												已在右侧选择讲师，此处可留空；添加时会使用勾选课程的课程 ID
+											{:else}
+												可直接粘贴课程链接，例如 https://www.bilibili.com/cheese/play/ss713799843
+											{/if}
+										</p>
+									{/if}
+									{#if sourceType === 'manga'}
+										<p class="text-muted-foreground text-xs">
+											可直接粘贴漫画链接（mc 后面的数字即 comic_id）。添加后按「作品目录 + 每话一个
+											CBZ」落盘，适配 Komga / Kavita / Mihon
+										</p>
+										{#if loadingMangaComic}
+											<p class="mt-1 text-xs text-blue-600 dark:text-blue-400">
+												🔍 正在获取漫画信息...
+											</p>
+										{:else if mangaComic}
+											<p class="mt-1 text-xs text-green-600">
+												✓ {mangaComic.title}{mangaComic.author ? ` · ${mangaComic.author}` : ''} · 共
+												{mangaComic.episode_count}
+												话{mangaComic.is_finish ? ' · 已完结' : ''}
+											</p>
+										{/if}
+									{/if}
+									{#if sourceType === 'collection' && !isManualInput && sourceId}
+										<p class="mt-1 text-xs text-green-600">✓ 已从列表中选择合集，类型已自动识别</p>
+									{/if}
+									{#if sourceType === 'favorite' && sourceId}
+										{#if validatingFavorite}
+											<p class="mt-1 text-xs text-blue-600 dark:text-blue-400">
+												🔍 验证收藏夹中...
+											</p>
+										{:else if favoriteValidationResult}
+											{#if favoriteValidationResult.valid}
+												<p class="mt-1 text-xs text-green-600">
+													✓ 收藏夹验证成功：{favoriteValidationResult.title}
+												</p>
+											{:else}
+												<p class="mt-1 text-xs text-red-600">
+													✗ {favoriteValidationResult.message}
+												</p>
+											{/if}
+										{/if}
+									{/if}
+
+									<!-- 下载所有季度（仅番剧时显示，紧跟在Season ID后面） -->
+									{#if sourceType === 'bangumi' && sourceId && bangumiSeasons.length > 0 && !loadingSeasons}
+										<div class="mt-3 flex items-center space-x-2">
+											<input
+												type="checkbox"
+												id="download-all-seasons"
+												bind:checked={downloadAllSeasons}
+												onchange={() => {
+													if (downloadAllSeasons) selectedSeasons = [];
+												}}
+												class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+											/>
+											<Label
+												for="download-all-seasons"
+												class="text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+											>
+												下载所有季度
+											</Label>
+										</div>
+										{#if downloadAllSeasons}
+											<p class="mt-1 ml-6 text-xs text-purple-600">
+												勾选后将下载该番剧的所有季度，无需单独选择
+											</p>
+										{:else if bangumiSeasons.length > 1}
+											<p class="mt-1 ml-6 text-xs text-purple-600">
+												检测到 {bangumiSeasons.length} 个相关季度，请在{isCompactLayout
+													? '下方'
+													: '右侧'}选择要下载的季度
+											</p>
+										{:else if bangumiSeasons.length === 1}
+											<p class="mt-1 ml-6 text-xs text-purple-600">该番剧只有当前一个季度</p>
+										{/if}
+
+										<!-- 合并到现有番剧源选项 -->
+										{#if existingBangumiSources.length > 0}
+											<div class="mt-3 space-y-2">
+												<Label class="text-sm font-medium">合并选项（可选）</Label>
+												<CustomSelect
+													value={mergeToSourceId}
+													options={[
+														{ value: null, label: '作为新的独立番剧源添加' },
+														...existingBangumiSources.map((source) => ({
+															value: source.id,
+															label: `合并到：${source.name}${source.season_id ? ` (Season ID: ${source.season_id})` : ''}${source.media_id ? ` (Media ID: ${source.media_id})` : ''}`
+														}))
+													]}
+													onChange={(nextValue) => (mergeToSourceId = nextValue as number | null)}
+													class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:ring-1 focus:ring-purple-500 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+												/>
+												{#if mergeToSourceId}
+													<p class="text-xs text-orange-600">
+														⚠️ 合并后，新番剧的内容将添加到选中的现有番剧源中，不会创建新的番剧源
+													</p>
+												{:else}
+													<p class="text-xs text-gray-500">
+														可以选择将新番剧合并到现有番剧源中，方便管理相关内容（如新季度、剧场版等）
+													</p>
 												{/if}
 											</div>
-										</div>
-										<p class="text-muted-foreground mt-1 text-xs">
-											{#if sourceType === 'collection'}
-												搜索UP主后会自动填充UP主ID，并显示该UP主的所有合集供选择
-											{:else if sourceType === 'submission'}
-												搜索并选择UP主，将自动填充UP主ID
-											{:else if sourceType === 'bangumi'}
-												搜索并选择番剧，将自动填充Season ID
-											{:else if sourceType === 'manga'}
-												搜索并选择漫画，将自动填充漫画 ID（也可以直接粘贴漫画链接）
-											{:else}
-												根据当前选择的视频源类型搜索对应内容
-											{/if}
-										</p>
-									</div>
-								</div>
-							</div>
-						{/if}
-
-						<!-- 收藏夹列表（仅收藏夹类型时显示） -->
-						{#if sourceType === 'favorite'}
-							<div class="space-y-4">
-								<!-- 我的收藏夹 -->
-								<div
-									class="rounded-lg border border-yellow-200 bg-yellow-50 p-4 dark:border-yellow-800 dark:bg-yellow-950"
-								>
-									<div
-										class="flex {isMobile ? 'flex-col gap-2' : 'items-center justify-between'} mb-2"
-									>
-										<span class="text-sm font-medium text-yellow-800 dark:text-yellow-200"
-											>我的收藏夹</span
-										>
-										<Button
-											size="sm"
-											variant="outline"
-											onclick={fetchUserFavorites}
-											disabled={loadingFavorites}
-											class={isMobile ? 'w-full' : ''}
-										>
-											{loadingFavorites ? '加载中...' : '获取收藏夹'}
-										</Button>
-									</div>
-
-									{#if userFavorites.length > 0}
-										<p class="text-xs text-yellow-600 dark:text-yellow-400">
-											已获取 {userFavorites.length} 个收藏夹，请在{isCompactLayout
-												? '下方'
-												: '右侧'}选择
-										</p>
-									{:else}
-										<p class="text-xs text-yellow-600 dark:text-yellow-400">
-											点击右侧按钮获取您的收藏夹列表
-										</p>
+										{/if}
+									{:else if sourceType === 'bangumi' && sourceId && loadingSeasons}
+										<p class="mt-3 text-xs text-purple-600">正在获取季度信息...</p>
 									{/if}
-								</div>
 
-								<!-- 他人的公开收藏夹 -->
-								<div
-									class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950"
-								>
-									<div class="mb-3">
-										<span class="text-sm font-medium text-blue-800 dark:text-blue-200"
-											>他人的公开收藏夹</span
-										>
-									</div>
-
-									<!-- 搜索UP主的收藏夹 -->
-									<div class="bg-card mb-4 rounded border border-gray-200 p-3">
-										<div class="mb-2">
-											<Label class="text-foreground text-sm font-medium">搜索UP主的收藏夹</Label>
-										</div>
-										<div class="flex {isMobile ? 'flex-col gap-2' : 'gap-2'}">
-											<Input
-												placeholder="搜索UP主名称..."
-												bind:value={searchKeyword}
-												onkeydown={(e) => e.key === 'Enter' && handleSearch()}
-											/>
-											<Button
-												onclick={() => handleSearch()}
-												disabled={searchLoading || !searchKeyword.trim()}
-												size="sm"
-												class={isMobile ? 'w-full' : ''}
-											>
-												{#if searchLoading}搜索中...{:else}搜索{/if}
-											</Button>
-										</div>
-
-										<p class="text-muted-foreground mt-2 text-xs">
-											{#if showSearchResults && searchResults.length > 0}
-												找到 {searchResults.length} 个UP主，请在{isCompactLayout
-													? '下方'
-													: '右侧'}列表中选择
-											{:else}
-												输入UP主名称后点击搜索，结果将在{isCompactLayout ? '下方' : '右侧'}显示
-											{/if}
-										</p>
-									</div>
-
-									<!-- 手动输入收藏夹ID -->
-									<div class="text-xs text-blue-600 dark:text-blue-400">
-										<strong>或者手动输入收藏夹ID：</strong><br />
-										1. 打开想要添加的收藏夹页面<br />
-										2. 复制URL中 "fid=" 后面的数字<br />
-										3. 在下方输入框中填写该数字
-									</div>
-								</div>
-							</div>
-						{/if}
-
-						<!-- 合集类型（仅合集时显示，且手动输入） -->
-						{#if sourceType === 'collection' && isManualInput}
-							<div class="space-y-2">
-								<Label for="collection-type">合集类型</Label>
-								<CustomSelect
-									id="collection-type"
-									value={collectionType}
-									options={collectionTypeOptions}
-									onChange={(nextValue) => (collectionType = String(nextValue ?? 'season'))}
-									class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-								/>
-								<p class="text-sm text-orange-600">
-									⚠️ 手动输入合集ID时需要指定类型，建议从{isCompactLayout
-										? '下方'
-										: '右侧'}合集列表中选择
-								</p>
-							</div>
-						{/if}
-
-						<!-- UP主ID（仅合集时显示） -->
-						{#if sourceType === 'collection'}
-							<div class="space-y-2">
-								<Label for="up-id">UP主ID</Label>
-								<Input
-									id="up-id"
-									bind:value={upId}
-									placeholder="请输入UP主ID"
-									onblur={handleUpIdChange}
-									required
-								/>
-								{#if userCollections.length > 0}
-									<p class="mt-1 text-xs text-green-600">
-										✓ 已获取合集列表，请在{isCompactLayout ? '下方' : '右侧'}选择
-									</p>
-								{/if}
-							</div>
-
-							<div class="space-y-2">
-								<Label>合集聚合</Label>
-								<div
-									class="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-800 dark:bg-blue-950/30"
-								>
-									<div class="pr-3">
-										<div class="text-sm font-medium text-blue-800 dark:text-blue-200">
-											按同UP合集绝对顺序聚合
-										</div>
-										<p class="mt-1 text-xs text-blue-600 dark:text-blue-300">
-											开启后，该合集会归并到“同UP合集根目录”，并按该UP远端全部合集/系列列表的绝对顺序映射
-											Season xx。
-										</p>
-									</div>
-									<label class="relative inline-flex cursor-pointer items-center">
-										<input
-											type="checkbox"
-											bind:checked={collectionAggregateEnabled}
-											class="peer sr-only"
-										/>
+									<!-- UP主投稿选择状态显示和控制（仅投稿类型时显示） -->
+									{#if sourceType === 'submission' && sourceId}
 										<div
-											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
-										></div>
-									</label>
-								</div>
-								<p class="text-muted-foreground text-xs">
-									关闭时保持合集源独立目录；开启时不压缩季号，远端排第几就是 Season 几。
-								</p>
-							</div>
-						{/if}
-
-						<!-- 视频源ID（稍后观看除外） -->
-						{#if sourceType !== 'watch_later'}
-							<div class="space-y-2">
-								<Label for="source-id">
-									{#if sourceType === 'collection'}合集ID
-									{:else if sourceType === 'favorite'}收藏夹ID
-									{:else if sourceType === 'submission'}UP主ID
-									{:else if sourceType === 'bangumi'}Season ID
-									{:else if sourceType === 'pugv'}课程 Season ID
-									{:else if sourceType === 'manga'}漫画 ID
-									{:else}ID{/if}
-								</Label>
-								<Input
-									id="source-id"
-									bind:value={sourceId}
-									placeholder={sourceType === 'manga'
-										? '粘贴漫画链接或 comic_id，例如 https://manga.bilibili.com/detail/mc25969'
-										: `请输入${sourceType === 'collection' ? '合集' : sourceType === 'favorite' ? '任意公开收藏夹' : sourceType === 'submission' ? 'UP主' : sourceType === 'bangumi' ? 'Season' : sourceType === 'pugv' ? '课程 Season' : ''}ID`}
-									oninput={() => {
-										if (sourceType === 'collection') {
-											isManualInput = true;
-										} else if (sourceType === 'favorite') {
-											handleFavoriteIdChange();
-										} else if (sourceType === 'pugv') {
-											sourceId = normalizePugvSeasonId(sourceId);
-										}
-									}}
-									required={!(sourceType === 'pugv' && !!pugvUpMid)}
-								/>
-								{#if sourceType === 'pugv'}
-									<p class="text-muted-foreground text-xs">
-										{#if pugvUpMid}
-											已在右侧选择讲师，此处可留空；添加时会使用勾选课程的课程 ID
-										{:else}
-											可直接粘贴课程链接，例如 https://www.bilibili.com/cheese/play/ss713799843
-										{/if}
-									</p>
-								{/if}
-								{#if sourceType === 'manga'}
-									<p class="text-muted-foreground text-xs">
-										可直接粘贴漫画链接（mc 后面的数字即 comic_id）。添加后按「作品目录 + 每话一个 CBZ」落盘，适配
-										Komga / Kavita / Mihon
-									</p>
-									{#if loadingMangaComic}
-										<p class="mt-1 text-xs text-blue-600 dark:text-blue-400">🔍 正在获取漫画信息...</p>
-									{:else if mangaComic}
-										<p class="mt-1 text-xs text-green-600">
-											✓ {mangaComic.title}{mangaComic.author ? ` · ${mangaComic.author}` : ''} · 共 {mangaComic.episode_count}
-											话{mangaComic.is_finish ? ' · 已完结' : ''}
-										</p>
-									{/if}
-								{/if}
-								{#if sourceType === 'collection' && !isManualInput && sourceId}
-									<p class="mt-1 text-xs text-green-600">✓ 已从列表中选择合集，类型已自动识别</p>
-								{/if}
-								{#if sourceType === 'favorite' && sourceId}
-									{#if validatingFavorite}
-										<p class="mt-1 text-xs text-blue-600 dark:text-blue-400">🔍 验证收藏夹中...</p>
-									{:else if favoriteValidationResult}
-										{#if favoriteValidationResult.valid}
-											<p class="mt-1 text-xs text-green-600">
-												✓ 收藏夹验证成功：{favoriteValidationResult.title}
-											</p>
-										{:else}
-											<p class="mt-1 text-xs text-red-600">✗ {favoriteValidationResult.message}</p>
-										{/if}
-									{/if}
-								{/if}
-
-								<!-- 下载所有季度（仅番剧时显示，紧跟在Season ID后面） -->
-								{#if sourceType === 'bangumi' && sourceId && bangumiSeasons.length > 0 && !loadingSeasons}
-									<div class="mt-3 flex items-center space-x-2">
-										<input
-											type="checkbox"
-											id="download-all-seasons"
-											bind:checked={downloadAllSeasons}
-											onchange={() => {
-												if (downloadAllSeasons) selectedSeasons = [];
-											}}
-											class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
-										/>
-										<Label
-											for="download-all-seasons"
-											class="text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+											class="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-950"
 										>
-											下载所有季度
-										</Label>
-									</div>
-									{#if downloadAllSeasons}
-										<p class="mt-1 ml-6 text-xs text-purple-600">
-											勾选后将下载该番剧的所有季度，无需单独选择
-										</p>
-									{:else if bangumiSeasons.length > 1}
-										<p class="mt-1 ml-6 text-xs text-purple-600">
-											检测到 {bangumiSeasons.length} 个相关季度，请在{isCompactLayout
-												? '下方'
-												: '右侧'}选择要下载的季度
-										</p>
-									{:else if bangumiSeasons.length === 1}
-										<p class="mt-1 ml-6 text-xs text-purple-600">该番剧只有当前一个季度</p>
-									{/if}
-
-									<!-- 合并到现有番剧源选项 -->
-									{#if existingBangumiSources.length > 0}
-										<div class="mt-3 space-y-2">
-											<Label class="text-sm font-medium">合并选项（可选）</Label>
-											<CustomSelect
-												value={mergeToSourceId}
-												options={[
-													{ value: null, label: '作为新的独立番剧源添加' },
-													...existingBangumiSources.map((source) => ({
-														value: source.id,
-														label: `合并到：${source.name}${source.season_id ? ` (Season ID: ${source.season_id})` : ''}${source.media_id ? ` (Media ID: ${source.media_id})` : ''}`
-													}))
-												]}
-												onChange={(nextValue) => (mergeToSourceId = nextValue as number | null)}
-												class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:ring-1 focus:ring-purple-500 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
-											/>
-											{#if mergeToSourceId}
-												<p class="text-xs text-orange-600">
-													⚠️ 合并后，新番剧的内容将添加到选中的现有番剧源中，不会创建新的番剧源
-												</p>
-											{:else}
-												<p class="text-xs text-gray-500">
-													可以选择将新番剧合并到现有番剧源中，方便管理相关内容（如新季度、剧场版等）
-												</p>
-											{/if}
-										</div>
-									{/if}
-								{:else if sourceType === 'bangumi' && sourceId && loadingSeasons}
-									<p class="mt-3 text-xs text-purple-600">正在获取季度信息...</p>
-								{/if}
-
-								<!-- UP主投稿选择状态显示和控制（仅投稿类型时显示） -->
-								{#if sourceType === 'submission' && sourceId}
-									<div
-										class="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-950"
-									>
-										<div class="flex items-center justify-between">
-											<div>
-												<span class="text-sm font-medium text-blue-800 dark:text-blue-200"
-													>历史投稿选择</span
+											<div class="flex items-center justify-between">
+												<div>
+													<span class="text-sm font-medium text-blue-800 dark:text-blue-200"
+														>历史投稿选择</span
+													>
+													<span class="ml-2 text-xs text-blue-600 dark:text-blue-400">
+														{#if selectedVideos.length > 0}
+															已选择 {selectedVideos.length} 个历史投稿
+														{:else}
+															未选择特定投稿（将下载全部）
+														{/if}
+													</span>
+												</div>
+												<Button
+													size="sm"
+													variant="outline"
+													onclick={() => {
+														showSubmissionSelection = true;
+													}}
+													class="border-blue-300 text-blue-700 hover:bg-blue-100"
 												>
-												<span class="ml-2 text-xs text-blue-600 dark:text-blue-400">
-													{#if selectedVideos.length > 0}
-														已选择 {selectedVideos.length} 个历史投稿
-													{:else}
-														未选择特定投稿（将下载全部）
-													{/if}
-												</span>
+													{selectedVideos.length > 0 ? '重新选择' : '选择投稿'}
+												</Button>
 											</div>
-											<Button
-												size="sm"
-												variant="outline"
-												onclick={() => {
-													showSubmissionSelection = true;
-												}}
-												class="border-blue-300 text-blue-700 hover:bg-blue-100"
-											>
-												{selectedVideos.length > 0 ? '重新选择' : '选择投稿'}
-											</Button>
+											<p class="mt-2 text-xs text-blue-600 dark:text-blue-400">
+												💡
+												您可以选择特定的历史投稿进行下载，未选择的视频将不会下载但会在数据库中记录。新发布的投稿会自动下载。
+											</p>
 										</div>
-										<p class="mt-2 text-xs text-blue-600 dark:text-blue-400">
-											💡
-											您可以选择特定的历史投稿进行下载，未选择的视频将不会下载但会在数据库中记录。新发布的投稿会自动下载。
-										</p>
-									</div>
-								{/if}
-							</div>
-						{/if}
+									{/if}
+								</div>
+							{/if}
 						{/if}
 
 						<!-- 名称 -->
@@ -4812,7 +4870,7 @@
 									? youtubeStatus?.default_output_path || '例如：D:/Videos/YouTube'
 									: sourcePlatform === 'douyin'
 										? '例如：D:/Videos/Douyin'
-									: '例如：D:/Videos/Bilibili'}
+										: '例如：D:/Videos/Bilibili'}
 								oninput={() => {
 									if (path !== lastAutoAppliedPath) {
 										lastAutoAppliedPath = '';
@@ -4942,7 +5000,8 @@
 													>图文作品合成视频</span
 												>
 												<p class="text-[10px] text-sky-600 dark:text-sky-400">
-													开启后会为纯图片作品额外生成 MP4；关闭后仅保留原图和配乐，显著降低 CPU 与内存占用
+													开启后会为纯图片作品额外生成 MP4；关闭后仅保留原图和配乐，显著降低 CPU
+													与内存占用
 												</p>
 											</div>
 										</div>
@@ -4995,88 +5054,13 @@
 								</div>
 
 								{#if sourcePlatform === 'bilibili'}
-								<!-- 分章下载 -->
-								<div
-									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
-								>
-									<div class="flex items-center gap-2">
-										<svg
-											class="h-4 w-4 text-emerald-600 dark:text-emerald-400"
-											fill="none"
-											stroke="currentColor"
-											viewBox="0 0 24 24"
-										>
-											<path
-												stroke-linecap="round"
-												stroke-linejoin="round"
-												stroke-width="2"
-												d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"
-											/>
-										</svg>
-										<div>
-											<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
-												>分章下载</span
-											>
-											<p class="text-[10px] text-gray-500 dark:text-gray-400">
-												下载完成后按播放器章节切分为独立视频
-											</p>
-										</div>
-									</div>
-									<label class="relative inline-flex cursor-pointer items-center">
-										<input
-											type="checkbox"
-											bind:checked={splitChaptersAfterDownload}
-											class="peer sr-only"
-										/>
-										<div
-											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-emerald-600 peer-focus:ring-2 peer-focus:ring-emerald-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-emerald-500"
-										></div>
-									</label>
-								</div>
-
-								<!-- 下载充电视频 -->
-								<div
-									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
-								>
-									<div class="flex items-center gap-2">
-										<svg
-											class="h-4 w-4 text-pink-600 dark:text-pink-400"
-											fill="none"
-											stroke="currentColor"
-											viewBox="0 0 24 24"
-										>
-											<path
-												stroke-linecap="round"
-												stroke-linejoin="round"
-												stroke-width="2"
-												d="M13 10V3L4 14h7v7l9-11h-7z"
-											/>
-										</svg>
-										<div>
-											<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
-												>下载充电视频</span
-											>
-											<p class="text-[10px] text-gray-500 dark:text-gray-400">
-												关闭后，识别为充电专享的视频只保留元数据，不下载媒体或占位文件
-											</p>
-										</div>
-									</div>
-									<label class="relative inline-flex cursor-pointer items-center">
-										<input type="checkbox" bind:checked={downloadChargeVideos} class="peer sr-only" />
-										<div
-											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-pink-600 peer-focus:ring-2 peer-focus:ring-pink-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-pink-500"
-										></div>
-									</label>
-								</div>
-
-								<!-- 动态API（仅UP主投稿） -->
-								{#if sourceType === 'submission'}
+									<!-- 分章下载 -->
 									<div
 										class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
 									>
 										<div class="flex items-center gap-2">
 											<svg
-												class="h-4 w-4 text-blue-600 dark:text-blue-400"
+												class="h-4 w-4 text-emerald-600 dark:text-emerald-400"
 												fill="none"
 												stroke="currentColor"
 												viewBox="0 0 24 24"
@@ -5085,30 +5069,109 @@
 													stroke-linecap="round"
 													stroke-linejoin="round"
 													stroke-width="2"
-													d="M5 12a7 7 0 0114 0M8 12a4 4 0 018 0M12 20h.01"
+													d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"
 												/>
 											</svg>
 											<div>
 												<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
-													>使用动态API</span
+													>分章下载</span
 												>
 												<p class="text-[10px] text-gray-500 dark:text-gray-400">
-													只有使用动态API才能拉取到动态视频，但该接口不提供分页参数，每次请求只能拉取12条视频。
-													这会一定程度上增加请求次数，用户可根据实际情况酌情选择，推荐仅在UP主有较多动态视频时开启。
+													下载完成后按播放器章节切分为独立视频
 												</p>
 											</div>
 										</div>
 										<label class="relative inline-flex cursor-pointer items-center">
-											<input type="checkbox" bind:checked={useDynamicApi} class="peer sr-only" />
+											<input
+												type="checkbox"
+												bind:checked={splitChaptersAfterDownload}
+												class="peer sr-only"
+											/>
 											<div
-												class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+												class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-emerald-600 peer-focus:ring-2 peer-focus:ring-emerald-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-emerald-500"
 											></div>
 										</label>
 									</div>
-								{/if}
+
+									<!-- 下载充电视频 -->
+									<div
+										class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
+									>
+										<div class="flex items-center gap-2">
+											<svg
+												class="h-4 w-4 text-pink-600 dark:text-pink-400"
+												fill="none"
+												stroke="currentColor"
+												viewBox="0 0 24 24"
+											>
+												<path
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													stroke-width="2"
+													d="M13 10V3L4 14h7v7l9-11h-7z"
+												/>
+											</svg>
+											<div>
+												<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
+													>下载充电视频</span
+												>
+												<p class="text-[10px] text-gray-500 dark:text-gray-400">
+													关闭后，识别为充电专享的视频只保留元数据，不下载媒体或占位文件
+												</p>
+											</div>
+										</div>
+										<label class="relative inline-flex cursor-pointer items-center">
+											<input
+												type="checkbox"
+												bind:checked={downloadChargeVideos}
+												class="peer sr-only"
+											/>
+											<div
+												class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-pink-600 peer-focus:ring-2 peer-focus:ring-pink-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-pink-500"
+											></div>
+										</label>
+									</div>
+
+									<!-- 动态API（仅UP主投稿） -->
+									{#if sourceType === 'submission'}
+										<div
+											class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
+										>
+											<div class="flex items-center gap-2">
+												<svg
+													class="h-4 w-4 text-blue-600 dark:text-blue-400"
+													fill="none"
+													stroke="currentColor"
+													viewBox="0 0 24 24"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														stroke-width="2"
+														d="M5 12a7 7 0 0114 0M8 12a4 4 0 018 0M12 20h.01"
+													/>
+												</svg>
+												<div>
+													<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
+														>使用动态API</span
+													>
+													<p class="text-[10px] text-gray-500 dark:text-gray-400">
+														只有使用动态API才能拉取到动态视频，但该接口不提供分页参数，每次请求只能拉取12条视频。
+														这会一定程度上增加请求次数，用户可根据实际情况酌情选择，推荐仅在UP主有较多动态视频时开启。
+													</p>
+												</div>
+											</div>
+											<label class="relative inline-flex cursor-pointer items-center">
+												<input type="checkbox" bind:checked={useDynamicApi} class="peer sr-only" />
+												<div
+													class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+												></div>
+											</label>
+										</div>
+									{/if}
 								{/if}
 
-				<!-- 下载弹幕 / YouTube 直播聊天 -->
+								<!-- 下载弹幕 / YouTube 直播聊天 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
 								>
@@ -5143,9 +5206,9 @@
 											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
 										></div>
 									</label>
-				</div>
+								</div>
 
-				<!-- 下载字幕 -->
+								<!-- 下载字幕 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
 								>
@@ -5172,7 +5235,7 @@
 													? '下载 YouTube 原生字幕文件（VTT格式）'
 													: sourcePlatform === 'douyin'
 														? '源站提供字幕时使用现有字幕链路保存'
-													: '下载CC字幕文件（SRT格式）'}
+														: '下载CC字幕文件（SRT格式）'}
 											</p>
 										</div>
 									</div>
@@ -5204,16 +5267,16 @@
 											</div>
 											<div class="flex flex-wrap items-center gap-2">
 												{#if sourcePlatform === 'bilibili'}
-												<label class="relative inline-flex cursor-pointer items-center">
-													<input
-														type="checkbox"
-														bind:checked={downloadAiSubtitle}
-														class="peer sr-only"
-													/>
-													<div
-														class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
-													></div>
-												</label>
+													<label class="relative inline-flex cursor-pointer items-center">
+														<input
+															type="checkbox"
+															bind:checked={downloadAiSubtitle}
+															class="peer sr-only"
+														/>
+														<div
+															class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-blue-600 peer-focus:ring-2 peer-focus:ring-blue-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-blue-500"
+														></div>
+													</label>
 												{/if}
 												<CustomSelect
 													value={aiSubtitleLanguage}
@@ -5223,7 +5286,9 @@
 														? `${sourcePlatform === 'douyin' ? '抖音' : 'YouTube'} 字幕优先语言`
 														: 'AI 字幕优先语言'}
 													onChange={(nextValue) =>
-														(aiSubtitleLanguage = String(nextValue ?? DEFAULT_AI_SUBTITLE_LANGUAGE))}
+														(aiSubtitleLanguage = String(
+															nextValue ?? DEFAULT_AI_SUBTITLE_LANGUAGE
+														))}
 													size="sm"
 													class="h-8 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
 												/>
@@ -5232,7 +5297,7 @@
 									</div>
 								{/if}
 
-				<!-- AI重命名 -->
+								<!-- AI重命名 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
 								>
@@ -5404,7 +5469,7 @@
 											{/if}
 										</div>
 									</div>
-				{/if}
+								{/if}
 							</div>
 						</div>
 
@@ -5446,7 +5511,9 @@
 									当前新源会继承设置页的全局视频/音频质量配置；关闭“继承全局”后可为该同步源单独限码率。
 								</p>
 							{:else}
-								<div class="rounded-md border border-blue-200 bg-white p-4 dark:border-blue-800 dark:bg-gray-900">
+								<div
+									class="rounded-md border border-blue-200 bg-white p-4 dark:border-blue-800 dark:bg-gray-900"
+								>
 									<FilterOptionEditor
 										value={filterOptionDraft}
 										on:change={(event) => (filterOptionDraft = event.detail)}
@@ -5850,7 +5917,7 @@
 											? '添加抖音视频源'
 											: sourcePlatform === 'tiktok'
 												? '添加 TikTok 视频源'
-										: '添加'}
+												: '添加'}
 							</Button>
 							<Button
 								type="button"
@@ -5912,7 +5979,8 @@
 											sourceType === 'bangumi' &&
 											!!result.season_id &&
 											isBangumiSeasonExists(result.season_id)}
-											{@const isMangaExisting = sourceType === 'manga' && isMangaComicExists(result.manga_comic_id)}
+										{@const isMangaExisting =
+											sourceType === 'manga' && isMangaComicExists(result.manga_comic_id)}
 										{@const isExternalExisting = isExternalResultAdded(result)}
 										{@const itemKey = `search_${result.youtube_url || result.bvid || result.season_id || result.mid || i}`}
 										<button
@@ -5956,9 +6024,9 @@
 												result.result_type === 'douyin_user' ||
 												result.result_type === 'tiktok_user'
 													? 'h-14 w-14 rounded-full'
-												: sourceType === 'bangumi' || sourceType === 'manga'
-													? 'h-20 w-14'
-													: 'h-14 w-20'} flex-shrink-0 rounded object-cover"
+													: sourceType === 'bangumi' || sourceType === 'manga'
+														? 'h-20 w-14'
+														: 'h-14 w-20'} flex-shrink-0 rounded object-cover"
 												placeholder="无图片"
 											/>
 											<div class="min-w-0 flex-1">
@@ -5974,47 +6042,47 @@
 																? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300'
 																: result.result_type === 'manga'
 																	? 'bg-pink-100 text-pink-700 dark:bg-pink-900 dark:text-pink-300'
-																: result.result_type === 'media_ft'
-																	? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
-																: result.result_type === 'bili_user' ||
-																		  result.result_type === 'youtube_channel' ||
-																		  result.result_type === 'douyin_user' ||
-																		  result.result_type === 'tiktok_user'
-																		? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
-																		: result.result_type === 'video' ||
-																			  result.result_type === 'youtube_playlist'
-																			? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
-																			: 'text-foreground bg-gray-100 dark:bg-gray-800'}"
+																	: result.result_type === 'media_ft'
+																		? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
+																		: result.result_type === 'bili_user' ||
+																			  result.result_type === 'youtube_channel' ||
+																			  result.result_type === 'douyin_user' ||
+																			  result.result_type === 'tiktok_user'
+																			? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+																			: result.result_type === 'video' ||
+																				  result.result_type === 'youtube_playlist'
+																				? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
+																				: 'text-foreground bg-gray-100 dark:bg-gray-800'}"
 														>
 															{result.result_type === 'media_bangumi'
 																? '番剧'
 																: result.result_type === 'manga'
 																	? '漫画'
-																: result.result_type === 'media_ft'
-																	? '影视'
-																	: result.result_type === 'bili_user'
-																		? 'UP主'
-																		: result.result_type === 'youtube_channel'
-																			? 'YouTube 频道'
-																			: result.result_type === 'douyin_user'
-																				? '抖音作者'
-																				: result.result_type === 'tiktok_user'
-																					? 'TikTok 作者'
-																			: result.result_type === 'douyin_theater'
-																				? '抖音放映厅'
-																			: result.result_type === 'douyin_series'
-																				? '抖音短剧'
-																			: result.result_type === 'douyin_collection'
-																				? '抖音收藏夹'
-																			: result.result_type === 'douyin_mix'
-																				? '抖音合集'
-																			: result.result_type === 'tiktok_playlist'
-																				? 'TikTok 收藏夹'
-																			: result.result_type === 'youtube_playlist'
-																				? 'YouTube 播放列表'
-																		: result.result_type === 'video'
-																			? '视频'
-																			: result.result_type}
+																	: result.result_type === 'media_ft'
+																		? '影视'
+																		: result.result_type === 'bili_user'
+																			? 'UP主'
+																			: result.result_type === 'youtube_channel'
+																				? 'YouTube 频道'
+																				: result.result_type === 'douyin_user'
+																					? '抖音作者'
+																					: result.result_type === 'tiktok_user'
+																						? 'TikTok 作者'
+																						: result.result_type === 'douyin_theater'
+																							? '抖音放映厅'
+																							: result.result_type === 'douyin_series'
+																								? '抖音短剧'
+																								: result.result_type === 'douyin_collection'
+																									? '抖音收藏夹'
+																									: result.result_type === 'douyin_mix'
+																										? '抖音合集'
+																										: result.result_type === 'tiktok_playlist'
+																											? 'TikTok 收藏夹'
+																											: result.result_type === 'youtube_playlist'
+																												? 'YouTube 播放列表'
+																												: result.result_type === 'video'
+																													? '视频'
+																													: result.result_type}
 														</span>
 													{/if}
 													<!-- 显示已存在标记 -->
@@ -6048,14 +6116,9 @@
 													{/if}
 												</div>
 												<p class="text-muted-foreground truncate text-xs">
-											{result.author}{#if (result.result_type === 'bili_user' ||
-												result.result_type === 'youtube_channel' ||
-												result.result_type === 'douyin_user' ||
-												result.result_type === 'tiktok_user') &&
-													result.follower !== undefined &&
-													result.follower !== null}
+													{result.author}{#if (result.result_type === 'bili_user' || result.result_type === 'youtube_channel' || result.result_type === 'douyin_user' || result.result_type === 'tiktok_user') && result.follower !== undefined && result.follower !== null}
 														<span class="ml-2"
-													>· {result.result_type === 'youtube_channel' ? '订阅数' : '粉丝'}:
+															>· {result.result_type === 'youtube_channel' ? '订阅数' : '粉丝'}:
 															{formatSubmissionMetricLabel(result.follower)}</span
 														>
 													{/if}
@@ -6078,17 +6141,17 @@
 									{/if}
 								</span>
 								{#if sourceType === 'manga' && mangaSearchHasMore}
-										<div class="mt-2">
-											<Button
-												size="sm"
-												variant="outline"
-												disabled={loadingMoreManga}
-												onclick={() => void searchMangaComics(mangaSearchPage + 1)}
-											>
-												{loadingMoreManga ? '加载中...' : '加载更多'}
-											</Button>
-										</div>
-									{/if}
+									<div class="mt-2">
+										<Button
+											size="sm"
+											variant="outline"
+											disabled={loadingMoreManga}
+											onclick={() => void searchMangaComics(mangaSearchPage + 1)}
+										>
+											{loadingMoreManga ? '加载中...' : '加载更多'}
+										</Button>
+									</div>
+								{/if}
 							{/snippet}
 						</SidePanel>
 					</div>
@@ -6100,13 +6163,19 @@
 						<SidePanel
 							isMobile={isCompactLayout}
 							title={youtubeSourceType === 'douyin_collection'
-								? (douyinCatalogOwnerName ? `${douyinCatalogOwnerName} 的收藏夹` : '我的抖音收藏夹')
+								? douyinCatalogOwnerName
+									? `${douyinCatalogOwnerName} 的收藏夹`
+									: '我的抖音收藏夹'
 								: youtubeSourceType === 'douyin_mix'
-									? (douyinCatalogOwnerName ? `${douyinCatalogOwnerName} 的合集` : '抖音合集')
-								: youtubeSourceType === 'douyin_theater'
-									? '抖音放映厅'
-									: '抖音短剧'}
-							subtitle={loadingDouyinCatalog ? '正在获取…' : `共 ${douyinCatalog.length} 个，点击选择`}
+									? douyinCatalogOwnerName
+										? `${douyinCatalogOwnerName} 的合集`
+										: '抖音合集'
+									: youtubeSourceType === 'douyin_theater'
+										? '抖音放映厅'
+										: '抖音短剧'}
+							subtitle={loadingDouyinCatalog
+								? '正在获取…'
+								: `共 ${douyinCatalog.length} 个，点击选择`}
 							maxHeightClass="max-h-126"
 							headerClass="bg-green-50 dark:bg-green-950"
 							titleClass="text-base font-medium text-green-800 dark:text-green-200"
@@ -6115,7 +6184,12 @@
 							{#if loadingDouyinCatalog}
 								<Loading />
 							{:else}
-								<div class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}" style={isMobile ? '' : 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}>
+								<div
+									class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}"
+									style={isMobile
+										? ''
+										: 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}
+								>
 									{#each douyinCatalog as item (item.youtube_url)}
 										{@const isAdded = isDouyinCatalogItemAdded(item)}
 										<SelectableCardButton
@@ -6124,14 +6198,26 @@
 											class="p-3"
 										>
 											<div class="flex items-start gap-3">
-												<BiliImage src={item.cover} alt={item.title} class="h-16 w-12 flex-shrink-0 rounded object-cover" placeholder="封面" />
+												<BiliImage
+													src={item.cover}
+													alt={item.title}
+													class="h-16 w-12 flex-shrink-0 rounded object-cover"
+													placeholder="封面"
+												/>
 												<div class="min-w-0 flex-1">
 													<h4 class="line-clamp-2 text-sm font-medium">{item.title}</h4>
 													<p class="text-muted-foreground mt-1 text-xs">{item.author}</p>
-													{#if item.description}<p class="text-muted-foreground/70 mt-1 line-clamp-2 text-xs">{item.description}</p>{/if}
-													
+													{#if item.description}<p
+															class="text-muted-foreground/70 mt-1 line-clamp-2 text-xs"
+														>
+															{item.description}
+														</p>{/if}
+
 													{#if isAdded}
-														<span class="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">已添加</span>
+														<span
+															class="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+															>已添加</span
+														>
 													{/if}
 												</div>
 											</div>
@@ -6149,7 +6235,9 @@
 						<SidePanel
 							isMobile={isCompactLayout}
 							title={youtubePlaylistPanelTitle}
-							subtitle={loadingYoutubeChannelPlaylists ? '正在获取…' : `共 ${youtubeChannelPlaylists.length} 个，点击选择`}
+							subtitle={loadingYoutubeChannelPlaylists
+								? '正在获取…'
+								: `共 ${youtubeChannelPlaylists.length} 个，点击选择`}
 							maxHeightClass="max-h-126"
 							headerClass="bg-green-50 dark:bg-green-950"
 							titleClass="text-base font-medium text-green-800 dark:text-green-200"
@@ -6160,18 +6248,39 @@
 							{:else if youtubeChannelPlaylists.length === 0}
 								<p class="text-muted-foreground p-4 text-center text-sm">该 UP 没有公开播放列表</p>
 							{:else}
-								<div class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}" style={isMobile ? '' : 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}>
+								<div
+									class="grid gap-3 {isMobile ? 'grid-cols-1' : ''}"
+									style={isMobile
+										? ''
+										: 'grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));'}
+								>
 									{#each youtubeChannelPlaylists as item (item.youtube_url)}
 										{@const isAdded = isExternalSourceAdded('playlist', item.youtube_url)}
-										<SelectableCardButton onclick={() => selectSearchResult(item)} disabled={isAdded} class="p-3">
+										<SelectableCardButton
+											onclick={() => selectSearchResult(item)}
+											disabled={isAdded}
+											class="p-3"
+										>
 											<div class="flex items-start gap-3">
-												<BiliImage src={item.cover} alt={item.title} class="h-16 w-12 flex-shrink-0 rounded object-cover" placeholder="封面" />
+												<BiliImage
+													src={item.cover}
+													alt={item.title}
+													class="h-16 w-12 flex-shrink-0 rounded object-cover"
+													placeholder="封面"
+												/>
 												<div class="min-w-0 flex-1">
 													<h4 class="line-clamp-2 text-sm font-medium">{item.title}</h4>
 													<p class="text-muted-foreground mt-1 text-xs">{item.author}</p>
-													{#if item.description}<p class="text-muted-foreground/70 mt-1 line-clamp-2 text-xs">{item.description}</p>{/if}
+													{#if item.description}<p
+															class="text-muted-foreground/70 mt-1 line-clamp-2 text-xs"
+														>
+															{item.description}
+														</p>{/if}
 													{#if isAdded}
-														<span class="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">已添加</span>
+														<span
+															class="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+															>已添加</span
+														>
 													{/if}
 												</div>
 											</div>
@@ -7126,7 +7235,7 @@
 												? '搜索喜欢的视频...'
 												: youtubeSourceType === 'watch_later'
 													? '搜索稍后再看视频...'
-												: `搜索当前${isDouyin ? '抖音' : 'YouTube'}来源的视频标题...`
+													: `搜索当前${isDouyin ? '抖音' : 'YouTube'}来源的视频标题...`
 										: '搜索视频标题（支持关键词搜索UP主所有视频）...'}
 									{isSearching}
 									statusText={isSearching
@@ -7593,7 +7702,9 @@
 					</div>
 
 					{#if !filterOptionInheritGlobal}
-						<div class="rounded-md border border-blue-200 bg-white p-4 dark:border-blue-800 dark:bg-gray-900">
+						<div
+							class="rounded-md border border-blue-200 bg-white p-4 dark:border-blue-800 dark:bg-gray-900"
+						>
 							<FilterOptionEditor
 								value={filterOptionDraft}
 								disabled={batchAdding}

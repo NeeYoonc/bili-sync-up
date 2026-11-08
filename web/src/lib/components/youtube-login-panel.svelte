@@ -64,7 +64,9 @@
 			} else if (result.state === 'expired') {
 				toast.error('YouTube 返回未登录', { description: `${result.message}（凭证已保留）` });
 			} else {
-				toast.warning('无法判断 YouTube 登录状态', { description: `${result.message}（凭证已保留）` });
+				toast.warning('无法判断 YouTube 登录状态', {
+					description: `${result.message}（凭证已保留）`
+				});
 			}
 			await refresh();
 		} catch (error) {
@@ -124,7 +126,11 @@
 								{/if}
 							</Badge>
 						{:else}
-							<Badge variant="secondary" class="gap-1" title="后台守护任务启动 5 分钟后做首次联网检查">
+							<Badge
+								variant="secondary"
+								class="gap-1"
+								title="后台守护任务启动 5 分钟后做首次联网检查"
+							>
 								<CircleAlert class="h-3.5 w-3.5" />尚未联网检查
 							</Badge>
 						{/if}
@@ -193,8 +199,9 @@
 						<li>再次打开助手，点击“传输登录状态”；本页刷新后会显示“已导入”。</li>
 					</ol>
 					<p class="mt-2 text-xs opacity-80">
-						助手只读取 youtube.com 和 google.com 中维持 YouTube 会话的 Cookie，并调用现有导入接口传输到当前
-						Bili Sync-up；不会传输 Google 密码，也不需要 Docker 内嵌浏览器。
+						助手只读取 youtube.com 和 google.com 中维持 YouTube 会话的
+						Cookie，并调用现有导入接口传输到当前 Bili Sync-up；不会传输 Google 密码，也不需要 Docker
+						内嵌浏览器。
 					</p>
 				</div>
 

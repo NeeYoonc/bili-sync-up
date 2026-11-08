@@ -34,7 +34,7 @@
 		BellIcon,
 		SparklesIcon,
 		RefreshCwIcon,
-	DatabaseIcon,
+		DatabaseIcon,
 		EyeIcon,
 		YoutubeIcon,
 		Music2Icon
@@ -178,9 +178,12 @@
 		danmaku: '配置弹幕文件的显示样式、布局参数和同步策略。',
 		credential: '填写 B 站登录凭证，影响会员画质、互动内容和受限接口访问。',
 		youtube_login: '通过电脑端登录助手或 cookies.txt 管理 yt-dlp 使用的 YouTube 登录状态。',
-		network_proxy: '外源网络代理：YouTube 与 TikTok 的搜索、扫描、直链解析和下载共用；B站与抖音不受影响。',
-		douyin_login: '通过同一个电脑端登录助手或 cookies.txt 管理抖音作者作品扫描和下载所需的 Cookie。',
-		tiktok_login: '管理 TikTok 作者扫描所用的 cookies.txt；TikTok 公开作者主页无需登录即可同步，导入后 yt-dlp 可访问需要登录的私密/受限内容。',
+		network_proxy:
+			'外源网络代理：YouTube 与 TikTok 的搜索、扫描、直链解析和下载共用；B站与抖音不受影响。',
+		douyin_login:
+			'通过同一个电脑端登录助手或 cookies.txt 管理抖音作者作品扫描和下载所需的 Cookie。',
+		tiktok_login:
+			'管理 TikTok 作者扫描所用的 cookies.txt；TikTok 公开作者主页无需登录即可同步，导入后 yt-dlp 可访问需要登录的私密/受限内容。',
 		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
 		captcha: '设置遇到验证码风控时的处理模式、超时和自动识别参数。',
 		aria2: '配置外部 Aria2 的健康检查、自动重启和监控策略。',
@@ -188,7 +191,8 @@
 		notification: '配置扫描完成后的推送渠道、测试发送和通知内容。',
 		ai_rename: '配置 AI 自动重命名的启用范围、提示词和相关行为。',
 		system: '调整扫描间隔、监听端口、路径模板和基础系统行为。',
-		database: '查看数据库文件信息与各表数据量；可清理图片代理缓存、AI 对话历史、任务队列历史与孤立记录，执行 VACUUM 压缩或备份数据库。'
+		database:
+			'查看数据库文件信息与各表数据量；可清理图片代理缓存、AI 对话历史、任务队列历史与孤立记录，执行 VACUUM 压缩或备份数据库。'
 	} as const;
 
 	function getSettingTooltip(id: string) {
@@ -468,14 +472,27 @@
 	let databaseLoading = false;
 	let databaseActionRunning = false;
 	let databaseAction: {
-		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup' | 'clean_logs';
+		action:
+			| 'clear_image_cache'
+			| 'clear_ai_history'
+			| 'clear_queue_history'
+			| 'clean_orphans'
+			| 'vacuum'
+			| 'backup'
+			| 'clean_logs';
 		label: string;
 		description: string;
 		danger: boolean;
 		keepDays: number;
 	} | null = null;
 
-	let databaseBackups: { name: string; path: string; size_bytes: number; created_at: string; is_import: boolean }[] = [];
+	let databaseBackups: {
+		name: string;
+		path: string;
+		size_bytes: number;
+		created_at: string;
+		is_import: boolean;
+	}[] = [];
 	let databaseBackupsLoading = false;
 	let restoreTarget: { name: string; size_bytes: number; created_at: string } | null = null;
 	let restoreRunning = false;
@@ -532,7 +549,10 @@
 	// 变量说明
 	const variableHelp = {
 		video: [
-			{ name: '{{title}}', desc: '视频标题（抖音/TikTok/YouTube 会自动去掉话题标签、只保留第一行）' },
+			{
+				name: '{{title}}',
+				desc: '视频标题（抖音/TikTok/YouTube 会自动去掉话题标签、只保留第一行）'
+			},
 			{ name: '{{title_full}}', desc: '完整原标题（仅抖音/TikTok/YouTube 可用，不做清洗）' },
 			{ name: '{{show_title}}', desc: '节目标题（与title相同）' },
 			{ name: '{{bvid}}', desc: 'BV号（视频编号）' },
@@ -543,7 +563,10 @@
 			{ name: '{{ctime}}', desc: '视频创建时间' }
 		],
 		page: [
-			{ name: '{{title}}', desc: '视频标题（单P/多P模板可用；抖音/TikTok/YouTube 会自动去掉话题标签、只保留第一行）' },
+			{
+				name: '{{title}}',
+				desc: '视频标题（单P/多P模板可用；抖音/TikTok/YouTube 会自动去掉话题标签、只保留第一行）'
+			},
 			{ name: '{{title_full}}', desc: '完整原标题（仅抖音/TikTok/YouTube 可用，不做清洗）' },
 			{ name: '{{bvid}}', desc: 'BV号（视频编号，单P/多P模板可用）' },
 			{ name: '{{upper_name}}', desc: 'UP主名称（单P/多P模板可用）' },
@@ -578,8 +601,14 @@
 		],
 		common: [
 			{ name: '{{truncate title 10}}', desc: '截取函数示例：截取标题前10个字符' },
-			{ name: '{{truncate_bytes title 200}}', desc: '按 UTF-8 字节截取（中文约3字节/字）：把变量字节数控制在 200 以内，避免整个文件名超过 255 字节' },
-			{ name: '自动截断', desc: '生成的文件名超过 255 字节（中文按字节计）时会自动按字节智能截断并预留后缀空间，无需手动处理' },
+			{
+				name: '{{truncate_bytes title 200}}',
+				desc: '按 UTF-8 字节截取（中文约3字节/字）：把变量字节数控制在 200 以内，避免整个文件名超过 255 字节'
+			},
+			{
+				name: '自动截断',
+				desc: '生成的文件名超过 255 字节（中文按字节计）时会自动按字节智能截断并预留后缀空间，无需手动处理'
+			},
 			{ name: '路径分隔符', desc: '支持使用 / 或 \\\\ 创建子文件夹' }
 		],
 		time: [
@@ -1188,7 +1217,14 @@
 	}
 
 	function requestDatabaseAction(
-		action: 'clear_image_cache' | 'clear_ai_history' | 'clear_queue_history' | 'clean_orphans' | 'vacuum' | 'backup' | 'clean_logs',
+		action:
+			| 'clear_image_cache'
+			| 'clear_ai_history'
+			| 'clear_queue_history'
+			| 'clean_orphans'
+			| 'vacuum'
+			| 'backup'
+			| 'clean_logs',
 		label: string,
 		description: string,
 		danger = false,
@@ -1459,7 +1495,7 @@
 			),
 			audio_only_use_low_qn_for_playurl: audioOnlyUseLowQnForPlayurl,
 			proxy: networkProxy.trim(),
-				// aria2监控配置
+			// aria2监控配置
 			enable_aria2_health_check: enableAria2HealthCheck,
 			enable_aria2_auto_restart: enableAria2AutoRestart,
 			aria2_health_check_interval: normalizeNumberInput(
@@ -1796,8 +1832,7 @@
 				| 'opensend'
 				| 'custom'
 				| 'synology_chat'
-				| undefined) ||
-			'auto';
+				| undefined) || 'auto';
 		webhookCustomBody = response.data.webhook_custom_body || '';
 		webhookSynologyChatTemplate =
 			response.data.webhook_synology_chat_template ||
@@ -3397,10 +3432,17 @@
 				autocomplete="off"
 			/>
 			<p class="text-muted-foreground text-sm">
-				YouTube 与 TikTok 的搜索、订阅、扫描、直链解析、视频/音频/封面/头像/字幕和直播聊天共用此代理；B站与抖音不会使用。留空关闭。
+				YouTube 与 TikTok
+				的搜索、订阅、扫描、直链解析、视频/音频/封面/头像/字幕和直播聊天共用此代理；B站与抖音不会使用。留空关闭。
 			</p>
 			<div class="flex flex-wrap items-center gap-2 pt-1">
-				<Button type="button" size="sm" variant="outline" disabled={proxyTesting} onclick={handleTestProxy}>
+				<Button
+					type="button"
+					size="sm"
+					variant="outline"
+					disabled={proxyTesting}
+					onclick={handleTestProxy}
+				>
 					{proxyTesting ? '测试中...' : '测试连通性'}
 				</Button>
 				{#if proxyTestResult}
@@ -3444,8 +3486,11 @@
 >
 	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
 		<DouyinLoginPanel />
-		<div class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200">
-			导入后可搜索抖音作者、选择历史作品并持续扫描新作品。媒体仍使用项目现有统一下载器、画质设置、路径模板、封面与 NFO 链路。
+		<div
+			class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
+		>
+			导入后可搜索抖音作者、选择历史作品并持续扫描新作品。媒体仍使用项目现有统一下载器、画质设置、路径模板、封面与
+			NFO 链路。
 		</div>
 	</div>
 </ResponsiveSheet>
@@ -3463,10 +3508,12 @@
 >
 	<div class="min-h-0 flex-1 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
 		<TikTokLoginPanel />
-		<div class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200">
-			TikTok 作者主页公开内容无需登录即可同步；导入登录状态后，作者扫描会携带该 Cookie，可访问需要登录才可见的私密/受限内容，且不会与 YouTube、抖音的 Cookie 混用。
+		<div
+			class="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
+		>
+			TikTok 作者主页公开内容无需登录即可同步；导入登录状态后，作者扫描会携带该
+			Cookie，可访问需要登录才可见的私密/受限内容，且不会与 YouTube、抖音的 Cookie 混用。
 		</div>
-
 	</div>
 </ResponsiveSheet>
 
@@ -4636,8 +4683,15 @@
 								<p>&#123;&#123;channel&#125;&#125;：当前通知渠道名称，例如 webhook</p>
 								<p>&#123;&#123;event&#125;&#125;：事件类型，例如 test_notification</p>
 								<p>&#123;&#123;sent_at&#125;&#125;：发送时间</p>
-								<p>可填写 JSON、<code>application/x-www-form-urlencoded</code> 或任意原始文本；不会限制消息类型。</p>
-								<p>JSON 模板继续兼容原有安全替换；其他格式按原文本替换占位符。原始模板还支持 <code>&#123;&#123;title_json&#125;&#125;</code> 和 <code>&#123;&#123;title_urlencoded&#125;&#125;</code>（其他字段同理）。</p>
+								<p>
+									可填写 JSON、<code>application/x-www-form-urlencoded</code> 或任意原始文本；不会限制消息类型。
+								</p>
+								<p>
+									JSON 模板继续兼容原有安全替换；其他格式按原文本替换占位符。原始模板还支持 <code
+										>&#123;&#123;title_json&#125;&#125;</code
+									>
+									和 <code>&#123;&#123;title_urlencoded&#125;&#125;</code>（其他字段同理）。
+								</p>
 							</div>
 						</div>
 					{/if}
@@ -4665,9 +4719,20 @@
 								class="font-mono text-xs"
 							/>
 							<div class="text-muted-foreground space-y-1 text-sm">
-								<p>这是纯文本模板，不会按 Markdown 解析；可直接使用群晖表情短码，例如 <code>:loudspeaker:</code>、<code>:mailbox_closed:</code>。</p>
-								<p>支持占位符：&#123;&#123;title&#125;&#125;、&#123;&#123;content&#125;&#125;、&#123;&#123;source&#125;&#125;、&#123;&#123;channel&#125;&#125;、&#123;&#123;event&#125;&#125;、&#123;&#123;sent_at&#125;&#125;；&#123;&#123;content&#125;&#125; 会自动移除 Markdown 标记。</p>
-								<p>留空时使用默认模板：<code>:loudspeaker: ------&#123;&#123;title&#125;&#125;------ :loudspeaker:</code> 后换行显示正文。</p>
+								<p>
+									这是纯文本模板，不会按 Markdown 解析；可直接使用群晖表情短码，例如 <code
+										>:loudspeaker:</code
+									>、<code>:mailbox_closed:</code>。
+								</p>
+								<p>
+									支持占位符：&#123;&#123;title&#125;&#125;、&#123;&#123;content&#125;&#125;、&#123;&#123;source&#125;&#125;、&#123;&#123;channel&#125;&#125;、&#123;&#123;event&#125;&#125;、&#123;&#123;sent_at&#125;&#125;；&#123;&#123;content&#125;&#125;
+									会自动移除 Markdown 标记。
+								</p>
+								<p>
+									留空时使用默认模板：<code
+										>:loudspeaker: ------&#123;&#123;title&#125;&#125;------ :loudspeaker:</code
+									> 后换行显示正文。
+								</p>
 							</div>
 						</div>
 					{/if}
@@ -5367,9 +5432,7 @@
 	{isMobile}
 >
 	<div class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}">
-		<div
-			class="min-h-0 flex-1 space-y-6 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}"
-		>
+		<div class="min-h-0 flex-1 space-y-6 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
 			{#if databaseLoading && !databaseStatus}
 				<div class="flex justify-center py-12">
 					<Loading />
@@ -5393,9 +5456,11 @@
 								<span class="font-medium">{formatBytes(databaseStatus.reclaimable_bytes)}</span>
 							</div>
 						</div>
-						<p class="text-muted-foreground mt-2 break-all text-xs">{databaseStatus.path}</p>
+						<p class="text-muted-foreground mt-2 text-xs break-all">{databaseStatus.path}</p>
 						{#if databaseStatus.reclaimable_bytes > 1024 * 1024}
-							<div class="mt-2 rounded-md bg-amber-100 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+							<div
+								class="mt-2 rounded-md bg-amber-100 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300"
+							>
 								可回收空间较大，建议执行「压缩数据库」释放磁盘空间。
 							</div>
 						{/if}
@@ -5431,7 +5496,11 @@
 							type="button"
 							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
 							onclick={() =>
-								requestDatabaseAction('clear_image_cache', '清理图片代理缓存', '清空网页图片代理缓存，图片将按需重新拉取。')}
+								requestDatabaseAction(
+									'clear_image_cache',
+									'清理图片代理缓存',
+									'清空网页图片代理缓存，图片将按需重新拉取。'
+								)}
 						>
 							<div>
 								<p class="text-sm font-medium">清理图片代理缓存</p>
@@ -5443,7 +5512,11 @@
 							type="button"
 							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
 							onclick={() =>
-								requestDatabaseAction('clear_ai_history', '清理 AI 对话历史', '清空 AI 重命名使用的历史对话记录，不影响已完成的命名。')}
+								requestDatabaseAction(
+									'clear_ai_history',
+									'清理 AI 对话历史',
+									'清空 AI 重命名使用的历史对话记录，不影响已完成的命名。'
+								)}
 						>
 							<div>
 								<p class="text-sm font-medium">清理 AI 对话历史</p>
@@ -5455,7 +5528,11 @@
 							type="button"
 							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
 							onclick={() =>
-								requestDatabaseAction('clear_queue_history', '清理任务队列历史', '删除已经完成或失败的任务队列记录（删除来源/添加来源等历史任务）。')}
+								requestDatabaseAction(
+									'clear_queue_history',
+									'清理任务队列历史',
+									'删除已经完成或失败的任务队列记录（删除来源/添加来源等历史任务）。'
+								)}
 						>
 							<div>
 								<p class="text-sm font-medium">清理任务队列历史</p>
@@ -5467,7 +5544,12 @@
 							type="button"
 							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
 							onclick={() =>
-								requestDatabaseAction('clean_orphans', '清理孤立记录', '删除来源已删除但仍保留在数据库里的 YouTube 视频记录，以及无主分P记录。', true)}
+								requestDatabaseAction(
+									'clean_orphans',
+									'清理孤立记录',
+									'删除来源已删除但仍保留在数据库里的 YouTube 视频记录，以及无主分P记录。',
+									true
+								)}
 						>
 							<div>
 								<p class="text-sm font-medium">清理孤立记录</p>
@@ -5479,11 +5561,17 @@
 							type="button"
 							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
 							onclick={() =>
-								requestDatabaseAction('vacuum', '压缩数据库', '执行 VACUUM 回收删除数据后留下的磁盘空间，可能需要几秒到几十秒。')}
+								requestDatabaseAction(
+									'vacuum',
+									'压缩数据库',
+									'执行 VACUUM 回收删除数据后留下的磁盘空间，可能需要几秒到几十秒。'
+								)}
 						>
 							<div>
 								<p class="text-sm font-medium">压缩数据库</p>
-								<p class="text-muted-foreground text-xs">回收可释放空间（当前约 {formatBytes(databaseStatus.reclaimable_bytes)}）</p>
+								<p class="text-muted-foreground text-xs">
+									回收可释放空间（当前约 {formatBytes(databaseStatus.reclaimable_bytes)}）
+								</p>
 							</div>
 							<span class="text-muted-foreground text-xs">→</span>
 						</button>
@@ -5491,7 +5579,11 @@
 							type="button"
 							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
 							onclick={() =>
-								requestDatabaseAction('backup', '备份数据库', '生成一份完整数据库快照到配置目录（data-backup-时间戳.sqlite），不影响当前运行。')}
+								requestDatabaseAction(
+									'backup',
+									'备份数据库',
+									'生成一份完整数据库快照到配置目录（data-backup-时间戳.sqlite），不影响当前运行。'
+								)}
 						>
 							<div>
 								<p class="text-sm font-medium">备份数据库</p>
@@ -5503,7 +5595,13 @@
 							type="button"
 							class="hover:bg-accent flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors"
 							onclick={() =>
-								requestDatabaseAction('clean_logs', '清理旧日志', '删除保留期以外的旧日志文件，释放磁盘空间；保留天数可在确认框中自由调整（1-365 天），当前正在写入的日志不受影响。', false, 7)}
+								requestDatabaseAction(
+									'clean_logs',
+									'清理旧日志',
+									'删除保留期以外的旧日志文件，释放磁盘空间；保留天数可在确认框中自由调整（1-365 天），当前正在写入的日志不受影响。',
+									false,
+									7
+								)}
 						>
 							<div>
 								<p class="text-sm font-medium">清理旧日志</p>
@@ -5520,7 +5618,10 @@
 						<div class="flex items-center justify-between gap-3">
 							<div class="min-w-0">
 								<p class="text-sm font-medium">导入备份包</p>
-								<p class="text-muted-foreground text-xs">选择其他电脑导出的 .sqlite 备份文件，导入后即可恢复；外部备份也会保留在本机备份列表中。</p>
+								<p class="text-muted-foreground text-xs">
+									选择其他电脑导出的 .sqlite
+									备份文件，导入后即可恢复；外部备份也会保留在本机备份列表中。
+								</p>
 							</div>
 							<input
 								bind:this={importFileInput}
@@ -5550,18 +5651,25 @@
 						</button>
 					</div>
 					{#if databaseBackups.length === 0}
-						<div class="text-muted-foreground rounded-lg border border-dashed p-4 text-center text-sm">
+						<div
+							class="text-muted-foreground rounded-lg border border-dashed p-4 text-center text-sm"
+						>
 							暂无备份。点击上方「备份数据库」生成一份快照。
 						</div>
 					{:else}
 						<div class="space-y-2">
 							{#each databaseBackups as backup (backup.name)}
-								<div class="hover:bg-accent flex items-center justify-between rounded-lg border p-3 transition-colors">
+								<div
+									class="hover:bg-accent flex items-center justify-between rounded-lg border p-3 transition-colors"
+								>
 									<div class="min-w-0">
 										<p class="truncate font-mono text-sm">
 											{backup.name}
 											{#if backup.is_import}
-												<span class="ml-2 rounded bg-blue-500/15 px-1.5 py-0.5 text-xs font-normal text-blue-600 dark:text-blue-400">外部导入</span>
+												<span
+													class="ml-2 rounded bg-blue-500/15 px-1.5 py-0.5 text-xs font-normal text-blue-600 dark:text-blue-400"
+													>外部导入</span
+												>
 											{/if}
 										</p>
 										<p class="text-muted-foreground text-xs">
@@ -5570,7 +5678,7 @@
 									</div>
 									<button
 										type="button"
-										class="text-destructive hover:text-destructive/80 flex-shrink-0 rounded-md border border-destructive/40 px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+										class="text-destructive hover:text-destructive/80 border-destructive/40 flex-shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
 										onclick={() => confirmRestore(backup)}
 									>
 										恢复
@@ -5614,7 +5722,9 @@
 			<AlertDialog.Description>{databaseAction?.description}</AlertDialog.Description>
 			{#if databaseAction?.action === 'clean_logs'}
 				<div class="mt-3 flex items-center gap-2">
-					<label for="keep-log-days" class="text-muted-foreground whitespace-nowrap text-sm">保留天数</label>
+					<label for="keep-log-days" class="text-muted-foreground text-sm whitespace-nowrap"
+						>保留天数</label
+					>
 					<input
 						id="keep-log-days"
 						type="number"
@@ -5642,7 +5752,7 @@
 			</button>
 			<button
 				type="button"
-				class="disabled:cursor-not-allowed rounded-md border border-transparent bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+				class="rounded-md border border-transparent bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
 				disabled={databaseActionRunning}
 				onclick={runDatabaseAction}
 			>
@@ -5664,14 +5774,17 @@
 			<AlertDialog.Title class="text-destructive dark:text-red-400">恢复数据库</AlertDialog.Title>
 			<AlertDialog.Description>
 				<p class="mb-2">确定要用以下备份替换当前数据库吗？</p>
-				<div class="rounded-md border bg-muted/50 p-3 font-mono text-xs">
+				<div class="bg-muted/50 rounded-md border p-3 font-mono text-xs">
 					<p class="break-all">{restoreTarget?.name}</p>
 					<p class="text-muted-foreground mt-1">
 						{formatBytes(restoreTarget?.size_bytes ?? 0)} · {restoreTarget?.created_at}
 					</p>
 				</div>
-				<div class="mt-3 rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
-					<strong>注意：</strong>恢复将在重启后生效。当前数据库会先自动保留一份快照，但请确认无需保留其它数据。
+				<div
+					class="mt-3 rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300"
+				>
+					<strong>注意：</strong
+					>恢复将在重启后生效。当前数据库会先自动保留一份快照，但请确认无需保留其它数据。
 				</div>
 			</AlertDialog.Description>
 		</AlertDialog.Header>
@@ -5686,7 +5799,7 @@
 			</button>
 			<button
 				type="button"
-				class="disabled:cursor-not-allowed rounded-md border border-transparent bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+				class="rounded-md border border-transparent bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
 				disabled={restoreRunning}
 				onclick={runRestore}
 			>
@@ -5704,15 +5817,22 @@
 >
 	<AlertDialog.Content class="max-w-md">
 		<AlertDialog.Header>
-			<AlertDialog.Title class="text-destructive dark:text-red-400">导入备份包并恢复</AlertDialog.Title>
+			<AlertDialog.Title class="text-destructive dark:text-red-400"
+				>导入备份包并恢复</AlertDialog.Title
+			>
 			<AlertDialog.Description>
 				<p class="mb-2">确定要导入以下备份包并替换当前数据库吗？</p>
-				<div class="rounded-md border bg-muted/50 p-3 font-mono text-xs">
+				<div class="bg-muted/50 rounded-md border p-3 font-mono text-xs">
 					<p class="break-all">{importRestoreTarget?.name}</p>
-					<p class="text-muted-foreground mt-1">{formatBytes(importRestoreTarget?.size_bytes ?? 0)}</p>
+					<p class="text-muted-foreground mt-1">
+						{formatBytes(importRestoreTarget?.size_bytes ?? 0)}
+					</p>
 				</div>
-				<div class="mt-3 rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
-					<strong>注意：</strong>导入后会校验备份包有效性，恢复将在重启后生效。当前数据库会先自动保留一份快照，但请确认无需保留其它数据。
+				<div
+					class="mt-3 rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300"
+				>
+					<strong>注意：</strong
+					>导入后会校验备份包有效性，恢复将在重启后生效。当前数据库会先自动保留一份快照，但请确认无需保留其它数据。
 				</div>
 			</AlertDialog.Description>
 		</AlertDialog.Header>
@@ -5727,7 +5847,7 @@
 			</button>
 			<button
 				type="button"
-				class="disabled:cursor-not-allowed rounded-md border border-transparent bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+				class="rounded-md border border-transparent bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
 				disabled={importRestoreRunning}
 				onclick={runImportRestore}
 			>
