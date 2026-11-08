@@ -41,7 +41,7 @@ bili-sync-up_armv8-<version>.spk      # 群晖 armv8（对应上游 aarch64 产�
 |---|---|
 | 套件名 / 包名 | `bili-sync-up`（DSM 显示名 `Bili Sync Up`） |
 | 访问入口 | `http://<NAS-IP>:<安装向导里填的端口>`（默认 12345） |
-| 配置 / 数据库 | `/var/packages/bili-sync-up/var/home/.config/bili-sync`（`HOME` 指向包数据目录） |
+| 配置 / 数据库 | `/var/packages/bili-sync-up/var/config`（`BILI_SYNC_CONFIG_DIR`，数据库是 `var/config/data.sqlite`） |
 | 运行日志 | `/var/packages/bili-sync-up/var/bili-sync.log` |
 | 下载目录 | 由 `conf/resource` 自动创建共享文件夹 `bili-sync-up`（`/volumeX/bili-sync-up`），也可在 Web 界面改成任意有权限的路径 |
 | 运行用户 | 包用户 `bili-sync-up`（`conf/privilege` 的 `run-as: package`） |

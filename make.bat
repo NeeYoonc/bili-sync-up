@@ -145,8 +145,8 @@ if errorlevel 1 (
 goto end
 
 :fmt
-echo 正在格式化代码...
-cargo fmt
+echo 正在检查代码格式（只检查不改文件，避免全局 cargo fmt 在 Windows 上制造 CRLF 噪音）...
+cargo fmt --check
 echo 代码格式化完成
 goto end
 
@@ -335,8 +335,12 @@ echo 包含: .gitignore
 copy ".gitignore" "%tempDir%\" >nul
 echo 包含: .dockerignore
 copy ".dockerignore" "%tempDir%\" >nul
-echo 包含: config.toml
-copy "config.toml" "%tempDir%\" >nul
+if exist "config.toml" (
+    echo 包含: config.toml
+    copy "config.toml" "%tempDir%\" >nul
+) else (
+    echo 跳过: config.toml（运行时配置，不入源码包）
+)
 echo 包含: make.bat
 copy "make.bat" "%tempDir%\" >nul
 
