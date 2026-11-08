@@ -732,6 +732,12 @@ const AI_BATCH_MIN_TIMEOUT_SECS: u64 = 60;
 const AI_SINGLE_REQUEST_GAP_MS: u64 = 300;
 /// 逐个降级时允许的连续失败次数，超过即判定 AI 服务不可用并停止降级
 const AI_FALLBACK_MAX_CONSECUTIVE_FAILURES: usize = 3;
+/// 限频重试的长退避阶梯（秒）
+///
+/// DeepSeek Web 的限频不返回 HTTP 429，而是在 SSE hint 里回「消息发送过于频繁，请稍后重试」，
+/// 或者直接返回空响应；常见的 1.5s/3s/6s 短退避对分钟级的限频窗口无效，反而会在窗口内反复请求。
+/// 这里按 30s/60s/120s 指数退避（先跨过限频窗口，再给足恢复时间），用完即放弃。
+const AI_RATE_LIMIT_BACKOFFS: [u64; 3] = [30, 60, 120];
 
 /// 判断 AI 错误是否值得重试
 ///
@@ -780,6 +786,55 @@ fn extract_http_status(message: &str) -> Option<u16> {
     None
 }
 
+/// 判断 AI 错误是否由限频引起
+///
+/// 上游（deepseek_web）会把 SSE hint 里的限频文本包装成 `RATE_LIMITED: ...`；
+/// 其它 provider / 反代也可能把「频繁」「稍后重试」「too many」「rate limit」
+/// 直接写进错误消息，这里统一做一次大小写不敏感匹配。
+fn is_rate_limited_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("rate_limited")
+        || lower.contains("频繁")
+        || lower.contains("稍后重试")
+        || lower.contains("too many")
+        || lower.contains("rate limit")
+}
+
+/// 计算一次失败后的等待时间；返回 `None` 表示不再重试
+///
+/// - 限频错误走 `AI_RATE_LIMIT_BACKOFFS`（30s/60s/120s）；
+/// - 其它可重试错误保持 1.5s/3s/6s 的短退避。
+fn ai_retry_backoff(attempt: usize, rate_limited: bool) -> Option<Duration> {
+    if rate_limited {
+        let index = attempt.saturating_sub(1);
+        AI_RATE_LIMIT_BACKOFFS.get(index).copied().map(Duration::from_secs)
+    } else {
+        Some(Duration::from_millis(
+            1500 * (1u64 << (attempt.saturating_sub(1)).min(3)),
+        ))
+    }
+}
+
+/// 本次错误允许的最大请求次数
+///
+/// 限频需要多给一次长退避机会（批量：3 次重试走满 30/60/120；单条：2 次重试走 30/60），
+/// 但仍受长退避阶梯长度约束，用完就不再重试。
+fn attempt_limit_for_error(max_attempts: usize, rate_limited: bool) -> usize {
+    if rate_limited {
+        (max_attempts + 1).min(AI_RATE_LIMIT_BACKOFFS.len() + 1)
+    } else {
+        max_attempts
+    }
+}
+
+/// 批量失败后是否还值得降级为逐条请求
+///
+/// 限频时降级会把请求数放大到 N 倍，等于在限频窗口里继续猛打，结果通常整批保留原名，
+/// 所以限频一律不降级，直接失败让调用方保留原名。
+fn should_fallback_to_single(err: &anyhow::Error, item_count: usize) -> bool {
+    item_count > 1 && is_retryable_ai_error(err) && !is_rate_limited_error(&err.to_string())
+}
+
 /// 计算本次 AI 请求的超时时间
 ///
 /// 批量请求一次要生成多条文件名，沿用单文件的小超时很容易直接把请求拖超时，
@@ -821,26 +876,35 @@ async fn request_ai_names_with_retry(
 ) -> Result<Vec<String>> {
     let max_attempts = max_attempts.max(1);
     let mut last_error: Option<anyhow::Error> = None;
-    for attempt in 1..=max_attempts {
+    let mut attempt = 1usize;
+    loop {
         match request_ai_names_once(cfg, source_key, prompt, expected_count).await {
             Ok(names) => return Ok(names),
             Err(err) => {
-                let retryable = is_retryable_ai_error(&err);
-                if !retryable || attempt == max_attempts {
+                let message = err.to_string();
+                let rate_limited = is_rate_limited_error(&message);
+                let retryable = is_retryable_ai_error(&err) || rate_limited;
+                let attempt_limit = attempt_limit_for_error(max_attempts, rate_limited);
+                let Some(backoff) = ai_retry_backoff(attempt, rate_limited) else {
+                    last_error = Some(err);
+                    break;
+                };
+                if !retryable || attempt >= attempt_limit {
                     last_error = Some(err);
                     break;
                 }
-                let backoff = Duration::from_millis(1500 * (1u64 << (attempt - 1).min(3)));
                 warn!(
-                    "[{}] {}AI 请求第 {}/{} 次失败，{} 毫秒后重试: {:#}",
+                    "[{}] {}AI 请求第 {}/{} 次失败（{}），{} 毫秒后重试: {:#}",
                     source_key,
                     kind,
                     attempt,
-                    max_attempts,
+                    attempt_limit,
+                    if rate_limited { "限频" } else { "可重试错误" },
                     backoff.as_millis(),
                     err
                 );
                 tokio::time::sleep(backoff).await;
+                attempt += 1;
             }
         }
     }
@@ -871,14 +935,22 @@ where
     match request_ai_names_with_retry(cfg, source_key, &batch_prompt, items.len(), kind, AI_MAX_ATTEMPTS).await {
         Ok(names) => return Ok(names),
         Err(err) => {
-            if items.len() <= 1 || !is_retryable_ai_error(&err) {
+            if !should_fallback_to_single(&err, items.len()) {
+                if items.len() > 1 && is_rate_limited_error(&err.to_string()) {
+                    warn!(
+                        "[{}] {}批量 AI 请求被限频，跳过逐个降级以免请求数放大（{} 个文件保留原名）: {:#}",
+                        source_key,
+                        kind,
+                        items.len(),
+                        err
+                    );
+                }
                 return Err(err);
             }
             warn!(
-                "[{}] {}批量 AI 请求重试 {} 次后仍失败，降级为逐个请求（共 {} 个）: {:#}",
+                "[{}] {}批量 AI 请求重试后仍失败，降级为逐个请求（共 {} 个）: {:#}",
                 source_key,
                 kind,
-                AI_MAX_ATTEMPTS,
                 items.len(),
                 err
             );
@@ -2860,6 +2932,55 @@ mod tests {
         };
 
         assert!(deepseek_thinking_override(&cfg).is_none());
+    }
+
+    #[test]
+    fn rate_limit_errors_are_classified_from_chinese_and_english_hints() {
+        use super::is_rate_limited_error;
+
+        assert!(is_rate_limited_error("RATE_LIMITED: 消息发送过于频繁，请稍后重试"));
+        assert!(is_rate_limited_error("消息发送过于频繁，请稍后重试"));
+        assert!(is_rate_limited_error("Rate Limit exceeded"));
+        assert!(is_rate_limited_error("429 Too Many Requests"));
+        assert!(!is_rate_limited_error("批量 AI 请求失败: 502 Bad Gateway"));
+        assert!(!is_rate_limited_error("点击链接继续使用"));
+    }
+
+    #[test]
+    fn rate_limit_retries_use_long_backoff_ladder_without_sleeping() {
+        use super::{ai_retry_backoff, attempt_limit_for_error};
+        use std::time::Duration;
+
+        assert_eq!(ai_retry_backoff(1, true), Some(Duration::from_secs(30)));
+        assert_eq!(ai_retry_backoff(2, true), Some(Duration::from_secs(60)));
+        assert_eq!(ai_retry_backoff(3, true), Some(Duration::from_secs(120)));
+        assert_eq!(ai_retry_backoff(4, true), None);
+        // 批量最多重试 3 次（30/60/120），单条最多重试 2 次（30/60）
+        assert_eq!(attempt_limit_for_error(3, true), 4);
+        assert_eq!(attempt_limit_for_error(2, true), 3);
+        // 非限频错误保持原短退避 1.5s/3s/6s
+        assert_eq!(ai_retry_backoff(1, false), Some(Duration::from_millis(1500)));
+        assert_eq!(ai_retry_backoff(2, false), Some(Duration::from_millis(3000)));
+        assert_eq!(ai_retry_backoff(3, false), Some(Duration::from_millis(6000)));
+        assert_eq!(attempt_limit_for_error(3, false), 3);
+    }
+
+    #[test]
+    fn rate_limited_batch_is_not_failed_over_to_single_requests() {
+        use super::should_fallback_to_single;
+        use anyhow::anyhow;
+
+        let rate_limited = anyhow!("RATE_LIMITED: 消息发送过于频繁，请稍后重试");
+        assert!(!should_fallback_to_single(&rate_limited, 10));
+        assert!(!should_fallback_to_single(&rate_limited, 2));
+        // 限频原因要保留在返回错误串里，调用方据此保留原名并记录原因
+        assert!(rate_limited.to_string().contains("RATE_LIMITED"));
+        assert!(rate_limited.to_string().contains("频繁"));
+
+        // 非限频的可重试错误仍然逐条降级
+        let transient = anyhow!("批量 AI 请求失败: 502 Bad Gateway");
+        assert!(should_fallback_to_single(&transient, 10));
+        assert!(!should_fallback_to_single(&transient, 1));
     }
 
     #[test]

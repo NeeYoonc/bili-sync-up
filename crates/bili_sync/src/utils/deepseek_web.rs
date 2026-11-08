@@ -492,6 +492,12 @@ impl DeepSeekWebClient {
                         return Err(anyhow!("SESSION_LIMIT_REACHED: {}", content));
                     }
 
+                    // 限频：DeepSeek Web 不返回 HTTP 429，而是在 hint 里回「消息发送过于频繁，请稍后重试」。
+                    // 必须转成明确错误，让上层按长退避重试，而不是被当成普通 hint 吞掉。
+                    if hint_type == Some("error") && is_rate_limit_hint(content) {
+                        return Err(anyhow!("RATE_LIMITED: {}", content));
+                    }
+
                     // 其他 hint 错误也记录
                     if hint_type == Some("error") {
                         warn!("DeepSeek hint 错误: {}", content);
@@ -638,6 +644,15 @@ impl DeepSeekWebClient {
     }
 }
 
+/// 判断 SSE hint 文本是否表示限频
+///
+/// DeepSeek Web 的限频没有 HTTP 状态码，只在 hint 事件里返回一段中文/英文文本，
+/// 例如「消息发送过于频繁，请稍后重试」；英文统一按小写比较。
+fn is_rate_limit_hint(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    lower.contains("频繁") || lower.contains("稍后重试") || lower.contains("too many") || lower.contains("rate limit")
+}
+
 /// 使用 DeepSeek Web API 生成原始响应（不清洗）
 ///
 /// # 参数
@@ -716,6 +731,31 @@ data: {"v":"HY2020_2024-06-09\", \"三国bigbig_2024-06-09\"]"}
 
         assert_eq!(message_id, Some("10".to_string()));
         assert_eq!(response, r#"["ZHY2020_2024-06-09", "三国bigbig_2024-06-09"]"#);
+    }
+
+    #[test]
+    fn parse_sse_response_maps_rate_limit_hint_to_rate_limited_error() {
+        let client = DeepSeekWebClient::new("token", 10).expect("client should build");
+
+        for content in [
+            "消息发送过于频繁，请稍后重试",
+            "Too Many Requests",
+            "rate limit exceeded",
+        ] {
+            let body = format!("event: hint\ndata: {{\"type\":\"error\",\"content\":\"{content}\"}}\n");
+            let err = client.parse_sse_response(&body).expect_err("限频 hint 必须返回错误");
+            let message = err.to_string();
+            assert!(
+                message.starts_with("RATE_LIMITED: "),
+                "限频 hint 必须转成 RATE_LIMITED 错误: {message}"
+            );
+            assert!(message.contains(content), "错误串要保留原始 hint 内容: {message}");
+        }
+
+        // 非限频 hint 仍然只记录告警，不打断解析
+        let body = "event: hint\ndata: {\"type\":\"error\",\"content\":\"对话生成出错，请重试其他问题\"}\n";
+        let (response, _) = client.parse_sse_response(body).expect("非限频 hint 不应报错");
+        assert!(response.is_empty(), "没有正文时响应为空: {response}");
     }
 
     #[test]
