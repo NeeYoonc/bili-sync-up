@@ -786,11 +786,11 @@ fn extract_http_status(message: &str) -> Option<u16> {
     None
 }
 
-/// 判断 AI 错误是否由限频引起
+/// 判断错误文本是否带有「限频」特征（纯文本匹配，不区分 provider）
 ///
 /// 上游（deepseek_web）会把 SSE hint 里的限频文本包装成 `RATE_LIMITED: ...`；
-/// 其它 provider / 反代也可能把「频繁」「稍后重试」「too many」「rate limit」
-/// 直接写进错误消息，这里统一做一次大小写不敏感匹配。
+/// 这里对「频繁」「稍后重试」「too many」「rate limit」等特征做一次大小写不敏感匹配。
+/// 是否真的按限频处理要看 provider，只有免费 Web 接口需要长退避，见 `is_web_rate_limited`。
 fn is_rate_limited_error(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("rate_limited")
@@ -798,6 +798,16 @@ fn is_rate_limited_error(message: &str) -> bool {
         || lower.contains("稍后重试")
         || lower.contains("too many")
         || lower.contains("rate limit")
+}
+
+/// 判断错误是否属于「DeepSeek Web 免费接口限频」
+///
+/// 只有 `deepseek-web` 这条免费接口会把限频写进 SSE hint 文本（没有 HTTP 429 状态码），
+/// 需要分钟级长退避才能跨过限频窗口；API（deepseek / openai / custom 等）有标准的
+/// 429/配额语义，仍然走原来的 1.5s/3s/6s 短退避 + `AI_MAX_ATTEMPTS` 次，
+/// 不能把 web 的长退避套到 API 用户头上。
+fn is_web_rate_limited(provider: &str, message: &str) -> bool {
+    provider == "deepseek-web" && is_rate_limited_error(message)
 }
 
 /// 计算一次失败后的等待时间；返回 `None` 表示不再重试
@@ -829,10 +839,10 @@ fn attempt_limit_for_error(max_attempts: usize, rate_limited: bool) -> usize {
 
 /// 批量失败后是否还值得降级为逐条请求
 ///
-/// 限频时降级会把请求数放大到 N 倍，等于在限频窗口里继续猛打，结果通常整批保留原名，
-/// 所以限频一律不降级，直接失败让调用方保留原名。
-fn should_fallback_to_single(err: &anyhow::Error, item_count: usize) -> bool {
-    item_count > 1 && is_retryable_ai_error(err) && !is_rate_limited_error(&err.to_string())
+/// 只有 `deepseek-web` 的限频不降级：降级会把请求数放大到 N 倍，等于在限频窗口里继续猛打，
+/// 结果通常整批保留原名。API（429/配额等）批量失败后仍然逐条降级，能救几条算几条。
+fn should_fallback_to_single(err: &anyhow::Error, provider: &str, item_count: usize) -> bool {
+    item_count > 1 && is_retryable_ai_error(err) && !is_web_rate_limited(provider, &err.to_string())
 }
 
 /// 计算本次 AI 请求的超时时间
@@ -881,7 +891,8 @@ async fn request_ai_names_with_retry(
             Ok(names) => return Ok(names),
             Err(err) => {
                 let message = err.to_string();
-                let rate_limited = is_rate_limited_error(&message);
+                // 只有 deepseek-web 的文本限频才走长退避；API 的 429 仍是普通可重试错误
+                let rate_limited = is_web_rate_limited(&cfg.provider, &message);
                 let retryable = is_retryable_ai_error(&err) || rate_limited;
                 let attempt_limit = attempt_limit_for_error(max_attempts, rate_limited);
                 let Some(backoff) = ai_retry_backoff(attempt, rate_limited) else {
@@ -931,8 +942,8 @@ where
     match request_ai_names_with_retry(cfg, source_key, &batch_prompt, items.len(), kind, AI_MAX_ATTEMPTS).await {
         Ok(names) => return Ok(names),
         Err(err) => {
-            if !should_fallback_to_single(&err, items.len()) {
-                if items.len() > 1 && is_rate_limited_error(&err.to_string()) {
+            if !should_fallback_to_single(&err, &cfg.provider, items.len()) {
+                if items.len() > 1 && is_web_rate_limited(&cfg.provider, &err.to_string()) {
                     warn!(
                         "[{}] {}批量 AI 请求被限频，跳过逐个降级以免请求数放大（{} 个文件保留原名）: {:#}",
                         source_key,
@@ -2967,16 +2978,52 @@ mod tests {
         use anyhow::anyhow;
 
         let rate_limited = anyhow!("RATE_LIMITED: 消息发送过于频繁，请稍后重试");
-        assert!(!should_fallback_to_single(&rate_limited, 10));
-        assert!(!should_fallback_to_single(&rate_limited, 2));
+        // 只有 deepseek-web 的限频才不降级；API 路径不受影响（见下一个测试）
+        assert!(!should_fallback_to_single(&rate_limited, "deepseek-web", 10));
+        assert!(!should_fallback_to_single(&rate_limited, "deepseek-web", 2));
         // 限频原因要保留在返回错误串里，调用方据此保留原名并记录原因
         assert!(rate_limited.to_string().contains("RATE_LIMITED"));
         assert!(rate_limited.to_string().contains("频繁"));
 
         // 非限频的可重试错误仍然逐条降级
         let transient = anyhow!("批量 AI 请求失败: 502 Bad Gateway");
-        assert!(should_fallback_to_single(&transient, 10));
-        assert!(!should_fallback_to_single(&transient, 1));
+        assert!(should_fallback_to_single(&transient, "deepseek-web", 10));
+        assert!(!should_fallback_to_single(&transient, "deepseek-web", 1));
+    }
+
+    #[test]
+    fn non_web_providers_keep_short_backoff_and_still_fall_back() {
+        use super::{ai_retry_backoff, attempt_limit_for_error, is_web_rate_limited, should_fallback_to_single};
+        use anyhow::anyhow;
+        use std::time::Duration;
+
+        // web 专属：同样的错误文本/429 在 web 上算限频
+        assert!(is_web_rate_limited("deepseek-web", "429 Too Many Requests"));
+        assert!(is_web_rate_limited(
+            "deepseek-web",
+            "RATE_LIMITED: 消息发送过于频繁，请稍后重试"
+        ));
+
+        // API 路径：429 / 「频繁」文本都不算限频，不套 30/60/120 长退避
+        for provider in ["deepseek", "openai", "custom"] {
+            assert!(!is_web_rate_limited(provider, "429 Too Many Requests"));
+            assert!(!is_web_rate_limited(provider, "消息发送过于频繁，请稍后重试"));
+        }
+
+        // API 恢复原行为：1.5s/3s/6s 短退避 + AI_MAX_ATTEMPTS 次
+        assert_eq!(ai_retry_backoff(1, false), Some(Duration::from_millis(1500)));
+        assert_eq!(ai_retry_backoff(2, false), Some(Duration::from_millis(3000)));
+        assert_eq!(ai_retry_backoff(3, false), Some(Duration::from_millis(6000)));
+        assert_eq!(attempt_limit_for_error(3, false), 3);
+
+        // API 批量失败仍逐条降级（429、限频文本都一样）
+        let too_many = anyhow!("429 Too Many Requests");
+        let frequency = anyhow!("消息发送过于频繁，请稍后重试");
+        for provider in ["deepseek", "openai", "custom"] {
+            assert!(should_fallback_to_single(&too_many, provider, 10));
+            assert!(should_fallback_to_single(&frequency, provider, 10));
+            assert!(!should_fallback_to_single(&frequency, provider, 1));
+        }
     }
 
     #[test]
