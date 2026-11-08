@@ -508,8 +508,8 @@ fn compute_structure_hint(source_type: &str, config: &crate::config::Config) -> 
             }
         }
         "collection" => match config.collection_folder_mode.as_ref() {
-            Some("unified") => "合集统一模式（SxxExx）",
-            Some("up_seasonal") => "UP分季结构（SxxExx）",
+            "unified" => "合集统一模式（SxxExx）",
+            "up_seasonal" => "UP分季结构（SxxExx）",
             _ => "",
         },
         _ => {
