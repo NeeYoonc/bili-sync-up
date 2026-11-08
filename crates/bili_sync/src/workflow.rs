@@ -9563,9 +9563,8 @@ async fn fetch_page_video(p: FetchPageVideoInput<'_>) -> Result<PageVideoFetchRe
                         bili_video
                             .get_bangumi_page_analyzer_with_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)
                             .await
-                    } else if video_model.source_type == Some(2) && video_model.ep_id.is_some() {
+                    } else if let (Some(2), Some(ep_id)) = (video_model.source_type, video_model.ep_id.as_ref()) {
                         // 课程（pugv）使用课程专用API
-                        let ep_id = video_model.ep_id.as_ref().unwrap();
                         debug!("使用带质量回退的课程API获取播放地址: ep_id={}", ep_id);
                         bili_video
                             .get_pugv_page_analyzer_with_fallback_in_range(&page_info_for_download, ep_id, max_qn, min_qn)

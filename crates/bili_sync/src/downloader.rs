@@ -2203,15 +2203,16 @@ mod tests {
         assert_eq!(written, data, "续传后文件内容应与源完全一致");
 
         // 续传只请求了缺失的首个分片
-        let reqs = requested.lock().unwrap();
-        let second_round = &reqs[requested_before..];
+        let second_round: Vec<_> = {
+            let reqs = requested.lock().unwrap();
+            reqs[requested_before..].to_vec()
+        };
         assert!(!second_round.is_empty(), "续传应至少请求一次缺失分片");
         assert!(
             second_round.iter().all(|(s, _)| *s == 0),
             "续传应只请求缺失的首个分片，实际请求: {:?}",
             second_round
         );
-        drop(reqs);
 
         let _ = fs::remove_dir_all(&dir).await;
     }
@@ -2300,14 +2301,16 @@ mod tests {
         assert_eq!(written, data, "重连续传后文件内容应与源完全一致");
 
         // 服务器 B 只收到了缺失分片的请求
-        let reqs = requested_b.lock().unwrap();
+        let reqs: Vec<_> = {
+            let guard = requested_b.lock().unwrap();
+            guard.clone()
+        };
         assert!(!reqs.is_empty(), "重连后应至少请求一次缺失分片");
         assert!(
             reqs.iter().all(|(s, _)| *s == 0),
             "重连应只请求缺失的首个分片，实际请求: {:?}",
             reqs
         );
-        drop(reqs);
 
         let _ = fs::remove_dir_all(&dir).await;
     }

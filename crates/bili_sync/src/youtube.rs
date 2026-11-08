@@ -9367,7 +9367,7 @@ pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    #[allow(clippy::invalid_from_utf8, reason = "测试故意用 GBK 字节序列验证非 UTF-8 解码路径")]
+    #[allow(invalid_from_utf8, reason = "测试故意用 GBK 字节序列验证非 UTF-8 解码路径")]
     fn decodes_gbk_command_error_text() {
         // GBK 编码的“远程主机强迫关闭了一个现有的连接”（Windows 10054 错误文本）
         let gbk: &[u8] = &[
@@ -10746,7 +10746,7 @@ mod tests {
         source.name = "传奇剧场（剧情）".to_string();
         source.path = "F:/Downloads/测试".to_string();
 
-        let mut video = youtube_video::Model {
+        let video = youtube_video::Model {
             episode_number: Some(12),
             ..Default::default()
         };
@@ -11005,7 +11005,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let mut video = super::youtube_video::Model {
+        let video = super::youtube_video::Model {
             output_path: Some(output.display().to_string()),
             ..Default::default()
         };
