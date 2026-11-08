@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { toast } from 'svelte-sonner';
 	import { Button } from '$lib/components/ui/button';
 	import { CustomSelect } from '$lib/components/ui/select';
@@ -40,6 +41,7 @@
 
 	// 响应式变量
 	const isMobileQuery = new IsMobile();
+	// eslint-disable-next-line svelte/no-immutable-reactive-statements -- isMobileQuery.current 是 MediaQuery 的响应式 getter（svelte/reactivity），规则看不到，属误报
 	$: isMobile = isMobileQuery.current;
 
 	// 状态变量
@@ -189,7 +191,7 @@
 		const token = localStorage.getItem('auth_token');
 		if (!token) return null;
 
-		const params = new URLSearchParams();
+		const params = new SvelteURLSearchParams();
 		params.append('token', token);
 		if (level) {
 			params.append('level', level);
@@ -394,7 +396,7 @@
 		}
 
 		authError = '';
-		const params = new URLSearchParams();
+		const params = new SvelteURLSearchParams();
 		params.append('limit', perPage.toString());
 		params.append('page', page.toString());
 
@@ -459,6 +461,7 @@
 	let currentFileLevel: LogFileLevel = 'all';
 	let logFilesForCurrentTab: LogFileInfo[] = [];
 	let visibleLogFiles: LogFileInfo[] = [];
+	// eslint-disable-next-line svelte/no-immutable-reactive-statements -- 函数内部读取了响应式 tab 状态，规则不追踪函数体，属误报
 	$: currentFileLevel = getCurrentFileLevel();
 	$: logFilesForCurrentTab = logFiles.filter(
 		(f) => String(f.level).trim().toLowerCase() === currentFileLevel
@@ -470,10 +473,7 @@
 		// 自动在切换 Tab 后选择“最新一轮”的同级别日志文件
 		if (visibleLogFiles.length === 0) {
 			selectedLogFile = '';
-		} else if (
-			!selectedLogFile ||
-			!visibleLogFiles.some((f) => f.file_name === selectedLogFile)
-		) {
+		} else if (!selectedLogFile || !visibleLogFiles.some((f) => f.file_name === selectedLogFile)) {
 			selectedLogFile = visibleLogFiles[0].file_name;
 		}
 	}
@@ -527,7 +527,7 @@
 						: [];
 
 				logFiles = files
-					.map((f: any) => ({
+					.map((f: Record<string, unknown>) => ({
 						level: String(f.level ?? f.log_level ?? f.type ?? 'all')
 							.trim()
 							.toLowerCase() as LogFileLevel,
@@ -594,7 +594,7 @@
 		await runRequest(
 			async () => {
 				// 获取当前选择级别的所有日志
-				const params = new URLSearchParams();
+				const params = new SvelteURLSearchParams();
 				// 后端最大支持 10000 条
 				params.append('limit', String(maxExport));
 				params.append('page', '1');
@@ -679,11 +679,10 @@
 
 				let successCount = 0;
 				for (const fileName of bundle) {
-					// eslint-disable-next-line no-await-in-loop
 					await downloadLogFileByName(fileName);
 					successCount += 1;
 					// 让浏览器有时间处理下载队列，降低被拦截概率
-					// eslint-disable-next-line no-await-in-loop
+
 					await new Promise((r) => setTimeout(r, 150));
 				}
 
@@ -741,7 +740,7 @@
 		const token = localStorage.getItem('auth_token');
 		if (!token) throw new Error('未找到认证token');
 
-		const params = new URLSearchParams();
+		const params = new SvelteURLSearchParams();
 		params.append('file', fileName);
 
 		const response = await fetch(`/api/logs/download?${params.toString()}`, {
@@ -818,7 +817,12 @@
 						{/if}
 					</Badge>
 					{#if pendingLiveCount > 0}
-						<Button variant="ghost" size="sm" class="h-7 px-2 text-xs" onclick={handlePendingLiveClick}>
+						<Button
+							variant="ghost"
+							size="sm"
+							class="h-7 px-2 text-xs"
+							onclick={handlePendingLiveClick}
+						>
 							{#if currentPage === 1}
 								当前有 {pendingLiveCount} 条新日志，点击更新查看
 							{:else}

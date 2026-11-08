@@ -4,12 +4,14 @@
 	import { useSidebar } from '$lib/components/ui/sidebar/context.svelte.js';
 	import { clearAll } from '$lib/stores/filter';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import type { Pathname } from '$app/types';
 
 	const sidebar = useSidebar();
 
 	function handleLogoClick() {
 		clearAll();
-		goto('/');
+		goto(resolve('/'));
 
 		if (sidebar.isMobile) {
 			sidebar.setOpenMobile(false);
@@ -17,7 +19,7 @@
 	}
 
 	function handleNavClick(href: string) {
-		goto(href);
+		goto(resolve(href as Pathname));
 		if (sidebar.isMobile) {
 			sidebar.setOpenMobile(false);
 		}
@@ -27,7 +29,7 @@
 <Sidebar.Root class="border-border bg-background border-r">
 	<Sidebar.Header class="border-border flex h-[73px] items-center border-b">
 		<a
-			href="/"
+			href={resolve('/')}
 			class="flex w-full items-center gap-3 px-4 py-3 hover:cursor-pointer"
 			on:click={handleLogoClick}
 		>

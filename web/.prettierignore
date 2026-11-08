@@ -7,3 +7,7 @@ bun.lockb
 
 # Generated
 src/lib/generated/
+
+# Third-party bundles（压缩/第三方产物，不格式化）
+static/vendor/
+static/youtube-login-extension/

@@ -8,8 +8,7 @@ function isBlankTimestamp(timestamp: string | number | Date | null | undefined):
 }
 
 // 格式化时间戳到北京时间
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+
 export function formatTimestamp(
 	timestamp: string | number | Date,
 	_timezone: string = BEIJING_TIMEZONE,
@@ -90,6 +89,7 @@ export function formatTimestampOrFallback(
 
 export function formatCompactTimestampOrFallback(
 	timestamp: string | number | Date | null | undefined,
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars -- 保留参数以兼容既有调用方签名，统一时间戳格式化按北京时间处理
 	_timezone: string = BEIJING_TIMEZONE,
 	fallback?: string
 ): string {
@@ -140,8 +140,7 @@ export function formatCompactTimestampOrFallback(
 }
 
 // 获取相对时间描述
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+
 export function getRelativeTime(
 	timestamp: string | number | Date,
 	_timezone: string = BEIJING_TIMEZONE
@@ -212,7 +211,7 @@ export function convertUTCToTimezone(
 }
 
 // 获取时区偏移信息 - 北京时间固定为 UTC+08:00
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+
 export function getTimezoneOffset(_timezone: string = BEIJING_TIMEZONE): string {
 	// 标记参数已使用（保持API兼容且不改变行为）
 	void _timezone;

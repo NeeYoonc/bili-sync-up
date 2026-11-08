@@ -2,6 +2,8 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { SvelteSet } from 'svelte/reactivity';
 	import VideoCard from '$lib/components/video-card.svelte';
 	import Pagination from '$lib/components/pagination.svelte';
 	import SearchBar from '$lib/components/search-bar.svelte';
@@ -212,7 +214,7 @@
 
 	// 批量选择状态
 	let selectionMode = false;
-	let selectedVideos: Set<number> = new Set();
+	let selectedVideos: Set<number> = new SvelteSet();
 	let batchDeleting = false;
 	let batchDeleteDialogOpen = false;
 
@@ -246,7 +248,7 @@
 
 	function buildVideosUrl() {
 		const query = ToQuery($appStateStore);
-		return query ? `/videos?${query}` : '/videos';
+		return resolve(query ? `/videos?${query}` : '/videos');
 	}
 
 	async function applyPageSize(value: number) {
@@ -335,7 +337,10 @@
 					: requestedPlatform === 'tiktok'
 						? 'tiktok'
 						: 'bilibili';
-		let videoSource: { type: VideoSourceType | 'youtube' | 'douyin' | 'tiktok'; id: string } | null = null;
+		let videoSource: {
+			type: VideoSourceType | 'youtube' | 'douyin' | 'tiktok';
+			id: string;
+		} | null = null;
 		if (platform !== 'bilibili') {
 			const value = searchParams.get(platform);
 			if (value) {
@@ -462,8 +467,10 @@
 		pendingInsertedCount = 0;
 
 		if (selectionMode) {
-			const visibleIds = new Set(data.videos.map((video) => video.id));
-			const nextSelected = new Set(Array.from(selectedVideos).filter((id) => visibleIds.has(id)));
+			const visibleIds = new SvelteSet(data.videos.map((video) => video.id));
+			const nextSelected = new SvelteSet(
+				Array.from(selectedVideos).filter((id) => visibleIds.has(id))
+			);
 			if (nextSelected.size !== selectedVideos.size) {
 				selectedVideos = nextSelected;
 			}
@@ -523,7 +530,7 @@
 	async function handlePendingInsertedClick() {
 		pendingInsertedCount = 0;
 		setCurrentPage(0);
-		await goto(`/videos?${ToQuery($appStateStore)}`);
+		await goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 	}
 
 	async function loadVideos(
@@ -578,8 +585,8 @@
 	async function loadVideoSources() {
 		const [result, youtubeResult, douyinResult, tiktokResult] = await Promise.all([
 			runRequest(() => api.getVideoSources(), {
-			showErrorToast: false,
-			onError: (error) => console.error('加载视频源失败:', error)
+				showErrorToast: false,
+				onError: (error) => console.error('加载视频源失败:', error)
 			}),
 			runRequest(() => api.getYouTubeSources(), {
 				showErrorToast: false,
@@ -602,7 +609,7 @@
 
 	async function handlePageChange(pageNum: number) {
 		setCurrentPage(pageNum);
-		goto(`/videos?${ToQuery($appStateStore)}`);
+		goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 	}
 
 	async function handleSearchParamsChange(searchParams: URLSearchParams) {
@@ -667,7 +674,7 @@
 		showFailedOnly = false;
 		selectionMode = false;
 		clearSelection();
-		goto(platform === 'bilibili' ? '/videos' : `/videos?platform=${platform}`);
+		goto(resolve(platform === 'bilibili' ? '/videos' : `/videos?platform=${platform}`));
 	}
 
 	async function handleResetVideo(video: VideoInfo, forceReset: boolean) {
@@ -835,7 +842,10 @@
 		}
 	}
 
-	function handleSourceFilter(sourceType: VideoSourceType | 'youtube' | 'douyin' | 'tiktok', sourceId: string) {
+	function handleSourceFilter(
+		sourceType: VideoSourceType | 'youtube' | 'douyin' | 'tiktok',
+		sourceId: string
+	) {
 		selectedSourceType = sourceType;
 		selectedSourceId = sourceId;
 		const range = getResolutionRange(selectedResolution);
@@ -849,7 +859,7 @@
 			range ? range.min : null,
 			range ? range.max : null
 		);
-		goto(`/videos?${ToQuery($appStateStore)}`);
+		goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 	}
 
 	function clearFilters() {
@@ -861,7 +871,7 @@
 		currentSortOrder = 'desc';
 		setAll('', 0, null, false, 'id', 'desc', null, null);
 		const query = ToQuery($appStateStore);
-		goto(query ? `/videos?${query}` : '/videos');
+		goto(resolve(query ? `/videos?${query}` : '/videos'));
 	}
 
 	function handleSortChange(sortBy: SortBy, sortOrder: SortOrder) {
@@ -869,7 +879,7 @@
 		currentSortOrder = sortOrder;
 		setSort(sortBy, sortOrder);
 		resetCurrentPage();
-		goto(`/videos?${ToQuery($appStateStore)}`);
+		goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 	}
 
 	function handleResolutionChange(value: string) {
@@ -900,7 +910,7 @@
 			maxHeight: nextMaxHeight
 		};
 		const nextQuery = ToQuery(nextState);
-		goto(nextQuery ? `/videos?${nextQuery}` : '/videos');
+		goto(resolve(nextQuery ? `/videos?${nextQuery}` : '/videos'));
 	}
 
 	// 处理重置任务选择
@@ -1075,432 +1085,459 @@
 
 	<Tabs.Root bind:value={platformTab}>
 		<Tabs.List class="grid w-full max-w-xl grid-cols-4">
-				<Tabs.Trigger value="bilibili" onclick={() => switchPlatform('bilibili')}>B 站视频</Tabs.Trigger>
-			<Tabs.Trigger value="youtube" onclick={() => switchPlatform('youtube')}>YouTube 视频</Tabs.Trigger>
+			<Tabs.Trigger value="bilibili" onclick={() => switchPlatform('bilibili')}
+				>B 站视频</Tabs.Trigger
+			>
+			<Tabs.Trigger value="youtube" onclick={() => switchPlatform('youtube')}
+				>YouTube 视频</Tabs.Trigger
+			>
 			<Tabs.Trigger value="douyin" onclick={() => switchPlatform('douyin')}>抖音视频</Tabs.Trigger>
-			<Tabs.Trigger value="tiktok" onclick={() => switchPlatform('tiktok')}>TikTok 视频</Tabs.Trigger>
+			<Tabs.Trigger value="tiktok" onclick={() => switchPlatform('tiktok')}
+				>TikTok 视频</Tabs.Trigger
+			>
 		</Tabs.List>
 
 		<div class="mt-6 space-y-6">
 			<!-- 搜索和筛选栏 -->
 			<div class="flex flex-col gap-4">
-		<!-- 搜索栏 -->
-		<div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-			<div class="w-full sm:max-w-md sm:flex-1">
-				<SearchBar
-					placeholder="搜索视频标题..."
-					value={$appStateStore.query}
-					onSearch={(value) => {
-						setQuery(value);
-						resetCurrentPage();
-						goto(`/videos?${ToQuery($appStateStore)}`);
-					}}
-				/>
-			</div>
-
-			<div
-				class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center sm:justify-end lg:flex-nowrap"
-			>
-				<!-- 排序 + 显示数量 -->
-				<div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-					<!-- 排序下拉框 - 在移动端占满宽度 -->
-					<div class="w-full sm:w-auto">
-						<CustomSelect
-							class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full rounded-md border px-3 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-auto"
-							value="{currentSortBy}_{currentSortOrder}"
-							options={[
-								{ value: 'id_desc', label: '添加时间 (最新)' },
-								{ value: 'id_asc', label: '添加时间 (最早)' },
-								{ value: 'pubtime_desc', label: '发布时间 (最新)' },
-								{ value: 'pubtime_asc', label: '发布时间 (最早)' },
-								{ value: 'is_charge_video_desc', label: '充电视频在前' },
-								{ value: 'file_size_desc', label: '文件大小 (最大)' },
-								{ value: 'file_size_asc', label: '文件大小 (最小)' },
-								{ value: 'name_asc', label: '名称 (A-Z)' },
-								{ value: 'name_desc', label: '名称 (Z-A)' }
-							]}
-							onChange={(nextValue) => {
-								const { sortBy, sortOrder } = parseSortValue(String(nextValue ?? 'id_desc'));
-								handleSortChange(sortBy, sortOrder);
+				<!-- 搜索栏 -->
+				<div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+					<div class="w-full sm:max-w-md sm:flex-1">
+						<SearchBar
+							placeholder="搜索视频标题..."
+							value={$appStateStore.query}
+							onSearch={(value) => {
+								setQuery(value);
+								resetCurrentPage();
+								goto(resolve(`/videos?${ToQuery($appStateStore)}`));
 							}}
 						/>
 					</div>
 
-					<!-- 显示数量设置 -->
-					<div class="grid grid-cols-2 gap-2 sm:flex sm:items-center sm:gap-2">
-						<label class="flex items-center gap-2">
-							<span class="text-muted-foreground text-sm whitespace-nowrap">每页</span>
-							<input
-								class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full min-w-0 rounded-md border px-2 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-24"
-								type="number"
-								min="1"
-								step="1"
-								bind:value={pageSizeDraft}
-								onchange={commitPageSize}
-							/>
-						</label>
-						<label class="flex items-center gap-2">
-							<span class="text-muted-foreground text-sm whitespace-nowrap">每行</span>
-							<input
-								class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full min-w-0 rounded-md border px-2 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-24"
-								type="number"
-								min="1"
-								step="1"
-								bind:value={gridColsDraft}
-								onchange={commitGridCols}
-							/>
-						</label>
+					<div
+						class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center sm:justify-end lg:flex-nowrap"
+					>
+						<!-- 排序 + 显示数量 -->
+						<div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+							<!-- 排序下拉框 - 在移动端占满宽度 -->
+							<div class="w-full sm:w-auto">
+								<CustomSelect
+									class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full rounded-md border px-3 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-auto"
+									value="{currentSortBy}_{currentSortOrder}"
+									options={[
+										{ value: 'id_desc', label: '添加时间 (最新)' },
+										{ value: 'id_asc', label: '添加时间 (最早)' },
+										{ value: 'pubtime_desc', label: '发布时间 (最新)' },
+										{ value: 'pubtime_asc', label: '发布时间 (最早)' },
+										{ value: 'is_charge_video_desc', label: '充电视频在前' },
+										{ value: 'file_size_desc', label: '文件大小 (最大)' },
+										{ value: 'file_size_asc', label: '文件大小 (最小)' },
+										{ value: 'name_asc', label: '名称 (A-Z)' },
+										{ value: 'name_desc', label: '名称 (Z-A)' }
+									]}
+									onChange={(nextValue) => {
+										const { sortBy, sortOrder } = parseSortValue(String(nextValue ?? 'id_desc'));
+										handleSortChange(sortBy, sortOrder);
+									}}
+								/>
+							</div>
+
+							<!-- 显示数量设置 -->
+							<div class="grid grid-cols-2 gap-2 sm:flex sm:items-center sm:gap-2">
+								<label class="flex items-center gap-2">
+									<span class="text-muted-foreground text-sm whitespace-nowrap">每页</span>
+									<input
+										class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full min-w-0 rounded-md border px-2 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-24"
+										type="number"
+										min="1"
+										step="1"
+										bind:value={pageSizeDraft}
+										onchange={commitPageSize}
+									/>
+								</label>
+								<label class="flex items-center gap-2">
+									<span class="text-muted-foreground text-sm whitespace-nowrap">每行</span>
+									<input
+										class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full min-w-0 rounded-md border px-2 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none sm:w-24"
+										type="number"
+										min="1"
+										step="1"
+										bind:value={gridColsDraft}
+										onchange={commitGridCols}
+									/>
+								</label>
+							</div>
+						</div>
+
+						<!-- 操作按钮栏 - 移动端使用网格布局 -->
+						<div class="grid grid-cols-2 gap-2 sm:flex sm:items-center sm:gap-2">
+							<!-- 筛选按钮 -->
+							<Button
+								variant={showFilters ? 'default' : 'outline'}
+								size="sm"
+								class="w-full sm:w-auto"
+								onclick={() => (showFilters = !showFilters)}
+							>
+								<FilterIcon class="mr-2 h-4 w-4" />
+								<span class="xs:inline hidden">筛选</span>
+								<span class="xs:hidden">筛选</span>
+							</Button>
+
+							<!-- 显示错误视频按钮 -->
+							<Button
+								variant={showFailedOnly ? 'destructive' : 'outline'}
+								size="sm"
+								class="w-full sm:w-auto"
+								onclick={() => {
+									showFailedOnly = !showFailedOnly;
+									setShowFailedOnly(showFailedOnly);
+									resetCurrentPage();
+									goto(resolve(`/videos?${ToQuery($appStateStore)}`));
+								}}
+							>
+								<span class="hidden sm:inline">只显示错误视频</span>
+								<span class="sm:hidden">错误视频</span>
+							</Button>
+
+							<!-- 批量重置按钮 -->
+							<Button
+								variant="outline"
+								size="sm"
+								class="col-span-2 w-full sm:col-span-1 sm:w-auto"
+								onclick={() => (resetAllDialogOpen = true)}
+								disabled={resettingAll || loading}
+								title="按当前筛选条件批量重置视频任务状态"
+							>
+								<RotateCcwIcon class="mr-2 h-4 w-4 {resettingAll ? 'animate-spin' : ''}" />
+								<span class="xs:inline hidden">批量重置</span>
+								<span class="xs:hidden">重置</span>
+							</Button>
+
+							<!-- 批量删除模式按钮 -->
+							<Button
+								variant={selectionMode ? 'outline' : 'destructive'}
+								size="sm"
+								class="col-span-2 w-full sm:col-span-1 sm:w-auto {selectionMode
+									? 'border-blue-600 bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
+									: ''}"
+								onclick={toggleSelectionMode}
+								disabled={loading}
+							>
+								{#if selectionMode}
+									<span>退出</span>
+								{:else}
+									<TrashIcon class="h-4 w-4 sm:mr-2" />
+									<span class="hidden sm:inline">批量删除</span>
+								{/if}
+							</Button>
+						</div>
 					</div>
 				</div>
-
-				<!-- 操作按钮栏 - 移动端使用网格布局 -->
-				<div class="grid grid-cols-2 gap-2 sm:flex sm:items-center sm:gap-2">
-					<!-- 筛选按钮 -->
-					<Button
-						variant={showFilters ? 'default' : 'outline'}
-						size="sm"
-						class="w-full sm:w-auto"
-						onclick={() => (showFilters = !showFilters)}
-					>
-						<FilterIcon class="mr-2 h-4 w-4" />
-						<span class="xs:inline hidden">筛选</span>
-						<span class="xs:hidden">筛选</span>
-					</Button>
-
-					<!-- 显示错误视频按钮 -->
-					<Button
-						variant={showFailedOnly ? 'destructive' : 'outline'}
-						size="sm"
-						class="w-full sm:w-auto"
-						onclick={() => {
-							showFailedOnly = !showFailedOnly;
-							setShowFailedOnly(showFailedOnly);
-							resetCurrentPage();
-							goto(`/videos?${ToQuery($appStateStore)}`);
-						}}
-					>
-						<span class="hidden sm:inline">只显示错误视频</span>
-						<span class="sm:hidden">错误视频</span>
-					</Button>
-
-					<!-- 批量重置按钮 -->
-					<Button
-						variant="outline"
-						size="sm"
-						class="col-span-2 w-full sm:col-span-1 sm:w-auto"
-						onclick={() => (resetAllDialogOpen = true)}
-						disabled={resettingAll || loading}
-						title="按当前筛选条件批量重置视频任务状态"
-					>
-						<RotateCcwIcon class="mr-2 h-4 w-4 {resettingAll ? 'animate-spin' : ''}" />
-						<span class="xs:inline hidden">批量重置</span>
-						<span class="xs:hidden">重置</span>
-					</Button>
-
-					<!-- 批量删除模式按钮 -->
-					<Button
-						variant={selectionMode ? 'outline' : 'destructive'}
-						size="sm"
-						class="col-span-2 w-full sm:col-span-1 sm:w-auto {selectionMode
-							? 'border-blue-600 bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
-							: ''}"
-						onclick={toggleSelectionMode}
-						disabled={loading}
-					>
-						{#if selectionMode}
-							<span>退出</span>
-						{:else}
-							<TrashIcon class="h-4 w-4 sm:mr-2" />
-							<span class="hidden sm:inline">批量删除</span>
-						{/if}
-					</Button>
-				</div>
-			</div>
-		</div>
 			</div>
 
 			<!-- 批量操作工具栏 -->
 			{#if selectionMode}
-		<div
-			class="space-y-3 rounded-lg border border-blue-200 bg-blue-50/50 p-3 dark:border-blue-800 dark:bg-blue-950/20"
-		>
-			<div class="flex items-center justify-between gap-2">
-				<div class="text-sm font-medium text-blue-700 dark:text-blue-300">
-					已选择 {selectedVideos.size} 个视频--将进行批量删除！！！
+				<div
+					class="space-y-3 rounded-lg border border-blue-200 bg-blue-50/50 p-3 dark:border-blue-800 dark:bg-blue-950/20"
+				>
+					<div class="flex items-center justify-between gap-2">
+						<div class="text-sm font-medium text-blue-700 dark:text-blue-300">
+							已选择 {selectedVideos.size} 个视频--将进行批量删除！！！
+						</div>
+						<div class="flex gap-2">
+							{#if videosData?.videos && selectedVideos.size < videosData.videos.length}
+								<SelectAllButton onclick={selectAllVideos} className="text-sm" />
+							{/if}
+							{#if selectedVideos.size > 0}
+								<Button variant="outline" size="sm" onclick={clearSelection}>取消选中</Button>
+								<Button
+									variant="destructive"
+									size="sm"
+									onclick={() => (batchDeleteDialogOpen = true)}
+									disabled={batchDeleting}
+								>
+									删除选中
+								</Button>
+							{/if}
+						</div>
+					</div>
 				</div>
-				<div class="flex gap-2">
-					{#if videosData?.videos && selectedVideos.size < videosData.videos.length}
-						<SelectAllButton onclick={selectAllVideos} className="text-sm" />
-					{/if}
-					{#if selectedVideos.size > 0}
-						<Button variant="outline" size="sm" onclick={clearSelection}>取消选中</Button>
-						<Button
-							variant="destructive"
-							size="sm"
-							onclick={() => (batchDeleteDialogOpen = true)}
-							disabled={batchDeleting}
-						>
-							删除选中
-						</Button>
-					{/if}
-				</div>
-			</div>
-		</div>
 			{/if}
 
 			<!-- 筛选面板 -->
 			{#if showFilters && (platformTab !== 'bilibili' || videoSources)}
-		<div class="space-y-3 rounded-lg border p-3">
-			<div class="flex items-center justify-between">
-				<h3 class="text-sm font-medium">按视频源筛选</h3>
-				{#if selectedSourceType}
-					<Button variant="ghost" size="sm" onclick={clearFilters}>清除筛选</Button>
-				{/if}
-			</div>
-
-			<div class="space-y-3">
-				{#if platformTab === 'youtube' || platformTab === 'douyin' || platformTab === 'tiktok'}
-					{@const externalSources = platformTab === 'tiktok' ? tiktokSources : platformTab === 'douyin' ? douyinSources : youtubeSources}
-					{#each EXTERNAL_SOURCE_SECTIONS[platformTab] as section (section.sourceType)}
-						{@const sources = externalSources.filter((source) => source.source_type === section.sourceType)}
-						{#if sources.length > 0}
-							<div class="space-y-2">
-								<div class="flex items-center gap-2">
-									<section.icon class="text-muted-foreground h-4 w-4" />
-									<span class="text-sm font-medium">{section.title}</span>
-									<Badge variant="outline" class="text-xs">{sources.length}</Badge>
-								</div>
-								<div class="flex flex-wrap gap-1">
-									{#each sources as source (source.id)}
-										<Button
-											variant={selectedSourceType === platformTab &&
-											selectedSourceId === source.id.toString()
-												? 'default'
-												: 'outline'}
-											size="sm"
-											class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
-											onclick={() =>
-												handleSourceFilter(
-													platformTab as 'youtube' | 'douyin' | 'tiktok',
-													source.id.toString()
-												)}
-										>
-											{source.name}
-											{#if !source.enabled}<span class="ml-1 text-xs opacity-70">(禁用)</span>{/if}
-										</Button>
-									{/each}
-								</div>
-							</div>
+				<div class="space-y-3 rounded-lg border p-3">
+					<div class="flex items-center justify-between">
+						<h3 class="text-sm font-medium">按视频源筛选</h3>
+						{#if selectedSourceType}
+							<Button variant="ghost" size="sm" onclick={clearFilters}>清除筛选</Button>
 						{/if}
-					{/each}
-				{:else if videoSources}
-					{#each Object.entries(VIDEO_SOURCES) as [sourceKey, sourceConfig] (sourceKey)}
-						{@const sources = videoSources[sourceConfig.type as VideoSourceType]}
-						{#if sources && sources.length > 0}
-							<div class="space-y-2">
-								<div class="flex items-center gap-2">
-									<sourceConfig.icon class="text-muted-foreground h-4 w-4" />
-									<span class="text-sm font-medium">{sourceConfig.title}</span>
-									<Badge variant="outline" class="text-xs">{sources.length}</Badge>
-								</div>
-								<div class="flex flex-wrap gap-1">
-									{#each sources as source (source.id)}
-										<Button
-											variant={selectedSourceType === sourceConfig.type &&
-											selectedSourceId === source.id.toString()
-												? 'default'
-												: 'outline'}
-											size="sm"
-											class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
-											onclick={() => handleSourceFilter(sourceConfig.type, source.id.toString())}
-										>
-											{source.name}
-											{#if !source.enabled}<span class="ml-1 text-xs opacity-70">(禁用)</span>{/if}
-										</Button>
-									{/each}
-								</div>
-							</div>
-						{/if}
-					{/each}
-				{/if}
-			</div>
+					</div>
 
-			{#if platformTab === 'bilibili'}
-			<div class="border-t pt-3">
-				<div class="flex items-center gap-2">
-					<span class="text-sm font-medium">按分辨率筛选</span>
+					<div class="space-y-3">
+						{#if platformTab === 'youtube' || platformTab === 'douyin' || platformTab === 'tiktok'}
+							{@const externalSources =
+								platformTab === 'tiktok'
+									? tiktokSources
+									: platformTab === 'douyin'
+										? douyinSources
+										: youtubeSources}
+							{#each EXTERNAL_SOURCE_SECTIONS[platformTab] as section (section.sourceType)}
+								{@const sources = externalSources.filter(
+									(source) => source.source_type === section.sourceType
+								)}
+								{#if sources.length > 0}
+									<div class="space-y-2">
+										<div class="flex items-center gap-2">
+											<section.icon class="text-muted-foreground h-4 w-4" />
+											<span class="text-sm font-medium">{section.title}</span>
+											<Badge variant="outline" class="text-xs">{sources.length}</Badge>
+										</div>
+										<div class="flex flex-wrap gap-1">
+											{#each sources as source (source.id)}
+												<Button
+													variant={selectedSourceType === platformTab &&
+													selectedSourceId === source.id.toString()
+														? 'default'
+														: 'outline'}
+													size="sm"
+													class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
+													onclick={() =>
+														handleSourceFilter(
+															platformTab as 'youtube' | 'douyin' | 'tiktok',
+															source.id.toString()
+														)}
+												>
+													{source.name}
+													{#if !source.enabled}<span class="ml-1 text-xs opacity-70">(禁用)</span
+														>{/if}
+												</Button>
+											{/each}
+										</div>
+									</div>
+								{/if}
+							{/each}
+						{:else if videoSources}
+							{#each Object.entries(VIDEO_SOURCES) as [sourceKey, sourceConfig] (sourceKey)}
+								{@const sources = videoSources[sourceConfig.type as VideoSourceType]}
+								{#if sources && sources.length > 0}
+									<div class="space-y-2">
+										<div class="flex items-center gap-2">
+											<sourceConfig.icon class="text-muted-foreground h-4 w-4" />
+											<span class="text-sm font-medium">{sourceConfig.title}</span>
+											<Badge variant="outline" class="text-xs">{sources.length}</Badge>
+										</div>
+										<div class="flex flex-wrap gap-1">
+											{#each sources as source (source.id)}
+												<Button
+													variant={selectedSourceType === sourceConfig.type &&
+													selectedSourceId === source.id.toString()
+														? 'default'
+														: 'outline'}
+													size="sm"
+													class="h-7 text-xs {!source.enabled ? 'opacity-60' : ''}"
+													onclick={() =>
+														handleSourceFilter(sourceConfig.type, source.id.toString())}
+												>
+													{source.name}
+													{#if !source.enabled}<span class="ml-1 text-xs opacity-70">(禁用)</span
+														>{/if}
+												</Button>
+											{/each}
+										</div>
+									</div>
+								{/if}
+							{/each}
+						{/if}
+					</div>
+
+					{#if platformTab === 'bilibili'}
+						<div class="border-t pt-3">
+							<div class="flex items-center gap-2">
+								<span class="text-sm font-medium">按分辨率筛选</span>
+							</div>
+							<div class="mt-2 w-full sm:max-w-xs">
+								<CustomSelect
+									class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full rounded-md border px-3 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none"
+									value={selectedResolution}
+									options={RESOLUTION_OPTIONS}
+									onChange={(nextValue) => handleResolutionChange(String(nextValue ?? ''))}
+								/>
+							</div>
+						</div>
+					{/if}
 				</div>
-				<div class="mt-2 w-full sm:max-w-xs">
-					<CustomSelect
-						class="border-input bg-background ring-offset-background focus:ring-ring h-9 w-full rounded-md border px-3 py-1 text-sm focus:ring-2 focus:ring-offset-2 focus:outline-none"
-						value={selectedResolution}
-						options={RESOLUTION_OPTIONS}
-						onChange={(nextValue) => handleResolutionChange(String(nextValue ?? ''))}
-					/>
-				</div>
-			</div>
-			{/if}
-		</div>
 			{/if}
 
 			<!-- 当前筛选状态 -->
 			{#if (selectedSourceType && selectedSourceId) || showFailedOnly || selectedResolution}
-		<div class="flex flex-wrap items-center gap-2">
-			<span class="text-muted-foreground text-sm">当前筛选:</span>
+				<div class="flex flex-wrap items-center gap-2">
+					<span class="text-muted-foreground text-sm">当前筛选:</span>
 
-			{#if (selectedSourceType === 'youtube' || selectedSourceType === 'douyin' || selectedSourceType === 'tiktok') && selectedSourceId}
-				{@const currentSource = (selectedSourceType === 'tiktok' ? tiktokSources : selectedSourceType === 'douyin' ? douyinSources : youtubeSources).find(
-					(s) => s.id.toString() === selectedSourceId
-				)}
-				{#if currentSource}
-					<Badge variant="secondary" class="flex items-center gap-1">
-						{selectedSourceType === 'tiktok' ? 'TikTok' : selectedSourceType === 'douyin' ? '抖音' : 'YouTube'} · {currentSource.name}
-						<button onclick={clearFilters} class="hover:bg-muted-foreground/20 ml-1 rounded">
-							<span class="sr-only">清除筛选</span>×
-						</button>
-					</Badge>
-				{/if}
-			{:else if selectedSourceType && selectedSourceId && videoSources}
-				{@const sourceConfig = Object.values(VIDEO_SOURCES).find(
-					(config) => config.type === selectedSourceType
-				)}
-				{@const sources = videoSources[selectedSourceType as VideoSourceType]}
-				{@const currentSource = sources?.find((s) => s.id.toString() === selectedSourceId)}
-				{#if sourceConfig && currentSource}
-					<Badge variant="secondary" class="flex items-center gap-1">
-						<sourceConfig.icon class="h-3 w-3" />
-						{currentSource.name}
-						<button onclick={clearFilters} class="hover:bg-muted-foreground/20 ml-1 rounded">
-							<span class="sr-only">清除筛选</span>
-							×
-						</button>
-					</Badge>
-				{/if}
-			{/if}
+					{#if (selectedSourceType === 'youtube' || selectedSourceType === 'douyin' || selectedSourceType === 'tiktok') && selectedSourceId}
+						{@const currentSource = (
+							selectedSourceType === 'tiktok'
+								? tiktokSources
+								: selectedSourceType === 'douyin'
+									? douyinSources
+									: youtubeSources
+						).find((s) => s.id.toString() === selectedSourceId)}
+						{#if currentSource}
+							<Badge variant="secondary" class="flex items-center gap-1">
+								{selectedSourceType === 'tiktok'
+									? 'TikTok'
+									: selectedSourceType === 'douyin'
+										? '抖音'
+										: 'YouTube'} · {currentSource.name}
+								<button onclick={clearFilters} class="hover:bg-muted-foreground/20 ml-1 rounded">
+									<span class="sr-only">清除筛选</span>×
+								</button>
+							</Badge>
+						{/if}
+					{:else if selectedSourceType && selectedSourceId && videoSources}
+						{@const sourceConfig = Object.values(VIDEO_SOURCES).find(
+							(config) => config.type === selectedSourceType
+						)}
+						{@const sources = videoSources[selectedSourceType as VideoSourceType]}
+						{@const currentSource = sources?.find((s) => s.id.toString() === selectedSourceId)}
+						{#if sourceConfig && currentSource}
+							<Badge variant="secondary" class="flex items-center gap-1">
+								<sourceConfig.icon class="h-3 w-3" />
+								{currentSource.name}
+								<button onclick={clearFilters} class="hover:bg-muted-foreground/20 ml-1 rounded">
+									<span class="sr-only">清除筛选</span>
+									×
+								</button>
+							</Badge>
+						{/if}
+					{/if}
 
-			{#if selectedResolution}
-				<Badge variant="secondary" class="flex items-center gap-1"
-					>分辨率 {getResolutionLabel(selectedResolution)}
-					<button
-						onclick={() => handleResolutionChange('')}
-						class="hover:bg-muted-foreground/20 ml-1 rounded"
-					>
-						<span class="sr-only">清除分辨率筛选</span>
-						x
-					</button>
-				</Badge>
-			{/if}
+					{#if selectedResolution}
+						<Badge variant="secondary" class="flex items-center gap-1"
+							>分辨率 {getResolutionLabel(selectedResolution)}
+							<button
+								onclick={() => handleResolutionChange('')}
+								class="hover:bg-muted-foreground/20 ml-1 rounded"
+							>
+								<span class="sr-only">清除分辨率筛选</span>
+								x
+							</button>
+						</Badge>
+					{/if}
 
-			{#if showFailedOnly}
-				<Badge variant="destructive" class="flex items-center gap-1">
-					只显示错误视频
-					<button
-						onclick={() => {
-							showFailedOnly = false;
-							setShowFailedOnly(false);
-							resetCurrentPage();
-							goto(`/videos?${ToQuery($appStateStore)}`);
-						}}
-						class="hover:bg-muted-foreground/20 ml-1 rounded"
-					>
-						<span class="sr-only">清除错误视频筛选</span>
-						×
-					</button>
-				</Badge>
-			{/if}
+					{#if showFailedOnly}
+						<Badge variant="destructive" class="flex items-center gap-1">
+							只显示错误视频
+							<button
+								onclick={() => {
+									showFailedOnly = false;
+									setShowFailedOnly(false);
+									resetCurrentPage();
+									goto(resolve(`/videos?${ToQuery($appStateStore)}`));
+								}}
+								class="hover:bg-muted-foreground/20 ml-1 rounded"
+							>
+								<span class="sr-only">清除错误视频筛选</span>
+								×
+							</button>
+						</Badge>
+					{/if}
 
-			{#if (selectedSourceType && selectedSourceId) || showFailedOnly || selectedResolution}
-				<Button variant="ghost" size="sm" onclick={clearFilters}>清除所有筛选</Button>
-			{/if}
-		</div>
+					{#if (selectedSourceType && selectedSourceId) || showFailedOnly || selectedResolution}
+						<Button variant="ghost" size="sm" onclick={clearFilters}>清除所有筛选</Button>
+					{/if}
+				</div>
 			{/if}
 
 			<!-- 视频列表统计 -->
 			{#if videosData}
-		<div class="text-muted-foreground flex items-center justify-between text-sm">
-			<span title="显示当前筛选结果总数和所在分页">
-				共 {videosData.total_count} 个视频，当前第 {$appStateStore.currentPage + 1} / {totalPages} 页
-			</span>
-			<Badge
-				variant="outline"
-				class={liveUpdateStatus === 'connected'
-					? 'border-green-200 bg-green-50 text-green-700'
-					: liveUpdateStatus === 'connecting'
-						? 'border-blue-200 bg-blue-50 text-blue-700'
-						: liveUpdateStatus === 'error'
-							? 'border-yellow-200 bg-yellow-50 text-yellow-700'
-							: 'border-muted-foreground/20 text-muted-foreground'}
-				title={liveUpdateStatus === 'connected'
-					? '视频下载和任务状态会通过实时连接自动更新'
-					: liveUpdateStatus === 'connecting'
-						? '正在建立实时连接，建立后会自动更新进度'
-						: liveUpdateStatus === 'error'
-							? '实时连接正在重试，恢复后会继续自动更新进度'
-							: '当前未建立实时连接，需要手动刷新查看最新进度'}
-			>
-				{#if liveUpdateStatus === 'connected'}
-					进度实时更新中
-				{:else if liveUpdateStatus === 'connecting'}
-					进度实时连接中
-				{:else if liveUpdateStatus === 'error'}
-					进度实时重连中
-				{:else}
-					进度实时未开启
+				<div class="text-muted-foreground flex items-center justify-between text-sm">
+					<span title="显示当前筛选结果总数和所在分页">
+						共 {videosData.total_count} 个视频，当前第 {$appStateStore.currentPage + 1} / {totalPages}
+						页
+					</span>
+					<Badge
+						variant="outline"
+						class={liveUpdateStatus === 'connected'
+							? 'border-green-200 bg-green-50 text-green-700'
+							: liveUpdateStatus === 'connecting'
+								? 'border-blue-200 bg-blue-50 text-blue-700'
+								: liveUpdateStatus === 'error'
+									? 'border-yellow-200 bg-yellow-50 text-yellow-700'
+									: 'border-muted-foreground/20 text-muted-foreground'}
+						title={liveUpdateStatus === 'connected'
+							? '视频下载和任务状态会通过实时连接自动更新'
+							: liveUpdateStatus === 'connecting'
+								? '正在建立实时连接，建立后会自动更新进度'
+								: liveUpdateStatus === 'error'
+									? '实时连接正在重试，恢复后会继续自动更新进度'
+									: '当前未建立实时连接，需要手动刷新查看最新进度'}
+					>
+						{#if liveUpdateStatus === 'connected'}
+							进度实时更新中
+						{:else if liveUpdateStatus === 'connecting'}
+							进度实时连接中
+						{:else if liveUpdateStatus === 'error'}
+							进度实时重连中
+						{:else}
+							进度实时未开启
+						{/if}
+					</Badge>
+				</div>
+				{#if currentSortBy === 'file_size' && videosData.file_size_stats_pending}
+					<div class="text-muted-foreground mt-2 text-sm">
+						文件大小统计中，首次按文件大小排序时会在后台逐步补全旧文件大小。
+					</div>
 				{/if}
-			</Badge>
-		</div>
-		{#if currentSortBy === 'file_size' && videosData.file_size_stats_pending}
-			<div class="text-muted-foreground mt-2 text-sm">
-				文件大小统计中，首次按文件大小排序时会在后台逐步补全旧文件大小。
-			</div>
-		{/if}
-		{#if $appStateStore.currentPage > 0 && pendingInsertedCount > 0}
-			<div class="mt-2">
-				<Button
-					variant="outline"
-					size="sm"
-					onclick={handlePendingInsertedClick}
-					title="跳转到第一页查看新入库视频"
-				>
-					当前页外有 {pendingInsertedCount} 个新入库视频，点击跳到第一页查看
-				</Button>
-			</div>
-		{/if}
+				{#if $appStateStore.currentPage > 0 && pendingInsertedCount > 0}
+					<div class="mt-2">
+						<Button
+							variant="outline"
+							size="sm"
+							onclick={handlePendingInsertedClick}
+							title="跳转到第一页查看新入库视频"
+						>
+							当前页外有 {pendingInsertedCount} 个新入库视频，点击跳到第一页查看
+						</Button>
+					</div>
+				{/if}
 			{/if}
 
 			<!-- 视频卡片网格 -->
 			{#if loading}
-		<Loading size="lg" />
-	{:else if videosData?.videos.length}
-		<div
-			class="grid gap-4 sm:grid-cols-2 md:grid-cols-[repeat(var(--videos-grid-cols),minmax(0,1fr))]"
-			style={`--videos-grid-cols: ${gridCols};`}
-		>
-			{#each videosData.videos as video (video.id)}
-				<VideoCard
-					{video}
-					resourceId={platformTab === 'bilibili' ? video.id : `${platformTab}-${video.id}`}
-					detailHref={platformTab === 'bilibili' ? `/video/${video.id}` : `/video/${platformTab}-${video.id}`}
-					{selectionMode}
-					selected={selectedVideos.has(video.id)}
-					onSelectionChange={handleVideoSelection}
-					onReset={async (forceReset) => {
-						await handleResetVideo(video, forceReset);
-					}}
-				/>
-			{/each}
-		</div>
+				<Loading size="lg" />
+			{:else if videosData?.videos.length}
+				<div
+					class="grid gap-4 sm:grid-cols-2 md:grid-cols-[repeat(var(--videos-grid-cols),minmax(0,1fr))]"
+					style={`--videos-grid-cols: ${gridCols};`}
+				>
+					{#each videosData.videos as video (video.id)}
+						<VideoCard
+							{video}
+							resourceId={platformTab === 'bilibili' ? video.id : `${platformTab}-${video.id}`}
+							detailHref={platformTab === 'bilibili'
+								? `/video/${video.id}`
+								: `/video/${platformTab}-${video.id}`}
+							{selectionMode}
+							selected={selectedVideos.has(video.id)}
+							onSelectionChange={handleVideoSelection}
+							onReset={async (forceReset) => {
+								await handleResetVideo(video, forceReset);
+							}}
+						/>
+					{/each}
+				</div>
 
-		<!-- 分页 -->
-		{#if totalPages > 1}
-			<Pagination
-				currentPage={$appStateStore.currentPage}
-				{totalPages}
-				onPageChange={handlePageChange}
-			/>
-		{/if}
-	{:else}
-		<EmptyState title="暂无视频数据" description="尝试调整搜索条件或添加视频源" class="py-16" />
+				<!-- 分页 -->
+				{#if totalPages > 1}
+					<Pagination
+						currentPage={$appStateStore.currentPage}
+						{totalPages}
+						onPageChange={handlePageChange}
+					/>
+				{/if}
+			{:else}
+				<EmptyState title="暂无视频数据" description="尝试调整搜索条件或添加视频源" class="py-16" />
 			{/if}
 		</div>
 	</Tabs.Root>
@@ -1630,7 +1667,10 @@
 								<li>选择特定任务类型时，会同时重置对应的分P下载状态</li>
 							{:else}
 								<li>"只重置失败的任务"模式只会重置状态为失败的任务（走整体重试）</li>
-								<li>外源视频按 B 站“子任务状态位”处理：强制重置并勾选<strong>封面 / 视频信息</strong>时，只把对应子任务打回“未开始”，下载任务会单独重新生成该文件，不会重下媒体、也不会动已完成的分P下载</li>
+								<li>
+									外源视频按 B 站“子任务状态位”处理：强制重置并勾选<strong>封面 / 视频信息</strong
+									>时，只把对应子任务打回“未开始”，下载任务会单独重新生成该文件，不会重下媒体、也不会动已完成的分P下载
+								</li>
 								<li>勾选<strong>"重置视频内容"</strong>才会把整条视频重新加入下载队列</li>
 							{/if}
 						</ul>

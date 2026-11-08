@@ -580,7 +580,7 @@
 										暂无白名单关键词
 									</p>
 								{:else}
-									{#each whitelistKeywords as keyword, index}
+									{#each whitelistKeywords as keyword, index (keyword)}
 										<div
 											class="flex items-center justify-between rounded-md bg-green-100 px-3 py-2 dark:bg-green-900"
 										>
@@ -651,7 +651,7 @@
 										暂无黑名单关键词
 									</p>
 								{:else}
-									{#each blacklistKeywords as keyword, index}
+									{#each blacklistKeywords as keyword, index (keyword)}
 										<div
 											class="flex items-center justify-between rounded-md bg-red-100 px-3 py-2 dark:bg-red-900"
 										>

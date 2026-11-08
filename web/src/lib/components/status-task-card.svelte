@@ -35,9 +35,10 @@
 		<div>
 			<div class="flex items-center gap-2">
 				<span
-					class="status-task-title text-sm font-medium leading-5 {isDownloadTask ? 'text-orange-700' : ''}"
-					title={taskName}
-				>{taskName}</span
+					class="status-task-title text-sm leading-5 font-medium {isDownloadTask
+						? 'text-orange-700'
+						: ''}"
+					title={taskName}>{taskName}</span
 				>
 				{#if isDownloadTask}
 					<span class="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700"
@@ -62,7 +63,7 @@
 				size="sm"
 				onclick={onReset}
 				{disabled}
-				class="col-span-2 h-7.5 w-full cursor-pointer px-3 text-xs text-gray-600 hover:bg-gray-100 sm:col-auto sm:h-8 sm:min-w-[60px] sm:w-auto"
+				class="col-span-2 h-7.5 w-full cursor-pointer px-3 text-xs text-gray-600 hover:bg-gray-100 sm:col-auto sm:h-8 sm:w-auto sm:min-w-[60px]"
 				title="恢复到原始状态"
 			>
 				重置
@@ -73,7 +74,8 @@
 			size="sm"
 			onclick={() => onStatusChange(0)}
 			{disabled}
-			class="h-7.5 w-full cursor-pointer px-3 text-xs sm:h-8 sm:min-w-[60px] sm:w-auto {currentStatus === 0
+			class="h-7.5 w-full cursor-pointer px-3 text-xs sm:h-8 sm:w-auto sm:min-w-[60px] {currentStatus ===
+			0
 				? 'border-yellow-600 bg-yellow-600 font-medium text-white hover:bg-yellow-700'
 				: 'hover:border-yellow-400 hover:bg-yellow-50 hover:text-yellow-700'}"
 			title={`将“${taskName}”标记为未开始`}
@@ -85,7 +87,8 @@
 			size="sm"
 			onclick={() => onStatusChange(7)}
 			{disabled}
-			class="h-7.5 w-full cursor-pointer px-3 text-xs sm:h-8 sm:min-w-[60px] sm:w-auto {currentStatus === 7
+			class="h-7.5 w-full cursor-pointer px-3 text-xs sm:h-8 sm:w-auto sm:min-w-[60px] {currentStatus ===
+			7
 				? 'border-green-600 bg-green-600 font-medium text-white hover:bg-green-700'
 				: 'hover:border-green-400 hover:bg-green-50 hover:text-green-700'}"
 			title={`将“${taskName}”标记为已完成`}

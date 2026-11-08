@@ -10,6 +10,7 @@
 	import SubmissionSelectionToolbar from '$lib/components/submission-selection-toolbar.svelte';
 	import Loading from '$lib/components/ui/Loading.svelte';
 	import { formatSubmissionDateLabel, formatSubmissionMetricLabel } from '$lib/utils/submission';
+	import { SvelteSet } from 'svelte/reactivity';
 
 	export let isOpen = false;
 	export let sourceId: number;
@@ -24,7 +25,7 @@
 
 	// 投稿视频列表
 	let submissionVideos: SubmissionVideoInfo[] = [];
-	let selectedSubmissionVideos: Set<string> = new Set();
+	let selectedSubmissionVideos: Set<string> = new SvelteSet();
 	let submissionLoading = false;
 	let submissionError: string | null = null;
 	let submissionTotalCount = 0;
@@ -40,7 +41,6 @@
 	let currentLoadedPage = 0;
 	let isLoadingMore = false;
 	let hasMoreVideos = true;
-	let loadingProgress = '';
 	let showLoadMoreButton = false;
 	let isSearching = false;
 
@@ -63,7 +63,7 @@
 	// 重置状态并加载
 	async function resetAndLoad() {
 		submissionVideos = [];
-		selectedSubmissionVideos = new Set(initialSelectedVideos);
+		selectedSubmissionVideos = new SvelteSet(initialSelectedVideos);
 		submissionLoading = false;
 		submissionError = null;
 		submissionTotalCount = 0;
@@ -129,8 +129,6 @@
 		const neededPages = Math.ceil(targetVideos / SUBMISSION_PAGE_SIZE);
 
 		for (let page = startPage; page <= neededPages; page++) {
-			loadingProgress = `正在加载第 ${page} 页...`;
-
 			if (page > startPage) {
 				await new Promise((resolve) => setTimeout(resolve, PAGE_DELAY));
 			}
@@ -165,7 +163,6 @@
 		}
 
 		hasMoreVideos = submissionVideos.length < submissionTotalCount;
-		loadingProgress = '';
 		updateFilteredVideos();
 	}
 
@@ -394,7 +391,7 @@
 					{isSearching}
 					statusText={isSearching
 						? '搜索中...'
-						: `搜索结果：在UP主所有视频中搜索 \"${submissionSearchQuery}\"`}
+						: `搜索结果：在UP主所有视频中搜索 "${submissionSearchQuery}"`}
 					selectedCount={selectedSubmissionCount}
 					totalCount={filteredSubmissionVideos.length}
 					onSelectAll={selectAllSubmissions}
