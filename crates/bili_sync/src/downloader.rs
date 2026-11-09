@@ -2462,8 +2462,11 @@ mod tests {
                         body.len()
                     );
                     let _ = socket.write_all(resp.as_bytes()).await;
-                    let first_request = !truncated.swap(true, Ordering::SeqCst);
-                    if first_request && s == 0 && truncate_after < body.len() {
+                    // 只在真正要截断这一次请求时才置位：并发下载时分片请求顺序不固定，
+                    // 若先到的是 s != 0 的分片，不能把截断机会浪费掉。
+                    let should_truncate =
+                        s == 0 && truncate_after < body.len() && !truncated.swap(true, Ordering::SeqCst);
+                    if should_truncate {
                         // 只发一部分 body 就断开，模拟 CDN 中途掐流
                         let _ = socket.write_all(&body[..truncate_after]).await;
                         let _ = socket.shutdown().await;
