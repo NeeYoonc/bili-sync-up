@@ -4941,7 +4941,7 @@ async fn download_youtube_media(
     video: &youtube_video::Model,
 ) -> Result<DownloadedYouTubeMedia> {
     let platform = source_platform_label(source);
-    let metadata = match extract_youtube_metadata(&video.url, Some(source)).await {
+    let mut metadata = match extract_youtube_metadata(&video.url, Some(source)).await {
         Ok(metadata) => metadata,
         Err(error) if should_placeholder_unavailable_tiktok(&error, video.retry_count) => {
             // TikTok「明确不可下载」分两类（判定见 should_placeholder_unavailable_tiktok）：
@@ -5029,6 +5029,17 @@ async fn download_youtube_media(
         }
         Err(error) => return Err(error),
     };
+    let filter_option = source
+        .filter_option
+        .as_ref()
+        .map(|value| serde_json::from_value::<FilterOption>(value.clone()))
+        .transpose()
+        .with_context(|| format!("{platform}视频源级流过滤设置无效"))?
+        .unwrap_or_else(|| crate::config::reload_config().filter_option);
+    // issue #294：YouTube 带 Cookie 时可能只解析到 HLS + 360p 混合流，可下载画质达不到
+    // 用户设置的最低画质；此时去掉 Cookie 匿名再解析一次，匿名结果严格更高才采用
+    // （匿名失败继续用原结果，私有来源不匿名）。
+    metadata = apply_youtube_anonymous_quality_fallback(metadata, &video.url, source, &filter_option, platform).await;
     let title = metadata.title.clone().unwrap_or_else(|| video.title.clone());
     let uploader = metadata
         .uploader
@@ -5067,16 +5078,10 @@ async fn download_youtube_media(
         // 大小就把任务标记为完成。
         remove_file_if_exists(&output_path).await?;
     }
-    let filter_option = source
-        .filter_option
-        .as_ref()
-        .map(|value| serde_json::from_value::<FilterOption>(value.clone()))
-        .transpose()
-        .with_context(|| format!("{platform}视频源级流过滤设置无效"))?
-        .unwrap_or_else(|| crate::config::reload_config().filter_option);
     let selected = if !metadata.is_slideshow() {
         let selected = select_youtube_streams(&metadata.formats, &filter_option, source.audio_only, platform)?;
         log_selected_youtube_streams(&selected, &filter_option, source, &title);
+        warn_youtube_below_min_quality(&selected, &filter_option, source, &title);
         Some(selected)
     } else {
         None
@@ -5668,6 +5673,18 @@ async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Mod
 }
 
 pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<ExternalMediaMetadata> {
+    extract_ytdlp_metadata_with_cookies(url, platform, true).await
+}
+
+/// 解析外源媒体元数据；`with_cookies` 决定是否把当前凭证（YouTube Cookie 等）传给 yt-dlp。
+///
+/// 匿名解析（`with_cookies = false`）只用于 YouTube 画质兜底（issue #294）：带 Cookie 时
+/// YouTube 可能只返回 HLS + 低分辨率混合流，匿名解析反而能拿到 http/https 分离流。
+async fn extract_ytdlp_metadata_with_cookies(
+    url: &str,
+    platform: &str,
+    with_cookies: bool,
+) -> Result<ExternalMediaMetadata> {
     let is_youtube = is_youtube_url(url);
     // YouTube 自 2025 年底起，默认 web 客户端要么报 “The page needs to be reloaded”，
     // 要么只返回最高 1080p 的格式（高分辨率走 SABR 协议、响应里没有签名直链）。
@@ -5680,7 +5697,7 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
     } else {
         None
     };
-    let metadata = run_ytdlp_metadata(url, platform, client_args).await?;
+    let metadata = run_ytdlp_metadata(url, platform, client_args, with_cookies).await?;
     // web_embedded 对部分视频（尤其需要 PO Token/登录会话的高码率源）只返回
     // ≤1080p 格式。此时用备用客户端再解析一次（tv_embedded/tv 为传统兜底，
     // visionos 提供 4K 直链），取分辨率上限更高的一份，避免“设置 4K 却只能
@@ -5708,8 +5725,13 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
                     "web_embedded 仅返回最高 {}p 格式，尝试 tv_embedded/tv/visionos 获取更高码率（每视频仅一次）",
                     best_max
                 );
-                if let Ok(alt) =
-                    run_ytdlp_metadata(url, platform, Some("youtube:player_client=tv_embedded,tv,visionos")).await
+                if let Ok(alt) = run_ytdlp_metadata(
+                    url,
+                    platform,
+                    Some("youtube:player_client=tv_embedded,tv,visionos"),
+                    with_cookies,
+                )
+                .await
                 {
                     let alt_max = youtube_max_format_height(&alt.formats);
                     if alt_max > best_max {
@@ -5734,7 +5756,147 @@ pub(crate) async fn extract_ytdlp_metadata(url: &str, platform: &str) -> Result<
 /// 记录已尝试过 tv_embedded 兜底解析的视频 URL，避免每次重试都多发一个请求。
 static YOUTUBE_FALLBACK_TRIED: LazyLock<StdMutex<HashSet<String>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
 
-async fn run_ytdlp_metadata(url: &str, platform: &str, client_args: Option<&str>) -> Result<ExternalMediaMetadata> {
+/// 记录本进程内已经尝试过「匿名兜底解析」的视频 URL。
+///
+/// 与 `YOUTUBE_FALLBACK_TRIED`（多客户端解析兜底）分开记录，互不影响；每个 URL 只重试
+/// 一次，避免同一个视频反复触发额外解析请求（YouTube 会按出口 IP 累计风控分）。
+static YOUTUBE_ANONYMOUS_TRIED: LazyLock<StdMutex<HashSet<String>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
+
+/// 是否触发 YouTube「去掉 Cookie 匿名解析」的画质兜底。
+///
+/// 触发条件必须全部满足：YouTube 链接、来源公开（稍后再看/点赞/订阅需要登录）、本次
+/// 解析确实带了 Cookie、当前可下载画质低于用户设置的最低画质（0 表示没有可下载的
+/// 视频格式，同样算不达标）、且本进程内没有对这个 URL 试过匿名解析。
+fn should_retry_youtube_anonymous(
+    is_youtube: bool,
+    is_private_source: bool,
+    cookies_present: bool,
+    selected_height: i32,
+    min_height: i32,
+    already_tried: bool,
+) -> bool {
+    is_youtube
+        && !is_private_source
+        && cookies_present
+        && min_height > 0
+        && selected_height < min_height
+        && !already_tried
+}
+
+/// 匿名解析结果是否更好：只有高度严格更高才采用，避免两份结果来回切换。
+fn youtube_anonymous_result_is_better(cookie_height: i32, anonymous_height: i32) -> bool {
+    anonymous_height > cookie_height
+}
+
+fn youtube_anonymous_already_tried(url: &str) -> bool {
+    YOUTUBE_ANONYMOUS_TRIED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(url)
+}
+
+fn mark_youtube_anonymous_tried(url: &str) {
+    YOUTUBE_ANONYMOUS_TRIED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(url.to_string());
+}
+
+/// 匿名（不带 Cookie）解析 YouTube 元数据，用于画质兜底。
+async fn extract_youtube_metadata_without_cookies(url: &str) -> Result<ExternalMediaMetadata> {
+    extract_ytdlp_metadata_with_cookies(url, "YouTube", false).await
+}
+
+/// 某份格式列表在给定过滤条件下实际会下载到的视频高度（0 表示没有可下载的视频流）。
+fn youtube_selectable_height(formats: &[ExternalMediaFormat], filter: &FilterOption, platform: &str) -> i32 {
+    select_youtube_streams(formats, filter, false, platform)
+        .ok()
+        .and_then(|selected| selected_effective_video_height(&selected))
+        .unwrap_or(0)
+}
+
+/// YouTube 画质匿名兜底（issue #294）：带 Cookie 解析出的可下载画质达不到用户设置的
+/// 最低画质时，去掉 Cookie 匿名再解析一次；匿名结果严格更高才替换 `formats`。
+///
+/// 只替换格式列表，标题/上传者/时长等元数据仍用带 Cookie 的结果，避免输出文件名变化；
+/// 匿名解析失败（年龄限制/会员/私享/需登录）只记一条 warn，继续用原结果，绝不让下载失败。
+async fn apply_youtube_anonymous_quality_fallback(
+    mut metadata: ExternalMediaMetadata,
+    url: &str,
+    source: &youtube_source::Model,
+    filter: &FilterOption,
+    platform: &str,
+) -> ExternalMediaMetadata {
+    if !is_youtube_url(url) || source.audio_only || metadata.is_slideshow() {
+        return metadata;
+    }
+    let min_height = youtube_quality_height(filter.video_min_quality);
+    let cookie_height = youtube_selectable_height(&metadata.formats, filter, platform);
+    let cookies_present = youtube_cookie_file().is_some();
+    let already_tried = youtube_anonymous_already_tried(url);
+    if !should_retry_youtube_anonymous(
+        true,
+        is_youtube_private_source(source),
+        cookies_present,
+        cookie_height,
+        min_height,
+        already_tried,
+    ) {
+        return metadata;
+    }
+    // 先登记再发起请求：即使解析中途失败/取消，同一进程内也不会对该 URL 重复重试。
+    mark_youtube_anonymous_tried(url);
+    debug!(
+        url = %url,
+        source_id = source.id,
+        cookie_height,
+        min_height,
+        "YouTube 带 Cookie 只解析到 {}p（最低要求 {}p），尝试去掉 Cookie 匿名解析一次",
+        cookie_height,
+        min_height
+    );
+    match extract_youtube_metadata_without_cookies(url).await {
+        Ok(anonymous) => {
+            let anonymous_height = youtube_selectable_height(&anonymous.formats, filter, platform);
+            if youtube_anonymous_result_is_better(cookie_height, anonymous_height) {
+                info!(
+                    url = %url,
+                    source_id = source.id,
+                    cookie_height,
+                    anonymous_height,
+                    "YouTube 带 Cookie 只解析到 {}p，匿名解析可达 {}p，已改用匿名解析结果",
+                    cookie_height,
+                    anonymous_height
+                );
+                metadata.formats = anonymous.formats;
+            } else {
+                debug!(
+                    url = %url,
+                    source_id = source.id,
+                    cookie_height,
+                    anonymous_height,
+                    "YouTube 匿名解析未提供更高画质，继续使用带 Cookie 的结果"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(
+                url = %url,
+                source_id = source.id,
+                %error,
+                "YouTube 匿名兜底解析失败，继续使用带 Cookie 的结果"
+            );
+        }
+    }
+    metadata
+}
+
+async fn run_ytdlp_metadata(
+    url: &str,
+    platform: &str,
+    client_args: Option<&str>,
+    with_cookies: bool,
+) -> Result<ExternalMediaMetadata> {
     let mut command = ytdlp_command();
     command.args([
         "--dump-single-json",
@@ -5746,7 +5908,9 @@ async fn run_ytdlp_metadata(url: &str, platform: &str, client_args: Option<&str>
         command.args(["--extractor-args", client_args]);
     }
     append_ytdlp_runtime(&mut command);
-    append_cookies_for_url(&mut command, url);
+    if with_cookies {
+        append_cookies_for_url(&mut command, url);
+    }
     append_youtube_proxy_for_url(&mut command, url);
     command.arg(url);
     let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output())
@@ -6021,12 +6185,49 @@ fn format_quality_height(format: &ExternalMediaFormat) -> i32 {
 /// 与 `download_youtube_media` 的分支保持一致：
 /// - 独立视频流 + 独立音频流同时存在时，使用视频流高度；
 /// - 否则使用混合流（音视频一体）高度。
-fn selected_effective_video_height(selected: &SelectedStreams) -> Option<i32> {
+fn selected_effective_video_format(selected: &SelectedStreams) -> Option<&ExternalMediaFormat> {
     if selected.video.is_some() && selected.audio.is_some() {
-        selected.video.as_ref().map(format_quality_height)
+        selected.video.as_ref()
     } else {
-        selected.mixed.as_ref().map(format_quality_height)
+        selected.mixed.as_ref()
     }
+}
+
+fn selected_effective_video_height(selected: &SelectedStreams) -> Option<i32> {
+    selected_effective_video_format(selected).map(format_quality_height)
+}
+
+/// 最终选中的画质低于用户设置的最低画质时补一条 WARN，避免静默降级（issue #294）。
+fn warn_youtube_below_min_quality(
+    selected: &SelectedStreams,
+    filter: &FilterOption,
+    source: &youtube_source::Model,
+    title: &str,
+) {
+    // 纯音频源不关心视频画质，不要拿 video_min_quality 报一条误导性的 WARN。
+    if source.audio_only {
+        return;
+    }
+    let min_height = youtube_quality_height(filter.video_min_quality);
+    let Some(format) = selected_effective_video_format(selected) else {
+        return;
+    };
+    let actual_height = format_quality_height(format);
+    if min_height <= 0 || actual_height <= 0 || actual_height >= min_height {
+        return;
+    }
+    warn!(
+        source_id = source.id,
+        source_type = %source.source_type,
+        min_height,
+        actual_height,
+        format_id = %format.format_id.as_deref().unwrap_or(""),
+        protocol = %format.protocol.as_deref().unwrap_or(""),
+        "YouTube 视频「{}」可下载画质 {}p 低于设定的最低画质 {}p",
+        title,
+        actual_height,
+        min_height
+    );
 }
 
 /// 编码是否命中用户的编码偏好列表。
@@ -11224,5 +11425,177 @@ mod tests {
                 "https://example.com/auto-zh.vtt?tlang=zh-Hans"
             ]
         );
+    }
+
+    /// issue #294：匿名兜底的触发条件——只有「公开来源 + 带了 Cookie + 画质不达标 +
+    /// 本进程没试过」才重试；私有来源、非 YouTube、画质已达标都不触发。
+    #[test]
+    fn youtube_anonymous_fallback_only_triggers_for_low_quality_public_video() {
+        assert!(super::should_retry_youtube_anonymous(
+            true, false, true, 360, 720, false
+        ));
+        // 没有任何可下载视频流（0）同样算不达标
+        assert!(super::should_retry_youtube_anonymous(true, false, true, 0, 1080, false));
+        assert!(!super::should_retry_youtube_anonymous(
+            true, false, true, 1080, 720, false
+        ));
+        // 本次没带 Cookie（本来就是匿名解析）不重试
+        assert!(!super::should_retry_youtube_anonymous(
+            true, false, false, 360, 720, false
+        ));
+        // 稍后再看/点赞/订阅等需要登录的来源绝不匿名
+        assert!(!super::should_retry_youtube_anonymous(
+            true, true, true, 360, 720, false
+        ));
+        // 非 YouTube 平台不触发
+        assert!(!super::should_retry_youtube_anonymous(
+            false, false, true, 360, 720, false
+        ));
+        // 同一 URL 本进程内已经试过，不再重复
+        assert!(!super::should_retry_youtube_anonymous(
+            true, false, true, 360, 720, true
+        ));
+    }
+
+    /// 匿名结果必须严格更高才采用，相同或更低都保留带 Cookie 的结果。
+    #[test]
+    fn youtube_anonymous_result_must_be_strictly_better() {
+        assert!(super::youtube_anonymous_result_is_better(360, 720));
+        assert!(super::youtube_anonymous_result_is_better(0, 360));
+        assert!(!super::youtube_anonymous_result_is_better(720, 720));
+        assert!(!super::youtube_anonymous_result_is_better(720, 360));
+        assert!(!super::youtube_anonymous_result_is_better(0, 0));
+    }
+
+    /// 私有来源判定覆盖「稍后再看 / 点赞 / 订阅」，公开来源不误判。
+    #[test]
+    fn youtube_private_source_detection_covers_login_only_lists() {
+        for source_type in ["watch_later", "liked", "subscriptions"] {
+            assert!(
+                super::is_youtube_private_source(&sample_external_source(source_type)),
+                "{source_type} 需要登录，不应匿名解析"
+            );
+        }
+        for source_type in ["channel", "playlist", "video"] {
+            assert!(
+                !super::is_youtube_private_source(&sample_external_source(source_type)),
+                "{source_type} 是公开来源，可以匿名兜底"
+            );
+        }
+    }
+
+    /// 匿名兜底的「每 URL 只试一次」是进程级去重，且按 URL 精确区分。
+    #[test]
+    fn youtube_anonymous_tracking_is_per_url() {
+        let url = "https://www.youtube.com/watch?v=anonymous-fallback-tracking-test";
+        let other = "https://www.youtube.com/watch?v=anonymous-fallback-tracking-other";
+        assert!(!super::youtube_anonymous_already_tried(url));
+        super::mark_youtube_anonymous_tried(url);
+        assert!(super::youtube_anonymous_already_tried(url));
+        assert!(!super::youtube_anonymous_already_tried(other));
+    }
+
+    /// 复现 issue #294 的两份格式集：带 Cookie 只有 HLS（被排除）+ 360p 混合流，
+    /// 匿名解析则有 720p 独立视频流 + 独立音频流，匿名结果更高、可被采用。
+    #[test]
+    fn youtube_cookie_formats_stay_360p_while_anonymous_formats_reach_720p() {
+        use super::ExternalMediaFormat;
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
+
+        let filter = FilterOption {
+            video_max_quality: VideoQuality::Quality8k,
+            video_min_quality: VideoQuality::Quality720p,
+            audio_max_quality: AudioQuality::QualityHiRES,
+            audio_min_quality: AudioQuality::Quality64k,
+            codecs: vec![VideoCodecs::AV1, VideoCodecs::AVC, VideoCodecs::HEV],
+            ..Default::default()
+        };
+        let fmt = |id: &str, h: Option<i32>, w: Option<i32>, vcodec: &str, acodec: &str, protocol: &str| {
+            ExternalMediaFormat {
+                format_id: Some(id.to_string()),
+                url: Some(format!("https://example.com/{id}")),
+                protocol: Some(protocol.to_string()),
+                ext: Some("mp4".to_string()),
+                vcodec: Some(vcodec.to_string()),
+                acodec: Some(acodec.to_string()),
+                width: w,
+                height: h,
+                fps: Some(30.0),
+                tbr: Some(1000.0),
+                vbr: Some(800.0),
+                abr: None,
+                dynamic_range: Some("SDR".to_string()),
+                is_original: false,
+                decryption_key: None,
+                fallback_urls: Vec::new(),
+            }
+        };
+        // 带 Cookie：高分辨率只有 m3u8_native（HLS）分片流，唯一 http/https 是 360p 混合流
+        let cookie_formats = vec![
+            fmt("95", Some(720), Some(1280), "avc1", "none", "m3u8_native"),
+            fmt("94", Some(480), Some(854), "avc1", "none", "m3u8_native"),
+            fmt("93", Some(240), Some(426), "avc1", "none", "m3u8_native"),
+            fmt("18", Some(360), Some(640), "avc1.42001E", "mp4a.40.2", "https"),
+        ];
+        assert_eq!(
+            super::youtube_selectable_height(&cookie_formats, &filter, "YouTube"),
+            360
+        );
+        let cookie_selected =
+            super::select_youtube_streams(&cookie_formats, &filter, false, "YouTube").expect("360p 混合流应可选");
+        assert_eq!(super::selected_effective_video_height(&cookie_selected), Some(360));
+
+        // 匿名解析：720p 独立视频流 + 独立音频流 + 同一个 360p 混合流兜底
+        let anonymous_formats = vec![
+            fmt("136", Some(720), Some(1280), "avc1.64001f", "none", "https"),
+            fmt("140", None, None, "none", "mp4a.40.2", "https"),
+            fmt("18", Some(360), Some(640), "avc1.42001E", "mp4a.40.2", "https"),
+        ];
+        assert_eq!(
+            super::youtube_selectable_height(&anonymous_formats, &filter, "YouTube"),
+            720
+        );
+        let anonymous_selected =
+            super::select_youtube_streams(&anonymous_formats, &filter, false, "YouTube").expect("独立音视频流应可选");
+        assert_eq!(super::selected_effective_video_height(&anonymous_selected), Some(720));
+        assert!(super::youtube_anonymous_result_is_better(360, 720));
+    }
+
+    /// 实际下载用的高度：有独立视频流 + 独立音频流时取视频流，否则取混合流。
+    #[test]
+    fn selected_effective_video_height_uses_separate_video_stream_when_available() {
+        use super::ExternalMediaFormat;
+
+        let fmt = |id: &str, h: i32, vcodec: &str, acodec: &str| ExternalMediaFormat {
+            format_id: Some(id.to_string()),
+            url: Some(format!("https://example.com/{id}")),
+            protocol: Some("https".to_string()),
+            ext: Some("mp4".to_string()),
+            vcodec: Some(vcodec.to_string()),
+            acodec: Some(acodec.to_string()),
+            width: Some(h * 16 / 9),
+            height: Some(h),
+            fps: Some(30.0),
+            tbr: Some(1000.0),
+            vbr: None,
+            abr: None,
+            dynamic_range: Some("SDR".to_string()),
+            is_original: false,
+            decryption_key: None,
+            fallback_urls: Vec::new(),
+        };
+        let both = super::SelectedStreams {
+            video: Some(fmt("136", 720, "avc1.64001f", "none")),
+            audio: Some(fmt("140", 0, "none", "mp4a.40.2")),
+            mixed: Some(fmt("18", 360, "avc1", "mp4a.40.2")),
+        };
+        assert_eq!(super::selected_effective_video_height(&both), Some(720));
+        let mixed_only = super::SelectedStreams {
+            video: None,
+            audio: None,
+            mixed: Some(fmt("18", 360, "avc1", "mp4a.40.2")),
+        };
+        assert_eq!(super::selected_effective_video_height(&mixed_only), Some(360));
+        assert!(super::selected_effective_video_format(&mixed_only).is_some());
     }
 }
