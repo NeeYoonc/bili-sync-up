@@ -9580,7 +9580,9 @@ mod tests {
         YoutubeLoginVerdict, SUBSCRIPTIONS_URL, WATCH_LATER_URL,
     };
     use std::collections::HashSet;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(windows)]
+    use std::path::PathBuf;
 
     use bili_sync_migration::MigratorTrait;
     use sea_orm::ActiveModelTrait;
