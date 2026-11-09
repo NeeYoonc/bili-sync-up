@@ -31,6 +31,9 @@ const GOOGLEVIDEO_SEGMENT_SIZE: u64 = 4 * 1024 * 1024;
 /// 一次中断只损失 16MB，而且已完成分片会记进 `.resume`，重试能接着走。
 const DEFAULT_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
 const RANGE_DOWNLOAD_ATTEMPTS: usize = 4;
+/// 单个 Range 分片在连续多少轮「零进展」后才判定失败。连接中途被掐断但
+/// 写出了部分数据的情况不计入，会直接从新偏移续传。
+const RANGE_RESUME_MAX_STALLS: usize = 4;
 // 断点续传状态文件后缀（记录已完成分片，供失败后继续下载）
 const RESUME_SIDECAR_SUFFIX: &str = ".resume";
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -263,8 +266,14 @@ impl Downloader {
     async fn fetch_with_optional_referer(&self, url: &str, path: &Path, referer: Option<&str>) -> Result<()> {
         let config = crate::config::reload_config();
         let parallel = &config.concurrent_limit.parallel_download;
+        let want_parallel = parallel.enabled
+            && if is_googlevideo_url(url) {
+                parallel.googlevideo_max_connections > 1
+            } else {
+                parallel.threads > 1
+            };
 
-        if parallel.enabled && parallel.threads > 1 {
+        if want_parallel {
             match self
                 .fetch_parallel(
                     url,
@@ -685,11 +694,14 @@ impl Downloader {
         }
 
         info!(
-            "原生多线程下载启用: 文件「{}」, 大小={:.2}MB, 分片数={}, 并发连接={}",
+            "原生多线程下载启用: 文件「{}」, 大小={:.2}MB, 分片数={}, 并发连接={}（googlevideo={}, 下载线程数={}, YouTube并发上限={}）",
             path.display(),
             total_mb,
             ranges.len(),
-            concurrency
+            concurrency,
+            is_googlevideo,
+            threads,
+            max_googlevideo_connections
         );
 
         if is_resumable {
@@ -703,6 +715,7 @@ impl Downloader {
         // 进度：并发分片累计已下载字节（含续传已完成部分）
         let downloaded_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(completed_bytes));
         let progress_path = path.display().to_string();
+        let started_at = std::time::Instant::now();
 
         let url_owned = url.to_string();
         let path_owned = path.to_path_buf();
@@ -763,6 +776,12 @@ impl Downloader {
             }
         }
         if !failed_ranges.is_empty() {
+            info!(
+                "并发分片 {} / {} 个失败，冷却后串行补下（并发连接={}）；频繁出现说明当前代理/节点承载不了该并发",
+                failed_ranges.len(),
+                ranges.len(),
+                concurrency
+            );
             // 第二轮：失败分片改成串行 + 冷却后再补。并发挤兑（CDN 限速）下这样
             // 通常能过；已经下完的分片不会白下，也不用整体重来。
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -796,6 +815,17 @@ impl Downloader {
         if !is_resumable || !is_media_stream_tmp_path(path) {
             remove_sidecar(&sidecar).await;
         }
+
+        // 实测吞吐：排查「下载慢」时先看这行 —— 并发是否真的开了、速率是否
+        // 贴着链路能力。并发已满但速率低，瓶颈就在代理/节点，不在下载器。
+        let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
+        info!(
+            "下载完成: 文件「{}」, 用时={:.1}s, 平均={:.2}MB/s, 并发连接={}",
+            path.display(),
+            elapsed,
+            total_mb / elapsed,
+            concurrency
+        );
 
         Ok(())
     }
@@ -925,7 +955,13 @@ impl Downloader {
         let parallel = &config.concurrent_limit.parallel_download;
         let mut last_error = None;
         for url in urls {
-            let result = if parallel.enabled && parallel.threads > 1 {
+            let want_parallel = parallel.enabled
+                && if is_googlevideo_url(url) {
+                    parallel.googlevideo_max_connections > 1
+                } else {
+                    parallel.threads > 1
+                };
+            let result = if want_parallel {
                 match self
                     .fetch_parallel(
                         url,
@@ -1270,8 +1306,11 @@ fn build_parallel_ranges(
         return (1, Vec::new());
     }
 
+    // googlevideo 的并行度只由「YouTube 并发连接上限」决定：YouTube 对单条连接
+    // 有独立限速，连接数才决定总吞吐。若这里与「下载线程数」取 min，用户把上限
+    // 调到 16、线程数仍留默认 4 时实际只跑 4 条连接，表现就是「并发怎么调都不涨」。
     let concurrency = if is_googlevideo {
-        threads.min(max_googlevideo_connections.max(1))
+        max_googlevideo_connections.max(1)
     } else {
         threads
     }
@@ -1359,6 +1398,12 @@ async fn download_range_to_file_with_retry(p: DownloadRangeInput<'_>) -> Result<
         .with_context(|| format!("Range 分片在重试后仍失败: bytes={start}-{end}"))
 }
 
+/// 单轮 Range 读取结果：本轮写盘字节数 + 结束原因（`None` 表示流正常结束）。
+struct RangeRoundOutcome {
+    written: u64,
+    error: Option<anyhow::Error>,
+}
+
 async fn download_range_to_file(
     client: Client,
     url: &str,
@@ -1369,11 +1414,142 @@ async fn download_range_to_file(
     cookie: Option<&str>,
 ) -> Result<u64> {
     let expected = end.saturating_sub(start) + 1;
+    let progress_path = path.display().to_string();
+    let mut received = 0u64;
+    let mut stalled_rounds = 0usize;
 
-    let mut file = OpenOptions::new().write(true).open(path).await?;
-    file.seek(std::io::SeekFrom::Start(start)).await?;
+    // 走代理下载时单条连接中途被掐断很常见（error decoding response body、等待
+    // 数据超时）。旧实现一出错就整片重下，4MiB 分片被掐几次，有效吞吐就会被压到
+    // 链路能力的零头，外在表现正是「并发调多大都不快」。这里改成片内断点续传：
+    // 连接断了就从已写入偏移继续请求剩余字节。
+    while received < expected {
+        let from = start.saturating_add(received);
+        let round = download_range_round(
+            RangeRoundRequest {
+                client: &client,
+                url,
+                path,
+                end,
+                referer,
+                cookie,
+            },
+            from,
+        )
+        .await;
+        let wrote = round.written;
+        received = received.saturating_add(wrote);
 
-    let range_value = format!("bytes={}-{}", start, end);
+        if received >= expected {
+            break;
+        }
+
+        // 硬失败（500/连接被拒/首字节超时）与「传输中途被掐」必须区别对待：
+        // 本片一个字节都没写进来，说明连不上或刚一开口就被拒，片内重试只会把
+        // 外层重试的次数成倍放大、退避策略失效，所以立刻带上下文返回，交给
+        // `download_range_to_file_with_retry` 按指数退避重试整片。
+        if wrote == 0 && received == 0 {
+            return match round.error {
+                Some(error) => Err(error).with_context(|| format!("Range 分片下载失败: bytes={start}-{end}")),
+                None => Err(anyhow!(
+                    "Range 分片未返回数据: bytes={start}-{end}（期望 {expected} 字节）"
+                )),
+            };
+        }
+
+        let Some(error) = round.error else {
+            // 流干净结束但没读满：从新偏移继续要剩余字节
+            stalled_rounds = if wrote == 0 { stalled_rounds + 1 } else { 0 };
+            if stalled_rounds >= RANGE_RESUME_MAX_STALLS {
+                bail!(
+                    "Range 分片续传连续 {} 轮无进展: bytes={start}-{end}，已完成 {received}/{expected}",
+                    stalled_rounds
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(
+                300u64 * (1u64 << (stalled_rounds as u32 - 1).min(5)),
+            ))
+            .await;
+            continue;
+        };
+
+        // 证书不匹配重试无意义，交给上层缓存坏 CDN 节点
+        if is_certificate_name_mismatch_error(&error) {
+            return Err(error);
+        }
+
+        if wrote == 0 {
+            stalled_rounds += 1;
+            if stalled_rounds >= RANGE_RESUME_MAX_STALLS {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Range 分片续传连续 {stalled_rounds} 轮无进展: bytes={start}-{end}，已完成 {received}/{expected}"
+                    )
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(
+                300u64 * (1u64 << (stalled_rounds as u32 - 1).min(5)),
+            ))
+            .await;
+        } else {
+            // 有进展 → 连接是在传输中途断的，立刻从新偏移续传
+            stalled_rounds = 0;
+            debug!(
+                start,
+                end,
+                offset = received,
+                remaining = expected.saturating_sub(received),
+                "Range 分片中途断开，已从新偏移续传"
+            );
+        }
+    }
+
+    // 分片完整接收：上报最终偏移（与分片完成时的累计上报一致，取 max）
+    crate::download_progress::DOWNLOAD_PROGRESS
+        .report_bytes(&progress_path, start.saturating_add(received))
+        .await;
+
+    Ok(received)
+}
+
+/// 一轮 Range 读取的固定上下文（打包传递，避免参数过多）。
+struct RangeRoundRequest<'a> {
+    client: &'a Client,
+    url: &'a str,
+    path: &'a Path,
+    end: u64,
+    referer: Option<&'a str>,
+    cookie: Option<&'a str>,
+}
+
+/// 发起一次 `from..=end` 的 Range 请求并把数据写入文件。返回本轮实际写入字节
+/// 与结束原因，由 [`download_range_to_file`] 决定是否续传。
+async fn download_range_round(req: RangeRoundRequest<'_>, from: u64) -> RangeRoundOutcome {
+    let RangeRoundRequest {
+        client,
+        url,
+        path,
+        end,
+        referer,
+        cookie,
+    } = req;
+    let progress_path = path.display().to_string();
+    let mut file = match OpenOptions::new().write(true).open(path).await {
+        Ok(file) => file,
+        Err(error) => {
+            return RangeRoundOutcome {
+                written: 0,
+                error: Some(anyhow::Error::from(error).context("打开分片目标文件失败")),
+            }
+        }
+    };
+    if let Err(error) = file.seek(std::io::SeekFrom::Start(from)).await {
+        return RangeRoundOutcome {
+            written: 0,
+            error: Some(anyhow::Error::from(error).context("定位分片写入偏移失败")),
+        };
+    }
+
+    let range_value = format!("bytes={}-{}", from, end);
     let request = client
         .media_request(Method::GET, url)
         .header(header::RANGE, range_value)
@@ -1388,25 +1564,44 @@ async fn download_range_to_file(
     } else {
         request
     };
-    let resp = tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send())
-        .await
-        .map_err(|_| anyhow!("Range分片响应超时（{} 秒）", FIRST_BYTE_TIMEOUT.as_secs()))?
-        .context("Range下载请求失败")?;
+    let resp = match tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send()).await {
+        Err(_) => {
+            return RangeRoundOutcome {
+                written: 0,
+                error: Some(anyhow!("Range分片响应超时（{} 秒）", FIRST_BYTE_TIMEOUT.as_secs())),
+            }
+        }
+        Ok(Err(error)) => {
+            return RangeRoundOutcome {
+                written: 0,
+                error: Some(anyhow::Error::from(error).context("Range下载请求失败")),
+            }
+        }
+        Ok(Ok(resp)) => resp,
+    };
 
-    ensure!(
-        resp.status() == StatusCode::PARTIAL_CONTENT,
-        "Range响应异常: {}",
-        resp.status()
-    );
+    if resp.status() != StatusCode::PARTIAL_CONTENT {
+        return RangeRoundOutcome {
+            written: 0,
+            error: Some(anyhow!("Range响应异常: {}", resp.status())),
+        };
+    }
 
-    let resp = resp.error_for_status().context("Range状态码错误")?;
+    let resp = match resp.error_for_status() {
+        Ok(resp) => resp,
+        Err(error) => {
+            return RangeRoundOutcome {
+                written: 0,
+                error: Some(anyhow::Error::from(error).context("Range状态码错误")),
+            }
+        }
+    };
 
-    let mut received = 0u64;
+    let mut written = 0u64;
     let mut stream = resp.bytes_stream();
     let mut first_chunk = true;
     // 进度：分片下载过程中按约 250ms 节流上报「文件内绝对偏移」，
     // 让首页进度条平滑增长而不是等整个分片下完才跳一次。
-    let progress_path = path.display().to_string();
     let mut last_progress_report = std::time::Instant::now();
     loop {
         let wait = if first_chunk {
@@ -1414,46 +1609,55 @@ async fn download_range_to_file(
         } else {
             CHUNK_IDLE_TIMEOUT
         };
-        let next = tokio::time::timeout(wait, stream.next())
-            .await
-            .map_err(|_| anyhow!("Range 分片 bytes={start}-{end} 等待数据超时（{} 秒）", wait.as_secs()))?;
-        let Some(chunk) = next else { break };
+        let next = match tokio::time::timeout(wait, stream.next()).await {
+            Err(_) => {
+                let _ = file.flush().await;
+                return RangeRoundOutcome {
+                    written,
+                    error: Some(anyhow!(
+                        "Range 分片 bytes={from}-{end} 等待数据超时（{} 秒）",
+                        wait.as_secs()
+                    )),
+                };
+            }
+            Ok(next) => next,
+        };
+        let Some(chunk) = next else {
+            let _ = file.flush().await;
+            return RangeRoundOutcome { written, error: None };
+        };
         first_chunk = false;
         match chunk {
             Ok(chunk) => {
-                file.write_all(&chunk).await?;
-                received += chunk.len() as u64;
+                if let Err(error) = file.write_all(&chunk).await {
+                    return RangeRoundOutcome {
+                        written,
+                        error: Some(anyhow::Error::from(error).context("写入分片数据失败")),
+                    };
+                }
+                written += chunk.len() as u64;
                 if last_progress_report.elapsed() >= Duration::from_millis(250) {
                     last_progress_report = std::time::Instant::now();
                     crate::download_progress::DOWNLOAD_PROGRESS
-                        .report_bytes(&progress_path, start.saturating_add(received))
+                        .report_bytes(&progress_path, from.saturating_add(written))
                         .await;
                 }
             }
-            Err(error) if received >= expected && contains_tls_close_notify_eof(&error.to_string()) => {
-                warn!(
-                    "Range CDN 未发送 TLS close_notify，但分片已完整接收: received={} expected={}",
-                    received, expected
-                );
-                break;
+            Err(error) => {
+                let _ = file.flush().await;
+                if contains_tls_close_notify_eof(&error.to_string()) {
+                    // CDN 不发 close_notify 就断流：已收到的数据仍然有效，
+                    // 交给上一层按续传处理，不当成失败。
+                    debug!(from, end, written, "Range CDN 未发送 TLS close_notify，按续传处理");
+                    return RangeRoundOutcome { written, error: None };
+                }
+                return RangeRoundOutcome {
+                    written,
+                    error: Some(error.into()),
+                };
             }
-            Err(error) => return Err(error.into()),
         }
     }
-    // 分片完整接收：上报最终偏移（与分片完成时的累计上报一致，取 max）
-    crate::download_progress::DOWNLOAD_PROGRESS
-        .report_bytes(&progress_path, start.saturating_add(received))
-        .await;
-    file.flush().await?;
-
-    ensure!(
-        received == expected,
-        "Range分片下载不完整: received {} bytes, expected {} bytes",
-        received,
-        expected
-    );
-
-    Ok(received)
 }
 
 trait ResponseExt {
@@ -1885,25 +2089,34 @@ mod tests {
     }
 
     #[test]
-    fn googlevideo_concurrency_follows_configured_threads() {
+    fn googlevideo_concurrency_follows_connection_limit_not_threads() {
         let total_size = 64 * 1024 * 1024;
-        // 用户把「下载线程数」调到 8 时，YouTube 必须真的用 8 条连接
-        // （旧版一律砍到 4，调节线程数对 YouTube 无效）。
-        let (concurrency, _) = build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
-        assert_eq!(concurrency, 8);
+        // YouTube 的并行度只看「YouTube 并发连接上限」。「下载线程数」只约束
+        // B 站/抖音等平台，不能反过来把 YouTube 的连接数压下去 —— 旧实现取
+        // min(线程数, 上限)，线程数留默认 4 时用户把上限调到 16 也只跑 4 条。
+        let (concurrency, _) = build_parallel_ranges(total_size, 4, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        assert_eq!(concurrency, 16);
 
-        // 配置上限低于线程数时，按配置上限收敛
-        let (concurrency, _) = build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 4);
-        assert_eq!(concurrency, 4);
+        let (concurrency, _) = build_parallel_ranges(total_size, 1, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        assert_eq!(concurrency, 16);
 
-        // 上限本身可配置，且不能被线程数反向放大
         let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
         assert_eq!(concurrency, 16);
-        let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 32);
+
+        // 上限调低时按上限收敛
+        let (concurrency, _) = build_parallel_ranges(total_size, 16, true, GOOGLEVIDEO_SEGMENT_SIZE, 4);
+        assert_eq!(concurrency, 4);
+
+        let (concurrency, _) = build_parallel_ranges(total_size, 16, true, GOOGLEVIDEO_SEGMENT_SIZE, 32);
         assert_eq!(concurrency, 32);
+
         // 非法 0 值也不能让并发变成 0
-        let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 0);
+        let (concurrency, _) = build_parallel_ranges(total_size, 16, true, GOOGLEVIDEO_SEGMENT_SIZE, 0);
         assert_eq!(concurrency, 1);
+
+        // 非 googlevideo 仍按「下载线程数」
+        let (concurrency, _) = build_parallel_ranges(total_size, 4, false, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        assert_eq!(concurrency, 4);
     }
 
     #[test]

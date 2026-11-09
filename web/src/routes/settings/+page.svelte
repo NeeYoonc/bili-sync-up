@@ -2680,7 +2680,8 @@
 								placeholder="16"
 							/>
 							<p class="text-muted-foreground text-xs">
-								YouTube 实际连接数取「下载线程数」与此上限的较小值；修改只对后续新任务生效。
+								YouTube 实际就用这么多条连接，不再受「下载线程数」压制（YouTube
+								对单条连接单独限速，连接数直接决定总速度）；修改只对后续新任务生效。
 							</p>
 						</div>
 
