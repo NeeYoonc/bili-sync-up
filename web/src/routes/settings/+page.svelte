@@ -271,6 +271,12 @@
 		return fallback;
 	}
 
+	// 并发提示用：输入框可能是空串/0/负数，统一兜成默认值，避免界面上算出 NaN 或 0
+	function normalizeConcurrencyValue(value: unknown, fallback: number): number {
+		const parsed = normalizeNumberInput(value, fallback);
+		return parsed > 0 ? parsed : fallback;
+	}
+
 	// 表单数据
 	let videoName = '{{upper_name}}';
 	let pageName = '{{pubtime}}-{{bvid}}';
@@ -329,6 +335,24 @@
 	let concurrentPage = 2;
 	let rateLimit = 4;
 	let rateDuration = 250;
+
+	// 「下载线程数」兜底后的值（空/0 时按默认 4 处理）
+	$: effectiveDownloadThreads = normalizeConcurrencyValue(parallelDownloadThreads, 4);
+	// 「YouTube 并发连接上限」兜底后的值（空/0 时按默认 16 处理）
+	$: effectiveGooglevideoMaxConnections = normalizeConcurrencyValue(
+		parallelDownloadGooglevideoMaxConnections,
+		16
+	);
+	// 实际生效并发：YouTube 下载取「下载线程数」和「并发连接上限」的较小值
+	$: effectiveYoutubeConnections = Math.min(
+		effectiveDownloadThreads,
+		effectiveGooglevideoMaxConnections
+	);
+	// 预估最大连接数（理论峰值）= 下载线程数 × 同时处理视频数 × 每视频并发分页数
+	$: effectiveConcurrentVideo = normalizeConcurrencyValue(concurrentVideo, 3);
+	$: effectiveConcurrentPage = normalizeConcurrencyValue(concurrentPage, 2);
+	$: estimatedMaxConnections =
+		effectiveDownloadThreads * effectiveConcurrentVideo * effectiveConcurrentPage;
 
 	// 其他设置
 	let cdnSorting = false;
@@ -2666,7 +2690,7 @@
 							type="number"
 							bind:value={parallelDownloadThreads}
 							min="1"
-							max="16"
+							max="32"
 							placeholder="4"
 						/>
 						<div class="space-y-2">
@@ -2680,8 +2704,12 @@
 								placeholder="16"
 							/>
 							<p class="text-muted-foreground text-xs">
-								YouTube 实际连接数取「下载线程数」与此上限的较小值；修改只对后续新任务生效。
+								实际生效并发：
+								<span class="text-foreground font-semibold"
+									>{effectiveYoutubeConnections} 条/文件</span
+								>（取「下载线程数」与「YouTube 并发连接上限」的较小值）
 							</p>
+							<p class="text-muted-foreground text-xs">修改只对后续新任务生效。</p>
 						</div>
 
 						<div class="flex items-center space-x-2">
@@ -2753,6 +2781,18 @@
 						/>
 						<p class="text-muted-foreground text-sm">请求频率限制的时间窗口</p>
 					</div>
+				</div>
+
+				<div
+					class="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
+				>
+					<p class="font-medium">
+						预估最大连接数：{estimatedMaxConnections}（下载线程数 {effectiveDownloadThreads} × 同时处理视频数
+						{effectiveConcurrentVideo} × 每视频并发分页数 {effectiveConcurrentPage}）
+					</p>
+					<p class="mt-1 opacity-80">
+						这是理论峰值，实际连接数受网络带宽和源站限制，通常达不到这个数字。
+					</p>
 				</div>
 			</div>
 
