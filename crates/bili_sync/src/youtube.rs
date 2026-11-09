@@ -9443,6 +9443,7 @@ mod tests {
         assert_ne!(name, "folder.download", "不能退化成所有任务共用的固定临时名");
     }
 
+    #[cfg(windows)]
     #[test]
     fn episodic_series_dir_handles_flat_and_season_layouts() {
         // 平铺目录：视频直接在源目录里，合集根就是源目录，不能再往上退一层
@@ -9566,9 +9567,11 @@ mod tests {
         assert!(!source_scanned_recently(Some("not-a-date"), 1200));
     }
 
+    #[cfg(windows)]
+    use super::episodic_series_dir;
     use super::{
         canonical_channel_url, checksum_for_release_asset, collect_external_scan_result,
-        collect_youtube_channel_renderers, current_ytdlp_package, episodic_series_dir, extract_youtube_initial_data,
+        collect_youtube_channel_renderers, current_ytdlp_package, extract_youtube_initial_data,
         generate_youtube_person_nfo, has_youtube_session_value, is_jpeg_header, is_netscape_youtube_cookie_file,
         is_partial_download_artifact, is_youtube_url, needs_jpeg_conversion, normalize_source_type,
         normalize_youtube_playlist_url, parse_youtube_live_chat, remove_partial_download_artifacts, resolve_source_url,

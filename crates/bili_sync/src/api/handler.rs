@@ -1508,6 +1508,7 @@ mod reset_path_tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn remap_existing_video_dir_to_new_base_is_case_insensitive_on_windows() {
         let remapped = remap_existing_video_dir_to_new_base(
