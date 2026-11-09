@@ -87,6 +87,10 @@ pub struct AiRenameHistoryTaskQueue {
     queue: Mutex<VecDeque<AiRenameHistoryTask>>,
     /// 是否正在处理（防止 handler 重复 spawn 造成并发执行）
     is_processing: AtomicBool,
+    /// 正在执行的任务（用于在限频重试等待期间响应取消请求）
+    processing_task: Mutex<Option<AiRenameHistoryTask>>,
+    /// 执行阶段的取消标记：取消正在执行的任务时置位，限频重试等待循环会轮询
+    cancel_requested: Arc<AtomicBool>,
 }
 
 impl AiRenameHistoryTaskQueue {
@@ -94,6 +98,8 @@ impl AiRenameHistoryTaskQueue {
         Self {
             queue: Mutex::new(VecDeque::new()),
             is_processing: AtomicBool::new(false),
+            processing_task: Mutex::new(None),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -225,6 +231,22 @@ impl AiRenameHistoryTaskQueue {
 
     /// 取消指定任务（仅支持仍在内存队列中等待的任务）
     pub async fn cancel_task(&self, task_id: &str, connection: &DatabaseConnection) -> Result<bool> {
+        // 正在执行的任务：置取消标记，让限频重试的等待循环尽快退出
+        //（任务已出队，数据库行仍是 Pending，执行结束后按正常流程标记完成）
+        {
+            let processing_task = self.processing_task.lock().await;
+            if let Some(task) = processing_task.as_ref() {
+                if task.task_id == task_id {
+                    self.cancel_requested.store(true, Ordering::SeqCst);
+                    info!(
+                        "AI 批量重命名任务收到取消请求（执行中，将停止限频重试）: {}",
+                        task.source_key()
+                    );
+                    return Ok(true);
+                }
+            }
+        }
+
         let removed_task = {
             let mut queue = self.queue.lock().await;
             if let Some(index) = queue.iter().position(|task| task.task_id == task_id) {
@@ -288,10 +310,21 @@ impl AiRenameHistoryTaskQueue {
 
         while let Some(task) = self.dequeue_task().await {
             let source_key = task.source_key();
+            self.cancel_requested.store(false, Ordering::SeqCst);
+            *self.processing_task.lock().await = Some(task.clone());
 
-            match execute_ai_rename_history_task(db.as_ref(), &task).await {
+            let execution =
+                execute_ai_rename_history_task(db.as_ref(), &task, Some(self.cancel_requested.clone())).await;
+
+            *self.processing_task.lock().await = None;
+            let was_cancelled = self.cancel_requested.swap(false, Ordering::SeqCst);
+
+            match execution {
                 Ok(outcome) => {
                     info!("AI 批量重命名任务执行成功: {}, {}", source_key, outcome.describe());
+                    if was_cancelled {
+                        info!("AI 批量重命名任务已按取消请求停止限频重试: {}", source_key);
+                    }
                     processed_count += 1;
 
                     if let Err(e) = self.mark_task_completed(&task, &db).await {
@@ -299,6 +332,9 @@ impl AiRenameHistoryTaskQueue {
                     }
                 }
                 Err(e) => {
+                    if was_cancelled {
+                        info!("AI 批量重命名任务在执行中被取消: {}", source_key);
+                    }
                     error!("AI 批量重命名任务执行失败: {}, 错误: {:#}", source_key, e);
 
                     if let Err(mark_err) = self.mark_task_failed(&task, &db).await {
@@ -340,6 +376,7 @@ impl Drop for ScanResumeGuard {
 pub async fn execute_ai_rename_history_task(
     db: &DatabaseConnection,
     task: &AiRenameHistoryTask,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<AiRenameHistoryOutcome> {
     let config = crate::config::reload_config();
     let mut ai_config = config.ai_rename.clone();
@@ -420,6 +457,7 @@ pub async fn execute_ai_rename_history_task(
             audio_prompt: &audio_prompt,
             flat_folder,
             structure_hint,
+            cancel,
         })
         .await?;
     notify_videos_changed();

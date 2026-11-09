@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -739,6 +741,19 @@ const AI_FALLBACK_MAX_CONSECUTIVE_FAILURES: usize = 3;
 /// 这里按 30s/60s/120s 指数退避（先跨过限频窗口，再给足恢复时间），用完即放弃。
 const AI_RATE_LIMIT_BACKOFFS: [u64; 3] = [30, 60, 120];
 
+/// 限频耗尽后，任务末尾自动重试一轮前的等待时间（秒）
+///
+/// DeepSeek Web 的硬限是滚动配额（2026-11-09 压测里约 50 分钟后恢复），30/60/120 秒
+/// 退避全部用尽后如果直接丢掉整批，文件会永久漏掉。这里在任务末尾对**限频失败**的批次
+/// 再等 5 分钟重试一轮，最多一轮，避免任务无限挂起。
+///
+/// 可用环境变量 `BILI_SYNC_AI_RENAME_RATE_LIMIT_RETRY_SECS` 调整（调试用；低于 300 的值
+/// 会被忽略，保证「至少 5 分钟」的语义不被破坏）。
+const AI_RATE_LIMIT_RETRY_DELAY_SECS: u64 = 300;
+const AI_RATE_LIMIT_RETRY_MIN_DELAY_SECS: u64 = 300;
+/// 重试等待期间轮询取消标记的间隔（秒）
+const AI_RATE_LIMIT_RETRY_POLL_INTERVAL_SECS: u64 = 5;
+
 /// 判断 AI 错误是否值得重试
 ///
 /// 配置缺失、凭据失效这类错误重试多少次结果都一样，直接放弃；
@@ -808,6 +823,41 @@ fn is_rate_limited_error(message: &str) -> bool {
 /// 不能把 web 的长退避套到 API 用户头上。
 fn is_web_rate_limited(provider: &str, message: &str) -> bool {
     provider == "deepseek-web" && is_rate_limited_error(message)
+}
+
+/// 判断批量请求错误是否属于「限频耗尽、值得在任务末尾再试一轮」
+fn should_retry_rate_limited_batch(err: &anyhow::Error, provider: &str) -> bool {
+    is_web_rate_limited(provider, &err.to_string())
+}
+
+/// 读取取消标记（未传入标记时视为未取消）
+fn is_cancel_requested(cancel: Option<&Arc<AtomicBool>>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::SeqCst))
+}
+
+/// 限频重试前的等待：分段 sleep，每 5 秒检查一次取消标记；返回 `true` 表示被取消
+async fn wait_before_rate_limit_retry(delay: Duration, cancel: Option<&Arc<AtomicBool>>) -> bool {
+    let poll_interval = Duration::from_secs(AI_RATE_LIMIT_RETRY_POLL_INTERVAL_SECS);
+    let mut remaining = delay;
+    while remaining > Duration::ZERO {
+        if is_cancel_requested(cancel) {
+            return true;
+        }
+        let step = remaining.min(poll_interval);
+        tokio::time::sleep(step).await;
+        remaining = remaining.saturating_sub(step);
+    }
+    is_cancel_requested(cancel)
+}
+
+/// 任务末尾限频重试的等待时间（默认 5 分钟，可用环境变量覆盖，见模块常量注释）
+fn rate_limit_retry_delay() -> Duration {
+    let seconds = std::env::var("BILI_SYNC_AI_RENAME_RATE_LIMIT_RETRY_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds >= AI_RATE_LIMIT_RETRY_MIN_DELAY_SECS)
+        .unwrap_or(AI_RATE_LIMIT_RETRY_DELAY_SECS);
+    Duration::from_secs(seconds)
 }
 
 /// 计算一次失败后的等待时间；返回 `None` 表示不再重试
@@ -1804,6 +1854,51 @@ pub async fn apply_ai_rename_folder(
     Ok(true)
 }
 
+/// 限频导致整批失败、留到任务末尾统一重试一轮的批次
+enum DeferredRateLimitBatch {
+    VideoFiles(Vec<FileToRename>),
+    AudioFiles(Vec<FileToRename>),
+    Folders(Vec<FolderToRename>),
+}
+
+impl DeferredRateLimitBatch {
+    fn files_len(&self) -> usize {
+        match self {
+            Self::VideoFiles(files) | Self::AudioFiles(files) => files.len(),
+            Self::Folders(folders) => folders.len(),
+        }
+    }
+}
+
+/// 限频批次末尾重试轮的统计，用于日志和 `failed_count` 核对
+#[derive(Debug, Default, Clone, Copy)]
+struct RateLimitRetryStats {
+    deferred_batches: usize,
+    deferred_files: usize,
+    recovered_files: usize,
+    failed_files: usize,
+}
+
+impl RateLimitRetryStats {
+    fn record_deferred(&mut self, files: usize) {
+        self.deferred_batches += 1;
+        self.deferred_files += files;
+    }
+
+    fn record_recovered(&mut self, files: usize) {
+        self.recovered_files += files;
+    }
+
+    fn record_failed(&mut self, files: usize) {
+        self.failed_files += files;
+    }
+
+    /// 重试轮结束后仍未恢复的文件数（应当与 `failed_files` 一致）
+    fn remaining_files(&self) -> usize {
+        self.deferred_files.saturating_sub(self.recovered_files)
+    }
+}
+
 pub(crate) struct BatchRenameHistoryInput<'a> {
     pub(crate) connection: &'a DatabaseConnection,
     pub(crate) source_key: &'a str,
@@ -1813,6 +1908,8 @@ pub(crate) struct BatchRenameHistoryInput<'a> {
     pub(crate) audio_prompt: &'a str,
     pub(crate) flat_folder: bool,
     pub(crate) structure_hint: &'a str,
+    /// 限频重试等待期间轮询的取消标记（队列取消执行中的任务时置位）
+    pub(crate) cancel: Option<Arc<AtomicBool>>,
 }
 
 /// 批量重命名视频源下的历史文件
@@ -1838,6 +1935,7 @@ pub async fn batch_rename_history_files(p: BatchRenameHistoryInput<'_>) -> Resul
         audio_prompt,
         flat_folder,
         structure_hint,
+        cancel,
     } = p;
     let mut result = BatchRenameResult::default();
 
@@ -1965,8 +2063,11 @@ pub async fn batch_rename_history_files(p: BatchRenameHistoryInput<'_>) -> Resul
         );
     }
 
-    // 第二步：按批次处理视频文件（每批 10 个）
-    let batch_size = 10;
+    // 第二步：按批次处理视频文件（每批 20 个）
+    //
+    // 批大小受 `batch_max_tokens` 上限约束：512 + 160 × 20 = 3712 ≤ 4096，仍在上限内。
+    // 20 个/批能把 3600 个文件的消息数从 360 条降到 180 条，直接减半限频压力。
+    let batch_size = 20;
     let video_prompt_hint = if !video_prompt.is_empty() {
         video_prompt
     } else {
@@ -1977,6 +2078,9 @@ pub async fn batch_rename_history_files(p: BatchRenameHistoryInput<'_>) -> Resul
     } else {
         &config.audio_prompt_hint
     };
+
+    // 限频（deepseek-web 文本限频）导致整批失败时先不丢弃，任务末尾统一再试一轮
+    let mut deferred_rate_limit_batches: Vec<DeferredRateLimitBatch> = Vec::new();
 
     // 处理视频文件
     for (batch_idx, batch) in video_files.chunks(batch_size).enumerate() {
@@ -1995,8 +2099,19 @@ pub async fn batch_rename_history_files(p: BatchRenameHistoryInput<'_>) -> Resul
                 }
             }
             Err(e) => {
-                warn!("[{}] 视频批次 {} 处理失败: {}", source_key, batch_idx + 1, e);
-                result.failed_count += batch.len();
+                if should_retry_rate_limited_batch(&e, config.provider.as_str()) {
+                    warn!(
+                        "[{}] 视频批次 {} 因限频失败，{} 个文件留到任务末尾延迟重试: {:#}",
+                        source_key,
+                        batch_idx + 1,
+                        batch.len(),
+                        e
+                    );
+                    deferred_rate_limit_batches.push(DeferredRateLimitBatch::VideoFiles(batch.to_vec()));
+                } else {
+                    warn!("[{}] 视频批次 {} 处理失败: {}", source_key, batch_idx + 1, e);
+                    result.failed_count += batch.len();
+                }
             }
         }
     }
@@ -2018,8 +2133,19 @@ pub async fn batch_rename_history_files(p: BatchRenameHistoryInput<'_>) -> Resul
                 }
             }
             Err(e) => {
-                warn!("[{}] 音频批次 {} 处理失败: {}", source_key, batch_idx + 1, e);
-                result.failed_count += batch.len();
+                if should_retry_rate_limited_batch(&e, config.provider.as_str()) {
+                    warn!(
+                        "[{}] 音频批次 {} 因限频失败，{} 个文件留到任务末尾延迟重试: {:#}",
+                        source_key,
+                        batch_idx + 1,
+                        batch.len(),
+                        e
+                    );
+                    deferred_rate_limit_batches.push(DeferredRateLimitBatch::AudioFiles(batch.to_vec()));
+                } else {
+                    warn!("[{}] 音频批次 {} 处理失败: {}", source_key, batch_idx + 1, e);
+                    result.failed_count += batch.len();
+                }
             }
         }
     }
@@ -2053,9 +2179,151 @@ pub async fn batch_rename_history_files(p: BatchRenameHistoryInput<'_>) -> Resul
                     }
                 }
                 Err(e) => {
-                    warn!("[{}] 文件夹批次 {} AI 调用失败: {}", source_key, batch_idx + 1, e);
-                    result.failed_count += batch.len();
+                    if should_retry_rate_limited_batch(&e, config.provider.as_str()) {
+                        warn!(
+                            "[{}] 文件夹批次 {} 因限频失败，{} 个文件夹留到任务末尾延迟重试: {:#}",
+                            source_key,
+                            batch_idx + 1,
+                            batch.len(),
+                            e
+                        );
+                        deferred_rate_limit_batches.push(DeferredRateLimitBatch::Folders(batch.to_vec()));
+                    } else {
+                        warn!("[{}] 文件夹批次 {} AI 调用失败: {}", source_key, batch_idx + 1, e);
+                        result.failed_count += batch.len();
+                    }
                 }
+            }
+        }
+    }
+
+    // 第三步：对限频耗尽的批次延迟重试一轮（最多一轮，避免任务无限挂起）
+    if !deferred_rate_limit_batches.is_empty() {
+        let mut stats = RateLimitRetryStats::default();
+        for batch in &deferred_rate_limit_batches {
+            stats.record_deferred(batch.files_len());
+        }
+        let retry_delay = rate_limit_retry_delay();
+        warn!(
+            "[{}] 有 {} 个文件（{} 批）因限频未完成，{} 秒后自动重试一轮",
+            source_key,
+            stats.deferred_files,
+            stats.deferred_batches,
+            retry_delay.as_secs()
+        );
+
+        if wait_before_rate_limit_retry(retry_delay, cancel.as_ref()).await {
+            warn!(
+                "[{}] 限频重试等待期间任务被取消，{} 个文件保持原名、可稍后重新执行",
+                source_key, stats.deferred_files
+            );
+            result.failed_count += stats.deferred_files;
+            stats.record_failed(stats.deferred_files);
+        } else {
+            for batch in deferred_rate_limit_batches {
+                if is_cancel_requested(cancel.as_ref()) {
+                    // 剩余未处理 = 延迟总数 - 已恢复 - 已判定失败（含前面批次的重试失败）
+                    let cancelled_files = stats
+                        .deferred_files
+                        .saturating_sub(stats.recovered_files + stats.failed_files);
+                    warn!(
+                        "[{}] 限频重试期间任务被取消，剩余 {} 个文件不再重试",
+                        source_key, cancelled_files
+                    );
+                    result.failed_count += cancelled_files;
+                    stats.record_failed(cancelled_files);
+                    break;
+                }
+                match batch {
+                    DeferredRateLimitBatch::VideoFiles(files) => {
+                        match ai_generate_filenames_batch(config, source_key, &files, video_prompt_hint).await {
+                            Ok(new_names) => {
+                                for (file, new_stem) in files.iter().zip(new_names.iter()) {
+                                    apply_rename(connection, source_key, file, new_stem, config, &mut result).await;
+                                }
+                                stats.record_recovered(files.len());
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "[{}] 限频重试后视频批次仍失败，{} 个文件保持原名: {:#}",
+                                    source_key,
+                                    files.len(),
+                                    e
+                                );
+                                result.failed_count += files.len();
+                                stats.record_failed(files.len());
+                            }
+                        }
+                    }
+                    DeferredRateLimitBatch::AudioFiles(files) => {
+                        match ai_generate_filenames_batch(config, source_key, &files, audio_prompt_hint).await {
+                            Ok(new_names) => {
+                                for (file, new_stem) in files.iter().zip(new_names.iter()) {
+                                    apply_rename(connection, source_key, file, new_stem, config, &mut result).await;
+                                }
+                                stats.record_recovered(files.len());
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "[{}] 限频重试后音频批次仍失败，{} 个文件保持原名: {:#}",
+                                    source_key,
+                                    files.len(),
+                                    e
+                                );
+                                result.failed_count += files.len();
+                                stats.record_failed(files.len());
+                            }
+                        }
+                    }
+                    DeferredRateLimitBatch::Folders(folders) => {
+                        match ai_generate_folder_names_batch(config, source_key, &folders, video_prompt_hint).await {
+                            Ok(new_names) => {
+                                for (folder, new_name) in folders.iter().zip(new_names.iter()) {
+                                    match apply_ai_rename_folder(connection, source_key, folder, new_name).await {
+                                        Ok(true) => {
+                                            result.renamed_count += 1;
+                                            stats.record_recovered(1);
+                                        }
+                                        Ok(false) => {
+                                            result.skipped_count += 1;
+                                            stats.record_recovered(1);
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "[{}] 限频重试后文件夹重命名失败 {}: {}",
+                                                source_key, folder.current_name, e
+                                            );
+                                            result.failed_count += 1;
+                                            stats.record_failed(1);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "[{}] 限频重试后文件夹批次仍失败，{} 个文件夹保持原名: {:#}",
+                                    source_key,
+                                    folders.len(),
+                                    e
+                                );
+                                result.failed_count += folders.len();
+                                stats.record_failed(folders.len());
+                            }
+                        }
+                    }
+                }
+            }
+
+            debug_assert_eq!(
+                stats.remaining_files(),
+                stats.failed_files,
+                "限频重试统计必须自洽：remaining_files 应等于 failed_files"
+            );
+            if stats.failed_files > 0 {
+                warn!(
+                    "[{}] 剩余 {} 个文件因限频未完成，可稍后重新执行（这些文件保持原名）",
+                    source_key, stats.failed_files
+                );
             }
         }
     }
@@ -2152,6 +2420,16 @@ pub fn append_missing_template_variables(ai_name: &str, template: &str, ctx: &Ai
     out
 }
 
+/// 目标名与当前文件名相同（含模板补全后相同）时必须跳过，不能追加 `-1` 后缀
+///
+/// 重复执行 AI 重命名时，AI 往往返回与当前名相同的名字；而模板补全（自动补
+/// `{{bvid}}`/`{{pubtime}}` 等变量）后又可能把目标名拼回当前名。旧逻辑只在模板补全
+/// **之前**比较一次，漏掉这种情况后会走「目标已存在 → 加后缀」的分支，重复执行一次就
+/// 多出一批 `原名-1.mp4` 垃圾文件（压测里产生了 400 个）。
+fn should_skip_same_name(current_stem: &str, final_stem: &str) -> bool {
+    final_stem == current_stem
+}
+
 /// 应用单个文件的重命名
 async fn apply_rename(
     connection: &DatabaseConnection,
@@ -2195,9 +2473,21 @@ async fn apply_rename(
     } else {
         append_missing_template_variables(new_stem, page_template, &file.ctx)
     };
+    // 模板补全后的目标名可能与当前文件名完全相同（重复执行时的典型场景），
+    // 必须在「目标已存在 → 加 -1 后缀」之前识别为跳过，否则每次重复执行都会多出垃圾文件。
+    if should_skip_same_name(&file.current_stem, &final_stem) {
+        info!("[{}] 跳过(补全模板后与当前文件名相同): '{}'", source_key, final_stem);
+        result.skipped_count += 1;
+        return;
+    }
     let base_stem = final_stem.clone();
     let mut new_filename = format!("{}.{}", final_stem, file.ext);
     let mut new_path = parent.join(&new_filename);
+    if new_path == file.path {
+        info!("[{}] 跳过(目标路径与当前路径相同): '{}'", source_key, final_stem);
+        result.skipped_count += 1;
+        return;
+    }
 
     // 如果目标文件已存在，添加后缀使其唯一
     let mut suffix = 1;
@@ -2455,7 +2745,78 @@ mod tests {
 
         assert_eq!(batch_max_tokens(1), 672);
         assert_eq!(batch_max_tokens(10), 2112);
+        // 批大小从 10 提到 20 后，单次请求的 max_tokens 仍不能超过 4096
+        assert_eq!(batch_max_tokens(20), 3712);
+        assert!(batch_max_tokens(20) <= 4096);
+        assert_eq!(batch_max_tokens(22), 4032);
         assert_eq!(batch_max_tokens(100), 4096);
+    }
+
+    #[test]
+    fn same_name_after_template_completion_is_skipped_instead_of_suffixed() {
+        use super::should_skip_same_name;
+
+        // 目标名与当前名相同（含模板补全后相同）→ 跳过，不能追加 -1
+        assert!(should_skip_same_name(
+            "UP-标题]BV1xx]20260101000000",
+            "UP-标题]BV1xx]20260101000000"
+        ));
+        assert!(should_skip_same_name("UP-标题-1080p", "UP-标题-1080p"));
+        // 真正不同名时仍要走冲突处理（加 -1 后缀）逻辑
+        assert!(!should_skip_same_name("UP-标题-1080p", "UP-标题-2-1080p"));
+    }
+
+    #[test]
+    fn rate_limited_batches_are_deferred_and_failed_count_is_accurate() {
+        use super::{should_retry_rate_limited_batch, RateLimitRetryStats};
+        use anyhow::anyhow;
+
+        let rate_limited = anyhow!("批量 AI 请求失败: RATE_LIMITED: 消息发送过于频繁，请稍后重试");
+        assert!(should_retry_rate_limited_batch(&rate_limited, "deepseek-web"));
+        // 非限频错误（鉴权失败等）不触发整批延迟重试
+        assert!(!should_retry_rate_limited_batch(
+            &anyhow!("批量 AI 请求失败: 401 Unauthorized"),
+            "deepseek-web"
+        ));
+        // API 的 429 属于普通可重试错误，不需要任务末尾的长等待重试
+        assert!(!should_retry_rate_limited_batch(
+            &anyhow!("批量 AI 请求失败: 429 Too Many Requests"),
+            "deepseek"
+        ));
+
+        // 压测场景：硬限期间连续 7 批 × 10 个文件整批失败
+        let mut stats = RateLimitRetryStats::default();
+        for _ in 0..7 {
+            stats.record_deferred(10);
+        }
+        assert_eq!(stats.deferred_batches, 7);
+        assert_eq!(stats.deferred_files, 70);
+
+        // 任务末尾重试一轮：5 批恢复（50 个）、2 批仍失败（20 个）
+        stats.record_recovered(50);
+        stats.record_failed(20);
+        assert_eq!(stats.failed_files, 20, "最终 failed_count 必须等于仍未恢复的文件数");
+        assert_eq!(stats.remaining_files(), stats.failed_files);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retry_wait_is_interruptible_by_cancellation() {
+        use super::{is_cancel_requested, wait_before_rate_limit_retry};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // 已收到取消请求时立即返回，不会真的等 5 分钟
+        let cancel = Arc::new(AtomicBool::new(true));
+        assert!(wait_before_rate_limit_retry(Duration::from_secs(300), Some(&cancel)).await);
+
+        // 未取消时用极短延迟验证等待能正常结束
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert!(!wait_before_rate_limit_retry(Duration::from_millis(20), Some(&cancel)).await);
+        assert!(!is_cancel_requested(Some(&cancel)));
+        assert!(!is_cancel_requested(None));
+        cancel.store(true, Ordering::SeqCst);
+        assert!(is_cancel_requested(Some(&cancel)));
     }
 
     #[test]
