@@ -1,7 +1,6 @@
 # 质量门禁 v1（2026-11-08）
 #
-# 五道：Rust 格式检查 / Clippy / 前端 svelte-check / 前端 lint（prettier + eslint）/ 文档站构建。
-# cargo test 暂缓，原因和启用方式见文件末尾的注释块。
+# 六道：Rust 格式检查 / Rust Clippy / Rust 测试 / 前端 svelte-check / 前端 lint（prettier + eslint）/ 文档站构建。
 #
 # 几个刻意不做的事：
 # - 不用 `npm run check:node20` / `build:node20`：那是 Windows 本地给 npx 用的包装脚本，
@@ -128,46 +127,33 @@ jobs:
         with:
           shared-key: clippy
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: 占位前端产物目录（rust-embed 的 #[folder = "../../web/build"] 缺目录会编译失败）
+      - name: '占位前端产物目录（rust-embed 的 #[folder = "../../web/build"] 缺目录会编译失败）'
         # index.html 一起补上：build.rs 检查前端产物时会打印 cargo:warning，避免日志出现噪音。
         run: mkdir -p web/build && touch web/build/index.html
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-# ---------------------------------------------------------------------------
-# 暂未启用的一关：test（等测试基线建立后启用）
-#   现在启用风险高：cargo test 从未在 CI 跑过，510 个测试里 13 个 #[ignore]（依赖网络 /
-#   真实凭证 / ffmpeg），非 ignore 的测试也没验证过在干净 runner 上是否全绿。
-#   更硬的坑：不先建 web/build 时 rust-embed 的 #[folder] 可能直接编译失败，
-#   所以这个 job 必须先 `mkdir -p web/build`。先本地跑通 `cargo test --workspace`
-#   （bili_sync 没有 lib target，是 bin target）并确认 ignore 列表，再放开。
-#
-#  test:
-#    name: Rust 测试
-#    runs-on: ubuntu-24.04
-#    steps:
-#      - name: 检出代码
-#        uses: actions/checkout@v6
-#      - name: 读取 rust-toolchain.toml 里的工具链版本
-#        id: toolchain
-#        run: |
-#          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | head -n 1)"
-#          if [ -z "$channel" ]; then
-#            echo "读不到 rust-toolchain.toml 里的 channel" >&2
-#            exit 1
-#          fi
-#          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-#      - name: 安装 Rust 工具链
-#        uses: dtolnay/rust-toolchain@stable
-#        with:
-#          toolchain: ${{ steps.toolchain.outputs.channel }}
-#      - name: 缓存 cargo 编译产物
-#        uses: Swatinem/rust-cache@v2
-#        with:
-#          shared-key: test
-#          save-if: ${{ github.ref == 'refs/heads/main' }}
-#      - name: 占位前端产物目录（rust-embed 的 #[folder = "../../web/build"]）
-#        run: mkdir -p web/build
-#      - name: cargo test
-#        run: cargo test --workspace
-# ---------------------------------------------------------------------------
+  test:
+    name: Rust 测试
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+      - name: 读取 rust-toolchain.toml 里的工具链版本
+        id: toolchain
+        run: |
+          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | head -n 1)"
+          if [ -z "$channel" ]; then
+            echo "读不到 rust-toolchain.toml 里的 channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: '占位前端产物目录（rust-embed 的 #[folder = "../../web/build"] 缺目录会编译失败）'
+        run: mkdir -p web/build && touch web/build/index.html
+      - name: cargo test
+        run: cargo test --bin bili-sync-rs
