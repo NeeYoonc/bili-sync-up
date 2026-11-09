@@ -2763,12 +2763,15 @@ mod tests {
         assert_eq!(fs::read(&path).await.unwrap(), data, "续传后文件内容应与源一致");
         let reqs = requested.lock().unwrap().clone();
         assert!(reqs.len() >= 3, "应发生分片内续传与第二个分片请求，实际: {reqs:?}");
-        assert_eq!(reqs[0], (0, 4 * 1024 * 1024 - 1), "首个请求应为第一个 4MiB 分片");
-        assert_eq!(
-            reqs[1].0, truncate_after as u64,
-            "第二次请求应从已写字节继续，实际: {reqs:?}"
+        // YouTube 单文件连接数独立生效后，两个分片会并发下载，请求顺序不固定，按内容断言。
+        let first_segment = (0, 4 * 1024 * 1024 - 1);
+        let second_segment = (4 * 1024 * 1024, 8 * 1024 * 1024 - 1);
+        assert!(reqs.contains(&first_segment), "应请求第一个 4MiB 分片，实际: {reqs:?}");
+        assert!(reqs.contains(&second_segment), "应请求第二个 4MiB 分片，实际: {reqs:?}");
+        assert!(
+            reqs.contains(&(truncate_after as u64, 4 * 1024 * 1024 - 1)),
+            "断流后应从已写字节继续下载第一个分片，实际: {reqs:?}"
         );
-        assert_eq!(reqs[2], (4 * 1024 * 1024, 8 * 1024 * 1024 - 1));
 
         let sidecar = resume_sidecar_path(&path);
         let content = fs::read_to_string(&sidecar)
