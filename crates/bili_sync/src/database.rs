@@ -965,6 +965,30 @@ mod tests {
         }
     }
 
+    /// 轮询等待日志缓冲区出现指定内容。
+    ///
+    /// `tracing` 的写入是同步的，正常情况下第一次读取就能命中；轮询是为了避免
+    /// 并行测试调度造成的可见性延迟（以及日志 writer 以后换成异步实现的情况）。
+    async fn wait_for_log_contains(logs: &SharedLogBuffer, needle: &str, timeout: std::time::Duration) -> String {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let contents = logs.contents();
+            if contents.contains(needle) || std::time::Instant::now() >= deadline {
+                return contents;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// 断言失败（panic）时也要清理进程级全局状态，避免污染后续测试。
+    struct ActiveDbOperationsCleanupGuard;
+
+    impl Drop for ActiveDbOperationsCleanupGuard {
+        fn drop(&mut self) {
+            ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+    }
+
     async fn create_test_connection(path: &Path, busy_timeout_ms: u64) -> anyhow::Result<DatabaseConnection> {
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -1010,6 +1034,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn traced_db_operation_skips_contention_warning_for_short_overlap() -> anyhow::Result<()> {
         let _serial = ACTIVE_DB_OPERATIONS_TEST_LOCK.lock().await;
+        let _cleanup = ActiveDbOperationsCleanupGuard;
         ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 
         let logs = SharedLogBuffer::default();
@@ -1020,6 +1045,10 @@ mod tests {
             .with_max_level(Level::DEBUG)
             .finish();
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        // `set_default` 只设置线程级 dispatcher，而 tracing 的 callsite interest 是
+        // 进程级缓存：如果该 callsite 之前被没有 subscriber 的测试线程先命中过，
+        // 会被缓存成 never，本测试就永远收不到 DEBUG 日志。强制重建一次。
+        tracing::callsite::rebuild_interest_cache();
 
         ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).insert(
             999,
@@ -1036,14 +1065,21 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&999);
 
-        let log_output = logs.contents();
-        assert!(
-            !log_output.contains("数据库操作开始时检测到"),
-            "short overlap should not emit contention log, got logs: {log_output}"
-        );
+        let log_output = wait_for_log_contains(
+            &logs,
+            "数据库操作开始: test.short_contender",
+            std::time::Duration::from_millis(500),
+        )
+        .await;
         assert!(
             log_output.contains("数据库操作开始: test.short_contender"),
             "short overlap should fall back to normal start debug log, got logs: {log_output}"
+        );
+        // 只对本测试的 contender 断言没有走 contention 分支；并行测试可能触发
+        // 其它 contention 日志，做全局否定断言本身就是 flaky 来源。
+        assert!(
+            !log_output.contains("current=test.short_contender"),
+            "short overlap should not emit contention log for short contender, got logs: {log_output}"
         );
 
         Ok(())
@@ -1052,6 +1088,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn traced_db_operation_logs_active_lock_holder_on_sqlite_lock() -> anyhow::Result<()> {
         let _serial = ACTIVE_DB_OPERATIONS_TEST_LOCK.lock().await;
+        let _cleanup = ActiveDbOperationsCleanupGuard;
         ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 
         let logs = SharedLogBuffer::default();
@@ -1062,6 +1099,10 @@ mod tests {
             .with_max_level(Level::DEBUG)
             .finish();
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        // `set_default` 只设置线程级 dispatcher，而 tracing 的 callsite interest 是
+        // 进程级缓存：如果该 callsite 之前被没有 subscriber 的测试线程先命中过，
+        // 会被缓存成 never，本测试就永远收不到 DEBUG 日志。强制重建一次。
+        tracing::callsite::rebuild_interest_cache();
 
         let db_path = std::env::temp_dir().join(format!("bili-sync-db-trace-{}.sqlite", Uuid::new_v4()));
         let connection_1 = create_test_connection(&db_path, 50).await?;
@@ -1092,7 +1133,10 @@ mod tests {
 
         lock_holder.rollback().await?;
 
-        let log_output = logs.contents();
+        // 用 current=test.contender 精确定位本测试的 begin contention 日志，
+        // 避免并行测试的日志串扰造成假阳性/假阴性。
+        let log_output =
+            wait_for_log_contains(&logs, "current=test.contender", std::time::Duration::from_secs(2)).await;
         assert!(
             log_output.contains("数据库操作开始时检测到"),
             "expected active operation start warning, got logs: {log_output}"
