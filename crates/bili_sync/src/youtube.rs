@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -5762,6 +5762,153 @@ static YOUTUBE_FALLBACK_TRIED: LazyLock<StdMutex<HashSet<String>>> = LazyLock::n
 /// 一次，避免同一个视频反复触发额外解析请求（YouTube 会按出口 IP 累计风控分）。
 static YOUTUBE_ANONYMOUS_TRIED: LazyLock<StdMutex<HashSet<String>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
 
+/// 匿名解析结果缓存（issue #294 后续修复）：下载阶段失败后进程内重试时，不应再退回带
+/// Cookie 解析出的退化格式（例如只剩 360p），这里缓存每个视频最近一次匿名解析出的格式。
+///
+/// 只在「带 Cookie 可下载画质低于最低画质」时才读取；缓存最多保留
+/// `YOUTUBE_ANONYMOUS_CACHE_CAPACITY` 个条目，超出后按插入顺序淘汰最旧的，长时间运行
+/// 也不会无限增长。
+///
+/// 缓存里存的是 googlevideo 直链（`expire`/`sig` 通常 6 小时后过期），所以条目还带写入
+/// 时间，读取时超过 `YOUTUBE_ANONYMOUS_CACHE_TTL` 就视为未命中并移除 —— 不能拿几小时前
+/// 的直链去下载（会 403），也不能因为缓存命中就拒绝重新匿名解析。
+struct CachedAnonymousFormats {
+    formats: Vec<ExternalMediaFormat>,
+    /// 写入序号，用于缓存满时找最旧的条目（`HashMap` 本身不保证顺序）。
+    seq: u64,
+    /// 写入时刻，用于 TTL 淘汰。
+    cached_at: Instant,
+}
+
+/// 匿名解析结果缓存的容量上限：长跑进程会看很多视频，只保留最近解析过的若干个。
+const YOUTUBE_ANONYMOUS_CACHE_CAPACITY: usize = 64;
+
+/// 匿名解析结果缓存的有效期：下载失败重试通常发生在分钟级，30 分钟足够覆盖重试窗口，
+/// 又能避开 googlevideo 直链过期（`expire`/`sig` 一般 6 小时），不会复用已失效的直链。
+const YOUTUBE_ANONYMOUS_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
+static YOUTUBE_ANONYMOUS_CACHE: LazyLock<StdMutex<HashMap<String, CachedAnonymousFormats>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// 缓存写入序号，只增不减，配合 `CachedAnonymousFormats::seq` 找最旧条目。
+static YOUTUBE_ANONYMOUS_CACHE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 读取某个视频缓存的匿名解析格式（克隆一份，避免调用方长时间持锁）。
+///
+/// 超过 `YOUTUBE_ANONYMOUS_CACHE_TTL` 的条目视为未命中并立即移除。
+fn youtube_anonymous_cached_formats(url: &str) -> Option<Vec<ExternalMediaFormat>> {
+    let mut cache = YOUTUBE_ANONYMOUS_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    read_youtube_anonymous_cache(&mut cache, url, Instant::now())
+}
+
+/// 在给定「当前时刻」下读取缓存；过期的条目直接移除。
+///
+/// 单独拆成接收 `&mut HashMap` 与 `now` 的纯函数，方便单测注入时间验证 TTL，
+/// 不依赖进程级全局状态。
+fn read_youtube_anonymous_cache(
+    cache: &mut HashMap<String, CachedAnonymousFormats>,
+    url: &str,
+    now: Instant,
+) -> Option<Vec<ExternalMediaFormat>> {
+    let expired = cache
+        .get(url)
+        .is_some_and(|cached| now.saturating_duration_since(cached.cached_at) > YOUTUBE_ANONYMOUS_CACHE_TTL);
+    if expired {
+        cache.remove(url);
+        return None;
+    }
+    cache.get(url).map(|cached| cached.formats.clone())
+}
+
+/// 把新条目写进缓存；缓存满时按插入顺序淘汰最旧的条目。
+///
+/// 单独拆成接收 `&mut HashMap` 的函数，方便单测在局部缓存上验证淘汰逻辑，
+/// 不依赖进程级全局状态。
+fn insert_youtube_anonymous_cache(
+    cache: &mut HashMap<String, CachedAnonymousFormats>,
+    url: &str,
+    formats: Vec<ExternalMediaFormat>,
+) {
+    if !cache.contains_key(url) && cache.len() >= YOUTUBE_ANONYMOUS_CACHE_CAPACITY {
+        let oldest = cache
+            .iter()
+            .min_by_key(|(_, cached)| cached.seq)
+            .map(|(oldest_url, _)| oldest_url.clone());
+        if let Some(oldest) = oldest {
+            cache.remove(&oldest);
+        }
+    }
+    let seq = YOUTUBE_ANONYMOUS_CACHE_SEQ.fetch_add(1, Ordering::Relaxed);
+    cache.insert(
+        url.to_string(),
+        CachedAnonymousFormats {
+            formats,
+            seq,
+            cached_at: Instant::now(),
+        },
+    );
+}
+
+/// 写入某个视频的匿名解析结果（全局缓存）。
+fn cache_youtube_anonymous_formats(url: &str, formats: Vec<ExternalMediaFormat>) {
+    let mut cache = YOUTUBE_ANONYMOUS_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    insert_youtube_anonymous_cache(&mut cache, url, formats);
+}
+
+/// 匿名兜底决策：优先复用缓存，其次决定是否为本 URL 发起一次匿名解析。
+enum AnonymousFallbackDecision {
+    /// 缓存的匿名结果比带 Cookie 的结果画质严格更高，直接复用，不再发请求。
+    ReuseCached(Vec<ExternalMediaFormat>),
+    /// 本 URL 还没试过匿名解析，可以发起一次。
+    Fetch,
+    /// 不需要或不能匿名解析：画质已达标、私有来源、或已经试过且没有更好的缓存结果。
+    Skip,
+}
+
+/// 决定「带 Cookie 画质不达标」时是复用缓存还是发起匿名解析。
+///
+/// 与 `should_retry_youtube_anonymous` 共用触发条件，额外多一步缓存优先：同一个视频
+/// 下载失败后重试时，直接复用上次匿名解析出的高画质格式，不再发第二次请求。
+fn plan_youtube_anonymous_fallback(
+    url: &str,
+    is_private_source: bool,
+    cookies_present: bool,
+    filter: &FilterOption,
+    platform: &str,
+    cookie_height: i32,
+    min_height: i32,
+) -> AnonymousFallbackDecision {
+    // 私有来源（稍后再看/点赞/订阅）一律不匿名：连缓存都不读，避免复用其它来源解析出的
+    // 匿名结果 —— 规则是「私有来源完全不匿名、不读不写缓存」。
+    if is_private_source {
+        return AnonymousFallbackDecision::Skip;
+    }
+    let already_tried = youtube_anonymous_already_tried(url);
+    if let Some(cached) = youtube_anonymous_cached_formats(url) {
+        let cached_height = youtube_selectable_height(&cached, filter, platform);
+        if youtube_anonymous_result_is_better(cookie_height, cached_height) {
+            return AnonymousFallbackDecision::ReuseCached(cached);
+        }
+        return AnonymousFallbackDecision::Skip;
+    }
+    if should_retry_youtube_anonymous(
+        true,
+        is_private_source,
+        cookies_present,
+        cookie_height,
+        min_height,
+        already_tried,
+    ) {
+        AnonymousFallbackDecision::Fetch
+    } else {
+        AnonymousFallbackDecision::Skip
+    }
+}
+
 /// 是否触发 YouTube「去掉 Cookie 匿名解析」的画质兜底。
 ///
 /// 触发条件必须全部满足：YouTube 链接、来源公开（稍后再看/点赞/订阅需要登录）、本次
@@ -5795,11 +5942,13 @@ fn youtube_anonymous_already_tried(url: &str) -> bool {
         .contains(url)
 }
 
-fn mark_youtube_anonymous_tried(url: &str) {
+/// 原子认领「本 URL 的匿名解析」：同一进程内并发解析同一 URL 时，只有第一个调用者
+/// 返回 true 并真正发起请求，其余调用者直接跳过，避免同一 URL 并发打出多次 yt-dlp。
+fn claim_youtube_anonymous_attempt(url: &str) -> bool {
     YOUTUBE_ANONYMOUS_TRIED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(url.to_string());
+        .insert(url.to_string())
 }
 
 /// 匿名（不带 Cookie）解析 YouTube 元数据，用于画质兜底。
@@ -5820,72 +5969,115 @@ fn youtube_selectable_height(formats: &[ExternalMediaFormat], filter: &FilterOpt
 ///
 /// 只替换格式列表，标题/上传者/时长等元数据仍用带 Cookie 的结果，避免输出文件名变化；
 /// 匿名解析失败（年龄限制/会员/私享/需登录）只记一条 warn，继续用原结果，绝不让下载失败。
+/// 解析成功的结果会写进 `YOUTUBE_ANONYMOUS_CACHE`：下载阶段失败后进程内重试时直接复用
+/// 上次的高画质格式，不会退回带 Cookie 的退化格式。
 async fn apply_youtube_anonymous_quality_fallback(
-    mut metadata: ExternalMediaMetadata,
+    metadata: ExternalMediaMetadata,
     url: &str,
     source: &youtube_source::Model,
     filter: &FilterOption,
     platform: &str,
 ) -> ExternalMediaMetadata {
+    apply_youtube_anonymous_quality_fallback_with(metadata, url, source, filter, platform, || {
+        extract_youtube_metadata_without_cookies(url)
+    })
+    .await
+}
+
+/// `apply_youtube_anonymous_quality_fallback` 的实现体；匿名解析函数由参数注入，
+/// 方便单测验证「命中缓存时不发请求」。
+async fn apply_youtube_anonymous_quality_fallback_with<F, Fut>(
+    mut metadata: ExternalMediaMetadata,
+    url: &str,
+    source: &youtube_source::Model,
+    filter: &FilterOption,
+    platform: &str,
+    fetch_anonymous: F,
+) -> ExternalMediaMetadata
+where
+    F: FnOnce() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<ExternalMediaMetadata>> + Send,
+{
     if !is_youtube_url(url) || source.audio_only || metadata.is_slideshow() {
         return metadata;
     }
     let min_height = youtube_quality_height(filter.video_min_quality);
     let cookie_height = youtube_selectable_height(&metadata.formats, filter, platform);
-    let cookies_present = youtube_cookie_file().is_some();
-    let already_tried = youtube_anonymous_already_tried(url);
-    if !should_retry_youtube_anonymous(
-        true,
-        is_youtube_private_source(source),
-        cookies_present,
-        cookie_height,
-        min_height,
-        already_tried,
-    ) {
+    if min_height <= 0 || cookie_height >= min_height {
         return metadata;
     }
-    // 先登记再发起请求：即使解析中途失败/取消，同一进程内也不会对该 URL 重复重试。
-    mark_youtube_anonymous_tried(url);
-    debug!(
-        url = %url,
-        source_id = source.id,
+    let cookies_present = youtube_cookie_file().is_some();
+    match plan_youtube_anonymous_fallback(
+        url,
+        is_youtube_private_source(source),
+        cookies_present,
+        filter,
+        platform,
         cookie_height,
         min_height,
-        "YouTube 带 Cookie 只解析到 {}p（最低要求 {}p），尝试去掉 Cookie 匿名解析一次",
-        cookie_height,
-        min_height
-    );
-    match extract_youtube_metadata_without_cookies(url).await {
-        Ok(anonymous) => {
-            let anonymous_height = youtube_selectable_height(&anonymous.formats, filter, platform);
-            if youtube_anonymous_result_is_better(cookie_height, anonymous_height) {
-                info!(
-                    url = %url,
-                    source_id = source.id,
-                    cookie_height,
-                    anonymous_height,
-                    "YouTube 带 Cookie 只解析到 {}p，匿名解析可达 {}p，已改用匿名解析结果",
-                    cookie_height,
-                    anonymous_height
-                );
-                metadata.formats = anonymous.formats;
-            } else {
-                debug!(
-                    url = %url,
-                    source_id = source.id,
-                    cookie_height,
-                    anonymous_height,
-                    "YouTube 匿名解析未提供更高画质，继续使用带 Cookie 的结果"
-                );
-            }
-        }
-        Err(error) => {
-            warn!(
+    ) {
+        AnonymousFallbackDecision::ReuseCached(formats) => {
+            let cached_height = youtube_selectable_height(&formats, filter, platform);
+            info!(
                 url = %url,
                 source_id = source.id,
-                %error,
-                "YouTube 匿名兜底解析失败，继续使用带 Cookie 的结果"
+                cookie_height,
+                cached_height,
+                "YouTube 带 Cookie 只解析到 {}p，复用此前匿名解析的 {}p 缓存",
+                cookie_height,
+                cached_height
             );
+            metadata.formats = formats;
+        }
+        AnonymousFallbackDecision::Skip => {}
+        AnonymousFallbackDecision::Fetch => {
+            // 原子认领：并发解析同一 URL 时只有一个任务会真正发起请求。
+            if !claim_youtube_anonymous_attempt(url) {
+                return metadata;
+            }
+            debug!(
+                url = %url,
+                source_id = source.id,
+                cookie_height,
+                min_height,
+                "YouTube 带 Cookie 只解析到 {}p（最低要求 {}p），尝试去掉 Cookie 匿名解析一次",
+                cookie_height,
+                min_height
+            );
+            match fetch_anonymous().await {
+                Ok(anonymous) => {
+                    let anonymous_height = youtube_selectable_height(&anonymous.formats, filter, platform);
+                    cache_youtube_anonymous_formats(url, anonymous.formats.clone());
+                    if youtube_anonymous_result_is_better(cookie_height, anonymous_height) {
+                        info!(
+                            url = %url,
+                            source_id = source.id,
+                            cookie_height,
+                            anonymous_height,
+                            "YouTube 带 Cookie 只解析到 {}p，匿名解析可达 {}p，已改用匿名解析结果",
+                            cookie_height,
+                            anonymous_height
+                        );
+                        metadata.formats = anonymous.formats;
+                    } else {
+                        debug!(
+                            url = %url,
+                            source_id = source.id,
+                            cookie_height,
+                            anonymous_height,
+                            "YouTube 匿名解析未提供更高画质，继续使用带 Cookie 的结果"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        url = %url,
+                        source_id = source.id,
+                        %error,
+                        "YouTube 匿名兜底解析失败，继续使用带 Cookie 的结果"
+                    );
+                }
+            }
         }
     }
     metadata
@@ -11484,15 +11676,21 @@ mod tests {
         }
     }
 
-    /// 匿名兜底的「每 URL 只试一次」是进程级去重，且按 URL 精确区分。
+    /// 匿名兜底的「每 URL 只试一次」是进程级去重，且按 URL 精确区分；
+    /// 认领会原子地标记已尝试，并发调用只有一个能拿到机会。
     #[test]
-    fn youtube_anonymous_tracking_is_per_url() {
+    fn youtube_anonymous_attempt_is_claimed_only_once() {
         let url = "https://www.youtube.com/watch?v=anonymous-fallback-tracking-test";
         let other = "https://www.youtube.com/watch?v=anonymous-fallback-tracking-other";
         assert!(!super::youtube_anonymous_already_tried(url));
-        super::mark_youtube_anonymous_tried(url);
+        assert!(super::claim_youtube_anonymous_attempt(url));
         assert!(super::youtube_anonymous_already_tried(url));
-        assert!(!super::youtube_anonymous_already_tried(other));
+        // 第二次认领失败：同一 URL 不会重复发匿名解析请求
+        assert!(!super::claim_youtube_anonymous_attempt(url));
+        assert!(super::claim_youtube_anonymous_attempt(other));
+        assert!(!super::youtube_anonymous_already_tried(
+            "https://www.youtube.com/watch?v=anonymous-fallback-never-tried"
+        ));
     }
 
     /// 复现 issue #294 的两份格式集：带 Cookie 只有 HLS（被排除）+ 360p 混合流，
@@ -11597,5 +11795,313 @@ mod tests {
         };
         assert_eq!(super::selected_effective_video_height(&mixed_only), Some(360));
         assert!(super::selected_effective_video_format(&mixed_only).is_some());
+    }
+
+    /// 匿名缓存测试用的最小元数据：只有 `formats` 参与断言。
+    fn sample_anonymous_metadata(formats: Vec<super::ExternalMediaFormat>) -> super::ExternalMediaMetadata {
+        super::ExternalMediaMetadata {
+            id: "anonymous-cache-test".to_string(),
+            title: Some("匿名缓存测试".to_string()),
+            uploader: None,
+            uploader_url: None,
+            channel: None,
+            channel_id: None,
+            channel_url: None,
+            thumbnail: None,
+            fanart: None,
+            description: None,
+            language: None,
+            upload_date: None,
+            duration: Some(60.0),
+            formats,
+            subtitles: std::collections::HashMap::new(),
+            automatic_captions: std::collections::HashMap::new(),
+            images: Vec::new(),
+            slides: Vec::new(),
+            music_urls: Vec::new(),
+            creators: None,
+        }
+    }
+
+    /// 构造一条最小可用的外部媒体格式。
+    fn anonymous_test_format(
+        id: &str,
+        height: Option<i32>,
+        vcodec: &str,
+        acodec: &str,
+        protocol: &str,
+    ) -> super::ExternalMediaFormat {
+        super::ExternalMediaFormat {
+            format_id: Some(id.to_string()),
+            url: Some(format!("https://example.com/{id}")),
+            protocol: Some(protocol.to_string()),
+            ext: Some("mp4".to_string()),
+            vcodec: Some(vcodec.to_string()),
+            acodec: Some(acodec.to_string()),
+            width: height.map(|height| height * 16 / 9),
+            height,
+            fps: Some(30.0),
+            tbr: Some(1000.0),
+            vbr: None,
+            abr: None,
+            dynamic_range: Some("SDR".to_string()),
+            is_original: false,
+            decryption_key: None,
+            fallback_urls: Vec::new(),
+        }
+    }
+
+    /// 画质过滤：最低 720p，编码不限（缓存测试统一用这一份）。
+    fn anonymous_test_filter() -> crate::bilibili::FilterOption {
+        use crate::bilibili::{AudioQuality, FilterOption, VideoCodecs, VideoQuality};
+
+        FilterOption {
+            video_max_quality: VideoQuality::Quality8k,
+            video_min_quality: VideoQuality::Quality720p,
+            audio_max_quality: AudioQuality::QualityHiRES,
+            audio_min_quality: AudioQuality::Quality64k,
+            codecs: vec![VideoCodecs::AV1, VideoCodecs::AVC, VideoCodecs::HEV],
+            ..Default::default()
+        }
+    }
+
+    /// issue #294 后续：下载失败后重试时命中缓存，不再发匿名解析请求、直接复用 1080p。
+    #[tokio::test]
+    async fn youtube_anonymous_cache_reuses_result_without_refetching() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+
+        let url = "https://www.youtube.com/watch?v=anonymous-cache-reuse-test";
+        let filter = anonymous_test_filter();
+        let cookie_formats = vec![anonymous_test_format(
+            "18",
+            Some(360),
+            "avc1.42001E",
+            "mp4a.40.2",
+            "https",
+        )];
+        let cached_formats = vec![
+            anonymous_test_format("137", Some(1080), "avc1.640028", "none", "https"),
+            anonymous_test_format("140", None, "none", "mp4a.40.2", "https"),
+        ];
+        super::cache_youtube_anonymous_formats(url, cached_formats);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_fetch = Arc::clone(&calls);
+        let unexpected =
+            sample_anonymous_metadata(vec![anonymous_test_format("399", Some(2160), "av01", "none", "https")]);
+        let metadata = sample_anonymous_metadata(cookie_formats);
+        let source = sample_external_source("video");
+        let result = super::apply_youtube_anonymous_quality_fallback_with(
+            metadata,
+            url,
+            &source,
+            &filter,
+            "YouTube",
+            move || async move {
+                calls_for_fetch.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(unexpected)
+            },
+        )
+        .await;
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0, "命中缓存不应再调用匿名解析");
+        assert_eq!(
+            super::youtube_selectable_height(&result.formats, &filter, "YouTube"),
+            1080,
+            "应复用缓存里的 1080p，而不是重新解析的 2160p"
+        );
+    }
+
+    /// 缓存里的匿名结果不比带 Cookie 的结果高时，既不采用缓存也不重新发请求。
+    #[tokio::test]
+    async fn youtube_anonymous_cache_is_ignored_when_not_better() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+
+        let url = "https://www.youtube.com/watch?v=anonymous-cache-not-better-test";
+        let filter = anonymous_test_filter();
+        let cookie_formats = vec![anonymous_test_format(
+            "18",
+            Some(360),
+            "avc1.42001E",
+            "mp4a.40.2",
+            "https",
+        )];
+        // 缓存里只有一份 360p 结果，不会比当前带 Cookie 的 360p 更高
+        super::cache_youtube_anonymous_formats(
+            url,
+            vec![anonymous_test_format(
+                "18",
+                Some(360),
+                "avc1.42001E",
+                "mp4a.40.2",
+                "https",
+            )],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_fetch = Arc::clone(&calls);
+        let unexpected = sample_anonymous_metadata(vec![anonymous_test_format(
+            "137",
+            Some(1080),
+            "avc1.640028",
+            "none",
+            "https",
+        )]);
+        let metadata = sample_anonymous_metadata(cookie_formats);
+        let source = sample_external_source("video");
+        let result = super::apply_youtube_anonymous_quality_fallback_with(
+            metadata,
+            url,
+            &source,
+            &filter,
+            "YouTube",
+            move || async move {
+                calls_for_fetch.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(unexpected)
+            },
+        )
+        .await;
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0, "缓存不比当前高时不应重新解析");
+        assert_eq!(
+            super::youtube_selectable_height(&result.formats, &filter, "YouTube"),
+            360,
+            "保留带 Cookie 的结果"
+        );
+    }
+
+    /// 缓存超过上限时按插入顺序淘汰最旧的条目，长度稳定在上限。
+    #[test]
+    fn youtube_anonymous_cache_evicts_oldest_entry_when_full() {
+        let mut cache = std::collections::HashMap::new();
+        let capacity = super::YOUTUBE_ANONYMOUS_CACHE_CAPACITY;
+        for index in 0..capacity + 1 {
+            let url = format!("https://www.youtube.com/watch?v=anonymous-cache-evict-{index}");
+            super::insert_youtube_anonymous_cache(
+                &mut cache,
+                &url,
+                vec![anonymous_test_format("136", Some(720), "avc1.64001f", "none", "https")],
+            );
+        }
+        assert_eq!(cache.len(), capacity, "缓存长度必须稳定在上限");
+        assert!(
+            !cache.contains_key("https://www.youtube.com/watch?v=anonymous-cache-evict-0"),
+            "最早插入的条目应被淘汰"
+        );
+        assert!(
+            cache.contains_key(&format!(
+                "https://www.youtube.com/watch?v=anonymous-cache-evict-{capacity}"
+            )),
+            "最新插入的条目必须保留"
+        );
+    }
+
+    /// 缓存条目超过 TTL 后视为未命中并被移除，避免复用已过期的 googlevideo 直链。
+    #[test]
+    fn youtube_anonymous_cache_entry_expires_after_ttl() {
+        let url = "https://www.youtube.com/watch?v=anonymous-cache-ttl-test";
+        let now = std::time::Instant::now();
+        let formats = vec![anonymous_test_format("137", Some(1080), "avc1.640028", "none", "https")];
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(
+            url.to_string(),
+            super::CachedAnonymousFormats {
+                formats: formats.clone(),
+                seq: 1,
+                cached_at: now,
+            },
+        );
+        assert!(
+            super::read_youtube_anonymous_cache(&mut cache, url, now).is_some(),
+            "TTL 内应命中缓存"
+        );
+        let expired_at = now
+            .checked_sub(super::YOUTUBE_ANONYMOUS_CACHE_TTL + std::time::Duration::from_secs(1))
+            .expect("测试时间应能回拨");
+        cache.insert(
+            url.to_string(),
+            super::CachedAnonymousFormats {
+                formats,
+                seq: 2,
+                cached_at: expired_at,
+            },
+        );
+        assert!(
+            super::read_youtube_anonymous_cache(&mut cache, url, now).is_none(),
+            "超过 TTL 应视为未命中"
+        );
+        assert!(!cache.contains_key(url), "过期条目必须被移除");
+    }
+
+    /// 私有来源（稍后再看/点赞/订阅）绝不匿名解析，也不写缓存。
+    #[tokio::test]
+    async fn youtube_anonymous_private_source_never_requests_or_caches() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+
+        let url = "https://www.youtube.com/watch?v=anonymous-cache-private-test";
+        let filter = anonymous_test_filter();
+        let source = sample_external_source("liked");
+        // 同一个视频先从公开来源入过缓存：私有来源仍然不读缓存，决策必须是 Skip
+        let preseeded_url = format!("{url}-preseeded");
+        super::cache_youtube_anonymous_formats(
+            &preseeded_url,
+            vec![
+                anonymous_test_format("137", Some(1080), "avc1.640028", "none", "https"),
+                anonymous_test_format("140", None, "none", "mp4a.40.2", "https"),
+            ],
+        );
+        assert!(matches!(
+            super::plan_youtube_anonymous_fallback(&preseeded_url, true, true, &filter, "YouTube", 360, 720),
+            super::AnonymousFallbackDecision::Skip
+        ));
+        // 纯决策层断言：即使本次带了 Cookie、画质不达标，私有来源也只返回 Skip
+        assert!(matches!(
+            super::plan_youtube_anonymous_fallback(
+                url,
+                super::is_youtube_private_source(&source),
+                true,
+                &filter,
+                "YouTube",
+                360,
+                720
+            ),
+            super::AnonymousFallbackDecision::Skip
+        ));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_fetch = Arc::clone(&calls);
+        let unexpected = sample_anonymous_metadata(vec![anonymous_test_format(
+            "137",
+            Some(1080),
+            "avc1.640028",
+            "none",
+            "https",
+        )]);
+        let metadata = sample_anonymous_metadata(vec![anonymous_test_format(
+            "18",
+            Some(360),
+            "avc1.42001E",
+            "mp4a.40.2",
+            "https",
+        )]);
+        let result = super::apply_youtube_anonymous_quality_fallback_with(
+            metadata,
+            url,
+            &source,
+            &filter,
+            "YouTube",
+            move || async move {
+                calls_for_fetch.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(unexpected)
+            },
+        )
+        .await;
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0, "私有来源不应发匿名解析请求");
+        assert!(
+            super::youtube_anonymous_cached_formats(url).is_none(),
+            "私有来源不应写匿名缓存"
+        );
+        assert_eq!(
+            super::youtube_selectable_height(&result.formats, &filter, "YouTube"),
+            360
+        );
     }
 }
