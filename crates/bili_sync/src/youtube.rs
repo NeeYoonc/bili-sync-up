@@ -5768,14 +5768,24 @@ static YOUTUBE_ANONYMOUS_TRIED: LazyLock<StdMutex<HashSet<String>>> = LazyLock::
 /// 只在「带 Cookie 可下载画质低于最低画质」时才读取；缓存最多保留
 /// `YOUTUBE_ANONYMOUS_CACHE_CAPACITY` 个条目，超出后按插入顺序淘汰最旧的，长时间运行
 /// 也不会无限增长。
+///
+/// 缓存里存的是 googlevideo 直链（`expire`/`sig` 通常 6 小时后过期），所以条目还带写入
+/// 时间，读取时超过 `YOUTUBE_ANONYMOUS_CACHE_TTL` 就视为未命中并移除 —— 不能拿几小时前
+/// 的直链去下载（会 403），也不能因为缓存命中就拒绝重新匿名解析。
 struct CachedAnonymousFormats {
     formats: Vec<ExternalMediaFormat>,
     /// 写入序号，用于缓存满时找最旧的条目（`HashMap` 本身不保证顺序）。
     seq: u64,
+    /// 写入时刻，用于 TTL 淘汰。
+    cached_at: Instant,
 }
 
 /// 匿名解析结果缓存的容量上限：长跑进程会看很多视频，只保留最近解析过的若干个。
 const YOUTUBE_ANONYMOUS_CACHE_CAPACITY: usize = 64;
+
+/// 匿名解析结果缓存的有效期：下载失败重试通常发生在分钟级，30 分钟足够覆盖重试窗口，
+/// 又能避开 googlevideo 直链过期（`expire`/`sig` 一般 6 小时），不会复用已失效的直链。
+const YOUTUBE_ANONYMOUS_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
 static YOUTUBE_ANONYMOUS_CACHE: LazyLock<StdMutex<HashMap<String, CachedAnonymousFormats>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
@@ -5784,12 +5794,32 @@ static YOUTUBE_ANONYMOUS_CACHE: LazyLock<StdMutex<HashMap<String, CachedAnonymou
 static YOUTUBE_ANONYMOUS_CACHE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// 读取某个视频缓存的匿名解析格式（克隆一份，避免调用方长时间持锁）。
+///
+/// 超过 `YOUTUBE_ANONYMOUS_CACHE_TTL` 的条目视为未命中并立即移除。
 fn youtube_anonymous_cached_formats(url: &str) -> Option<Vec<ExternalMediaFormat>> {
-    YOUTUBE_ANONYMOUS_CACHE
+    let mut cache = YOUTUBE_ANONYMOUS_CACHE
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    read_youtube_anonymous_cache(&mut cache, url, Instant::now())
+}
+
+/// 在给定「当前时刻」下读取缓存；过期的条目直接移除。
+///
+/// 单独拆成接收 `&mut HashMap` 与 `now` 的纯函数，方便单测注入时间验证 TTL，
+/// 不依赖进程级全局状态。
+fn read_youtube_anonymous_cache(
+    cache: &mut HashMap<String, CachedAnonymousFormats>,
+    url: &str,
+    now: Instant,
+) -> Option<Vec<ExternalMediaFormat>> {
+    let expired = cache
         .get(url)
-        .map(|cached| cached.formats.clone())
+        .is_some_and(|cached| now.saturating_duration_since(cached.cached_at) > YOUTUBE_ANONYMOUS_CACHE_TTL);
+    if expired {
+        cache.remove(url);
+        return None;
+    }
+    cache.get(url).map(|cached| cached.formats.clone())
 }
 
 /// 把新条目写进缓存；缓存满时按插入顺序淘汰最旧的条目。
@@ -5811,7 +5841,14 @@ fn insert_youtube_anonymous_cache(
         }
     }
     let seq = YOUTUBE_ANONYMOUS_CACHE_SEQ.fetch_add(1, Ordering::Relaxed);
-    cache.insert(url.to_string(), CachedAnonymousFormats { formats, seq });
+    cache.insert(
+        url.to_string(),
+        CachedAnonymousFormats {
+            formats,
+            seq,
+            cached_at: Instant::now(),
+        },
+    );
 }
 
 /// 写入某个视频的匿名解析结果（全局缓存）。
@@ -5845,6 +5882,11 @@ fn plan_youtube_anonymous_fallback(
     cookie_height: i32,
     min_height: i32,
 ) -> AnonymousFallbackDecision {
+    // 私有来源（稍后再看/点赞/订阅）一律不匿名：连缓存都不读，避免复用其它来源解析出的
+    // 匿名结果 —— 规则是「私有来源完全不匿名、不读不写缓存」。
+    if is_private_source {
+        return AnonymousFallbackDecision::Skip;
+    }
     let already_tried = youtube_anonymous_already_tried(url);
     if let Some(cached) = youtube_anonymous_cached_formats(url) {
         let cached_height = youtube_selectable_height(&cached, filter, platform);
@@ -11952,6 +11994,43 @@ mod tests {
         );
     }
 
+    /// 缓存条目超过 TTL 后视为未命中并被移除，避免复用已过期的 googlevideo 直链。
+    #[test]
+    fn youtube_anonymous_cache_entry_expires_after_ttl() {
+        let url = "https://www.youtube.com/watch?v=anonymous-cache-ttl-test";
+        let now = std::time::Instant::now();
+        let formats = vec![anonymous_test_format("137", Some(1080), "avc1.640028", "none", "https")];
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(
+            url.to_string(),
+            super::CachedAnonymousFormats {
+                formats: formats.clone(),
+                seq: 1,
+                cached_at: now,
+            },
+        );
+        assert!(
+            super::read_youtube_anonymous_cache(&mut cache, url, now).is_some(),
+            "TTL 内应命中缓存"
+        );
+        let expired_at = now
+            .checked_sub(super::YOUTUBE_ANONYMOUS_CACHE_TTL + std::time::Duration::from_secs(1))
+            .expect("测试时间应能回拨");
+        cache.insert(
+            url.to_string(),
+            super::CachedAnonymousFormats {
+                formats,
+                seq: 2,
+                cached_at: expired_at,
+            },
+        );
+        assert!(
+            super::read_youtube_anonymous_cache(&mut cache, url, now).is_none(),
+            "超过 TTL 应视为未命中"
+        );
+        assert!(!cache.contains_key(url), "过期条目必须被移除");
+    }
+
     /// 私有来源（稍后再看/点赞/订阅）绝不匿名解析，也不写缓存。
     #[tokio::test]
     async fn youtube_anonymous_private_source_never_requests_or_caches() {
@@ -11961,6 +12040,19 @@ mod tests {
         let url = "https://www.youtube.com/watch?v=anonymous-cache-private-test";
         let filter = anonymous_test_filter();
         let source = sample_external_source("liked");
+        // 同一个视频先从公开来源入过缓存：私有来源仍然不读缓存，决策必须是 Skip
+        let preseeded_url = format!("{url}-preseeded");
+        super::cache_youtube_anonymous_formats(
+            &preseeded_url,
+            vec![
+                anonymous_test_format("137", Some(1080), "avc1.640028", "none", "https"),
+                anonymous_test_format("140", None, "none", "mp4a.40.2", "https"),
+            ],
+        );
+        assert!(matches!(
+            super::plan_youtube_anonymous_fallback(&preseeded_url, true, true, &filter, "YouTube", 360, 720),
+            super::AnonymousFallbackDecision::Skip
+        ));
         // 纯决策层断言：即使本次带了 Cookie、画质不达标，私有来源也只返回 Skip
         assert!(matches!(
             super::plan_youtube_anonymous_fallback(
