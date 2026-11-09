@@ -2314,11 +2314,17 @@ pub async fn batch_rename_history_files(p: BatchRenameHistoryInput<'_>) -> Resul
                 }
             }
 
-            debug_assert_eq!(
-                stats.remaining_files(),
-                stats.failed_files,
-                "限频重试统计必须自洽：remaining_files 应等于 failed_files"
-            );
+            // 软校验：视频/音频批次重试成功时按整批记为 recovered，若 apply_rename 内部
+            // 有单文件失败（权限/占用/路径问题），失败数只进 result.failed_count、不进
+            // stats.failed_files，所以两者允许不一致，只提示不 panic。
+            if stats.remaining_files() != stats.failed_files {
+                warn!(
+                    "[{}] 限频重试统计不完全一致: 剩余 {} / 失败 {}",
+                    source_key,
+                    stats.remaining_files(),
+                    stats.failed_files
+                );
+            }
             if stats.failed_files > 0 {
                 warn!(
                     "[{}] 剩余 {} 个文件因限频未完成，可稍后重新执行（这些文件保持原名）",
