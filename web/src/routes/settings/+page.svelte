@@ -338,21 +338,20 @@
 
 	// 「下载线程数」兜底后的值（空/0 时按默认 4 处理）
 	$: effectiveDownloadThreads = normalizeConcurrencyValue(parallelDownloadThreads, 4);
-	// 「YouTube 并发连接上限」兜底后的值（空/0 时按默认 16 处理）
+	// 「YouTube 单文件连接数」兜底后的值（空/0 时按默认 16 处理）
 	$: effectiveGooglevideoMaxConnections = normalizeConcurrencyValue(
 		parallelDownloadGooglevideoMaxConnections,
 		16
 	);
-	// 实际生效并发：YouTube 下载取「下载线程数」和「并发连接上限」的较小值
-	$: effectiveYoutubeConnections = Math.min(
-		effectiveDownloadThreads,
-		effectiveGooglevideoMaxConnections
-	);
-	// 预估最大连接数（理论峰值）= 下载线程数 × 同时处理视频数 × 每视频并发分页数
+	// YouTube 单文件连接数独立生效，不再与「下载线程数」取较小值
+	$: effectiveYoutubeConnections = effectiveGooglevideoMaxConnections;
+	// 单文件最多使用的连接数：YouTube 用上面的连接数，其它平台用下载线程数
+	$: effectiveMaxFileConnections = Math.max(effectiveDownloadThreads, effectiveYoutubeConnections);
+	// 预估最大连接数（理论峰值）= 单文件最多连接数 × 同时处理视频数 × 每视频并发分页数
 	$: effectiveConcurrentVideo = normalizeConcurrencyValue(concurrentVideo, 3);
 	$: effectiveConcurrentPage = normalizeConcurrencyValue(concurrentPage, 2);
 	$: estimatedMaxConnections =
-		effectiveDownloadThreads * effectiveConcurrentVideo * effectiveConcurrentPage;
+		effectiveMaxFileConnections * effectiveConcurrentVideo * effectiveConcurrentPage;
 
 	// 其他设置
 	let cdnSorting = false;
@@ -2694,7 +2693,7 @@
 							placeholder="4"
 						/>
 						<div class="space-y-2">
-							<Label for="googlevideo-max-connections">YouTube 并发连接上限</Label>
+							<Label for="googlevideo-max-connections">YouTube 单文件连接数</Label>
 							<Input
 								id="googlevideo-max-connections"
 								type="number"
@@ -2704,10 +2703,10 @@
 								placeholder="16"
 							/>
 							<p class="text-muted-foreground text-xs">
-								实际生效并发：
+								YouTube 下载实际生效并发：
 								<span class="text-foreground font-semibold"
 									>{effectiveYoutubeConnections} 条/文件</span
-								>（取「下载线程数」与「YouTube 并发连接上限」的较小值）
+								>（独立于「下载线程数」，其它平台仍按下载线程数）
 							</p>
 							<p class="text-muted-foreground text-xs">修改只对后续新任务生效。</p>
 						</div>
@@ -2787,8 +2786,8 @@
 					class="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-950/20 dark:text-blue-200"
 				>
 					<p class="font-medium">
-						预估最大连接数：{estimatedMaxConnections}（下载线程数 {effectiveDownloadThreads} × 同时处理视频数
-						{effectiveConcurrentVideo} × 每视频并发分页数 {effectiveConcurrentPage}）
+						预估最大连接数：{estimatedMaxConnections}（单文件最多 {effectiveMaxFileConnections} 条 ×
+						同时处理视频数 {effectiveConcurrentVideo} × 每视频并发分页数 {effectiveConcurrentPage}）
 					</p>
 					<p class="mt-1 opacity-80">
 						这是理论峰值，实际连接数受网络带宽和源站限制，通常达不到这个数字。
