@@ -38,6 +38,9 @@ const RANGE_RESUME_MAX_STALLED: u32 = 3;
 const RANGE_RESUME_MAX_REQUESTS: u32 = 8;
 /// 分片内断流续传前的短暂冷却，避免刚断开就重连又被掐。
 const RANGE_RESUME_BACKOFF: Duration = Duration::from_millis(500);
+
+/// 单个文件的原生并行连接数硬上限（YouTube/GoogleVideo 单文件连接数同样受此限制）。
+const MAX_PARALLEL_CONNECTIONS: usize = 32;
 // 断点续传状态文件后缀（记录已完成分片，供失败后继续下载）
 const RESUME_SIDECAR_SUFFIX: &str = ".resume";
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -278,7 +281,10 @@ impl Downloader {
         let config = crate::config::reload_config();
         let parallel = &config.concurrent_limit.parallel_download;
 
-        if parallel.enabled && parallel.threads > 1 {
+        let is_googlevideo = is_googlevideo_url(url);
+        let file_concurrency =
+            parallel_file_concurrency(parallel.threads, parallel.googlevideo_max_connections, is_googlevideo);
+        if parallel.enabled && file_concurrency > 1 {
             match self
                 .fetch_parallel(
                     url,
@@ -998,7 +1004,10 @@ impl Downloader {
         let parallel = &config.concurrent_limit.parallel_download;
         let mut last_error = None;
         for url in urls {
-            let result = if parallel.enabled && parallel.threads > 1 {
+            let is_googlevideo = is_googlevideo_url(url);
+            let file_concurrency =
+                parallel_file_concurrency(parallel.threads, parallel.googlevideo_max_connections, is_googlevideo);
+            let result = if parallel.enabled && file_concurrency > 1 {
                 match self
                     .fetch_parallel(
                         url,
@@ -1370,6 +1379,19 @@ async fn remove_sidecar(sidecar: &Path) {
     let _ = fs::remove_file(sidecar).await;
 }
 
+/// 计算单个文件实际使用的并行连接数。
+///
+/// YouTube/GoogleVideo 使用独立的「单文件连接数」配置（默认 16），不再与下载
+/// 线程数取较小值，上限为 [`MAX_PARALLEL_CONNECTIONS`]；其它平台仍使用下载
+/// 线程数。任何情况下返回值至少为 1。
+fn parallel_file_concurrency(threads: usize, googlevideo_max_connections: usize, is_googlevideo: bool) -> usize {
+    if is_googlevideo {
+        googlevideo_max_connections.clamp(1, MAX_PARALLEL_CONNECTIONS)
+    } else {
+        threads.max(1)
+    }
+}
+
 fn build_parallel_ranges(
     total_size: u64,
     threads: usize,
@@ -1381,12 +1403,7 @@ fn build_parallel_ranges(
         return (1, Vec::new());
     }
 
-    let concurrency = if is_googlevideo {
-        threads.min(max_googlevideo_connections.max(1))
-    } else {
-        threads
-    }
-    .max(1);
+    let concurrency = parallel_file_concurrency(threads, max_googlevideo_connections, is_googlevideo);
 
     if is_googlevideo {
         let mut ranges = Vec::new();
@@ -2061,18 +2078,30 @@ mod tests {
     }
 
     #[test]
-    fn googlevideo_concurrency_follows_configured_threads() {
-        let total_size = 64 * 1024 * 1024;
-        // 用户把「下载线程数」调到 8 时，YouTube 必须真的用 8 条连接
-        // （旧版一律砍到 4，调节线程数对 YouTube 无效）。
-        let (concurrency, _) = build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
-        assert_eq!(concurrency, 8);
+    fn parallel_file_concurrency_uses_independent_youtube_limit() {
+        // YouTube 单文件连接数独立生效，不再与下载线程数取较小值
+        assert_eq!(parallel_file_concurrency(4, 16, true), 16);
+        assert_eq!(parallel_file_concurrency(1, 16, true), 16);
+        assert_eq!(parallel_file_concurrency(64, 64, true), 32);
+        assert_eq!(parallel_file_concurrency(8, 4, true), 4);
+        assert_eq!(parallel_file_concurrency(0, 0, true), 1);
+        // 其它平台仍使用下载线程数
+        assert_eq!(parallel_file_concurrency(4, 16, false), 4);
+        assert_eq!(parallel_file_concurrency(0, 0, false), 1);
+    }
 
-        // 配置上限低于线程数时，按配置上限收敛
+    #[test]
+    fn googlevideo_ranges_use_independent_connection_limit() {
+        let total_size = 64 * 1024 * 1024;
+        // 「下载线程数」= 8、YouTube 单文件连接数 = 16 时，YouTube 用 16 条连接
+        // （旧版取 min(8, 16) = 8，调大 YouTube 配置也压不过线程数）。
+        let (concurrency, _) = build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        assert_eq!(concurrency, 16);
+
+        // 配置的 YouTube 连接数低于线程数时按配置收敛
         let (concurrency, _) = build_parallel_ranges(total_size, 8, true, GOOGLEVIDEO_SEGMENT_SIZE, 4);
         assert_eq!(concurrency, 4);
 
-        // 上限本身可配置，且不能被线程数反向放大
         let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
         assert_eq!(concurrency, 16);
         let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 32);
@@ -2080,6 +2109,9 @@ mod tests {
         // 非法 0 值也不能让并发变成 0
         let (concurrency, _) = build_parallel_ranges(total_size, 64, true, GOOGLEVIDEO_SEGMENT_SIZE, 0);
         assert_eq!(concurrency, 1);
+        // 下载线程数为 1 时 YouTube 也不能退化成单连接
+        let (concurrency, _) = build_parallel_ranges(total_size, 1, true, GOOGLEVIDEO_SEGMENT_SIZE, 16);
+        assert_eq!(concurrency, 16);
     }
 
     #[test]
@@ -2430,8 +2462,11 @@ mod tests {
                         body.len()
                     );
                     let _ = socket.write_all(resp.as_bytes()).await;
-                    let first_request = !truncated.swap(true, Ordering::SeqCst);
-                    if first_request && s == 0 && truncate_after < body.len() {
+                    // 只在真正要截断这一次请求时才置位：并发下载时分片请求顺序不固定，
+                    // 若先到的是 s != 0 的分片，不能把截断机会浪费掉。
+                    let should_truncate =
+                        s == 0 && truncate_after < body.len() && !truncated.swap(true, Ordering::SeqCst);
+                    if should_truncate {
                         // 只发一部分 body 就断开，模拟 CDN 中途掐流
                         let _ = socket.write_all(&body[..truncate_after]).await;
                         let _ = socket.shutdown().await;
@@ -2731,12 +2766,15 @@ mod tests {
         assert_eq!(fs::read(&path).await.unwrap(), data, "续传后文件内容应与源一致");
         let reqs = requested.lock().unwrap().clone();
         assert!(reqs.len() >= 3, "应发生分片内续传与第二个分片请求，实际: {reqs:?}");
-        assert_eq!(reqs[0], (0, 4 * 1024 * 1024 - 1), "首个请求应为第一个 4MiB 分片");
-        assert_eq!(
-            reqs[1].0, truncate_after as u64,
-            "第二次请求应从已写字节继续，实际: {reqs:?}"
+        // YouTube 单文件连接数独立生效后，两个分片会并发下载，请求顺序不固定，按内容断言。
+        let first_segment = (0, 4 * 1024 * 1024 - 1);
+        let second_segment = (4 * 1024 * 1024, 8 * 1024 * 1024 - 1);
+        assert!(reqs.contains(&first_segment), "应请求第一个 4MiB 分片，实际: {reqs:?}");
+        assert!(reqs.contains(&second_segment), "应请求第二个 4MiB 分片，实际: {reqs:?}");
+        assert!(
+            reqs.contains(&(truncate_after as u64, 4 * 1024 * 1024 - 1)),
+            "断流后应从已写字节继续下载第一个分片，实际: {reqs:?}"
         );
-        assert_eq!(reqs[2], (4 * 1024 * 1024, 8 * 1024 * 1024 - 1));
 
         let sidecar = resume_sidecar_path(&path);
         let content = fs::read_to_string(&sidecar)
@@ -2753,8 +2791,19 @@ mod tests {
             "指纹应包含内容标识参数，实际: {fingerprint}"
         );
         assert!(fingerprint.contains("mh=1") && fingerprint.contains("mn=sn-a,sn-b"));
-        let (start, end) = parse_range_line(lines.next().expect("应有已完成分片记录")).expect("分片记录应为 start,end");
-        assert_eq!((start, end), (0, 4 * 1024 * 1024 - 1), "第一个分片应被标记完成");
+        // 两个分片并发下载，完成记录写入顺序不固定，按内容断言。
+        let mut completed = Vec::new();
+        for line in lines {
+            completed.push(parse_range_line(line).expect("分片记录应为 start,end"));
+        }
+        assert!(
+            completed.contains(&first_segment),
+            "第一个分片应被标记完成，实际: {completed:?}"
+        );
+        assert!(
+            completed.contains(&second_segment),
+            "第二个分片也应被标记完成，实际: {completed:?}"
+        );
 
         let _ = fs::remove_dir_all(&dir).await;
     }

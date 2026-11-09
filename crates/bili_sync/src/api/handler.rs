@@ -12216,7 +12216,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "parallel_download_enabled" => Some("多线程下载开关"),
         "parallel_download_threads" => Some("下载线程数"),
         "parallel_download_use_aria2" => Some("优先使用aria2"),
-        "parallel_download_googlevideo_max_connections" => Some("YouTube 并发连接上限"),
+        "parallel_download_googlevideo_max_connections" => Some("YouTube 单文件连接数"),
         "video_max_quality" => Some("视频最高画质"),
         "video_min_quality" => Some("视频最低画质"),
         "audio_max_quality" => Some("音频最高音质"),
@@ -12362,7 +12362,8 @@ fn sync_nfo_time_type(
 #[cfg(test)]
 mod config_update_tests {
     use super::{
-        clamp_parallel_download_threads, nfo_time_type_response_value, should_reset_nfo_tasks, sync_nfo_time_type,
+        clamp_parallel_download_googlevideo_max_connections, clamp_parallel_download_threads,
+        nfo_time_type_response_value, should_reset_nfo_tasks, sync_nfo_time_type,
     };
     use crate::config::{Config, NFOTimeType};
 
@@ -12408,6 +12409,14 @@ mod config_update_tests {
     }
 
     #[test]
+    fn parallel_download_googlevideo_connections_are_clamped_to_1_32() {
+        assert_eq!(clamp_parallel_download_googlevideo_max_connections(0), 1);
+        assert_eq!(clamp_parallel_download_googlevideo_max_connections(33), 32);
+        assert_eq!(clamp_parallel_download_googlevideo_max_connections(100), 32);
+        assert_eq!(clamp_parallel_download_googlevideo_max_connections(16), 16);
+    }
+
+    #[test]
     fn sync_nfo_time_type_skips_when_both_values_match() {
         let mut config = Config {
             nfo_time_type: NFOTimeType::PubTime,
@@ -12425,6 +12434,11 @@ mod config_update_tests {
 /// 下载线程数硬校验：前端 `max="16"` 只是提示，接口可以绕过，后端统一收敛到 1..=32。
 fn clamp_parallel_download_threads(threads: usize) -> usize {
     threads.clamp(1, 32)
+}
+
+/// YouTube/GoogleVideo 单文件连接数硬校验：与下载线程数一样收敛到 1..=32。
+fn clamp_parallel_download_googlevideo_max_connections(connections: usize) -> usize {
+    connections.clamp(1, 32)
 }
 
 pub async fn update_config_internal(
@@ -12765,7 +12779,7 @@ pub async fn update_config_internal(
     }
 
     if let Some(max_connections) = params.parallel_download_googlevideo_max_connections {
-        let max_connections = max_connections.clamp(1, 32);
+        let max_connections = clamp_parallel_download_googlevideo_max_connections(max_connections);
         if max_connections != config.concurrent_limit.parallel_download.googlevideo_max_connections {
             config.concurrent_limit.parallel_download.googlevideo_max_connections = max_connections;
             updated_fields.push("parallel_download_googlevideo_max_connections");
