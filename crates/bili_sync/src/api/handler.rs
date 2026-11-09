@@ -12361,7 +12361,9 @@ fn sync_nfo_time_type(
 
 #[cfg(test)]
 mod config_update_tests {
-    use super::{nfo_time_type_response_value, should_reset_nfo_tasks, sync_nfo_time_type};
+    use super::{
+        clamp_parallel_download_threads, nfo_time_type_response_value, should_reset_nfo_tasks, sync_nfo_time_type,
+    };
     use crate::config::{Config, NFOTimeType};
 
     #[test]
@@ -12398,6 +12400,14 @@ mod config_update_tests {
     }
 
     #[test]
+    fn parallel_download_threads_are_clamped_to_1_32() {
+        assert_eq!(clamp_parallel_download_threads(0), 1);
+        assert_eq!(clamp_parallel_download_threads(33), 32);
+        assert_eq!(clamp_parallel_download_threads(100), 32);
+        assert_eq!(clamp_parallel_download_threads(16), 16);
+    }
+
+    #[test]
     fn sync_nfo_time_type_skips_when_both_values_match() {
         let mut config = Config {
             nfo_time_type: NFOTimeType::PubTime,
@@ -12410,6 +12420,11 @@ mod config_update_tests {
 
         assert!(updated_fields.is_empty());
     }
+}
+
+/// 下载线程数硬校验：前端 `max="16"` 只是提示，接口可以绕过，后端统一收敛到 1..=32。
+fn clamp_parallel_download_threads(threads: usize) -> usize {
+    threads.clamp(1, 32)
 }
 
 pub async fn update_config_internal(
@@ -12735,7 +12750,8 @@ pub async fn update_config_internal(
     }
 
     if let Some(threads) = params.parallel_download_threads {
-        if threads > 0 && threads != config.concurrent_limit.parallel_download.threads {
+        let threads = clamp_parallel_download_threads(threads);
+        if threads != config.concurrent_limit.parallel_download.threads {
             config.concurrent_limit.parallel_download.threads = threads;
             updated_fields.push("parallel_download_threads");
         }
