@@ -12362,7 +12362,8 @@ fn sync_nfo_time_type(
 #[cfg(test)]
 mod config_update_tests {
     use super::{
-        clamp_parallel_download_threads, nfo_time_type_response_value, should_reset_nfo_tasks, sync_nfo_time_type,
+        clamp_parallel_download_googlevideo_max_connections, clamp_parallel_download_threads,
+        nfo_time_type_response_value, should_reset_nfo_tasks, sync_nfo_time_type,
     };
     use crate::config::{Config, NFOTimeType};
 
