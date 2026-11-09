@@ -6204,6 +6204,10 @@ fn warn_youtube_below_min_quality(
     source: &youtube_source::Model,
     title: &str,
 ) {
+    // 纯音频源不关心视频画质，不要拿 video_min_quality 报一条误导性的 WARN。
+    if source.audio_only {
+        return;
+    }
     let min_height = youtube_quality_height(filter.video_min_quality);
     let Some(format) = selected_effective_video_format(selected) else {
         return;
