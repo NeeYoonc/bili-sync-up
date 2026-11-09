@@ -2791,8 +2791,19 @@ mod tests {
             "指纹应包含内容标识参数，实际: {fingerprint}"
         );
         assert!(fingerprint.contains("mh=1") && fingerprint.contains("mn=sn-a,sn-b"));
-        let (start, end) = parse_range_line(lines.next().expect("应有已完成分片记录")).expect("分片记录应为 start,end");
-        assert_eq!((start, end), (0, 4 * 1024 * 1024 - 1), "第一个分片应被标记完成");
+        // 两个分片并发下载，完成记录写入顺序不固定，按内容断言。
+        let mut completed = Vec::new();
+        for line in lines {
+            completed.push(parse_range_line(line).expect("分片记录应为 start,end"));
+        }
+        assert!(
+            completed.contains(&first_segment),
+            "第一个分片应被标记完成，实际: {completed:?}"
+        );
+        assert!(
+            completed.contains(&second_segment),
+            "第二个分片也应被标记完成，实际: {completed:?}"
+        );
 
         let _ = fs::remove_dir_all(&dir).await;
     }
