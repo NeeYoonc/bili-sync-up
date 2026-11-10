@@ -1893,8 +1893,10 @@ impl<'a> Video<'a> {
 
                 match verification_request {
                     VerificationRequest::StartNew(_captcha_info) => {
-                        tracing::info!("启动新验证流程，已在管理页 /captcha 提供验证界面");
-                        tracing::info!("请在浏览器中访问管理页面完成验证，超时时间: {}秒", risk_config.timeout);
+                        tracing::warn!(
+                            "启动 B 站风控人工验证，请在浏览器访问管理页 /captcha 完成极验（最长等待 {} 秒）",
+                            risk_config.timeout
+                        );
 
                         // 发送风控通知（异步执行，不阻塞验证流程）
                         tokio::spawn(async {
@@ -1903,13 +1905,10 @@ impl<'a> Video<'a> {
                             }
                         });
 
-                        // 等待用户完成验证
-                        let captcha_result = tokio::time::timeout(
-                            std::time::Duration::from_secs(risk_config.timeout),
-                            VERIFICATION_COORDINATOR.wait_for_captcha_result(),
-                        )
-                        .await
-                        .map_err(|_| anyhow::anyhow!("验证码验证等待超时"))??;
+                        // 等待用户完成验证（超时时间由 risk_config.timeout 控制，超时后协调器会唤醒所有等待者）
+                        let captcha_result = VERIFICATION_COORDINATOR
+                            .wait_for_captcha_result(std::time::Duration::from_secs(risk_config.timeout))
+                            .await?;
 
                         // 使用验证结果获取gaia_vtoken
                         tracing::info!("收到验证结果，正在获取gaia_vtoken");
@@ -1922,9 +1921,20 @@ impl<'a> Video<'a> {
                         Ok(gaia_vtoken)
                     }
                     VerificationRequest::WaitForExisting => {
-                        tracing::info!("检测到正在进行的验证，等待完成...");
-                        let gaia_vtoken = VERIFICATION_COORDINATOR.wait_for_completion().await?;
-                        Ok(gaia_vtoken)
+                        tracing::warn!(
+                            "检测到正在进行的风控验证，等待其完成（最长等待 {} 秒）",
+                            risk_config.timeout
+                        );
+                        match VERIFICATION_COORDINATOR
+                            .wait_for_completion(std::time::Duration::from_secs(risk_config.timeout))
+                            .await
+                        {
+                            Ok(gaia_vtoken) => Ok(gaia_vtoken),
+                            Err(e) => {
+                                tracing::warn!("等待风控验证完成失败：{}；本次任务失败，可重试", e);
+                                Err(e)
+                            }
+                        }
                     }
                     VerificationRequest::UseCache(gaia_vtoken) => {
                         tracing::info!("使用缓存的gaia_vtoken");
@@ -1973,9 +1983,20 @@ impl<'a> Video<'a> {
                         Ok(gaia_vtoken)
                     }
                     VerificationRequest::WaitForExisting => {
-                        tracing::info!("检测到正在进行的验证，等待完成...");
-                        let gaia_vtoken = VERIFICATION_COORDINATOR.wait_for_completion().await?;
-                        Ok(gaia_vtoken)
+                        tracing::warn!(
+                            "检测到正在进行的风控验证，等待其完成（最长等待 {} 秒）",
+                            risk_config.timeout
+                        );
+                        match VERIFICATION_COORDINATOR
+                            .wait_for_completion(std::time::Duration::from_secs(risk_config.timeout))
+                            .await
+                        {
+                            Ok(gaia_vtoken) => Ok(gaia_vtoken),
+                            Err(e) => {
+                                tracing::warn!("等待风控验证完成失败：{}；本次任务失败，可重试", e);
+                                Err(e)
+                            }
+                        }
                     }
                     VerificationRequest::UseCache(gaia_vtoken) => {
                         tracing::info!("使用缓存的gaia_vtoken");

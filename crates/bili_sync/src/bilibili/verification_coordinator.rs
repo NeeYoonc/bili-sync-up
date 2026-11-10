@@ -8,6 +8,13 @@ use tokio::sync::{oneshot, Mutex, Notify};
 use super::{CaptchaInfo, CaptchaResult, CaptchaSolver};
 use crate::config::RiskControlConfig;
 
+/// 风控验证默认超时时间（秒）。
+///
+/// 正常路径由调用方传入风控配置里的 `risk_config.timeout`，这个常量只作为无配置场景
+/// （例如单测）的兜底，避免再次出现写死的超时。
+#[allow(dead_code, reason = "保留给无配置场景与单测兜底使用")]
+pub const DEFAULT_VERIFICATION_TIMEOUT_SECS: u64 = 300;
+
 /// 验证请求类型
 #[derive(Debug)]
 pub enum VerificationRequest {
@@ -117,7 +124,11 @@ impl VerificationCoordinator {
     }
 
     /// 等待验证完成，返回验证结果
-    pub async fn wait_for_captcha_result(&self) -> Result<CaptchaResult> {
+    ///
+    /// `timeout` 由调用方传入（通常取风控配置里的 `risk_config.timeout`）。超时或验证通道
+    /// 关闭时会先把状态重置为 `Idle`，再唤醒所有 `wait_for_completion` 等待者，避免它们
+    /// 因为状态已被重置而永久阻塞。
+    pub async fn wait_for_captcha_result(&self, timeout: Duration) -> Result<CaptchaResult> {
         // 首先设置result_sender
         let receiver = {
             let mut state = self.state.lock().await;
@@ -134,7 +145,7 @@ impl VerificationCoordinator {
         };
 
         // 等待验证完成（带超时）
-        let result = tokio::time::timeout(Duration::from_secs(300), receiver).await;
+        let result = tokio::time::timeout(timeout, receiver).await;
 
         match result {
             Ok(Ok(captcha_result)) => {
@@ -142,18 +153,37 @@ impl VerificationCoordinator {
                 Ok(captcha_result)
             }
             Ok(Err(_)) => {
-                // 重置状态
-                let mut state = self.state.lock().await;
-                *state = VerificationState::Idle;
+                // 验证通道已关闭：重置状态并唤醒所有等待者，避免它们永久阻塞。
+                self.reset_to_idle_and_wake().await;
                 anyhow::bail!("验证通道已关闭");
             }
             Err(_) => {
-                // 超时，重置状态
-                let mut state = self.state.lock().await;
-                *state = VerificationState::Idle;
-                anyhow::bail!("验证超时");
+                // 超时：重置状态并唤醒所有 WaitForExisting 等待者，避免它们永久挂住。
+                self.reset_to_idle_and_wake().await;
+                anyhow::bail!(
+                    "风控验证未在 {} 秒内完成，本次任务按失败处理（可重试）",
+                    timeout.as_secs()
+                );
             }
         }
+    }
+
+    /// 仅当前状态仍是「等待用户验证」时重置为 `Idle`，然后唤醒所有等待者。
+    ///
+    /// 已完成的 token 不会被这里覆盖。
+    async fn reset_to_idle_and_wake(&self) {
+        {
+            let mut state = self.state.lock().await;
+            if matches!(*state, VerificationState::WaitingForUser { .. }) {
+                *state = VerificationState::Idle;
+            }
+        }
+        self.notify.notify_waiters();
+    }
+
+    /// 当前是否处于空闲状态（发起验证的任务已超时/放弃）。
+    async fn is_idle(&self) -> bool {
+        matches!(*self.state.lock().await, VerificationState::Idle)
     }
 
     /// 保存验证成功的token
@@ -188,15 +218,38 @@ impl VerificationCoordinator {
     }
 
     /// 等待验证完成的通知
-    pub async fn wait_for_completion(&self) -> Result<String> {
+    ///
+    /// `timeout` 由调用方传入（通常取风控配置里的 `risk_config.timeout`）。循环中会同时
+    /// 检查缓存 token、协调器状态是否已被重置为 `Idle`（说明发起验证的任务已超时/放弃）
+    /// 以及是否到达截止时间，因此不会再出现永久阻塞。
+    pub async fn wait_for_completion(&self, timeout: Duration) -> Result<String> {
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
             // 检查是否已完成
             if let Some(token) = self.get_cached_token().await {
                 return Ok(token);
             }
 
-            // 等待通知
-            self.notify.notified().await;
+            // 发起验证的任务已超时/放弃（状态被重置为 Idle）→ 立即失败，不再永久等待
+            if self.is_idle().await {
+                anyhow::bail!("风控验证已被放弃或超时，本次任务按失败处理（可重试）");
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                // 超时：仅在仍等待用户时重置状态，避免覆盖已完成的 token
+                self.reset_to_idle_and_wake().await;
+                anyhow::bail!(
+                    "风控验证未在 {} 秒内完成，本次任务按失败处理（可重试）",
+                    timeout.as_secs()
+                );
+            }
+
+            // 等待下一次通知，最多等到截止时间
+            tokio::select! {
+                _ = self.notify.notified() => {}
+                _ = tokio::time::sleep(deadline - now) => {}
+            }
         }
     }
 
@@ -235,3 +288,107 @@ impl VerificationCoordinator {
 
 /// 全局验证协调器实例
 pub static VERIFICATION_COORDINATOR: Lazy<VerificationCoordinator> = Lazy::new(VerificationCoordinator::new);
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn sample_captcha_info() -> CaptchaInfo {
+        CaptchaInfo {
+            captcha_type: "geetest".to_string(),
+            token: "test-captcha-token".to_string(),
+            geetest: None,
+        }
+    }
+
+    async fn start_verification(coordinator: &VerificationCoordinator) {
+        let request = coordinator
+            .request_verification("test-v-voucher".to_string(), sample_captcha_info())
+            .await
+            .expect("启动验证请求失败");
+        assert!(matches!(request, VerificationRequest::StartNew(_)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_completion_returns_error_after_timeout() {
+        let coordinator = VerificationCoordinator::new();
+        start_verification(&coordinator).await;
+
+        let err = coordinator
+            .wait_for_completion(Duration::from_millis(50))
+            .await
+            .expect_err("超时后应返回错误，而不是永久挂住");
+        assert!(err.to_string().contains("风控验证未在"));
+        // 超时后状态应回到 Idle
+        assert!(coordinator.get_captcha_info().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn captcha_timeout_wakes_wait_for_completion_waiters() {
+        let coordinator = Arc::new(VerificationCoordinator::new());
+        start_verification(&coordinator).await;
+
+        let waiter = {
+            let coordinator = Arc::clone(&coordinator);
+            tokio::spawn(async move { coordinator.wait_for_completion(Duration::from_secs(5)).await })
+        };
+        // 让等待者先进入等待，再让发起方超时
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let captcha_err = coordinator
+            .wait_for_captcha_result(Duration::from_millis(100))
+            .await
+            .expect_err("验证码等待应超时返回错误");
+        assert!(captcha_err.to_string().contains("风控验证未在"));
+
+        let waiter_result = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("发起方超时后，WaitForExisting 等待者应立即醒来")
+            .expect("等待任务 panic");
+        let waiter_err = waiter_result.expect_err("发起方超时后等待者不应返回成功");
+        assert!(waiter_err.to_string().contains("风控验证已被放弃或超时"));
+        assert!(coordinator.is_idle().await);
+    }
+
+    #[tokio::test]
+    async fn wait_for_completion_returns_token_after_save() {
+        let coordinator = VerificationCoordinator::new();
+        start_verification(&coordinator).await;
+        assert!(coordinator.get_cached_token().await.is_none());
+
+        coordinator.save_token("test-gaia-vtoken".to_string()).await;
+        let token = coordinator
+            .wait_for_completion(Duration::from_millis(200))
+            .await
+            .expect("已保存 token 后应立即返回 Ok");
+        assert_eq!(token, "test-gaia-vtoken");
+    }
+
+    #[tokio::test]
+    async fn wait_for_completion_returns_error_when_state_reset_externally() {
+        let coordinator = Arc::new(VerificationCoordinator::new());
+        start_verification(&coordinator).await;
+
+        let waiter = {
+            let coordinator = Arc::clone(&coordinator);
+            tokio::spawn(async move { coordinator.wait_for_completion(Duration::from_secs(5)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // 模拟发起验证的任务超时/放弃后把状态重置为 Idle
+        {
+            let mut state = coordinator.state.lock().await;
+            *state = VerificationState::Idle;
+        }
+        coordinator.notify.notify_waiters();
+
+        let waiter_result = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("状态被置 Idle 后等待者应立即醒来")
+            .expect("等待任务 panic");
+        let waiter_err = waiter_result.expect_err("状态已被重置时不应返回成功");
+        assert!(waiter_err.to_string().contains("风控验证已被放弃或超时"));
+    }
+}
