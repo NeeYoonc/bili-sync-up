@@ -963,6 +963,11 @@ mod tests {
         fn contents(&self) -> String {
             String::from_utf8(self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()).unwrap_or_default()
         }
+
+        /// 清空缓冲区；warm-up 产生的日志不能干扰后续断言。
+        fn clear(&self) {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
     }
 
     /// 轮询等待日志缓冲区出现指定内容。
@@ -978,6 +983,52 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    /// 预热 tracing 的 callsite interest，并让本测试断言依赖的 callsite 先「注册」。
+    ///
+    /// `tracing` 的 callsite interest 是**进程级**缓存：某个 callsite 第一次被命中时，
+    /// 如果命中的线程没有起作用的 subscriber，就会被缓存成 `never`，之后即使本测试
+    /// `set_default` 了 DEBUG subscriber 也收不到日志。`rebuild_interest_cache()` 只能对
+    /// 「已经注册」的 callsite 重算 interest —— 若该 callsite 此前从未被命中，重算是空转，
+    /// 之后由其它测试线程首次命中时又会缓存成 never；若它恰好在本测试 rebuild 之后才
+    /// 首次注册，同样救不回来。这两种情况正是本测试在 CI 上偶发丢掉 begin 阶段
+    /// `debug!` 行的原因（complete 阶段的 WARN 证明 contention 确实发生了）。
+    ///
+    /// 所以正确顺序是：先在本线程 DEBUG subscriber 生效期间把断言依赖的 callsite 各
+    /// 主动命中一次（让它们注册、interest 按 DEBUG 计算），**最后**再
+    /// `rebuild_interest_cache()` 把之前可能被缓存成 never 的值纠正过来。顺序不能反。
+    /// warm-up 自身产生的日志会被 `logs.clear()` 清掉，不影响断言。
+    fn warm_up_db_operation_trace_callsites(logs: &SharedLogBuffer) {
+        // 1) 命中「空占用」分支的 debug! callsite（short overlap 测试断言 `数据库操作开始: ...` 依赖它）。
+        ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        log_active_db_operation_contention("数据库操作开始时检测到", "数据库操作开始", "test.warmup_idle", None);
+
+        // 2) 命中「有占用」分支的 debug! callsite：塞一条 1 秒前开始、已超过 WARN 阈值的假操作，
+        //    让 log_active_db_operation_contention 走 occupied 分支。
+        ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            990,
+            ActiveDbOperation {
+                name: "test.warmup".to_string(),
+                started_at: Instant::now() - std::time::Duration::from_secs(1),
+            },
+        );
+        log_active_db_operation_contention("数据库操作开始时检测到", "数据库操作开始", "test.warmup", None);
+
+        // 3) 命中 on_error 里「锁等待/冲突」的 WARN callsite。
+        let warning_guard = DbOperationGuard::begin("test.warmup_warn");
+        warning_guard.on_error("complete", &"database is locked");
+        // 不调用 finish：Drop 会再打一条「未显式提交」WARN（噪音但无害），
+        // 同时把该假操作从 ACTIVE_DB_OPERATIONS 里移除。
+        drop(warning_guard);
+
+        // 4) 清掉 warm-up 的日志与残留状态，避免干扰断言。
+        ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        logs.clear();
+
+        // 5) 最后重建 interest：此时上面的 callsite 已在当前 DEBUG subscriber 下注册，
+        //    重建会把之前缓存成 never 的 interest 纠正为启用。
+        tracing::callsite::rebuild_interest_cache();
     }
 
     /// 断言失败（panic）时也要清理进程级全局状态，避免污染后续测试。
@@ -1045,10 +1096,10 @@ mod tests {
             .with_max_level(Level::DEBUG)
             .finish();
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-        // `set_default` 只设置线程级 dispatcher，而 tracing 的 callsite interest 是
-        // 进程级缓存：如果该 callsite 之前被没有 subscriber 的测试线程先命中过，
-        // 会被缓存成 never，本测试就永远收不到 DEBUG 日志。强制重建一次。
-        tracing::callsite::rebuild_interest_cache();
+        // `set_default` 只设置线程级 dispatcher，而 callsite interest 是进程级缓存：
+        // 必须先 warm-up 让断言依赖的 callsite 在本线程 DEBUG subscriber 下注册，
+        // 最后再 rebuild_interest_cache() 收尾 —— 顺序反了会留下竞态（见函数注释）。
+        warm_up_db_operation_trace_callsites(&logs);
 
         ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).insert(
             999,
@@ -1099,10 +1150,10 @@ mod tests {
             .with_max_level(Level::DEBUG)
             .finish();
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-        // `set_default` 只设置线程级 dispatcher，而 tracing 的 callsite interest 是
-        // 进程级缓存：如果该 callsite 之前被没有 subscriber 的测试线程先命中过，
-        // 会被缓存成 never，本测试就永远收不到 DEBUG 日志。强制重建一次。
-        tracing::callsite::rebuild_interest_cache();
+        // `set_default` 只设置线程级 dispatcher，而 callsite interest 是进程级缓存：
+        // 必须先 warm-up 让断言依赖的 callsite 在本线程 DEBUG subscriber 下注册，
+        // 最后再 rebuild_interest_cache() 收尾 —— 顺序反了会留下竞态（见函数注释）。
+        warm_up_db_operation_trace_callsites(&logs);
 
         let db_path = std::env::temp_dir().join(format!("bili-sync-db-trace-{}.sqlite", Uuid::new_v4()));
         let connection_1 = create_test_connection(&db_path, 50).await?;
