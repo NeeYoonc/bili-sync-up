@@ -169,12 +169,12 @@ impl CaptchaSolver {
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("JSON结果缺少geetest_seccode字段"))?;
 
-                    CaptchaResult {
-                        challenge: challenge.to_string(),
-                        validate: validate.to_string(),
-                        seccode: seccode.to_string(),
-                        token: captcha_token.to_string(),
-                    }
+                    CaptchaResult::new_v3(
+                        challenge.to_string(),
+                        captcha_token.to_string(),
+                        validate.to_string(),
+                        seccode.to_string(),
+                    )
                 } else if let Some(request_str) = request_value.as_str() {
                     // 旧格式：字符串 "challenge:validate:seccode"
                     tracing::info!("2Captcha返回字符串格式结果: {}", request_str);
@@ -187,12 +187,12 @@ impl CaptchaSolver {
                         );
                     }
 
-                    CaptchaResult {
-                        challenge: parts[0].to_string(),
-                        validate: parts[1].to_string(),
-                        seccode: format!("{}|jordan", parts[1]), // seccode格式通常是 validate|jordan
-                        token: captcha_token.to_string(),
-                    }
+                    CaptchaResult::new_v3(
+                        parts[0].to_string(),
+                        captcha_token.to_string(),
+                        parts[1].to_string(),
+                        format!("{}|jordan", parts[1]), // seccode格式通常是 validate|jordan
+                    )
                 } else {
                     anyhow::bail!("无法解析验证结果，request字段既不是对象也不是字符串");
                 };
@@ -297,12 +297,12 @@ impl CaptchaSolver {
             if result_response["status"].as_str() == Some("ready") {
                 let solution = &result_response["solution"];
 
-                return Ok(CaptchaResult {
-                    challenge: solution["challenge"].as_str().unwrap_or("").to_string(),
-                    validate: solution["validate"].as_str().unwrap_or("").to_string(),
-                    seccode: solution["seccode"].as_str().unwrap_or("").to_string(),
-                    token: captcha_token.to_string(),
-                });
+                return Ok(CaptchaResult::new_v3(
+                    solution["challenge"].as_str().unwrap_or("").to_string(),
+                    captcha_token.to_string(),
+                    solution["validate"].as_str().unwrap_or("").to_string(),
+                    solution["seccode"].as_str().unwrap_or("").to_string(),
+                ));
             }
         }
     }
