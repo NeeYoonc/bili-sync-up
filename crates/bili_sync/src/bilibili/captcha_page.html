@@ -177,35 +177,62 @@
         </div>
     </div>
 
-    <!-- 极验证JS SDK -->
-    <script src="https://static.geetest.com/static/js/gt.0.4.9.js"></script>
-    
     <script>
+        const GEETEST_V3_SDK = 'https://static.geetest.com/static/js/gt.0.4.9.js';
+        const GEETEST_V4_SDK = 'https://static.geetest.com/v4/gt4.js';
+
+        // 动态加载极验 SDK，加载失败时把 URL 一并显示出来，方便用户截图反馈
+        function loadScript(src) {
+            return new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = src;
+                script.async = true;
+                script.onload = () => resolve();
+                script.onerror = () => reject(new Error(`验证码 SDK 加载失败：${src}`));
+                document.head.appendChild(script);
+            });
+        }
+
         class CaptchaVerification {
             constructor() {
                 this.captchaObj = null;
                 this.captchaInfo = null;
+                this.isV4 = false;
+                this.captchaId = '';
+                this.submitting = false;
+                this.manualButton = null;
                 this.statusEl = document.getElementById('status');
                 this.loadingEl = document.getElementById('loading');
                 this.captchaContainer = document.getElementById('captcha-container');
-                
+
                 this.init();
             }
 
             async init() {
                 try {
-                    // 获取验证码信息
                     this.updateStatus('正在获取验证码信息...', 'info');
                     await this.fetchCaptchaInfo();
-                    
-                    // 初始化极验证
-                    this.updateStatus('正在初始化验证组件...', 'info');
-                    await this.initGeetest();
-                    
+
+                    this.isV4 = typeof this.captchaInfo.type === 'string'
+                        && this.captchaInfo.type.indexOf('geetest4') !== -1;
+                    this.captchaId = this.resolveCaptchaId();
+
+                    const versionLabel = this.isV4 ? '极验 v4' : '极验 v3';
+                    const idLabel = this.captchaId ? `，captchaId: ${this.captchaId.slice(0, 8)}…` : '';
+                    this.updateStatus(`当前验证类型：${versionLabel}${idLabel}，正在加载验证组件...`, 'info');
+
+                    await this.initCaptcha();
                 } catch (error) {
                     console.error('初始化失败:', error);
-                    this.updateStatus(`初始化失败: ${error.message}`, 'error');
+                    this.updateStatus(`初始化失败：${error.message}`, 'error');
                 }
+            }
+
+            resolveCaptchaId() {
+                const info = this.captchaInfo || {};
+                const v4 = info.geetest4 || {};
+                const v3 = info.geetest || {};
+                return v4.captcha_id || v3.captcha_id || v3.gt || '';
             }
 
             async fetchCaptchaInfo() {
@@ -213,72 +240,143 @@
                 if (!response.ok) {
                     throw new Error('获取验证码信息失败');
                 }
-                
+
                 const result = await response.json();
                 if (!result.success) {
                     throw new Error(result.message);
                 }
-                
+
                 this.captchaInfo = result.data;
                 console.log('验证码信息:', this.captchaInfo);
             }
 
-            async initGeetest() {
-                if (!this.captchaInfo || !this.captchaInfo.geetest) {
+            async initCaptcha() {
+                if (!this.captchaInfo || (!this.captchaInfo.geetest && !this.captchaInfo.geetest4)) {
                     throw new Error('验证码信息无效');
                 }
+                if (this.isV4) {
+                    await this.initGeetest4();
+                } else {
+                    await this.initGeetest3();
+                }
+            }
 
-                const { gt, challenge } = this.captchaInfo.geetest;
-                
-                return new Promise((resolve, reject) => {
-                    // 初始化极验证 (v3版本)
+            // 极验 v3：静态加载 gt.0.4.9.js，initGeetest({gt, challenge})
+            async initGeetest3() {
+                await loadScript(GEETEST_V3_SDK);
+                if (typeof window.initGeetest !== 'function') {
+                    throw new Error('极验 v3 SDK 未正确加载（window.initGeetest 不存在）');
+                }
+                const v3 = this.captchaInfo.geetest || {};
+
+                return new Promise((resolve) => {
                     window.initGeetest({
-                        gt: gt,
-                        challenge: challenge,
+                        gt: v3.gt,
+                        challenge: v3.challenge,
                         protocol: 'https://',
                         timeout: 60000,
                         offline: false,
                         new_captcha: true
                     }, (captchaObj) => {
-                        console.log('极验证初始化成功');
+                        console.log('极验 v3 初始化成功');
                         this.captchaObj = captchaObj;
-                        
-                        // 绑定验证成功事件 (v3版本)
                         captchaObj.onSuccess(() => {
-                            console.log('验证成功');
+                            console.log('验证成功（v3）');
                             this.handleVerifySuccess();
                         });
-
-                        // 绑定错误事件
-                        captchaObj.onError((error) => {
-                            console.error('验证错误:', error);
-                            this.updateStatus(`验证失败: ${error}`, 'error');
-                        });
-
-                        // 隐藏loading，显示验证码
+                        if (typeof captchaObj.onError === 'function') {
+                            captchaObj.onError((error) => {
+                                console.error('验证错误:', error);
+                                this.updateStatus(`验证失败：${error}`, 'error');
+                            });
+                        }
                         this.loadingEl.classList.add('hidden');
-                        captchaObj.appendTo(document.getElementById('captcha-container'));
-                        
+                        captchaObj.appendTo(this.captchaContainer);
                         this.updateStatus('请完成下方的人机验证', 'info');
                         resolve();
                     });
                 });
             }
 
+            // 极验 v4：加载 v4/gt4.js，initGeetest4({captchaId, product:'bind'})
+            async initGeetest4() {
+                await loadScript(GEETEST_V4_SDK);
+                if (typeof window.initGeetest4 !== 'function') {
+                    throw new Error('极验 v4 SDK 未正确加载（window.initGeetest4 不存在）');
+                }
+                if (!this.captchaId) {
+                    throw new Error('验证码信息缺少 captchaId，无法初始化极验 v4');
+                }
+
+                return new Promise((resolve) => {
+                    window.initGeetest4({
+                        captchaId: this.captchaId,
+                        product: 'bind',
+                        language: 'zho'
+                    }, (captchaObj) => {
+                        console.log('极验 v4 初始化成功');
+                        this.captchaObj = captchaObj;
+                        captchaObj.onSuccess(() => {
+                            console.log('验证成功（v4）');
+                            this.handleVerifySuccess();
+                        });
+                        if (typeof captchaObj.onError === 'function') {
+                            captchaObj.onError((error) => {
+                                console.error('验证错误:', error);
+                                this.updateStatus(`验证失败：${error}`, 'error');
+                            });
+                        }
+                        this.loadingEl.classList.add('hidden');
+                        captchaObj.appendTo('#captcha-container');
+                        this.showManualSubmitButton();
+                        this.updateStatus('请完成下方的人机验证', 'info');
+                        resolve();
+                    });
+                });
+            }
+
+            // v4 的 onSuccess 在部分环境可能不触发，提供手动提交兜底
+            showManualSubmitButton() {
+                if (this.manualButton) {
+                    return;
+                }
+                const button = document.createElement('button');
+                button.textContent = '我已完成验证，手动提交';
+                button.style.cssText =
+                    'margin-top:16px;padding:10px 20px;border:none;border-radius:6px;background:#667eea;color:#fff;font-size:14px;cursor:pointer;';
+                button.addEventListener('click', () => {
+                    this.handleVerifySuccess();
+                });
+                this.captchaContainer.parentElement.appendChild(button);
+                this.manualButton = button;
+            }
+
             async handleVerifySuccess() {
+                if (this.submitting) {
+                    return;
+                }
+                this.submitting = true;
                 try {
                     this.updateStatus('验证成功，正在提交结果...', 'info');
-                    
-                    // 获取验证结果 (v3版本API)
-                    const result = this.captchaObj.getValidate();
+
+                    const result = this.captchaObj ? this.captchaObj.getValidate() : null;
                     console.log('验证结果:', result);
-                    
-                    // v3版本的结果格式: {geetest_challenge, geetest_validate, geetest_seccode}
-                    const submitData = {
-                        geetest_challenge: result.geetest_challenge,
-                        geetest_validate: result.geetest_validate,
-                        geetest_seccode: result.geetest_seccode
-                    };
+                    if (!result) {
+                        throw new Error('未获取到验证结果，请先完成验证');
+                    }
+
+                    const submitData = this.isV4
+                        ? {
+                            lot_number: result.lot_number,
+                            captcha_output: result.captcha_output,
+                            pass_token: result.pass_token,
+                            gen_time: result.gen_time
+                        }
+                        : {
+                            geetest_challenge: result.geetest_challenge,
+                            geetest_validate: result.geetest_validate,
+                            geetest_seccode: result.geetest_seccode
+                        };
 
                     const response = await fetch('/api/captcha/submit', {
                         method: 'POST',
@@ -288,22 +386,19 @@
                         body: JSON.stringify(submitData)
                     });
                     const submitResult = await response.json();
-                    
+
                     if (submitResult.success) {
                         this.updateStatus('✅ 验证完成！页面将自动关闭...', 'success');
-                        
-                        // 3秒后关闭页面
                         setTimeout(() => {
                             window.close();
                         }, 3000);
-                        
                     } else {
                         throw new Error(submitResult.message);
                     }
-                    
                 } catch (error) {
+                    this.submitting = false;
                     console.error('提交验证结果失败:', error);
-                    this.updateStatus(`提交失败: ${error.message}`, 'error');
+                    this.updateStatus(`提交失败：${error.message}`, 'error');
                 }
             }
 

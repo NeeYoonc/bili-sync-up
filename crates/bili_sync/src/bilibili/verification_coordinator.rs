@@ -300,6 +300,7 @@ mod tests {
             captcha_type: "geetest".to_string(),
             token: "test-captcha-token".to_string(),
             geetest: None,
+            geetest4: None,
         }
     }
 
