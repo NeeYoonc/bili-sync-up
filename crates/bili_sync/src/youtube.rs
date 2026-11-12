@@ -71,6 +71,16 @@ const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
 const PLAYLIST_CATALOG_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const SOURCE_VIDEO_PREVIEW_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
+/// YouTube 频道扫描的硬超时。
+///
+/// 超大频道（例如 1.6 万条：videos 2,283 + live 4,616 + shorts 9,392）在代理下
+/// 用 yt-dlp 完整枚举约需 9 分钟，此前写死的 5 分钟会让这类频道每轮都超时、
+/// 永远同步不到视频。这里放宽到 20 分钟；已扫描过的频道还会走增量枚举
+/// （见 [`YOUTUBE_INCREMENTAL_PLAYLIST_END`]），通常几秒即可完成。
+const YOUTUBE_SCAN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// 增量扫描时每个标签页最多枚举的条数（videos/live/shorts 各自生效）。
+const YOUTUBE_INCREMENTAL_PLAYLIST_END: u32 = 500;
+
 /// 扫描失败告警静默期：同一来源失败后 6 小时内不重复打 WARN，避免私有源
 /// （稍后再看/喜欢/订阅）登录失效时每轮（约 20 分钟）刷屏告警。
 const SCAN_FAILURE_WARN_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
@@ -3337,6 +3347,27 @@ fn ytdlp_flat_item_cover_url(item: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 判断本次 YouTube 频道扫描是否只枚举每个标签页最近若干条（增量扫描）。
+///
+/// 只有「YouTube 频道 + 已有历史记录 + 未开启扫描已删除视频」才返回上限：
+/// 新视频总在各标签页顶部，限 500 条足够；用户开启「扫描已删除视频」时必须
+/// 全量枚举才能发现被删条目。TikTok / 抖音 / 播放列表等来源行为不变。
+fn youtube_incremental_playlist_end(
+    source_type: &str,
+    known_video_ids_empty: bool,
+    scan_deleted_videos: bool,
+    is_tiktok: bool,
+    is_douyin: bool,
+) -> Option<u32> {
+    if is_tiktok || is_douyin {
+        return None;
+    }
+    if source_type != "channel" || known_video_ids_empty || scan_deleted_videos {
+        return None;
+    }
+    Some(YOUTUBE_INCREMENTAL_PLAYLIST_END)
+}
+
 async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) -> Result<u64> {
     if is_douyin_source(source) {
         return scan_douyin_source(db, source).await;
@@ -3367,6 +3398,8 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         );
     }
     let tiktok = crate::tiktok::is_tiktok_source(source);
+    let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
+    let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
     let mut command = ytdlp_command();
     command.args([
         "--flat-playlist",
@@ -3389,6 +3422,20 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         append_ytdlp_tab_args(&mut command);
     }
     append_youtube_proxy(&mut command);
+    if let Some(playlist_end) = youtube_incremental_playlist_end(
+        &source.source_type,
+        known_video_ids.is_empty(),
+        scan_deleted_videos,
+        tiktok,
+        is_douyin_source(source),
+    ) {
+        // `--playlist-end` 对频道根地址是「每个标签页各自生效」：三个 tab 各取最近 N 条。
+        command.arg("--playlist-end").arg(playlist_end.to_string());
+        info!(
+            "YouTube 视频源「{}」已有历史记录，本次仅枚举每个标签页最近 {} 条",
+            source.name, playlist_end
+        );
+    }
     // 频道的 `/videos`、`/shorts` 和 `/streams` 是三个彼此独立的标签页。
     // 扫描频道根地址时 yt-dlp 会按频道完整枚举三个标签页；若直接使用用户
     // 粘贴的 `/videos` 地址，则只会看到普通视频，漏掉 Shorts 和直播回放。
@@ -3399,7 +3446,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         source.url.clone()
     };
     command.arg(&scan_url);
-    let output = tokio::time::timeout(Duration::from_secs(5 * 60), command.output())
+    let output = tokio::time::timeout(YOUTUBE_SCAN_TIMEOUT, command.output())
         .await
         .map_err(|_| anyhow!("扫描 {} 来源超时", source_platform_label(source)))??;
     if !output.status.success() {
@@ -3416,9 +3463,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         .as_deref()
         .and_then(|value| serde_json::from_str::<HashSet<String>>(value).ok())
         .unwrap_or_default();
-    let known_video_ids = parse_video_id_set(source.known_video_ids.as_deref());
     let mut deleted_video_ids = parse_video_id_set(source.deleted_video_ids.as_deref());
-    let scan_deleted_videos = source.scan_deleted_videos || source.scan_deleted_videos_once;
     let mut scanned_video_ids = HashSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(item) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -12102,6 +12147,60 @@ mod tests {
         assert_eq!(
             super::youtube_selectable_height(&result.formats, &filter, "YouTube"),
             360
+        );
+    }
+
+    /// 增量扫描：已有历史记录的 YouTube 频道只枚举每个标签页最近 500 条。
+    #[test]
+    fn youtube_incremental_playlist_end_limits_known_channel() {
+        assert_eq!(
+            super::youtube_incremental_playlist_end("channel", false, false, false, false),
+            Some(super::YOUTUBE_INCREMENTAL_PLAYLIST_END)
+        );
+    }
+
+    /// 没有历史记录的频道必须全量枚举，避免漏掉老视频。
+    #[test]
+    fn youtube_incremental_playlist_end_skips_empty_history() {
+        assert_eq!(
+            super::youtube_incremental_playlist_end("channel", true, false, false, false),
+            None
+        );
+    }
+
+    /// 开启「扫描已删除视频」时必须全量枚举，否则发现不了被删条目。
+    #[test]
+    fn youtube_incremental_playlist_end_skips_deleted_scan() {
+        assert_eq!(
+            super::youtube_incremental_playlist_end("channel", false, true, false, false),
+            None
+        );
+    }
+
+    /// TikTok 来源不受 YouTube 增量逻辑影响。
+    #[test]
+    fn youtube_incremental_playlist_end_skips_tiktok() {
+        assert_eq!(
+            super::youtube_incremental_playlist_end("channel", false, false, true, false),
+            None
+        );
+    }
+
+    /// 抖音来源不受 YouTube 增量逻辑影响。
+    #[test]
+    fn youtube_incremental_playlist_end_skips_douyin() {
+        assert_eq!(
+            super::youtube_incremental_playlist_end("channel", false, false, false, true),
+            None
+        );
+    }
+
+    /// 播放列表等非频道来源不限制枚举条数。
+    #[test]
+    fn youtube_incremental_playlist_end_skips_non_channel() {
+        assert_eq!(
+            super::youtube_incremental_playlist_end("playlist", false, false, false, false),
+            None
         );
     }
 }
