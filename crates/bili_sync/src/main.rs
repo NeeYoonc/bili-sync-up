@@ -50,25 +50,22 @@ use crate::utils::signal::terminate;
 use crate::utils::{file_logger, init_logger};
 use anyhow::Result;
 
-#[cfg(windows)]
-const TOKIO_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+/// Tokio worker 线程栈大小，所有平台统一。
+///
+/// 下载链路里的 async 状态机嵌套较深（分页任务 → 详情 → 下载器 → 各平台分支），
+/// debug 构建不做优化、future 状态机未压缩，单个 poll 帧可达数 MB。
+/// 此前只在 Windows 下抬栈，macOS/Linux 用默认 2 MB 会直接
+/// `thread 'tokio-rt-worker' has overflowed its stack`（HEAD 版本同样复现）。
+/// 这里不再按平台区分，避免 release/debug 与平台差异导致同类崩溃；
+/// 16 MB 只是线程虚拟地址预留，不会按需实占。
+const TOKIO_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> Result<()> {
-    #[cfg(windows)]
-    {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            // Windows 下 Tokio worker 默认栈偏小，大批量下载阶段会触发 tokio-runtime-worker 栈溢出。
-            .thread_stack_size(TOKIO_WORKER_STACK_SIZE)
-            .build()?;
-        return runtime.block_on(async_main());
-    }
-
-    #[cfg(not(windows))]
-    {
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-        runtime.block_on(async_main())
-    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(TOKIO_WORKER_STACK_SIZE)
+        .build()?;
+    runtime.block_on(async_main())
 }
 
 async fn async_main() -> Result<()> {

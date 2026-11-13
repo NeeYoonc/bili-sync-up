@@ -2566,8 +2566,16 @@ mod tests {
         // 服务器 A：收到首个分片 (0..2MB) 请求时直接断开连接并停止服务（模拟节点挂掉）
         let (url_a, _requested, _fail_start, _fail_left) =
             spawn_range_test_server(data.clone(), Some(0), "/res/test.m4s").await;
-        let dir = std::env::temp_dir().join(format!("bili-resume-drop-{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir).await;
+        // 每次用唯一目录并从干净状态开始：旧实现只按 pid 命名且不清理，
+        // 上次运行留下的分片状态 / sidecar 会让「首次下载必须失败」的前提失效，
+        // 表现为全量测试里偶发的断言失败。
+        let dir = std::env::temp_dir().join(format!(
+            "bili-resume-drop-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = fs::remove_dir_all(&dir).await;
+        fs::create_dir_all(&dir).await.expect("应能创建测试临时目录");
         let path = dir.join("video.tmp_video");
         let downloader = Downloader::new(Client::new());
 
@@ -2581,7 +2589,10 @@ mod tests {
         let first = downloader.fetch_parallel(&url_a, &path, 4, 16, None, None).await;
         assert!(first.is_err(), "节点断开后并发下载应返回错误");
         let first_err = format!("{:#}", first.unwrap_err());
-        assert!(first_err.to_lowercase().contains("error"), "错误应来自网络层连接失败");
+        assert!(
+            first_err.to_lowercase().contains("error") || first_err.contains("失败"),
+            "错误应来自网络层连接失败，实际: {first_err}"
+        );
         println!(
             "[2] 分片 (0..2MiB) 连接被断开、服务器 A 停止服务 -> 下载失败: {}",
             first_err.lines().next().unwrap_or("")

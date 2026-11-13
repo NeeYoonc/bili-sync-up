@@ -143,6 +143,15 @@ impl<const N: usize> Status<N> {
                 ExecutionStatus::Failed(_) | ExecutionStatus::ClassifiedFailed(_) => self.plus_one(offset),
                 // Cancelled：用户暂停/取消导致提前结束，不改变子任务状态，便于恢复后继续执行
                 ExecutionStatus::Cancelled => {}
+                // RetryLater：结果不完整，只递增计数、不置 STATUS_OK，留待下一轮重试；
+                // 计数逼近上限时按完成收尾，避免无字幕视频让整页永远无法标记 completed。
+                ExecutionStatus::RetryLater(_) => {
+                    if self.get_status(offset) + 1 < STATUS_MAX_RETRY {
+                        self.plus_one(offset);
+                    } else {
+                        self.set_ok(offset);
+                    }
+                }
                 _ => {}
             }
         }
@@ -190,6 +199,8 @@ pub const VIDEO_STATUS_UPPER_FACE_INDEX: usize = 2;
 pub const VIDEO_STATUS_PAGE_DOWNLOAD_INDEX: usize = 4;
 
 pub const PAGE_STATUS_NFO_INDEX: usize = 2;
+/// PageStatus 的第 4 个子任务是「字幕」。
+pub const PAGE_STATUS_SUBTITLE_INDEX: usize = 4;
 
 /// 包含五个子任务，从前到后依次是：视频封面、视频信息、Up 主头像、Up 主信息、分 P 下载
 pub type VideoStatus = Status<5>;
@@ -297,5 +308,44 @@ mod test {
         status.set(4, 7);
         assert!(status.get_completed());
         assert_eq!(<[u32; 5]>::from(status), [4, 7, 7, 7, 7]);
+    }
+
+    /// 回归：空字幕结果曾被记为 `Succeeded`，字幕位被永久写成 `STATUS_OK`，
+    /// 之后即使上游补上 AI 轨（或用户补了 Cookie）也再不会进入字幕子任务。
+    #[test]
+    fn test_retry_later_keeps_subtitle_slot_runnable_then_settles() {
+        let mut status = PageStatus::default();
+        // ExecutionStatus 未实现 Clone，不能用 `vec![x; 5]`
+        let mut results: Vec<ExecutionStatus> = (0..5).map(|_| ExecutionStatus::Succeeded).collect();
+        results[PAGE_STATUS_SUBTITLE_INDEX] = ExecutionStatus::RetryLater(anyhow!("本轮无字幕轨"));
+
+        status.update_status(&results);
+        assert_eq!(status.get(PAGE_STATUS_SUBTITLE_INDEX), 1);
+        assert!(status.should_run()[PAGE_STATUS_SUBTITLE_INDEX]);
+        assert!(!status.get_completed(), "结果不完整时不能把整页标记成已完成");
+
+        // 有限退避：1 -> 2 -> 3，每一轮都还有机会重新拉取
+        for expected in [2, 3] {
+            status.update_status(&results);
+            assert_eq!(status.get(PAGE_STATUS_SUBTITLE_INDEX), expected);
+            assert!(status.should_run()[PAGE_STATUS_SUBTITLE_INDEX]);
+        }
+
+        // 达到上限后按完成收尾，避免「本来就没有字幕的视频」永远卡住整页
+        status.update_status(&results);
+        assert_eq!(status.get(PAGE_STATUS_SUBTITLE_INDEX), STATUS_OK);
+        assert!(!status.should_run()[PAGE_STATUS_SUBTITLE_INDEX]);
+        assert!(status.get_completed());
+    }
+
+    #[test]
+    fn test_succeeded_still_freezes_subtitle_slot() {
+        let mut status = PageStatus::default();
+        // ExecutionStatus 未实现 Clone，不能用 `vec![x; 5]`
+        let mut results: Vec<ExecutionStatus> = (0..5).map(|_| ExecutionStatus::Succeeded).collect();
+        results[PAGE_STATUS_SUBTITLE_INDEX] = ExecutionStatus::Succeeded;
+        status.update_status(&results);
+        assert_eq!(status.get(PAGE_STATUS_SUBTITLE_INDEX), STATUS_OK);
+        assert!(!status.should_run()[PAGE_STATUS_SUBTITLE_INDEX]);
     }
 }

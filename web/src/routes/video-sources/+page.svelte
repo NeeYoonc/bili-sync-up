@@ -381,7 +381,7 @@
 			download_charge_videos: false,
 			download_danmaku: source.download_danmaku,
 			download_subtitle: source.download_subtitle,
-			download_ai_subtitle: source.download_subtitle,
+			download_ai_subtitle: source.download_subtitle, // 外部源无独立 AI 字幕开关，随字幕开关降级回显
 			ai_subtitle_language: source.ai_subtitle_language,
 			ai_rename: source.ai_rename,
 			ai_rename_video_prompt: source.ai_rename_video_prompt,
@@ -1228,6 +1228,9 @@
 		sourceId: number,
 		currentDownloadAiSubtitle: boolean
 	) {
+		// 外部源没有独立的 AI 字幕开关（后端表也没有该列），请求会被忽略。
+		// 提前拦截，避免弹出「设置成功」却什么都没变。
+		if (isExternalSourceType(sourceType)) return;
 		const newDownloadAiSubtitle = !currentDownloadAiSubtitle;
 		await updateAndApply(
 			() =>
@@ -1267,9 +1270,13 @@
 					description: `AI 字幕优先语言已设置为 ${getAiSubtitleLanguageLabel(nextLanguage)}`
 				}),
 				applyLocalUpdate: (data) => {
+					// 外部源响应里的 download_ai_subtitle 是由 download_subtitle 降级来的，
+					// 不能回写进 store，否则会污染（并不存在的）AI 字幕开关状态。
 					updateSourceInStore(sourceType, sourceId, (source) => ({
 						...source,
-						download_ai_subtitle: data.download_ai_subtitle,
+						download_ai_subtitle: isExternalSourceType(sourceType)
+							? (source.download_ai_subtitle ?? true)
+							: data.download_ai_subtitle,
 						ai_subtitle_language: data.ai_subtitle_language
 					}));
 				}
