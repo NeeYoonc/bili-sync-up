@@ -62,18 +62,18 @@ fn plan_aria2_download_sources(package: &Aria2Package, mirror_base: Option<&str>
     if let Some(base) = normalize_download_base(mirror_base) {
         return vec![Aria2DownloadSource {
             label: "镜像",
-            url: format!("{}/{}", base, package.archive_name),
+            url: resolve_aria2_download_url(package.primary_url, package.archive_name, Some(&base)),
             sha256: package.sha256,
         }];
     }
     vec![
         Aria2DownloadSource {
-            label: "主源(r2d.dnof.net)",
+            label: "公开镜像(r2d.dnof.net)",
             url: package.primary_url.to_string(),
             sha256: package.sha256,
         },
         Aria2DownloadSource {
-            label: "备用源(GitHub Release)",
+            label: "GitHub Release(备用源)",
             url: package.fallback_url.to_string(),
             sha256: package.sha256,
         },
@@ -81,8 +81,21 @@ fn plan_aria2_download_sources(package: &Aria2Package, mirror_base: Option<&str>
 }
 
 /// 当前源失败后应尝试的下一个源；没有则为 None（所有源都试过了）。
-fn next_aria2_source<'a>(sources: &'a [Aria2DownloadSource], failed_index: usize) -> Option<&'a Aria2DownloadSource> {
+fn next_aria2_source(sources: &[Aria2DownloadSource], failed_index: usize) -> Option<&Aria2DownloadSource> {
     sources.get(failed_index + 1)
+}
+
+/// 所有下载源都失败时的错误文案：逐个列出源名称与失败原因，并附手动放置 / 镜像提示。
+fn aria2_download_failure_message(failures: &[(String, String)], manual_hint: &str) -> String {
+    let detail = failures
+        .iter()
+        .map(|(label, error)| format!("{label}: {error}"))
+        .collect::<Vec<_>>()
+        .join("；");
+    format!(
+        "下载 aria2 包失败（已尝试 {} 个源）；{detail}；{manual_hint}",
+        failures.len()
+    )
 }
 
 static ARIA2_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -701,7 +714,7 @@ impl Aria2Downloader {
             .build()
             .context("创建 aria2 下载客户端失败")?;
         let mut downloaded = None;
-        let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
+        let mut failures: Vec<(String, String)> = Vec::new();
 
         for (index, source) in sources.iter().enumerate() {
             match Self::download_aria2_archive(&download_client, source).await {
@@ -722,21 +735,13 @@ impl Aria2Downloader {
                             "没有更多可用源"
                         }
                     );
-                    failures.push((source.label.to_string(), error));
+                    failures.push((source.label.to_string(), format!("{error:#}")));
                 }
             }
         }
 
         let Some(archive_bytes) = downloaded else {
-            let detail = failures
-                .iter()
-                .map(|(label, error)| format!("{label}: {error:#}"))
-                .collect::<Vec<_>>()
-                .join("；");
-            bail!(
-                "下载 aria2 包失败（已尝试 {} 个源）；{detail}；{manual_hint}",
-                failures.len()
-            );
+            bail!("{}", aria2_download_failure_message(&failures, &manual_hint));
         };
 
         tokio::fs::write(&archive_path, archive_bytes.as_slice())
@@ -2245,8 +2250,8 @@ impl Drop for Aria2Downloader {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_aria2_source, plan_aria2_download_sources, resolve_aria2_download_url, Aria2DownloadSource, Aria2Package,
-        ARIA2_MIRROR_BASE_ENV,
+        aria2_download_failure_message, next_aria2_source, plan_aria2_download_sources, resolve_aria2_download_url,
+        Aria2DownloadSource, Aria2Package, ARIA2_MIRROR_BASE_ENV,
     };
 
     const ARCHIVE: &str = "aria2-x86_64-linux-musl_static.zip";
@@ -2272,7 +2277,7 @@ mod tests {
     #[test]
     fn aria2_default_sources_try_primary_then_fallback_with_same_sha256() {
         let sources = plan_aria2_download_sources(&TEST_PACKAGE, None);
-        assert_eq!(labels(&sources), ["主源(r2d.dnof.net)", "备用源(GitHub Release)"]);
+        assert_eq!(labels(&sources), ["公开镜像(r2d.dnof.net)", "GitHub Release(备用源)"]);
         assert_eq!(sources[0].url, PRIMARY_R2D);
         assert_eq!(sources[1].url, FALLBACK_GITHUB);
         assert_eq!(sources[0].sha256, SHA256);
@@ -2313,6 +2318,27 @@ mod tests {
             resolve_aria2_download_url(PRIMARY_R2D, ARCHIVE, Some("  https://mirror.example.com/aria2//  ")),
             "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
         );
+    }
+
+    /// 两个源都失败时，错误信息要能看出试过哪些源、各自失败原因，以及手动放置 / 镜像提示。
+    #[test]
+    fn aria2_all_sources_failed_message_contains_actionable_hints() {
+        let failures = vec![
+            ("公开镜像(r2d.dnof.net)".to_string(), "network unreachable".to_string()),
+            ("GitHub Release(备用源)".to_string(), "校验不通过".to_string()),
+        ];
+        let message = aria2_download_failure_message(
+            &failures,
+            &format!("可放在 /config/tools/aria2 或设置 {} 指向镜像", ARIA2_MIRROR_BASE_ENV),
+        );
+        assert!(message.contains("已尝试 2 个源"), "{message}");
+        assert!(
+            message.contains("公开镜像(r2d.dnof.net): network unreachable"),
+            "{message}"
+        );
+        assert!(message.contains("GitHub Release(备用源): 校验不通过"), "{message}");
+        assert!(message.contains("可放在 /config/tools/aria2"), "{message}");
+        assert!(message.contains(ARIA2_MIRROR_BASE_ENV), "{message}");
     }
 
     /// 环境变量名与文档、日志提示保持一致。

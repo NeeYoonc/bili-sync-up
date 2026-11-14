@@ -93,6 +93,8 @@ A:
 
 **方式一：手动下载离线包（国内网络推荐）**
 
+公开分享页（免登录，含 `tools/aria2` 与 `tools/yt-dlp` 全部文件，可直接对照 sha256）：<https://r2d.dnof.net/share/143a2bbac81d45a2>
+
 国内盘：<https://wwbat.lanzouw.com/b01i60dxoh> 提取码 `3crm`
 
 包含：
