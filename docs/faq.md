@@ -82,6 +82,58 @@ A:
 - 例如：/media，或者/download，而是直接把你要下载文件的目录映射出来，不用理会项目内部目录。
 - 你可以按照这个方法，试一下。希望能帮到你。
 
+## aria2 / yt-dlp 下载失败（国内网络或镜像失效）
+
+**现象**：启用 aria2 或首次使用 YouTube 时，日志出现「下载 aria2 包失败」「下载 yt-dlp 返回错误状态」或校验失败；或者连接 GitHub 长时间无响应。
+
+**原因**：
+- 旧版内置的 aria2 下载地址（`r2d.dnof.net`）已改成 API key 鉴权，直接访问会返回 `401 {"error":"Unauthorized","code":"INVALID_API_KEY"}`；当前版本已改用本仓库 Release `tools-aria2` 的压缩包。
+- 自动下载走 GitHub，国内网络可能很慢或连不上。
+
+**方式一：手动下载离线包（国内网络推荐）**
+
+国内盘：<https://wwbat.lanzouw.com/b01i60dxoh> 提取码 `3crm`
+
+包含：
+- aria2 1.37.0：Windows x64 / x86、Linux x86_64 / aarch64 / armv7 / arm / i686 / LoongArch64 的 musl 静态构建，以及源码；
+- yt-dlp 2026.10.26：Windows、Linux（glibc 与 musl 两种）、macOS、armv7l、Python zipapp；
+- `CHECKSUMS.txt` 校验和。
+
+注意：glibc 与 musl 构建不能混用；群晖 NAS 用的是 glibc 系统，请选 glibc 版 yt-dlp。
+
+放置路径（`<配置目录>` 见下）：
+
+| 工具 | 放置路径 |
+|---|---|
+| aria2 | `<配置目录>/tools/aria2/1.37.0/<target_key>/aria2c`（Windows 为 `aria2c.exe`） |
+| yt-dlp | `<配置目录>/tools/yt-dlp/<target_key>/yt-dlp`（Windows 为 `yt-dlp.exe`），或设置环境变量 `BILI_SYNC_YTDLP_PATH` 直接指向可执行文件 |
+
+`<target_key>`：Windows x86_64 用 `windows-x86_64`，Linux x86_64 用 `linux-x86_64`，Linux aarch64 用 `linux-aarch64`。
+
+**方式二：配置镜像目录**
+
+把同名压缩包（aria2）或同名资产 + `SHA2-256SUMS`（yt-dlp）放到自己的 Web 目录 / 对象存储，再设置环境变量：
+
+```bash
+# aria2 镜像：目录下放 aria2-x86_64-linux-musl_static.zip 等同名压缩包
+BILI_SYNC_ARIA2_MIRROR_BASE=https://your-mirror.example.com/aria2
+
+# yt-dlp 镜像：目录下放 yt-dlp_linux 等同名资产和 SHA2-256SUMS
+BILI_SYNC_YTDLP_MIRROR_BASE=https://your-mirror.example.com/yt-dlp
+```
+
+- 值末尾的 `/` 可写可不写，程序会去掉；
+- aria2 仍会校验 sha256，镜像里必须是同名同内容的压缩包；
+- yt-dlp 镜像必须同时提供 `SHA2-256SUMS`，程序按它校验下载结果。
+
+**配置目录在哪**：
+- Docker：`/app/.config/bili-sync`（容器内路径），对应你挂载出来的配置卷；
+- 群晖套件：`/var/packages/bili-sync-up/var/config`（即套件说明里的 `var/config`）；
+- Windows：`%APPDATA%\bili-sync`；
+- 其它部署方式见 [安装指南](./installation.md)。
+
+放好后重启程序即可，已下载完成的内容不需要重下。
+
 ## 故障排除
 
 ### Q: Web 界面打不开？

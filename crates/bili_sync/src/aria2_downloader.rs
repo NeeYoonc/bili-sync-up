@@ -18,6 +18,26 @@ use crate::http::headers::{create_api_headers, create_aria2_headers, create_aria
 /// aria2 运行时下载配置
 const ARIA2_VERSION: &str = "1.37.0";
 const ARIA2_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// 镜像目录环境变量：非空时优先从该目录下载 aria2 压缩包（目录下需放同名压缩包）。
+const ARIA2_MIRROR_BASE_ENV: &str = "BILI_SYNC_ARIA2_MIRROR_BASE";
+
+/// 读取 aria2 镜像基址（去空白、去尾部斜杠）；未配置或配置为空时返回 None。
+fn aria2_mirror_base() -> Option<String> {
+    std::env::var(ARIA2_MIRROR_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 计算 aria2 压缩包的实际下载地址：
+/// - 配置了镜像基址（非空）时使用 `<base>/<archive_name>`，基址尾部斜杠会被去掉；
+/// - 否则回退到包内置的发布地址。
+fn resolve_aria2_download_url(package_download_url: &str, archive_name: &str, mirror_base: Option<&str>) -> String {
+    match mirror_base.map(str::trim).filter(|base| !base.is_empty()) {
+        Some(base) => format!("{}/{}", base.trim_end_matches('/'), archive_name),
+        None => package_download_url.to_string(),
+    }
+}
 
 static ARIA2_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -517,7 +537,7 @@ impl Aria2Downloader {
             target_key: "windows-x86_64",
             archive_name: "aria2-1.37.0-win-64bit-build1.zip",
             binary_name: "aria2c.exe",
-            download_url: "https://r2d.dnof.net/file/mn643mzqukqji5fj",
+            download_url: "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-1.37.0-win-64bit-build1.zip",
             sha256: "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
         })
     }
@@ -528,8 +548,8 @@ impl Aria2Downloader {
             target_key: "linux-x86_64",
             archive_name: "aria2-x86_64-linux-musl_static.zip",
             binary_name: "aria2c",
-            download_url: "https://r2d.dnof.net/file/mn643m2nnkg455f9",
-            sha256: "f6133e102916dc55f3aa0ba47fa134aec959928cc433c255ca63beceeee49965",
+            download_url: "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-x86_64-linux-musl_static.zip",
+            sha256: "0d86b4fe16bc820f9e97ccd1034c88db87b884ed59b8db3ba7ebf286424389f4",
         })
     }
 
@@ -539,8 +559,8 @@ impl Aria2Downloader {
             target_key: "linux-aarch64",
             archive_name: "aria2-aarch64-linux-musl_static.zip",
             binary_name: "aria2c",
-            download_url: "https://r2d.dnof.net/file/mn643lqvfbxj2rp4",
-            sha256: "01cb29433cc2d7f039d6621ebaf4bf4d9891a8efacd8a54e5ff4c244d839421c",
+            download_url: "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-aarch64-linux-musl_static.zip",
+            sha256: "0bdd04973526b7c8afddf8b63b89b456eb1a56a9c4a73e109f70773f712f6fe7",
         })
     }
 
@@ -596,6 +616,19 @@ impl Aria2Downloader {
         let cache_dir = Self::cache_dir(package);
         let archive_path = cache_dir.join(package.archive_name);
         let binary_path = cache_dir.join(package.binary_name);
+        // 镜像目录优先：内网/代理环境可把同名压缩包放到自己的镜像上，避免直连 GitHub。
+        let download_url = resolve_aria2_download_url(
+            package.download_url,
+            package.archive_name,
+            aria2_mirror_base().as_deref(),
+        );
+        let manual_hint = format!(
+            "可手动下载 {} 并解压出 {} 放到 {}，或设置 {} 指向含同名压缩包的镜像目录",
+            package.archive_name,
+            package.binary_name,
+            cache_dir.join(package.binary_name).display(),
+            ARIA2_MIRROR_BASE_ENV
+        );
 
         tokio::fs::create_dir_all(&cache_dir)
             .await
@@ -603,7 +636,7 @@ impl Aria2Downloader {
 
         info!(
             "开始按需下载 aria2 二进制: version={}, target={}, url={}",
-            ARIA2_VERSION, package.target_key, package.download_url
+            ARIA2_VERSION, package.target_key, download_url
         );
 
         let download_client = ReqwestClient::builder()
@@ -614,15 +647,16 @@ impl Aria2Downloader {
             .context("创建 aria2 下载客户端失败")?;
 
         let response = download_client
-            .get(package.download_url)
+            .get(&download_url)
             .send()
             .await
-            .with_context(|| format!("下载 aria2 包失败: {}", package.download_url))?
+            .with_context(|| format!("下载 aria2 包失败: {download_url}；{manual_hint}"))?
             .error_for_status()
-            .with_context(|| format!("下载 aria2 包返回错误状态: {}", package.download_url))?;
+            .with_context(|| format!("下载 aria2 包返回错误状态: {download_url}；{manual_hint}"))?;
 
         let archive_bytes = response.bytes().await.context("读取 aria2 下载内容失败")?;
-        Self::verify_archive_checksum(archive_bytes.as_ref(), package.sha256)?;
+        Self::verify_archive_checksum(archive_bytes.as_ref(), package.sha256)
+            .with_context(|| format!("aria2 压缩包校验未通过（{download_url}）；{manual_hint}"))?;
 
         tokio::fs::write(&archive_path, archive_bytes.as_ref())
             .await
@@ -2109,5 +2143,50 @@ impl Drop for Aria2Downloader {
     fn drop(&mut self) {
         // 保留aria2二进制文件，避免在暂停/重启扫描时被删除
         // 如果后续需要清理，可在显式卸载/清理路径中处理，而不是在Drop中
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_aria2_download_url, ARIA2_MIRROR_BASE_ENV};
+
+    const OFFICIAL: &str =
+        "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-x86_64-linux-musl_static.zip";
+    const ARCHIVE: &str = "aria2-x86_64-linux-musl_static.zip";
+
+    /// 配置镜像基址时优先从镜像拼接下载地址。
+    #[test]
+    fn aria2_download_url_prefers_mirror_base() {
+        assert_eq!(
+            resolve_aria2_download_url(OFFICIAL, ARCHIVE, Some("https://mirror.example.com/aria2")),
+            "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
+        );
+    }
+
+    /// 镜像基址尾部斜杠（含多余空白）会被去掉后再拼接，不会出现双斜杠。
+    #[test]
+    fn aria2_download_url_strips_trailing_slash_from_mirror_base() {
+        assert_eq!(
+            resolve_aria2_download_url(OFFICIAL, ARCHIVE, Some("https://mirror.example.com/aria2/")),
+            "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
+        );
+        assert_eq!(
+            resolve_aria2_download_url(OFFICIAL, ARCHIVE, Some("  https://mirror.example.com/aria2//  ")),
+            "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
+        );
+    }
+
+    /// 未配置镜像（或为空/纯斜杠）时回退到内置发布地址，archive_name 不参与拼接。
+    #[test]
+    fn aria2_download_url_falls_back_without_mirror() {
+        for mirror in [None, Some(""), Some("   "), Some("/")] {
+            assert_eq!(resolve_aria2_download_url(OFFICIAL, ARCHIVE, mirror), OFFICIAL);
+        }
+    }
+
+    /// 环境变量名与文档、日志提示保持一致。
+    #[test]
+    fn aria2_mirror_env_name_matches_documentation() {
+        assert_eq!(ARIA2_MIRROR_BASE_ENV, "BILI_SYNC_ARIA2_MIRROR_BASE");
     }
 }

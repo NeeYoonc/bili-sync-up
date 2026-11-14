@@ -50,6 +50,8 @@ use crate::utils::time_format::now_standard_string;
 const YTDLP_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const YTDLP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const YTDLP_RELEASE_BASE_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
+/// 镜像目录环境变量：非空时替换 yt-dlp 官方发布基址（需同时提供同名资产与 SHA2-256SUMS）。
+const YTDLP_MIRROR_BASE_ENV: &str = "BILI_SYNC_YTDLP_MIRROR_BASE";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(90);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 /// 单次外源视频下载尝试的硬上限。
@@ -8841,6 +8843,20 @@ fn managed_ytdlp_path(package: YtDlpPackage) -> PathBuf {
         .join(package.binary_name)
 }
 
+/// 计算 yt-dlp 发布基址：配置了镜像（非空）时用它（去尾部斜杠），否则用官方基址。
+fn resolve_ytdlp_release_base_url(mirror_base: Option<&str>) -> String {
+    match mirror_base.map(str::trim).filter(|base| !base.is_empty()) {
+        Some(base) => base.trim_end_matches('/').to_string(),
+        None => YTDLP_RELEASE_BASE_URL.to_string(),
+    }
+}
+
+/// 读取 yt-dlp 镜像基址；未配置或为空时回退到官方发布基址。
+fn ytdlp_release_base_url() -> String {
+    let configured = std::env::var(YTDLP_MIRROR_BASE_ENV).ok();
+    resolve_ytdlp_release_base_url(configured.as_deref())
+}
+
 async fn download_and_install_ytdlp(
     package: YtDlpPackage,
     binary_path: &Path,
@@ -8853,8 +8869,14 @@ async fn download_and_install_ytdlp(
         .await
         .with_context(|| format!("创建 yt-dlp 安装目录失败：{}", parent.display()))?;
 
-    let asset_url = format!("{YTDLP_RELEASE_BASE_URL}/{}", package.asset_name);
-    let checksums_url = format!("{YTDLP_RELEASE_BASE_URL}/SHA2-256SUMS");
+    let release_base = ytdlp_release_base_url();
+    let asset_url = format!("{release_base}/{}", package.asset_name);
+    let checksums_url = format!("{release_base}/SHA2-256SUMS");
+    let manual_hint = format!(
+        "若持续失败，可设置 {} 指向含同名资产与 SHA2-256SUMS 的镜像目录，或设置 BILI_SYNC_YTDLP_PATH 指向手动下载的 yt-dlp（当前安装路径：{}）",
+        YTDLP_MIRROR_BASE_ENV,
+        binary_path.display()
+    );
     match old_version {
         Some(version) => info!(version, url = asset_url, "yt-dlp 版本过旧，自动下载最新版替换"),
         None => info!(
@@ -8899,16 +8921,16 @@ async fn download_and_install_ytdlp(
         let fetched = async {
             let (asset_response, checksums_response) =
                 tokio::try_join!(client.get(&asset_url).send(), client.get(&checksums_url).send(),)
-                    .context("请求 yt-dlp 官方发布文件失败")?;
+                    .with_context(|| format!("请求 yt-dlp 发布文件失败（{release_base}）；{manual_hint}"))?;
             let asset_bytes = asset_response
                 .error_for_status()
-                .with_context(|| format!("下载 yt-dlp 返回错误状态：{asset_url}"))?
+                .with_context(|| format!("下载 yt-dlp 返回错误状态：{asset_url}；{manual_hint}"))?
                 .bytes()
                 .await
                 .context("读取 yt-dlp 下载内容失败")?;
             let checksums = checksums_response
                 .error_for_status()
-                .with_context(|| format!("下载 yt-dlp 校验文件返回错误状态：{checksums_url}"))?
+                .with_context(|| format!("下载 yt-dlp 校验文件返回错误状态：{checksums_url}；{manual_hint}"))?
                 .text()
                 .await
                 .context("读取 yt-dlp 校验文件失败")?;
@@ -8930,7 +8952,7 @@ async fn download_and_install_ytdlp(
         };
 
         let expected = checksum_for_release_asset(&checksums, package.asset_name)
-            .ok_or_else(|| anyhow!("yt-dlp 官方校验文件中缺少 {}", package.asset_name))?;
+            .ok_or_else(|| anyhow!("yt-dlp 校验文件中缺少 {}；{manual_hint}", package.asset_name))?;
         let actual = hex::encode(Sha256::digest(asset_bytes.as_ref()));
         if !actual.eq_ignore_ascii_case(expected) {
             bail!(
@@ -8962,7 +8984,10 @@ async fn download_and_install_ytdlp(
         return Ok(());
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow!("yt-dlp 下载失败")))
+    match last_error {
+        Some(error) => Err(error).with_context(|| format!("yt-dlp 下载失败；{manual_hint}")),
+        None => bail!("yt-dlp 下载失败；{manual_hint}"),
+    }
 }
 
 async fn install_ytdlp_zip(bytes: &[u8], binary_path: &Path, archive_binary_name: &str) -> Result<()> {
@@ -12202,5 +12227,29 @@ mod tests {
             super::youtube_incremental_playlist_end("playlist", false, false, false, false),
             None
         );
+    }
+
+    /// 配置镜像基址时替换 yt-dlp 发布基址，并去掉尾部斜杠。
+    #[test]
+    fn ytdlp_release_base_url_uses_mirror_override() {
+        assert_eq!(
+            super::resolve_ytdlp_release_base_url(Some("https://mirror.example.com/yt-dlp/")),
+            "https://mirror.example.com/yt-dlp"
+        );
+        assert_eq!(
+            super::resolve_ytdlp_release_base_url(Some("  https://mirror.example.com/yt-dlp  ")),
+            "https://mirror.example.com/yt-dlp"
+        );
+    }
+
+    /// 未配置或配置为空时回退到官方发布基址。
+    #[test]
+    fn ytdlp_release_base_url_falls_back_to_official_release() {
+        for mirror in [None, Some(""), Some("   "), Some("/")] {
+            assert_eq!(
+                super::resolve_ytdlp_release_base_url(mirror),
+                super::YTDLP_RELEASE_BASE_URL
+            );
+        }
     }
 }
