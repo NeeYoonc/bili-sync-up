@@ -87,7 +87,7 @@ A:
 **现象**：启用 aria2 或首次使用 YouTube 时，日志出现「下载 aria2 包失败」「下载 yt-dlp 返回错误状态」或校验失败；或者连接 GitHub 长时间无响应。
 
 **原因**：
-- 旧版内置的 aria2 下载地址（`r2d.dnof.net`）已改成 API key 鉴权，直接访问会返回 `401 {"error":"Unauthorized","code":"INVALID_API_KEY"}`；当前版本已改用本仓库 Release `tools-aria2` 的压缩包。
+- 官方 CDN（`r2d.dnof.net`）现在需要 API key 才能下载，匿名访问会返回 `401 {"error":"Unauthorized","code":"INVALID_API_KEY"}`。普通用户不用管：程序默认从本仓库 Release `tools-aria2` 自动下载，失败再按下面的离线包手动放置；自建/内网环境如果自己持有官方 CDN 的 key，可以设置环境变量 `BILI_SYNC_ARIA2_API_KEY`，程序会优先走官方源、失败自动回退到 GitHub Release。
 - 自动下载走 GitHub，国内网络可能很慢或连不上。
 
 **方式一：手动下载离线包（国内网络推荐）**

@@ -18,25 +18,97 @@ use crate::http::headers::{create_api_headers, create_aria2_headers, create_aria
 /// aria2 运行时下载配置
 const ARIA2_VERSION: &str = "1.37.0";
 const ARIA2_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
-/// 镜像目录环境变量：非空时优先从该目录下载 aria2 压缩包（目录下需放同名压缩包）。
+/// 官方 CDN（r2d.dnof.net）的 API key 环境变量：设置后优先走官方源，请求带 `X-API-Key` 头。
+const ARIA2_API_KEY_ENV: &str = "BILI_SYNC_ARIA2_API_KEY";
+/// 镜像目录环境变量：非空时只从该目录下载 aria2 压缩包（目录下需放同名压缩包），优先级最高。
 const ARIA2_MIRROR_BASE_ENV: &str = "BILI_SYNC_ARIA2_MIRROR_BASE";
 
-/// 读取 aria2 镜像基址（去空白、去尾部斜杠）；未配置或配置为空时返回 None。
-fn aria2_mirror_base() -> Option<String> {
-    std::env::var(ARIA2_MIRROR_BASE_ENV)
-        .ok()
+/// 归一化下载基址：去首尾空白、去尾部斜杠；空白或纯斜杠都视为未配置。
+fn normalize_download_base(value: Option<&str>) -> Option<String> {
+    value
         .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 读取 aria2 镜像基址；未配置或配置为空时返回 None。
+fn aria2_mirror_base() -> Option<String> {
+    normalize_download_base(std::env::var(ARIA2_MIRROR_BASE_ENV).ok().as_deref())
+}
+
+/// 读取官方 CDN 的 API key；未配置或配置为空时返回 None。
+fn aria2_api_key() -> Option<String> {
+    std::env::var(ARIA2_API_KEY_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
 
 /// 计算 aria2 压缩包的实际下载地址：
 /// - 配置了镜像基址（非空）时使用 `<base>/<archive_name>`，基址尾部斜杠会被去掉；
-/// - 否则回退到包内置的发布地址。
-fn resolve_aria2_download_url(package_download_url: &str, archive_name: &str, mirror_base: Option<&str>) -> String {
-    match mirror_base.map(str::trim).filter(|base| !base.is_empty()) {
-        Some(base) => format!("{}/{}", base.trim_end_matches('/'), archive_name),
-        None => package_download_url.to_string(),
+/// - 否则回退到给定的默认下载地址。
+fn resolve_aria2_download_url(default_download_url: &str, archive_name: &str, mirror_base: Option<&str>) -> String {
+    match normalize_download_base(mirror_base) {
+        Some(base) => format!("{}/{}", base, archive_name),
+        None => default_download_url.to_string(),
     }
+}
+
+/// aria2 压缩包的一个下载源。
+///
+/// 官方 CDN 与 GitHub Release 备用源是**不同构建**（Linux 两份压缩包的 sha256 不同），
+/// 所以每个源必须带自己的 sha256，不能混用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Aria2DownloadSource {
+    /// 日志里展示的源名称。
+    label: &'static str,
+    /// 实际下载地址（镜像源会拼接 archive_name）。
+    url: String,
+    /// 该源对应压缩包的 sha256。
+    sha256: &'static str,
+    /// 是否需要 `X-API-Key` 请求头。
+    requires_api_key: bool,
+}
+
+/// 计算本次实际尝试的下载源顺序：
+/// - 配置 `BILI_SYNC_ARIA2_MIRROR_BASE`：只走镜像（优先级最高）；
+/// - 配置 `BILI_SYNC_ARIA2_API_KEY`：官方 CDN 优先，失败（网络/401/校验失败）回退 GitHub Release 备用源；
+/// - 都没配：只走 GitHub Release 备用源。
+fn plan_aria2_download_sources(
+    package: &Aria2Package,
+    mirror_base: Option<&str>,
+    api_key: Option<&str>,
+) -> Vec<Aria2DownloadSource> {
+    if let Some(base) = normalize_download_base(mirror_base) {
+        return vec![Aria2DownloadSource {
+            label: "镜像",
+            url: format!("{}/{}", base, package.archive_name),
+            sha256: package.fallback_sha256,
+            requires_api_key: false,
+        }];
+    }
+    let fallback = Aria2DownloadSource {
+        label: "备用源(GitHub Release)",
+        url: package.fallback_url.to_string(),
+        sha256: package.fallback_sha256,
+        requires_api_key: false,
+    };
+    match api_key.map(str::trim).filter(|key| !key.is_empty()) {
+        Some(_) => vec![
+            Aria2DownloadSource {
+                label: "官方源(需 API key)",
+                url: package.official_url.to_string(),
+                sha256: package.official_sha256,
+                requires_api_key: true,
+            },
+            fallback,
+        ],
+        None => vec![fallback],
+    }
+}
+
+/// 当前源失败后应尝试的下一个源；没有则为 None（所有源都试过了）。
+fn next_aria2_source<'a>(sources: &'a [Aria2DownloadSource], failed_index: usize) -> Option<&'a Aria2DownloadSource> {
+    sources.get(failed_index + 1)
 }
 
 static ARIA2_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -54,13 +126,20 @@ struct RequestHints<'a> {
     proxy: Option<&'a str>,
 }
 
+/// aria2 运行时包描述：官方 CDN 与 GitHub Release 备用源并存。
 #[derive(Clone, Copy)]
 struct Aria2Package {
     target_key: &'static str,
     archive_name: &'static str,
     binary_name: &'static str,
-    download_url: &'static str,
-    sha256: &'static str,
+    /// 官方 CDN 地址（r2d.dnof.net，需要 API key）。
+    official_url: &'static str,
+    /// 官方 CDN 压缩包的 sha256。
+    official_sha256: &'static str,
+    /// GitHub Release 备用源地址（无需鉴权）。
+    fallback_url: &'static str,
+    /// 备用源压缩包的 sha256。
+    fallback_sha256: &'static str,
 }
 
 /// 单个aria2进程实例
@@ -537,8 +616,11 @@ impl Aria2Downloader {
             target_key: "windows-x86_64",
             archive_name: "aria2-1.37.0-win-64bit-build1.zip",
             binary_name: "aria2c.exe",
-            download_url: "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-1.37.0-win-64bit-build1.zip",
-            sha256: "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
+            official_url: "https://r2d.dnof.net/file/mn643mzqukqji5fj",
+            official_sha256: "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
+            fallback_url:
+                "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-1.37.0-win-64bit-build1.zip",
+            fallback_sha256: "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
         })
     }
 
@@ -548,8 +630,11 @@ impl Aria2Downloader {
             target_key: "linux-x86_64",
             archive_name: "aria2-x86_64-linux-musl_static.zip",
             binary_name: "aria2c",
-            download_url: "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-x86_64-linux-musl_static.zip",
-            sha256: "0d86b4fe16bc820f9e97ccd1034c88db87b884ed59b8db3ba7ebf286424389f4",
+            official_url: "https://r2d.dnof.net/file/mn643m2nnkg455f9",
+            official_sha256: "f6133e102916dc55f3aa0ba47fa134aec959928cc433c255ca63beceeee49965",
+            fallback_url:
+                "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-x86_64-linux-musl_static.zip",
+            fallback_sha256: "0d86b4fe16bc820f9e97ccd1034c88db87b884ed59b8db3ba7ebf286424389f4",
         })
     }
 
@@ -559,8 +644,11 @@ impl Aria2Downloader {
             target_key: "linux-aarch64",
             archive_name: "aria2-aarch64-linux-musl_static.zip",
             binary_name: "aria2c",
-            download_url: "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-aarch64-linux-musl_static.zip",
-            sha256: "0bdd04973526b7c8afddf8b63b89b456eb1a56a9c4a73e109f70773f712f6fe7",
+            official_url: "https://r2d.dnof.net/file/mn643lqvfbxj2rp4",
+            official_sha256: "01cb29433cc2d7f039d6621ebaf4bf4d9891a8efacd8a54e5ff4c244d839421c",
+            fallback_url:
+                "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-aarch64-linux-musl_static.zip",
+            fallback_sha256: "0bdd04973526b7c8afddf8b63b89b456eb1a56a9c4a73e109f70773f712f6fe7",
         })
     }
 
@@ -616,17 +704,13 @@ impl Aria2Downloader {
         let cache_dir = Self::cache_dir(package);
         let archive_path = cache_dir.join(package.archive_name);
         let binary_path = cache_dir.join(package.binary_name);
-        // 镜像目录优先：内网/代理环境可把同名压缩包放到自己的镜像上，避免直连 GitHub。
-        let download_url = resolve_aria2_download_url(
-            package.download_url,
-            package.archive_name,
-            aria2_mirror_base().as_deref(),
-        );
+        // 候选下载源：镜像 > 官方 CDN（需 API key）> GitHub Release 备用源。
+        let sources = plan_aria2_download_sources(&package, aria2_mirror_base().as_deref(), aria2_api_key().as_deref());
         let manual_hint = format!(
             "可手动下载 {} 并解压出 {} 放到 {}，或设置 {} 指向含同名压缩包的镜像目录",
             package.archive_name,
             package.binary_name,
-            cache_dir.join(package.binary_name).display(),
+            binary_path.display(),
             ARIA2_MIRROR_BASE_ENV
         );
 
@@ -635,8 +719,10 @@ impl Aria2Downloader {
             .with_context(|| format!("创建 aria2 缓存目录失败: {}", cache_dir.display()))?;
 
         info!(
-            "开始按需下载 aria2 二进制: version={}, target={}, url={}",
-            ARIA2_VERSION, package.target_key, download_url
+            "开始按需下载 aria2 二进制: version={}, target={}, 候选源={:?}",
+            ARIA2_VERSION,
+            package.target_key,
+            sources.iter().map(|source| source.label).collect::<Vec<_>>()
         );
 
         let download_client = ReqwestClient::builder()
@@ -645,20 +731,47 @@ impl Aria2Downloader {
             .timeout(ARIA2_DOWNLOAD_TIMEOUT)
             .build()
             .context("创建 aria2 下载客户端失败")?;
+        let api_key = aria2_api_key();
+        let mut downloaded = None;
+        let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
 
-        let response = download_client
-            .get(&download_url)
-            .send()
-            .await
-            .with_context(|| format!("下载 aria2 包失败: {download_url}；{manual_hint}"))?
-            .error_for_status()
-            .with_context(|| format!("下载 aria2 包返回错误状态: {download_url}；{manual_hint}"))?;
+        for (index, source) in sources.iter().enumerate() {
+            match Self::download_aria2_archive(&download_client, source, api_key.as_deref()).await {
+                Ok(bytes) => {
+                    info!("aria2 压缩包已从「{}」下载完成: {}", source.label, source.url);
+                    downloaded = Some(bytes);
+                    break;
+                }
+                Err(error) => {
+                    let has_next = next_aria2_source(&sources, index).is_some();
+                    warn!(
+                        "aria2 下载源「{}」失败：{:#}；{}",
+                        source.label,
+                        error,
+                        if has_next {
+                            "继续尝试下一个源"
+                        } else {
+                            "没有更多可用源"
+                        }
+                    );
+                    failures.push((source.label.to_string(), error));
+                }
+            }
+        }
 
-        let archive_bytes = response.bytes().await.context("读取 aria2 下载内容失败")?;
-        Self::verify_archive_checksum(archive_bytes.as_ref(), package.sha256)
-            .with_context(|| format!("aria2 压缩包校验未通过（{download_url}）；{manual_hint}"))?;
+        let Some(archive_bytes) = downloaded else {
+            let detail = failures
+                .iter()
+                .map(|(label, error)| format!("{label}: {error:#}"))
+                .collect::<Vec<_>>()
+                .join("；");
+            bail!(
+                "下载 aria2 包失败（已尝试 {} 个源）；{detail}；{manual_hint}",
+                failures.len()
+            );
+        };
 
-        tokio::fs::write(&archive_path, archive_bytes.as_ref())
+        tokio::fs::write(&archive_path, archive_bytes.as_slice())
             .await
             .with_context(|| format!("写入 aria2 压缩包失败: {}", archive_path.display()))?;
 
@@ -672,6 +785,31 @@ impl Aria2Downloader {
 
         let _ = tokio::fs::remove_file(&binary_path).await;
         bail!("aria2 安装完成后校验失败: {}", binary_path.display())
+    }
+
+    /// 从单个下载源拉取并校验 aria2 压缩包；需要 API key 的源会附加 `X-API-Key` 头。
+    async fn download_aria2_archive(
+        client: &ReqwestClient,
+        source: &Aria2DownloadSource,
+        api_key: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let mut request = client.get(&source.url);
+        if source.requires_api_key {
+            let Some(api_key) = api_key else {
+                bail!("下载源「{}」需要 {} 但未配置", source.label, ARIA2_API_KEY_ENV);
+            };
+            request = request.header("X-API-Key", api_key);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("请求下载源失败: {}", source.url))?
+            .error_for_status()
+            .with_context(|| format!("下载源返回错误状态: {}", source.url))?;
+        let archive_bytes = response.bytes().await.context("读取 aria2 下载内容失败")?;
+        Self::verify_archive_checksum(archive_bytes.as_ref(), source.sha256)
+            .with_context(|| format!("aria2 压缩包校验未通过: {}", source.url))?;
+        Ok(archive_bytes.to_vec())
     }
 
     fn verify_archive_checksum(bytes: &[u8], expected_sha256: &str) -> Result<()> {
@@ -2148,45 +2286,104 @@ impl Drop for Aria2Downloader {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_aria2_download_url, ARIA2_MIRROR_BASE_ENV};
+    use super::{
+        next_aria2_source, plan_aria2_download_sources, resolve_aria2_download_url, Aria2DownloadSource, Aria2Package,
+        ARIA2_API_KEY_ENV, ARIA2_MIRROR_BASE_ENV,
+    };
 
-    const OFFICIAL: &str =
-        "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-x86_64-linux-musl_static.zip";
     const ARCHIVE: &str = "aria2-x86_64-linux-musl_static.zip";
+    const OFFICIAL_R2D: &str = "https://r2d.dnof.net/file/mn643m2nnkg455f9";
+    const OFFICIAL_SHA: &str = "f6133e102916dc55f3aa0ba47fa134aec959928cc433c255ca63beceeee49965";
+    const FALLBACK_GITHUB: &str =
+        "https://github.com/NeeYoonc/bili-sync-up/releases/download/tools-aria2/aria2-x86_64-linux-musl_static.zip";
+    const FALLBACK_SHA: &str = "0d86b4fe16bc820f9e97ccd1034c88db87b884ed59b8db3ba7ebf286424389f4";
 
-    /// 配置镜像基址时优先从镜像拼接下载地址。
-    #[test]
-    fn aria2_download_url_prefers_mirror_base() {
-        assert_eq!(
-            resolve_aria2_download_url(OFFICIAL, ARCHIVE, Some("https://mirror.example.com/aria2")),
-            "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
-        );
+    const TEST_PACKAGE: Aria2Package = Aria2Package {
+        target_key: "linux-x86_64",
+        archive_name: ARCHIVE,
+        binary_name: "aria2c",
+        official_url: OFFICIAL_R2D,
+        official_sha256: OFFICIAL_SHA,
+        fallback_url: FALLBACK_GITHUB,
+        fallback_sha256: FALLBACK_SHA,
+    };
+
+    fn labels(sources: &[Aria2DownloadSource]) -> Vec<&'static str> {
+        sources.iter().map(|source| source.label).collect()
     }
 
-    /// 镜像基址尾部斜杠（含多余空白）会被去掉后再拼接，不会出现双斜杠。
+    /// 未配置 API key 时只走 GitHub Release 备用源，不碰需要鉴权的官方 CDN。
     #[test]
-    fn aria2_download_url_strips_trailing_slash_from_mirror_base() {
-        assert_eq!(
-            resolve_aria2_download_url(OFFICIAL, ARCHIVE, Some("https://mirror.example.com/aria2/")),
-            "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
-        );
-        assert_eq!(
-            resolve_aria2_download_url(OFFICIAL, ARCHIVE, Some("  https://mirror.example.com/aria2//  ")),
-            "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
-        );
+    fn aria2_sources_without_api_key_only_use_fallback() {
+        let sources = plan_aria2_download_sources(&TEST_PACKAGE, None, None);
+        assert_eq!(labels(&sources), ["备用源(GitHub Release)"]);
+        assert_eq!(sources[0].url, FALLBACK_GITHUB);
+        assert_eq!(sources[0].sha256, FALLBACK_SHA);
+        assert!(!sources[0].requires_api_key);
     }
 
-    /// 未配置镜像（或为空/纯斜杠）时回退到内置发布地址，archive_name 不参与拼接。
+    /// 配置 API key 后官方 CDN 优先，备用源排在后面用于回退，两个源各带自己的 sha256。
     #[test]
-    fn aria2_download_url_falls_back_without_mirror() {
-        for mirror in [None, Some(""), Some("   "), Some("/")] {
-            assert_eq!(resolve_aria2_download_url(OFFICIAL, ARCHIVE, mirror), OFFICIAL);
+    fn aria2_sources_with_api_key_prefer_official_then_fallback() {
+        let sources = plan_aria2_download_sources(&TEST_PACKAGE, None, Some("  test-key  "));
+        assert_eq!(labels(&sources), ["官方源(需 API key)", "备用源(GitHub Release)"]);
+        assert_eq!(sources[0].url, OFFICIAL_R2D);
+        assert_eq!(sources[0].sha256, OFFICIAL_SHA);
+        assert!(sources[0].requires_api_key);
+        assert_eq!(sources[1].url, FALLBACK_GITHUB);
+        assert_eq!(sources[1].sha256, FALLBACK_SHA);
+        assert!(!sources[1].requires_api_key);
+    }
+
+    /// 配置镜像基址时只走镜像（优先级高于 API key 与两个内置源），sha256 用实测可跑的备用源那份。
+    #[test]
+    fn aria2_mirror_base_overrides_all_other_sources() {
+        let sources = plan_aria2_download_sources(
+            &TEST_PACKAGE,
+            Some(" https://mirror.example.com/aria2/ "),
+            Some("test-key"),
+        );
+        assert_eq!(labels(&sources), ["镜像"]);
+        assert_eq!(
+            sources[0].url,
+            "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
+        );
+        assert_eq!(sources[0].sha256, FALLBACK_SHA);
+        assert!(!sources[0].requires_api_key);
+    }
+
+    /// 第一个源失败后应落到下一个源；全部试完返回 None。
+    #[test]
+    fn aria2_falls_back_to_next_source_after_failure() {
+        let sources = plan_aria2_download_sources(&TEST_PACKAGE, None, Some("test-key"));
+        let fallback = next_aria2_source(&sources, 0).expect("官方源失败后应回退到备用源");
+        assert_eq!(fallback.url, FALLBACK_GITHUB);
+        assert!(next_aria2_source(&sources, 1).is_none());
+    }
+
+    /// 只有备用源时没有可回退的第二个源。
+    #[test]
+    fn aria2_single_source_has_no_fallback() {
+        let sources = plan_aria2_download_sources(&TEST_PACKAGE, None, None);
+        assert!(next_aria2_source(&sources, 0).is_none());
+    }
+
+    /// 空白 / 纯斜杠的镜像基址视为未配置，回退默认地址；尾斜杠与首尾空白会被清理。
+    #[test]
+    fn aria2_mirror_base_is_normalized() {
+        for mirror in [None, Some(""), Some("   "), Some("/"), Some("///")] {
+            assert_eq!(resolve_aria2_download_url(OFFICIAL_R2D, ARCHIVE, mirror), OFFICIAL_R2D);
         }
+        assert_eq!(
+            resolve_aria2_download_url(FALLBACK_GITHUB, ARCHIVE, Some("  https://mirror.example.com/aria2//  ")),
+            "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
+        );
     }
 
     /// 环境变量名与文档、日志提示保持一致。
     #[test]
-    fn aria2_mirror_env_name_matches_documentation() {
+    fn aria2_env_names_match_documentation() {
+        assert_eq!(ARIA2_API_KEY_ENV, "BILI_SYNC_ARIA2_API_KEY");
         assert_eq!(ARIA2_MIRROR_BASE_ENV, "BILI_SYNC_ARIA2_MIRROR_BASE");
     }
 }

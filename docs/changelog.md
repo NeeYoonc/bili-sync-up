@@ -17,7 +17,7 @@
 
 **下载 / 工具**
 
-- **aria2 自动下载地址修复 + 下载镜像支持**：此前程序内置的 aria2 下载地址（`r2d.dnof.net`）已改成 API key 鉴权，新用户启用 aria2 时下载必然失败（日志报 `401 INVALID_API_KEY`）。现在三个平台改用本仓库 `tools-aria2` 发布包自动下载（Windows 包内容不变；Linux x86_64/aarch64 换成实测可运行的 aria2 1.37.0 musl 静态构建，校验和同步更新），并新增环境变量 `BILI_SYNC_ARIA2_MIRROR_BASE` / `BILI_SYNC_YTDLP_MIRROR_BASE`：内网或代理环境可把压缩包放到自己的镜像目录，程序会优先从镜像下载。下载失败时日志会直接给出手动放置路径和镜像用法，详见常见问题「aria2 / yt-dlp 下载失败」。
+- **aria2 自动下载地址修复（双源 + 可选 API key）**：此前程序内置的 aria2 下载地址（`r2d.dnof.net`）改成 API key 鉴权后，新用户启用 aria2 时下载必然失败（日志报 `401 INVALID_API_KEY`）。现在每个平台都带两个下载源：官方 CDN（仅在设置环境变量 `BILI_SYNC_ARIA2_API_KEY` 时启用，请求带 `X-API-Key` 头）和本仓库 `tools-aria2` Release 备用源（始终可用，失败自动回退）；Linux 两份压缩包是不同构建，各自带自己的 sha256 校验。另新增 `BILI_SYNC_ARIA2_MIRROR_BASE` / `BILI_SYNC_YTDLP_MIRROR_BASE` 镜像覆盖：内网或代理环境可把压缩包放到自己的镜像目录，程序会优先从镜像下载。下载失败时日志会直接给出手动放置路径和镜像用法，详见常见问题「aria2 / yt-dlp 下载失败」。
 
 ## v3.1.6.1 (2026-11-09)
 

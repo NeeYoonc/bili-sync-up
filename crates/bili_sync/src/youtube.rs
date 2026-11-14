@@ -8843,12 +8843,16 @@ fn managed_ytdlp_path(package: YtDlpPackage) -> PathBuf {
         .join(package.binary_name)
 }
 
+/// 归一化下载基址：去首尾空白、去尾部斜杠；空白或纯斜杠都视为未配置。
+fn normalize_download_base_url(value: Option<&str>) -> Option<String> {
+    value
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// 计算 yt-dlp 发布基址：配置了镜像（非空）时用它（去尾部斜杠），否则用官方基址。
 fn resolve_ytdlp_release_base_url(mirror_base: Option<&str>) -> String {
-    match mirror_base.map(str::trim).filter(|base| !base.is_empty()) {
-        Some(base) => base.trim_end_matches('/').to_string(),
-        None => YTDLP_RELEASE_BASE_URL.to_string(),
-    }
+    normalize_download_base_url(mirror_base).unwrap_or_else(|| YTDLP_RELEASE_BASE_URL.to_string())
 }
 
 /// 读取 yt-dlp 镜像基址；未配置或为空时回退到官方发布基址。
