@@ -71,24 +71,6 @@ pub(crate) fn parse_cues(input: &str) -> Vec<SubtitleCue> {
     cues
 }
 
-/// 把 cue 列表渲染成 WebVTT 文本。
-pub(crate) fn render_vtt(cues: &[SubtitleCue]) -> String {
-    let mut output = String::with_capacity(cues.len().saturating_mul(96) + 16);
-    output.push_str("WEBVTT\n");
-    for cue in cues {
-        output.push('\n');
-        output.push_str(&render_timestamp(cue.start_ms));
-        output.push_str(" --> ");
-        output.push_str(&render_timestamp(cue.end_ms));
-        output.push('\n');
-        for line in cue.text.lines() {
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-    output
-}
-
 /// 把 cue 列表渲染成 SRT 文本（B 站字幕落盘格式）。
 pub(crate) fn render_srt(cues: &[SubtitleCue]) -> String {
     let mut output = String::with_capacity(cues.len().saturating_mul(96) + 16);
@@ -106,6 +88,60 @@ pub(crate) fn render_srt(cues: &[SubtitleCue]) -> String {
         output.push('\n');
     }
     output
+}
+
+/// 把 cue 列表渲染成 ASS 文本（YouTube 字幕落盘格式之一）。
+///
+/// 与本模块的整体定位一致：不做样式/位置信息的保留，输出默认样式的
+/// 纯文本轨，保证 Jellyfin/Emby 等媒体库能直接识别 `.ass` 后缀。
+/// cue 内多行文本用 ASS 的软换行 `\N` 连接。
+pub(crate) fn render_ass(cues: &[SubtitleCue]) -> String {
+    let mut output = String::with_capacity(cues.len().saturating_mul(112) + 512);
+    output.push_str("[Script Info]\n");
+    output.push_str("ScriptType: v4.00+\n");
+    output.push_str("PlayResX: 384\n");
+    output.push_str("PlayResY: 288\n");
+    output.push_str("WrapStyle: 0\n");
+    output.push_str("ScaledBorderAndShadow: yes\n");
+    output.push('\n');
+    output.push_str("[V4+ Styles]\n");
+    output.push_str(
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n",
+    );
+    output.push_str(
+        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n",
+    );
+    output.push('\n');
+    output.push_str("[Events]\n");
+    output.push_str("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
+    for cue in cues {
+        output.push_str("Dialogue: 0,");
+        output.push_str(&render_ass_timestamp(cue.start_ms));
+        output.push(',');
+        output.push_str(&render_ass_timestamp(cue.end_ms));
+        output.push_str(",Default,,0,0,0,,");
+        output.push_str(&escape_ass_text(&cue.text));
+        output.push('\n');
+    }
+    output
+}
+
+/// 转义 ASS 正文：`{}` 是 override 标签边界，`\` 是转义引导符，正文里出现时必须
+/// 加反斜杠，否则播放器会把整段内容当成样式指令吃掉（例如字幕文本里的「{笑}」）。
+/// 换行转成 ASS 的软换行 `\N`。
+fn escape_ass_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        match ch {
+            '\\' | '{' | '}' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            '\n' => escaped.push_str("\\N"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// 清洗一段已按行拆分好的字幕文本（用于平台直接给出 `content` 字段、而非整份文件的场景）。
@@ -405,15 +441,6 @@ fn parse_timestamp(value: &str) -> Option<i64> {
     Some(total)
 }
 
-fn render_timestamp(milliseconds: i64) -> String {
-    let value = milliseconds.max(0);
-    let hours = value / 3_600_000;
-    let minutes = (value % 3_600_000) / 60_000;
-    let seconds = (value % 60_000) / 1000;
-    let millis = value % 1000;
-    format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
-}
-
 fn render_srt_timestamp(milliseconds: i64) -> String {
     let value = milliseconds.max(0);
     let hours = value / 3_600_000;
@@ -423,11 +450,21 @@ fn render_srt_timestamp(milliseconds: i64) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
 }
 
+/// ASS 时间戳：`H:MM:SS.CS`（小时不补零，精确到百分之一秒）。
+fn render_ass_timestamp(milliseconds: i64) -> String {
+    let value = milliseconds.max(0);
+    let hours = value / 3_600_000;
+    let minutes = (value % 3_600_000) / 60_000;
+    let seconds = (value % 60_000) / 1000;
+    let centis = (value % 1000) / 10;
+    format!("{hours}:{minutes:02}:{seconds:02}.{centis:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         clean_cue_text, merge_overlay, parse_bilingual_language_pair, parse_cues, primary_language, render_srt,
-        render_vtt, SubtitleCue,
+        SubtitleCue,
     };
 
     #[test]
@@ -521,24 +558,50 @@ mod tests {
         assert_eq!(merged[0].text, "只有中文");
     }
 
+    /// ASS 渲染：头部完整、每条 cue 一行 Dialogue、时间戳为 `H:MM:SS.CS`。
     #[test]
-    fn renders_vtt_with_blank_line_between_cues() {
+    fn render_ass_emits_dialogue_lines_with_ass_timestamps() {
+        use super::render_ass;
+
         let cues = vec![
             SubtitleCue {
-                start_ms: 61_000,
-                end_ms: 62_000,
-                text: "english\n中文".into(),
+                start_ms: 700,
+                end_ms: 1_620,
+                text: "哈喽大家好".to_string(),
             },
             SubtitleCue {
-                start_ms: 3_725_000,
-                end_ms: 3_726_500,
-                text: "第三行".into(),
+                start_ms: 3_675_000,
+                end_ms: 3_678_500,
+                text: "第一行\n第二行".to_string(),
             },
         ];
-        let rendered = render_vtt(&cues);
-        assert!(rendered.starts_with("WEBVTT\n\n"));
-        assert!(rendered.contains("00:01:01.000 --> 00:01:02.000\nenglish\n中文\n"));
-        assert!(rendered.contains("01:02:05.000 --> 01:02:06.500\n第三行\n"));
+        let output = render_ass(&cues);
+        assert!(output.starts_with("[Script Info]\n"));
+        assert!(output.contains("[V4+ Styles]\n"));
+        assert!(output.contains("[Events]\n"));
+        assert!(output.contains("0:00:00.70,0:00:01.62,Default,,0,0,0,,哈喽大家好"));
+        // 3675000ms = 1:01:15.00；小时位不补零，多行文本用 \N 连接
+        assert!(output.contains("1:01:15.00,1:01:18.50,Default,,0,0,0,,第一行\\N第二行"));
+        assert_eq!(output.matches("Dialogue: 0,").count(), 2);
+    }
+
+    /// ASS 里 `{}` 是 override 标签边界、`\` 是转义引导符：正文出现时必须转义，
+    /// 否则播放器会把字幕内容当成样式指令吃掉。
+    #[test]
+    fn render_ass_escapes_override_braces_and_backslashes() {
+        use super::render_ass;
+
+        let cues = vec![SubtitleCue {
+            start_ms: 0,
+            end_ms: 1000,
+            text: "{笑} 反斜杠 \\ 与 ${\\an8} 都要原样显示".to_string(),
+        }];
+        let output = render_ass(&cues);
+        assert!(
+            output.contains("\\{笑\\} 反斜杠 \\\\ 与 $\\{\\\\an8\\} 都要原样显示"),
+            "正文花括号与反斜杠都要转义，实际: {}",
+            output.lines().last().unwrap_or_default()
+        );
     }
 
     #[test]
