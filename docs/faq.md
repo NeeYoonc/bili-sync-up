@@ -87,7 +87,8 @@ A:
 **现象**：启用 aria2 或首次使用 YouTube 时，日志出现「下载 aria2 包失败」「下载 yt-dlp 返回错误状态」或校验失败；或者连接 GitHub 长时间无响应。
 
 **原因**：
-- 官方 CDN（`r2d.dnof.net`）现在需要 API key 才能下载，匿名访问会返回 `401 {"error":"Unauthorized","code":"INVALID_API_KEY"}`。普通用户不用管：程序默认从本仓库 Release `tools-aria2` 自动下载，失败再按下面的离线包手动放置；自建/内网环境如果自己持有官方 CDN 的 key，可以设置环境变量 `BILI_SYNC_ARIA2_API_KEY`，程序会优先走官方源、失败自动回退到 GitHub Release。
+- 程序内置的 aria2 下载地址已改成双源：主源是 `r2d.dnof.net` 的公开分享直链（`https://r2d.dnof.net/files/tools/aria2/...`，与官方发布同一份文件、sha256 相同），失败会自动回退到本仓库 Release `tools-aria2`；两个都失败时再按下面的离线包手动放置。旧的 `/file/<id>` 地址需要 API key 鉴权，匿名访问返回 `401 INVALID_API_KEY`，程序已不再使用。
+
 - 自动下载走 GitHub，国内网络可能很慢或连不上。
 
 **方式一：手动下载离线包（国内网络推荐）**
@@ -123,6 +124,7 @@ BILI_SYNC_YTDLP_MIRROR_BASE=https://your-mirror.example.com/yt-dlp
 ```
 
 - 值末尾的 `/` 可写可不写，程序会去掉；
+- yt-dlp 的官方源在国内经常很慢，可以直接把 `BILI_SYNC_YTDLP_MIRROR_BASE` 设为 `https://r2d.dnof.net/files/tools/yt-dlp`（该目录有各平台资产与 `SHA2-256SUMS`，可直接通过程序校验）；
 - aria2 仍会校验 sha256，镜像里必须是同名同内容的压缩包；
 - yt-dlp 镜像必须同时提供 `SHA2-256SUMS`，程序按它校验下载结果。
 
