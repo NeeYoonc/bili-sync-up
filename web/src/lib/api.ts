@@ -705,7 +705,7 @@ class ApiClient {
 					download_charge_videos: false,
 					download_danmaku: source.download_danmaku,
 					download_subtitle: source.download_subtitle,
-					download_ai_subtitle: source.download_subtitle,
+					download_ai_subtitle: source.download_subtitle, // 外部源无独立 AI 字幕开关，回显字幕开关状态
 					ai_subtitle_language: source.ai_subtitle_language,
 					ai_rename: false,
 					ai_rename_video_prompt: '',
