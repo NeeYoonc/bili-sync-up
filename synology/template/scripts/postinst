@@ -1,9 +1,9 @@
 #!/bin/sh
 # postinst —— 安装/重装后：
 #   1) 目录与权限
-#   2) 预置应用配置（端口 / Token）—— 只在「向导确实填了值」或「全新安装」时写入，
-#      升级/重装保留数据时【绝不覆盖】用户已有配置（2026-11-05 真机 bug：升级后端口被重置成 12345）
-#   3) 生成 DSM 门户 ui/config，让套件中心出现「打开」按钮
+#   2) 探测已安装的 FFmpeg 套件（强依赖），得到 ffmpeg 目录
+#   3) 预置应用配置（端口 / Token / ffmpeg_path）——升级/重装保留数据时绝不覆盖用户已有配置
+#   4) 生成 DSM 门户 ui/config（套件中心「打开」按钮）
 PKG_NAME="@APP@"
 APP_ID="BiliSyncUp"
 PKG_DIR="/var/packages/$PKG_NAME/target"
@@ -20,7 +20,24 @@ WIZ_TOKEN="${wizard_token:-}"
 have_sqlite=no
 command -v sqlite3 >/dev/null 2>&1 && have_sqlite=yes
 
-# ── 1) 判定：全新安装 vs 升级/重装（库已存在） ───────────────────────────
+# ── 1) 探测 FFmpeg 套件（套件源里为 ffmpeg / ffmpeg5 / ffmpeg6 / ffmpeg7 / ffmpeg8） ──
+FFMPEG_DEP="@FFMPEG_DEP@"
+FF_DIR=""
+for _v in 8 7 6 5 ""; do
+  _d="/var/packages/ffmpeg${_v}/target/bin"
+  if [ -x "$_d/ffmpeg" ]; then FF_DIR="$_d"; break; fi
+done
+# 兜底：符号链接在 /usr/local/bin 的情况
+if [ -z "$FF_DIR" ] && command -v ffmpeg >/dev/null 2>&1; then
+  FF_DIR="$(dirname "$(command -v ffmpeg)")"
+fi
+if [ -n "$FF_DIR" ]; then
+  echo "[postinst] 检测到 FFmpeg: $FF_DIR"
+else
+  echo "[postinst] ⚠ 未检测到 FFmpeg 套件（依赖 $FFMPEG_DEP 应已安装）；视频合并会失败，请确认 FFmpeg 套件已启动"
+fi
+
+# ── 2) 判定全新安装 vs 升级/重装 ─────────────────────────────────────────
 EXIST_DB=no
 [ -f "$DB" ] && EXIST_DB=yes
 
@@ -32,13 +49,13 @@ if [ "$EXIST_DB" = "yes" ] && [ "$have_sqlite" = "yes" ]; then
   case "$CUR_PORT" in ''|*[!0-9]*) CUR_PORT="" ;; esac
 fi
 
-# ── 2) 决定生效端口 ──────────────────────────────────────────────────────
+# 生效端口：向导填了 → 用它；库里有 → 保持；都没有 → 12345
 if [ -n "$WIZ_PORT" ]; then
-  PORT="$WIZ_PORT"                 # 向导明确填了 → 用它
+  PORT="$WIZ_PORT"
 elif [ -n "$CUR_PORT" ]; then
-  PORT="$CUR_PORT"                 # 升级/重装且向导留空 → 保持现有端口
+  PORT="$CUR_PORT"
 else
-  PORT=12345                       # 全新安装且留空 → 默认
+  PORT=12345
 fi
 case "$PORT" in ''|*[!0-9]*) PORT=12345 ;; esac
 if [ "$PORT" -lt 100 ] 2>/dev/null || [ "$PORT" -gt 65535 ] 2>/dev/null; then PORT=12345; fi
@@ -48,15 +65,14 @@ printf '%s\n' "$PORT" > "$VAR_DIR/port"
 if [ "$have_sqlite" = "yes" ]; then
   if [ "$EXIST_DB" = "no" ]; then
     # 全新安装：造 legacy `config` 表，应用首启自动迁移成正式配置
-    if [ -n "$WIZ_TOKEN" ]; then
-      _json="{\"bind_address\":\"0.0.0.0:$PORT\",\"auth_token\":\"$WIZ_TOKEN\"}"
-    else
-      _json="{\"bind_address\":\"0.0.0.0:$PORT\"}"
-    fi
+    _json="{\"bind_address\":\"0.0.0.0:$PORT\""
+    [ -n "$WIZ_TOKEN" ] && _json="$_json,\"auth_token\":\"$WIZ_TOKEN\""
+    [ -n "$FF_DIR" ]    && _json="$_json,\"ffmpeg_path\":\"$FF_DIR\""
+    _json="$_json}"
     sqlite3 "$DB" "CREATE TABLE config (data TEXT); INSERT INTO config (data) VALUES ('$_json');" >/dev/null 2>&1 \
-      && echo "[postinst] 全新安装：已预置配置 0.0.0.0:$PORT"
+      && echo "[postinst] 全新安装：预置端口 $PORT${FF_DIR:+ / ffmpeg_path=$FF_DIR}"
   else
-    # 升级/重装：只更新向导里真的填了的项，其它保持原值
+    # 升级/重装：只更新向导里真的填了的项
     if [ -n "$WIZ_PORT" ]; then
       sqlite3 "$DB" "INSERT OR REPLACE INTO config_items (key_name,value_json,updated_at) VALUES ('bind_address','\"0.0.0.0:$PORT\"',datetime('now'));" >/dev/null 2>&1 || true
       echo "[postinst] 向导指定端口 → 更新为 $PORT"
@@ -66,6 +82,14 @@ if [ "$have_sqlite" = "yes" ]; then
     if [ -n "$WIZ_TOKEN" ]; then
       sqlite3 "$DB" "INSERT OR REPLACE INTO config_items (key_name,value_json,updated_at) VALUES ('auth_token','\"$WIZ_TOKEN\"',datetime('now'));" >/dev/null 2>&1 || true
       echo "[postinst] 向导指定 Token → 已更新"
+    fi
+    # ffmpeg_path：仅在库中为空/缺失时写入（不覆盖用户手填）
+    if [ -n "$FF_DIR" ]; then
+      CUR_FF="$(sqlite3 "$DB" "SELECT value_json FROM config_items WHERE key_name='ffmpeg_path';" 2>/dev/null | tr -d '\"')"
+      if [ -z "$CUR_FF" ]; then
+        sqlite3 "$DB" "INSERT OR REPLACE INTO config_items (key_name,value_json,updated_at) VALUES ('ffmpeg_path','\"$FF_DIR\"',datetime('now'));" >/dev/null 2>&1 || true
+        echo "[postinst] 已写入 ffmpeg_path=$FF_DIR"
+      fi
     fi
   fi
 fi
@@ -88,15 +112,12 @@ cat > "$PKG_DIR/ui/config" <<PORTAL
 }
 PORTAL
 
-# ── 5) 安装信息（保留原 Token 提示，不打印 Token 明文以外的敏感信息） ────
+# ── 5) 安装信息 ──────────────────────────────────────────────────────────
 {
   echo "端口: $PORT"
   echo "访问: http://<NAS-IP>:$PORT"
-  if [ -n "$WIZ_TOKEN" ]; then
-    echo "Token: $WIZ_TOKEN"
-  else
-    echo "Token: 沿用原有设置（本次未修改）"
-  fi
+  if [ -n "$WIZ_TOKEN" ]; then echo "Token: $WIZ_TOKEN"; else echo "Token: 沿用原有设置（本次未修改）"; fi
+  if [ -n "$FF_DIR" ]; then echo "FFmpeg: $FF_DIR"; else echo "FFmpeg: 未检测到（请安装 FFmpeg 套件）"; fi
   echo "配置目录: $CONFIG_DIR"
 } > "$VAR_DIR/access-info.txt"
 

@@ -7,12 +7,12 @@
 
 ## 0. 一句话概括
 
-上游（Rust 项目）Release 里已经有 **Linux 静态 musl 二进制**，所以套件不需要编译 Rust：
+上游（Rust 项目）Release 里已经有 **Linux 静态 musl 二进制**，所以套件不需要编译 Rust；
+且 ffmpeg 不再内置，改为强依赖套件源里的 FFmpeg 套件：
 
 ```
 上游 Release 资产 (bili-sync-rs-Linux-*-musl.tar.gz)
-        + 静态 ffmpeg
-        ↓  build-spk.sh 组装
+        ↓  build-spk.sh 组装（不再下载/内置 ffmpeg）
 SPK 骨架（INFO / scripts / conf / WIZARD_UIFILES / package.tgz）
         ↓  tar（未压缩、无 ./ 前缀）
 bili-sync-up_<arch>-<version>.spk
@@ -72,7 +72,7 @@ CI 侧：
 | 配置表结构 | `config_items(key_name, value_json, updated_at)` | 装好后 `sqlite3 data.sqlite .schema config_items` |
 | 配置能否预置 | 能，两种路径（见 §6.1） | 读 `config/manager.rs`：`legacy_config_exists()` / `load_legacy_config_value()` / `migrate_config_schema()` |
 | 有没有鉴权 | 有：配置项 `auth_token`（默认 None），前端 `auth-login.svelte` | `config/mod.rs` 的 `default_auth_token()` |
-| 运行时依赖 | **ffmpeg/ffprobe**（B 站 DASH 分离流合并必需）；可选 quickjs/node（yt-dlp） | Dockerfile 的 `apk add ffmpeg` |
+| 运行时依赖 | **ffmpeg/ffprobe**（B 站 DASH 分离流合并必需）——**改为依赖套件源里的 FFmpeg 套件**，不内置；可选 quickjs/node（yt-dlp） | Dockerfile 的 `apk add ffmpeg` |
 | 进程行为 | **启动后会 fork**（父进程写 pid、子进程监听端口） | 真机 `ps` / `netstat` 对比 |
 | 许可 | MIT（上游），内置 ffmpeg 为 GPL 静态构建 → 需在文档声明来源 | LICENSE / ffmpeg 构建来源 |
 
@@ -112,12 +112,12 @@ xxx.spk (tar)
 
 ```
 bin/bili-sync-rs        # 上游二进制（必须 755）
-bin/ffmpeg              # 静态 ffmpeg
-bin/ffprobe
-bin/start.sh            # 启动包装：PATH/HOME/BILI_SYNC_CONFIG_DIR
+bin/start.sh            # 启动包装：PATH/HOME/BILI_SYNC_CONFIG_DIR + ffmpeg 套件探测
 ui/images/icon_64.png   # DSM 桌面门户图标
 ui/images/icon_256.png
 ```
+
+> ffmpeg **不打包**：由 `INFO` 的 `depends="ffmpeg7"` 声明强依赖，运行时从 `/var/packages/ffmpeg7/target/bin` 取。
 
 打包命令（**必须强制 755**，见 §8 坑 2）：
 
@@ -137,6 +137,7 @@ maintainer_url="https://github.com/NeeYoonc/bili-sync-up"
 distributor="NeeYoonc"
 distributor_url="https://github.com/NeeYoonc/bili-sync-up"
 os_min_ver="7.0-40851"
+depends="ffmpeg7"                       # 强依赖：套件源里的 FFmpeg 7
 displayname="Bili Sync Up"
 dsmuidir="ui"                          # 有门户才写
 dsmappname="SYNO.SDS.BiliSyncUp.Application"   # 必须与 ui/config 的 key 逐字一致
@@ -152,14 +153,14 @@ changelog="..."                        # 套件中心「版本说明」，可写
 
 ```bash
 ./synology/build-spk.sh --tag v3.1.6 --arch x86_64 [--outdir dist]
-                        [--binary <本地 tar.gz>] [--ffmpeg-dir <已解压目录>] [--keep]
+                        [--binary <本地 tar.gz>] [--keep]
 ```
 
 | 步骤 | 做什么 | 关键点 |
 |---|---|---|
 | 1 | 解析参数、架构映射 | `x86_64` → 资产 `bili-sync-rs-Linux-x86_64-musl.tar.gz` + ffmpeg amd64；`armv8` → `...aarch64...` + ffmpeg arm64 |
 | 2 | 取二进制 | 优先 `--binary`（CI 用下载好的 artifact），否则从 Release 按 tag 下载 |
-| 3 | 取 ffmpeg | 默认从 johnvansickle 下载静态构建（`ffmpeg-release-{amd64,arm64}-static.tar.xz`），只取 `ffmpeg`/`ffprobe` |
+| 3 | （已移除）取 ffmpeg | ffmpeg 不再内置；`INFO` 用 `depends` 声明依赖，`postinst` 探测 `ffmpeg*` 套件路径 |
 | 3b | 门户图标 | 把 64/256 图标拷进 `app/ui/images/` |
 | 4 | 打 `package.tgz` | `tar -czf ... --mode='u+rwx,go+rx' -C app .` |
 | 5 | 组装 SPK 骨架 | 拷 INFO（替换 `@APP@`/`@VERSION@`/`@ARCH@`/`@REPO@`）、scripts（替换占位符）、conf、WIZARD_UIFILES、图标 |
@@ -389,7 +390,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<端口>/
 1. **调研**：读 `Dockerfile`/`docker-compose` → 得到运行命令、端口、卷（配置/下载目录）、系统依赖
 2. **确认产物**：Release 里有没有 Linux x86_64/arm64 静态二进制；没有就得在 CI 里自己交叉编译
 3. **定配置落点**：能否用环境变量指定配置目录（如 `BILI_SYNC_CONFIG_DIR`）；否则用 `HOME`
-4. **写 `build-spk.sh`**：下载二进制 + 依赖（ffmpeg 等）→ `package.tgz`（**--mode 强制 755**）→ SPK 骨架 → 外层 tar（**无 `./`**）→ 自检
+4. **写 `build-spk.sh`**：下载二进制 → `package.tgz`（**--mode 强制 755**）→ SPK 骨架 → 外层 tar（**无 `./`**）→ 自检；系统依赖（如 ffmpeg）用 `INFO depends` 声明为强依赖，不要内置
 5. **写生命周期脚本**：`start-stop-status`（端口就绪探测、fork 兜底 kill）、`postinst`（配置/门户/权限）、`preuninst`/`postuninst`（**软链解析后再删**）
 6. **加向导**：`install_uifile`（端口/Token/目录）、`uninstall_uifile`（保留/删除数据）
 7. **接 CI**：在发版 workflow 末尾追加 `spk` job（`needs: release`、`if: tags v*`）+ 一个手动补包 workflow
@@ -401,4 +402,5 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<端口>/
 
 - 上游项目：<https://github.com/NeeYoonc/bili-sync-up>
 - 套件源：<https://ssp.dnof.net/>
-- 静态 ffmpeg：<https://johnvansickle.com/ffmpeg/>（GPL，随包分发需注明来源）
+- FFmpeg 套件（SynoCommunity）：<https://docs.synocommunity.com/packages/ffmpeg/>
+- 早期版本的静态 ffmpeg 来源（已不再内置）：<https://johnvansickle.com/ffmpeg/>
