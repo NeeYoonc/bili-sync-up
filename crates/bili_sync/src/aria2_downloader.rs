@@ -19,6 +19,41 @@ use crate::http::headers::{create_api_headers, create_aria2_headers, create_aria
 const ARIA2_VERSION: &str = "1.37.0";
 const ARIA2_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// aria2 公开镜像基址环境变量：设置后优先用 `<base>/<archive_name>` 下载，不设置则用内置公开直链。
+const ARIA2_MIRROR_BASE_ENV: &str = "BILI_SYNC_ARIA2_MIRROR_BASE";
+
+/// 规范化用户填写的镜像基址：去空白、去尾部斜杠；空串视为未配置。
+fn normalize_download_base(base: Option<&str>) -> Option<String> {
+    base.map(str::trim)
+        .filter(|base| !base.is_empty())
+        .map(|base| base.trim_end_matches('/').to_string())
+        .filter(|base| !base.is_empty())
+}
+
+/// 解析 aria2 压缩包的实际下载地址：配置了镜像就用 `<base>/<archive_name>`，否则用内置公开直链。
+fn resolve_aria2_download_url(default_download_url: &str, archive_name: &str, mirror_base: Option<&str>) -> String {
+    match normalize_download_base(mirror_base) {
+        Some(base) => format!("{base}/{archive_name}"),
+        None => default_download_url.to_string(),
+    }
+}
+
+/// 读取 aria2 镜像基址环境变量（名字是编译期常量，值在运行期读）。
+fn aria2_mirror_base() -> Option<String> {
+    std::env::var(ARIA2_MIRROR_BASE_ENV).ok()
+}
+
+/// 下载失败时的可操作提示：直接给出运行时解析出来的绝对安装路径 + 镜像变量名。
+fn aria2_download_failure_hint(package: Aria2Package, binary_path: &Path) -> String {
+    format!(
+        "aria2c 下载失败：可手动下载 {} 放到 {}，或设置 {} 指向包含同名 zip 的镜像目录（文件名必须是 {}，sha256 需匹配）",
+        package.binary_name,
+        binary_path.display(),
+        ARIA2_MIRROR_BASE_ENV,
+        package.archive_name
+    )
+}
+
 static ARIA2_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// aria2 RPC 端点（端口 + token），用于把「往哪个实例提交任务」收成一个参数。
@@ -34,6 +69,8 @@ struct RequestHints<'a> {
     proxy: Option<&'a str>,
 }
 
+/// 内置的 aria2 发行包信息：下载地址用 r2d.dnof.net 的公开分享直链（免鉴权，与官方同一份文件），
+/// 用户可通过 `BILI_SYNC_ARIA2_MIRROR_BASE` 换成自己的镜像目录。
 #[derive(Clone, Copy)]
 struct Aria2Package {
     target_key: &'static str,
@@ -511,37 +548,52 @@ impl Aria2Downloader {
         ARIA2_INSTALL_LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    fn current_package() -> Option<Aria2Package> {
-        Some(Aria2Package {
+    #[cfg(any(test, all(target_os = "windows", target_arch = "x86_64")))]
+    fn windows_package() -> Aria2Package {
+        Aria2Package {
             target_key: "windows-x86_64",
             archive_name: "aria2-1.37.0-win-64bit-build1.zip",
             binary_name: "aria2c.exe",
-            download_url: "https://r2d.dnof.net/file/mn643mzqukqji5fj",
+            download_url: "https://r2d.dnof.net/files/tools/aria2/aria2-1.37.0-win-64bit-build1.zip",
             sha256: "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
-        })
+        }
+    }
+
+    #[cfg(any(test, all(target_os = "linux", target_arch = "x86_64")))]
+    fn linux_x86_64_package() -> Aria2Package {
+        Aria2Package {
+            target_key: "linux-x86_64",
+            archive_name: "aria2-x86_64-linux-musl_static.zip",
+            binary_name: "aria2c",
+            download_url: "https://r2d.dnof.net/files/tools/aria2/aria2-x86_64-linux-musl_static.zip",
+            sha256: "0d86b4fe16bc820f9e97ccd1034c88db87b884ed59b8db3ba7ebf286424389f4",
+        }
+    }
+
+    #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+    fn linux_aarch64_package() -> Aria2Package {
+        Aria2Package {
+            target_key: "linux-aarch64",
+            archive_name: "aria2-aarch64-linux-musl_static.zip",
+            binary_name: "aria2c",
+            download_url: "https://r2d.dnof.net/files/tools/aria2/aria2-aarch64-linux-musl_static.zip",
+            sha256: "0bdd04973526b7c8afddf8b63b89b456eb1a56a9c4a73e109f70773f712f6fe7",
+        }
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    fn current_package() -> Option<Aria2Package> {
+        Some(Self::windows_package())
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn current_package() -> Option<Aria2Package> {
-        Some(Aria2Package {
-            target_key: "linux-x86_64",
-            archive_name: "aria2-x86_64-linux-musl_static.zip",
-            binary_name: "aria2c",
-            download_url: "https://r2d.dnof.net/file/mn643m2nnkg455f9",
-            sha256: "f6133e102916dc55f3aa0ba47fa134aec959928cc433c255ca63beceeee49965",
-        })
+        Some(Self::linux_x86_64_package())
     }
 
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     fn current_package() -> Option<Aria2Package> {
-        Some(Aria2Package {
-            target_key: "linux-aarch64",
-            archive_name: "aria2-aarch64-linux-musl_static.zip",
-            binary_name: "aria2c",
-            download_url: "https://r2d.dnof.net/file/mn643lqvfbxj2rp4",
-            sha256: "01cb29433cc2d7f039d6621ebaf4bf4d9891a8efacd8a54e5ff4c244d839421c",
-        })
+        Some(Self::linux_aarch64_package())
     }
 
     #[cfg(not(any(
@@ -601,9 +653,16 @@ impl Aria2Downloader {
             .await
             .with_context(|| format!("创建 aria2 缓存目录失败: {}", cache_dir.display()))?;
 
+        let download_url = resolve_aria2_download_url(
+            package.download_url,
+            package.archive_name,
+            aria2_mirror_base().as_deref(),
+        );
+        let failure_hint = aria2_download_failure_hint(package, &binary_path);
+
         info!(
             "开始按需下载 aria2 二进制: version={}, target={}, url={}",
-            ARIA2_VERSION, package.target_key, package.download_url
+            ARIA2_VERSION, package.target_key, download_url
         );
 
         let download_client = ReqwestClient::builder()
@@ -614,12 +673,12 @@ impl Aria2Downloader {
             .context("创建 aria2 下载客户端失败")?;
 
         let response = download_client
-            .get(package.download_url)
+            .get(&download_url)
             .send()
             .await
-            .with_context(|| format!("下载 aria2 包失败: {}", package.download_url))?
+            .with_context(|| format!("下载 aria2 包失败: {download_url}；{failure_hint}"))?
             .error_for_status()
-            .with_context(|| format!("下载 aria2 包返回错误状态: {}", package.download_url))?;
+            .with_context(|| format!("下载 aria2 包返回错误状态: {download_url}；{failure_hint}"))?;
 
         let archive_bytes = response.bytes().await.context("读取 aria2 下载内容失败")?;
         Self::verify_archive_checksum(archive_bytes.as_ref(), package.sha256)?;
@@ -2109,5 +2168,131 @@ impl Drop for Aria2Downloader {
     fn drop(&mut self) {
         // 保留aria2二进制文件，避免在暂停/重启扫描时被删除
         // 如果后续需要清理，可在显式卸载/清理路径中处理，而不是在Drop中
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_package() -> Aria2Package {
+        Aria2Package {
+            target_key: "linux-x86_64",
+            archive_name: "aria2-x86_64-linux-musl_static.zip",
+            binary_name: "aria2c",
+            download_url: "https://example.com/default/aria2.zip",
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        }
+    }
+
+    #[test]
+    fn aria2_builtin_packages_use_public_mirror_urls() {
+        let packages = [
+            Aria2Downloader::windows_package(),
+            Aria2Downloader::linux_x86_64_package(),
+            Aria2Downloader::linux_aarch64_package(),
+        ];
+        for package in packages {
+            assert!(
+                package
+                    .download_url
+                    .starts_with("https://r2d.dnof.net/files/tools/aria2/"),
+                "内置下载地址必须是公开分享直链: {}",
+                package.download_url
+            );
+            assert!(
+                package.download_url.ends_with(package.archive_name),
+                "下载地址必须以压缩包名结尾: {}",
+                package.download_url
+            );
+            assert_eq!(package.sha256.len(), 64, "sha256 长度必须是 64");
+            assert!(
+                !package.download_url.contains("/file/"),
+                "不能再用需要 API key 的 /file/<id> 地址: {}",
+                package.download_url
+            );
+        }
+        assert_eq!(
+            Aria2Downloader::linux_x86_64_package().download_url,
+            "https://r2d.dnof.net/files/tools/aria2/aria2-x86_64-linux-musl_static.zip"
+        );
+        assert_eq!(
+            Aria2Downloader::linux_aarch64_package().download_url,
+            "https://r2d.dnof.net/files/tools/aria2/aria2-aarch64-linux-musl_static.zip"
+        );
+        assert_eq!(
+            Aria2Downloader::windows_package().download_url,
+            "https://r2d.dnof.net/files/tools/aria2/aria2-1.37.0-win-64bit-build1.zip"
+        );
+    }
+
+    #[test]
+    fn aria2_mirror_base_overrides_builtin_download_url() {
+        let package = test_package();
+        let url = resolve_aria2_download_url(
+            package.download_url,
+            package.archive_name,
+            Some("https://mirror.example.com/aria2"),
+        );
+        assert_eq!(
+            url,
+            "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip"
+        );
+    }
+
+    #[test]
+    fn aria2_mirror_base_is_normalized() {
+        let package = test_package();
+        for base in [
+            "https://mirror.example.com/aria2/",
+            "https://mirror.example.com/aria2///",
+            "  https://mirror.example.com/aria2/  ",
+        ] {
+            let url = resolve_aria2_download_url(package.download_url, package.archive_name, Some(base));
+            assert_eq!(
+                url, "https://mirror.example.com/aria2/aria2-x86_64-linux-musl_static.zip",
+                "镜像基址 {base} 应该被规范化"
+            );
+        }
+        for empty in [None, Some(""), Some("   "), Some("/"), Some("///")] {
+            let url = resolve_aria2_download_url(package.download_url, package.archive_name, empty);
+            assert_eq!(url, package.download_url, "空镜像基址 {empty:?} 应该回退到内置地址");
+        }
+    }
+
+    #[test]
+    fn aria2_download_failure_hint_is_actionable() {
+        let package = test_package();
+        let binary_path = Path::new("/app/.config/bili-sync/tools/aria2/1.37.0/linux-x86_64/aria2c");
+        let hint = aria2_download_failure_hint(package, binary_path);
+        assert!(hint.contains("aria2c 下载失败"), "提示要说明失败的是 aria2c: {hint}");
+        assert!(hint.contains("手动下载"), "提示要给手动放置的办法: {hint}");
+        assert!(hint.contains(package.archive_name), "提示要写压缩包名: {hint}");
+        assert!(
+            hint.contains("/app/.config/bili-sync/tools/aria2/1.37.0/linux-x86_64/aria2c"),
+            "提示要写具体放置文件: {hint}"
+        );
+        assert!(hint.contains(ARIA2_MIRROR_BASE_ENV), "提示要写镜像变量名: {hint}");
+        assert!(hint.contains("sha256 需匹配"), "提示要说明校验要求: {hint}");
+    }
+
+    #[test]
+    fn aria2_failure_hint_uses_resolved_config_dir_path() {
+        let package = test_package();
+        let install_path = Aria2Downloader::cache_dir(package).join(package.binary_name);
+        let hint = aria2_download_failure_hint(package, &install_path);
+        let resolved = install_path.display().to_string();
+        assert!(
+            hint.contains(&resolved),
+            "提示必须包含运行时解析出的绝对路径: hint={hint}, path={resolved}"
+        );
+        assert!(hint.contains("tools/aria2/1.37.0/"), "提示要含版本目录: {hint}");
+        assert!(hint.contains(package.target_key), "提示要含 target_key: {hint}");
+        assert!(install_path.is_absolute(), "安装路径必须是绝对路径");
+    }
+
+    #[test]
+    fn aria2_mirror_env_name_matches_documentation() {
+        assert_eq!(ARIA2_MIRROR_BASE_ENV, "BILI_SYNC_ARIA2_MIRROR_BASE");
     }
 }

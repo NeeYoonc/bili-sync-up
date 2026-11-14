@@ -82,6 +82,92 @@ A:
 - 例如：/media，或者/download，而是直接把你要下载文件的目录映射出来，不用理会项目内部目录。
 - 你可以按照这个方法，试一下。希望能帮到你。
 
+## aria2 / yt-dlp 下载失败（国内网络或镜像失效）
+
+**现象**：启用 aria2 或首次使用 YouTube 时，日志出现「下载 aria2 包失败」「下载 yt-dlp 返回错误状态」或校验失败；或者连接 GitHub 长时间无响应。
+
+**原因**：
+- 程序内置的 aria2 下载地址已改成 `r2d.dnof.net` 的公开分享直链（`https://r2d.dnof.net/files/tools/aria2/...`，免鉴权，与官方发布同一份文件、sha256 相同）。旧的 `/file/<id>` 地址需要 API key 鉴权，匿名访问返回 `401 INVALID_API_KEY`，程序已不再使用。
+- yt-dlp 官方下载走 GitHub，国内网络可能很慢或连不上（可配镜像或按下面手动放置）。
+
+**方式一：手动下载离线包（国内网络推荐）**
+
+公开分享页（免登录，含 `tools/aria2` 与 `tools/yt-dlp` 全部文件，可直接对照 sha256）：<https://r2d.dnof.net/share/143a2bbac81d45a2>
+
+国内盘：<https://wwbat.lanzouw.com/b01i60dxoh> 提取码 `3crm`
+
+包含：
+- aria2 1.37.0：Windows x64 / x86、Linux x86_64 / aarch64 / armv7 / arm / i686 / LoongArch64 的 musl 静态构建，以及源码；
+- yt-dlp 2026.10.26：Windows、Linux（glibc 与 musl 两种）、macOS、armv7l、Python zipapp；
+- `CHECKSUMS.txt` 校验和。
+
+注意：glibc 与 musl 构建不能混用；群晖 NAS 用的是 glibc 系统，请选 glibc 版 yt-dlp。
+
+放置路径 = `<配置目录>/tools/...`，各部署方式的配置目录不同：
+
+| 部署方式 | 配置目录 |
+|---|---|
+| Docker（官方镜像） | `/app/.config/bili-sync`（容器内路径，对应你挂载出来的配置卷） |
+| 群晖套件 | `/var/packages/bili-sync-up/var/config` |
+| Windows 裸程序 | `%APPDATA%\bili-sync` |
+| Linux 裸程序 | `~/.config/bili-sync` |
+| macOS 裸程序 | `~/Library/Application Support/bili-sync` |
+| 自定义 | 环境变量 `BILI_SYNC_CONFIG_DIR` 指定的目录 |
+
+具体例子：
+
+- Linux x86_64（Docker）：`/app/.config/bili-sync/tools/aria2/1.37.0/linux-x86_64/aria2c`；
+- Windows：`%APPDATA%\bili-sync\tools\aria2\1.37.0\windows-x86_64\aria2c.exe`。
+
+**aria2 的 `<target_key>`**（文件名：Linux/macOS 为 `aria2c`，Windows 为 `aria2c.exe`）：
+
+| 平台 | target_key |
+|---|---|
+| Windows x86_64 | `windows-x86_64` |
+| Linux x86_64 | `linux-x86_64` |
+| Linux aarch64 | `linux-aarch64` |
+
+**yt-dlp 的 `<target_key>` 与文件名**（目录 = `<配置目录>/tools/yt-dlp/<target_key>/`）：
+
+| 平台 | target_key | 文件名 |
+|---|---|---|
+| Windows x86_64 | `windows-x86_64` | `yt-dlp.exe` |
+| Windows x86（32 位） | `windows-x86` | `yt-dlp.exe` |
+| Windows aarch64 | `windows-aarch64` | `yt-dlp.exe` |
+| Linux x86_64（musl） | `linux-x86_64-musl` | `yt-dlp` |
+| Linux aarch64（musl） | `linux-aarch64-musl` | `yt-dlp` |
+| Linux x86_64（glibc） | `linux-x86_64` | `yt-dlp` |
+| Linux aarch64（glibc） | `linux-aarch64` | `yt-dlp` |
+| Linux armv7l | `linux-armv7l` | `yt-dlp_linux_armv7l`（**整个 zip 解压进去，连同 `_internal/` 目录**） |
+| macOS（Universal） | `macos-universal` | `yt-dlp` |
+
+不想按目录结构放，也可以直接设置环境变量 `BILI_SYNC_YTDLP_PATH` 指向任意位置的 yt-dlp 可执行文件。
+
+**方式二：配置镜像目录**
+
+把同名压缩包（aria2）或同名资产 + `SHA2-256SUMS`（yt-dlp）放到自己的 Web 目录 / 对象存储，再设置环境变量：
+
+```bash
+# aria2 镜像：目录下放 aria2-x86_64-linux-musl_static.zip 等同名压缩包
+BILI_SYNC_ARIA2_MIRROR_BASE=https://your-mirror.example.com/aria2
+
+# yt-dlp 镜像：目录下放 yt-dlp_linux 等同名资产和 SHA2-256SUMS
+BILI_SYNC_YTDLP_MIRROR_BASE=https://your-mirror.example.com/yt-dlp
+```
+
+- 值末尾的 `/` 可写可不写，程序会去掉；
+- yt-dlp 的官方源在国内经常很慢，可以直接把 `BILI_SYNC_YTDLP_MIRROR_BASE` 设为 `https://r2d.dnof.net/files/tools/yt-dlp`（该目录有各平台资产与 `SHA2-256SUMS`，可直接通过程序校验）；
+- aria2 仍会校验 sha256，镜像里必须是同名同内容的压缩包；
+- yt-dlp 镜像必须同时提供 `SHA2-256SUMS`，程序按它校验下载结果。
+
+**配置目录在哪**：
+- Docker：`/app/.config/bili-sync`（容器内路径），对应你挂载出来的配置卷；
+- 群晖套件：`/var/packages/bili-sync-up/var/config`（即套件说明里的 `var/config`）；
+- Windows：`%APPDATA%\bili-sync`；
+- 其它部署方式见 [安装指南](./installation.md)。
+
+放好后重启程序即可，已下载完成的内容不需要重下。
+
 ## 故障排除
 
 ### Q: Web 界面打不开？
