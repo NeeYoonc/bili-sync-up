@@ -8877,7 +8877,7 @@ async fn download_and_install_ytdlp(
     let asset_url = format!("{release_base}/{}", package.asset_name);
     let checksums_url = format!("{release_base}/SHA2-256SUMS");
     let manual_hint = format!(
-        "若持续失败，可设置 {} 指向含同名资产与 SHA2-256SUMS 的镜像目录，或设置 BILI_SYNC_YTDLP_PATH 指向手动下载的 yt-dlp（当前安装路径：{}）",
+        "若持续失败，可设置 {} 指向含同名资产与 SHA2-256SUMS 的镜像目录，或把 yt-dlp 手动放到 {}，或设置 BILI_SYNC_YTDLP_PATH 指向任意位置的可执行文件",
         YTDLP_MIRROR_BASE_ENV,
         binary_path.display()
     );

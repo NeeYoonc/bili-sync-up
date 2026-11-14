@@ -103,14 +103,45 @@ A:
 
 注意：glibc 与 musl 构建不能混用；群晖 NAS 用的是 glibc 系统，请选 glibc 版 yt-dlp。
 
-放置路径（`<配置目录>` 见下）：
+放置路径 = `<配置目录>/tools/...`，各部署方式的配置目录不同：
 
-| 工具 | 放置路径 |
+| 部署方式 | 配置目录 |
 |---|---|
-| aria2 | `<配置目录>/tools/aria2/1.37.0/<target_key>/aria2c`（Windows 为 `aria2c.exe`） |
-| yt-dlp | `<配置目录>/tools/yt-dlp/<target_key>/yt-dlp`（Windows 为 `yt-dlp.exe`），或设置环境变量 `BILI_SYNC_YTDLP_PATH` 直接指向可执行文件 |
+| Docker（官方镜像） | `/app/.config/bili-sync`（容器内路径，对应你挂载出来的配置卷） |
+| 群晖套件 | `/var/packages/bili-sync-up/var/config` |
+| Windows 裸程序 | `%APPDATA%\bili-sync` |
+| Linux 裸程序 | `~/.config/bili-sync` |
+| macOS 裸程序 | `~/Library/Application Support/bili-sync` |
+| 自定义 | 环境变量 `BILI_SYNC_CONFIG_DIR` 指定的目录 |
 
-`<target_key>`：Windows x86_64 用 `windows-x86_64`，Linux x86_64 用 `linux-x86_64`，Linux aarch64 用 `linux-aarch64`。
+具体例子：
+
+- Linux x86_64（Docker）：`/app/.config/bili-sync/tools/aria2/1.37.0/linux-x86_64/aria2c`；
+- Windows：`%APPDATA%\bili-sync\tools\aria2\1.37.0\windows-x86_64\aria2c.exe`。
+
+**aria2 的 `<target_key>`**（文件名：Linux/macOS 为 `aria2c`，Windows 为 `aria2c.exe`）：
+
+| 平台 | target_key |
+|---|---|
+| Windows x86_64 | `windows-x86_64` |
+| Linux x86_64 | `linux-x86_64` |
+| Linux aarch64 | `linux-aarch64` |
+
+**yt-dlp 的 `<target_key>` 与文件名**（目录 = `<配置目录>/tools/yt-dlp/<target_key>/`）：
+
+| 平台 | target_key | 文件名 |
+|---|---|---|
+| Windows x86_64 | `windows-x86_64` | `yt-dlp.exe` |
+| Windows x86（32 位） | `windows-x86` | `yt-dlp.exe` |
+| Windows aarch64 | `windows-aarch64` | `yt-dlp.exe` |
+| Linux x86_64（musl） | `linux-x86_64-musl` | `yt-dlp` |
+| Linux aarch64（musl） | `linux-aarch64-musl` | `yt-dlp` |
+| Linux x86_64（glibc） | `linux-x86_64` | `yt-dlp` |
+| Linux aarch64（glibc） | `linux-aarch64` | `yt-dlp` |
+| Linux armv7l | `linux-armv7l` | `yt-dlp_linux_armv7l`（**整个 zip 解压进去，连同 `_internal/` 目录**） |
+| macOS（Universal） | `macos-universal` | `yt-dlp` |
+
+不想按目录结构放，也可以直接设置环境变量 `BILI_SYNC_YTDLP_PATH` 指向任意位置的 yt-dlp 可执行文件。
 
 **方式二：配置镜像目录**
 

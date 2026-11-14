@@ -43,14 +43,14 @@ fn aria2_mirror_base() -> Option<String> {
     std::env::var(ARIA2_MIRROR_BASE_ENV).ok()
 }
 
-/// 所有下载源都失败时的可操作提示：手动放置路径 + 镜像变量名。
-fn aria2_download_failure_hint(package: Aria2Package, cache_dir: &Path) -> String {
+/// 下载失败时的可操作提示：直接给出运行时解析出来的绝对安装路径 + 镜像变量名。
+fn aria2_download_failure_hint(package: Aria2Package, binary_path: &Path) -> String {
     format!(
-        "aria2c 下载失败：可手动下载 {} 解压出 {} 放到 {}，或设置 {} 指向包含同名 zip 的镜像目录",
-        package.archive_name,
+        "aria2c 下载失败：可手动下载 {} 放到 {}，或设置 {} 指向包含同名 zip 的镜像目录（文件名必须是 {}，sha256 需匹配）",
         package.binary_name,
-        cache_dir.display(),
-        ARIA2_MIRROR_BASE_ENV
+        binary_path.display(),
+        ARIA2_MIRROR_BASE_ENV,
+        package.archive_name
     )
 }
 
@@ -658,7 +658,7 @@ impl Aria2Downloader {
             package.archive_name,
             aria2_mirror_base().as_deref(),
         );
-        let failure_hint = aria2_download_failure_hint(package, &cache_dir);
+        let failure_hint = aria2_download_failure_hint(package, &binary_path);
 
         info!(
             "开始按需下载 aria2 二进制: version={}, target={}, url={}",
@@ -2263,16 +2263,32 @@ mod tests {
     #[test]
     fn aria2_download_failure_hint_is_actionable() {
         let package = test_package();
-        let cache_dir = Path::new("/cfg/tools/aria2/1.37.0/linux-x86_64");
-        let hint = aria2_download_failure_hint(package, cache_dir);
+        let binary_path = Path::new("/app/.config/bili-sync/tools/aria2/1.37.0/linux-x86_64/aria2c");
+        let hint = aria2_download_failure_hint(package, binary_path);
         assert!(hint.contains("aria2c 下载失败"), "提示要说明失败的是 aria2c: {hint}");
         assert!(hint.contains("手动下载"), "提示要给手动放置的办法: {hint}");
         assert!(hint.contains(package.archive_name), "提示要写压缩包名: {hint}");
         assert!(
-            hint.contains("/cfg/tools/aria2/1.37.0/linux-x86_64"),
-            "提示要写具体放置目录: {hint}"
+            hint.contains("/app/.config/bili-sync/tools/aria2/1.37.0/linux-x86_64/aria2c"),
+            "提示要写具体放置文件: {hint}"
         );
         assert!(hint.contains(ARIA2_MIRROR_BASE_ENV), "提示要写镜像变量名: {hint}");
+        assert!(hint.contains("sha256 需匹配"), "提示要说明校验要求: {hint}");
+    }
+
+    #[test]
+    fn aria2_failure_hint_uses_resolved_config_dir_path() {
+        let package = test_package();
+        let install_path = Aria2Downloader::cache_dir(package).join(package.binary_name);
+        let hint = aria2_download_failure_hint(package, &install_path);
+        let resolved = install_path.display().to_string();
+        assert!(
+            hint.contains(&resolved),
+            "提示必须包含运行时解析出的绝对路径: hint={hint}, path={resolved}"
+        );
+        assert!(hint.contains("tools/aria2/1.37.0/"), "提示要含版本目录: {hint}");
+        assert!(hint.contains(package.target_key), "提示要含 target_key: {hint}");
+        assert!(install_path.is_absolute(), "安装路径必须是绝对路径");
     }
 
     #[test]
