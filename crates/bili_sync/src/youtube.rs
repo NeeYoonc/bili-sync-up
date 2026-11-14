@@ -440,7 +440,7 @@ pub async fn search_youtube(
         "--ignore-errors",
         "--no-warnings",
     ]);
-    append_ytdlp_runtime(&mut command);
+    append_ytdlp_runtime(&mut command).await;
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
     append_ytdlp_tab_args(&mut command);
@@ -607,7 +607,7 @@ async fn fetch_youtube_playlist_catalog(playlists_url: &str, operation: &str) ->
         "--retries",
         "3",
     ]);
-    append_ytdlp_runtime(&mut command);
+    append_ytdlp_runtime(&mut command).await;
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
     append_ytdlp_tab_args(&mut command);
@@ -787,7 +787,7 @@ pub async fn get_youtube_source_videos(
         "--retries",
         "3",
     ]);
-    append_ytdlp_runtime(&mut command);
+    append_ytdlp_runtime(&mut command).await;
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
     append_ytdlp_tab_args(&mut command);
@@ -1039,10 +1039,7 @@ async fn probe_youtube_subscription_channels() -> std::result::Result<serde_json
     })?;
     let response = client
         .get(SUBSCRIPTION_CHANNELS_URL)
-        .header(
-            reqwest::header::USER_AGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-        )
+        .header(reqwest::header::USER_AGENT, YOUTUBE_WEB_USER_AGENT)
         .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
         .send()
         .await
@@ -2117,6 +2114,11 @@ pub(crate) fn source_platform_label(source: &youtube_source::Model) -> &'static 
     }
 }
 
+/// 访问 YouTube 网页时使用的浏览器标识：`timedtext` 字幕端点对非浏览器 UA
+/// 更早触发风控，登录探测与字幕下载共用同一个值，避免行为不一致。
+const YOUTUBE_WEB_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
+
 async fn fetch_platform_asset(
     downloader: &UnifiedDownloader,
     source: &youtube_source::Model,
@@ -2136,6 +2138,71 @@ async fn fetch_platform_asset(
         let proxy = configured_external_proxy();
         downloader.fetch_with_fallback_with_proxy(urls, path, &proxy).await
     }
+}
+
+/// 下载单条 YouTube 字幕轨。
+///
+/// `timedtext` 端点对**不带 Cookie** 的请求直接返回 429（Google 侧判定为
+/// automated queries），即使签名 URL 完全有效；同一 URL 带上已导入的登录
+/// Cookie（按域匹配）会返回 200。因此字幕不能复用通用媒体下载链路——
+/// 那条链路为了下载 googlevideo 直链并不携带会话 Cookie。
+///
+/// 字幕是纯文本、体积小，这里用带 Cookie Jar + 外源代理的 reqwest 直取；
+/// 未导入 Cookie 或直取失败时回退到通用资源下载，保持旧行为可用。
+async fn fetch_youtube_subtitle_track(
+    downloader: &UnifiedDownloader,
+    source: &youtube_source::Model,
+    url: &str,
+    path: &Path,
+) -> Result<()> {
+    if !is_douyin_source(source) && !crate::tiktok::is_tiktok_source(source) {
+        let cookie_text = youtube_cookie_text().filter(|text| has_youtube_session_value(text));
+        if let Some(cookie_text) = cookie_text {
+            match download_youtube_subtitle_http(&cookie_text, url, path).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let _ = remove_file_if_exists(path).await;
+                    debug!(
+                        reason = %format!("{error:#}"),
+                        "带登录 Cookie 下载 YouTube 字幕轨失败，回退通用资源下载"
+                    );
+                }
+            }
+        }
+    }
+    fetch_platform_asset(downloader, source, &[url], path).await
+}
+
+async fn download_youtube_subtitle_http(cookie_text: &str, url: &str, path: &Path) -> Result<()> {
+    let jar = youtube_cookie_jar_from_text(cookie_text)?;
+    let mut builder = reqwest::Client::builder()
+        .cookie_provider(jar)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(60));
+    let proxy = configured_external_proxy();
+    if !proxy.is_empty() {
+        builder = builder
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(&proxy).context("外源代理地址无效")?);
+    }
+    let client = builder.build().context("构建 YouTube 字幕请求客户端失败")?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, YOUTUBE_WEB_USER_AGENT)
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+        .header(reqwest::header::REFERER, "https://www.youtube.com/")
+        .send()
+        .await
+        .context("请求 YouTube 字幕端点失败")?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("下载 YouTube 字幕失败：HTTP {}", status.as_u16());
+    }
+    let bytes = response.bytes().await.context("读取 YouTube 字幕响应失败")?;
+    if bytes.is_empty() {
+        bail!("YouTube 字幕响应为空");
+    }
+    tokio::fs::write(path, &bytes).await.context("写入字幕临时文件失败")
 }
 
 fn youtube_source_type_label(source_type: &str) -> &'static str {
@@ -3415,7 +3482,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         "--retries",
         "3",
     ]);
-    append_ytdlp_runtime(&mut command);
+    append_ytdlp_runtime(&mut command).await;
     if tiktok {
         // 公开内容无需登录；仅在导入过 TikTok cookies 时携带，不混用 YouTube/抖音 Cookie。
         crate::tiktok::append_tiktok_cookies(&mut command);
@@ -6146,7 +6213,7 @@ async fn run_ytdlp_metadata(
     if let Some(client_args) = client_args {
         command.args(["--extractor-args", client_args]);
     }
-    append_ytdlp_runtime(&mut command);
+    append_ytdlp_runtime(&mut command).await;
     if with_cookies {
         append_cookies_for_url(&mut command, url);
     }
@@ -7328,7 +7395,7 @@ async fn extract_youtube_source_metadata(url: &str) -> Result<YtDlpSourceMetadat
         "--skip-download",
         "--no-warnings",
     ]);
-    append_ytdlp_runtime(&mut command);
+    append_ytdlp_runtime(&mut command).await;
     append_cookies(&mut command);
     append_youtube_proxy(&mut command);
     append_ytdlp_tab_args(&mut command);
@@ -7789,14 +7856,25 @@ async fn download_youtube_single_subtitle(
     }
     let mut last_error = None;
     for (index, candidate) in candidates.iter().enumerate() {
-        let subtitle_path = output_path.with_extension(format!("{}.{}", candidate.language, candidate.ext));
-        match fetch_platform_asset(downloader, source, &[candidate.url.as_str()], &subtitle_path).await {
+        let subtitle_path = youtube_single_subtitle_path(output_path, candidate);
+        // 每个候选使用独立临时文件：非播放格式要先转成 VTT 再落盘，也避免上一条
+        // 失败留下的残留被下载器当成断点续传内容。
+        let temporary = output_path.with_extension(format!("{}.{}.subtitle.tmp", candidate.language, index));
+        let _ = remove_file_if_exists(&temporary).await;
+        let outcome = match fetch_youtube_subtitle_track(downloader, source, &candidate.url, &temporary).await {
+            Ok(()) => persist_youtube_subtitle(&temporary, &subtitle_path, &candidate.ext).await,
+            Err(error) => Err(error),
+        };
+        match outcome {
             Ok(()) => {
                 info!(platform, youtube_id = %metadata.id, language = %candidate.language, path = %subtitle_path.display(), "{}视频源「{}」视频「{}」字幕下载完成", platform, source.name, title);
+                let _ = remove_file_if_exists(&temporary).await;
                 return Ok(());
             }
             Err(error) => {
+                let _ = remove_file_if_exists(&temporary).await;
                 let _ = remove_file_if_exists(&subtitle_path).await;
+                let _ = remove_file_if_exists(&subtitle_path.with_extension("ass")).await;
                 warn!(
                     platform,
                     youtube_id = %metadata.id,
@@ -7819,6 +7897,248 @@ async fn download_youtube_single_subtitle(
     }
     let error = last_error.unwrap_or_else(|| anyhow!("没有可用的{platform}字幕轨"));
     Err(error.context(format!("使用项目统一下载器下载{platform}字幕失败")))
+}
+
+/// 单轨字幕的最终文件名：无论源格式（`vtt/srt/json3/srv*/ttml`）都统一解析成
+/// cue 后重新渲染，落盘为 `.srt`，并同时生成同名的 `.ass`（见 `persist_youtube_subtitle`）。
+/// 旧实现把 `candidate.ext` 直接拼进文件名，`.json3` 落盘后播放器不认、
+/// 存在性检查也认不出，于是每轮重复下载。
+fn youtube_single_subtitle_path(output_path: &Path, candidate: &SubtitleCandidate) -> PathBuf {
+    output_path.with_extension(format!("{}.srt", candidate.language))
+}
+
+/// 把下载好的字幕写到最终路径：统一解析成 cue 后同时落盘 `.srt` 与 `.ass`
+/// 两种格式（媒体库原生识别、播放器兼容面最广），不再按源格式原样保存。
+async fn persist_youtube_subtitle(temporary: &Path, final_path: &Path, ext: &str) -> Result<()> {
+    let bytes = tokio::fs::read(temporary).await.context("读取字幕临时文件失败")?;
+    let text = String::from_utf8_lossy(&bytes);
+    let cues = parse_youtube_subtitle_cues(&text, ext);
+    if cues.is_empty() {
+        // 仍然解析不出 cue：按**原始后缀**落盘（`srv1/2/3`、`ttml`），
+        // 绝不能写不带 `WEBVTT` 头的 `.vtt`——那样媒体库解析不了，而
+        // `youtube_subtitle_exists()` 又认这个后缀，这一页从此既不会重下、
+        // 也不会生成 `.srt`/`.ass`，坏页就永久化了。
+        let fallback_ext = ext.trim_start_matches('.').to_ascii_lowercase();
+        if is_xml_subtitle_ext(&fallback_ext) {
+            let fallback = final_path.with_extension(&fallback_ext);
+            warn!(
+                ext,
+                path = %fallback.display(),
+                "{} 字幕解析不出文本轨，已按原始格式落盘（媒体库可能识别不了这条轨）",
+                ext
+            );
+            tokio::fs::write(temporary, &bytes).await?;
+            replace_file(temporary, &fallback).await?;
+            return Ok(());
+        }
+        bail!("无法从 {} 字幕中解析出任何字幕内容", ext);
+    }
+    write_youtube_subtitle_sidecars(temporary, final_path, &cues).await
+}
+
+/// 这些后缀都是 YouTube 的 XML 字幕格式，解析失败时按原名落盘。
+fn is_xml_subtitle_ext(ext: &str) -> bool {
+    matches!(ext, "srv1" | "srv2" | "srv3" | "ttml" | "xml")
+}
+
+/// 按源格式选择解析器：`json3` 走 JSON 结构，`srv*/ttml` 走 XML 计时元素，
+/// 其余（`vtt`/`srt`）走通用的文本时间轴解析。
+fn parse_youtube_subtitle_cues(text: &str, ext: &str) -> Vec<crate::utils::subtitle::SubtitleCue> {
+    let lowered = ext.trim_start_matches('.').to_ascii_lowercase();
+    match lowered.as_str() {
+        "json3" => parse_json3_cues(text),
+        other if is_xml_subtitle_ext(other) => {
+            let cues = parse_xml_timed_cues(text);
+            if cues.is_empty() {
+                crate::utils::subtitle::parse_cues(text)
+            } else {
+                cues
+            }
+        }
+        _ => crate::utils::subtitle::parse_cues(text),
+    }
+}
+
+/// `srv1/2/3`、`ttml` 的极小解析器：只认时间属性，正文里的内联标签交给
+/// `clean_cue_text` 清理。
+///
+/// 支持的形状（YouTube 实际会返回这几种）：
+/// - `srv3`：`<p t="1234" d="2500">文字</p>`（毫秒）
+/// - `srv1/2`：`<text start="1.23" dur="2.5">文字</text>`（秒）
+/// - `ttml`：`<p begin="00:00:01.230" end="00:00:03.400">文字</p>`
+fn parse_xml_timed_cues(input: &str) -> Vec<crate::utils::subtitle::SubtitleCue> {
+    let mut cues: Vec<crate::utils::subtitle::SubtitleCue> = Vec::new();
+    let mut current: Option<(i64, i64, String)> = None;
+    let mut rest = input;
+
+    while let Some(open) = rest.find('<') {
+        // 标签之前的文本属于当前 cue 的正文。
+        if let Some((_, _, body)) = current.as_mut() {
+            body.push_str(&rest[..open]);
+        }
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('>') else {
+            break;
+        };
+        let tag = &after[..close];
+        rest = &after[close + 1..];
+
+        let closing = tag.starts_with('/');
+        let tag_body = tag.trim_start_matches('/').trim_end_matches('/');
+        let name_end = tag_body
+            .find(|ch: char| ch.is_whitespace() || ch == '/')
+            .unwrap_or(tag_body.len());
+        let name = &tag_body[..name_end];
+        let attrs = &tag_body[name_end..];
+        let is_timed_element = name.eq_ignore_ascii_case("text") || name.eq_ignore_ascii_case("p");
+
+        if closing {
+            if is_timed_element {
+                if let Some((start, end, body)) = current.take() {
+                    push_xml_cue(&mut cues, start, end, &body);
+                }
+            }
+            continue;
+        }
+        if is_timed_element {
+            // 容错：上一个元素没闭合也要先收尾，否则会吞掉下一段的时间。
+            if let Some((start, end, body)) = current.take() {
+                push_xml_cue(&mut cues, start, end, &body);
+            }
+            if let Some((start, end)) = parse_xml_timing(attrs) {
+                current = Some((start, end, String::new()));
+            }
+            continue;
+        }
+        if name.eq_ignore_ascii_case("br") {
+            if let Some((_, _, body)) = current.as_mut() {
+                body.push('\n');
+            }
+        }
+    }
+    if let Some((start, end, body)) = current.take() {
+        push_xml_cue(&mut cues, start, end, &body);
+    }
+    cues.sort_by_key(|cue| cue.start_ms);
+    cues
+}
+
+fn push_xml_cue(cues: &mut Vec<crate::utils::subtitle::SubtitleCue>, start: i64, end: i64, body: &str) {
+    let text = crate::utils::subtitle::clean_cue_text(body);
+    if text.trim().is_empty() {
+        return;
+    }
+    cues.push(crate::utils::subtitle::SubtitleCue {
+        start_ms: start,
+        end_ms: end.max(start),
+        text,
+    });
+}
+
+/// 从标签属性里取时间：`t/d`（毫秒）或 `start/dur/begin/end`（秒或时间码）。
+fn parse_xml_timing(attrs: &str) -> Option<(i64, i64)> {
+    const DEFAULT_CUE_DURATION_MS: i64 = 2_000;
+    let start = if let Some(value) = xml_attr(attrs, "t") {
+        parse_cue_time(value, true)?
+    } else if let Some(value) = xml_attr(attrs, "begin") {
+        parse_cue_time(value, false)?
+    } else {
+        parse_cue_time(xml_attr(attrs, "start")?, false)?
+    };
+    let end = if let Some(value) = xml_attr(attrs, "d") {
+        start.saturating_add(parse_cue_time(value, true)?)
+    } else if let Some(value) = xml_attr(attrs, "dur") {
+        start.saturating_add(parse_cue_time(value, false)?)
+    } else if let Some(value) = xml_attr(attrs, "end") {
+        parse_cue_time(value, false)?
+    } else {
+        start.saturating_add(DEFAULT_CUE_DURATION_MS)
+    };
+    Some((start, end.max(start)))
+}
+
+/// 取 XML 属性值：只认同名属性（`d` 不会误匹配 `dur`）。
+fn xml_attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    let mut search = attrs;
+    while let Some(index) = search.find(name) {
+        let boundary_ok = index == 0 || search[..index].ends_with(|ch: char| ch.is_whitespace());
+        let after = &search[index + name.len()..];
+        let after_trimmed = after.trim_start();
+        if boundary_ok {
+            if let Some(rest) = after_trimmed.strip_prefix('=') {
+                let value = rest.trim_start();
+                if let Some(quote) = value.chars().next().filter(|ch| *ch == '"' || *ch == '\'') {
+                    let body = &value[1..];
+                    if let Some(end) = body.find(quote) {
+                        return Some(&body[..end]);
+                    }
+                }
+            }
+        }
+        search = after;
+    }
+    None
+}
+
+/// 把字幕时间值解析成毫秒：`12.34`（秒）、`1.5s`、`00:01:02.345`、
+/// 以及 `numeric_unit_ms` 为真时的裸毫秒（`1234`）。
+fn parse_cue_time(raw: &str, numeric_unit_ms: bool) -> Option<i64> {
+    let value = raw.trim().trim_end_matches('s');
+    if value.is_empty() {
+        return None;
+    }
+    if value.contains(':') {
+        let mut parts = value.split(':').rev();
+        let seconds: f64 = parts.next()?.parse().ok()?;
+        let minutes: f64 = parts.next().map(|part| part.parse().ok()).unwrap_or(Some(0.0))?;
+        let hours: f64 = parts.next().map(|part| part.parse().ok()).unwrap_or(Some(0.0))?;
+        return Some(((hours * 3600.0 + minutes * 60.0 + seconds) * 1000.0).round() as i64);
+    }
+    let number: f64 = value.parse().ok()?;
+    let millis = if numeric_unit_ms { number } else { number * 1000.0 };
+    Some(millis.round() as i64)
+}
+
+/// yt-dlp 的 `json3` 自动字幕：`events[].tStartMs / dDurationMs / segs[].utf8`。
+/// 项目统一的 `parse_cues` 只认 WebVTT / SRT 文本，这里补一层 JSON → cue。
+fn parse_json3_cues(input: &str) -> Vec<crate::utils::subtitle::SubtitleCue> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return Vec::new();
+    };
+    let Some(events) = value.get("events").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut cues: Vec<crate::utils::subtitle::SubtitleCue> = events
+        .iter()
+        .filter_map(|event| {
+            let start_ms = event.get("tStartMs").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            let duration_ms = event
+                .get("dDurationMs")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            let text = event
+                .get("segs")
+                .and_then(serde_json::Value::as_array)
+                .map(|segments| {
+                    segments
+                        .iter()
+                        .filter_map(|segment| segment.get("utf8").and_then(serde_json::Value::as_str))
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            let text = crate::utils::subtitle::clean_cue_text(&text);
+            if text.is_empty() {
+                return None;
+            }
+            Some(crate::utils::subtitle::SubtitleCue {
+                start_ms,
+                end_ms: start_ms.saturating_add(duration_ms.max(0)),
+                text,
+            })
+        })
+        .collect();
+    cues.sort_by_key(|cue| cue.start_ms);
+    cues
 }
 
 /// 下载目标语言轨与对照语言轨，按时间轴重叠度合并成一条双语 VTT。
@@ -7858,27 +8178,20 @@ async fn download_youtube_bilingual_subtitle(
         fetch_first_youtube_subtitle(downloader, source, &secondary_candidates, &secondary_tmp).await?
     };
 
-    let primary_cues = read_youtube_subtitle_cues(&primary_tmp).await?;
-    let merged_cues = match secondary.as_ref() {
-        Some(secondary) => {
-            // 目标语言轨自己就带对照语言（人工双语轨）时，`merge_overlay` 会逐句跳过，
-            // 结果与目标轨一致，不必再写一份重复的双语文件。
-            if crate::utils::subtitle::bilingual_ratio(&primary_cues, &secondary.language) >= 0.9 {
-                let _ = remove_file_if_exists(&primary_tmp).await;
-                let _ = remove_file_if_exists(&secondary_tmp).await;
-                info!(
-                    youtube_id = %metadata.id,
-                    "{}视频源「{}」视频「{}」的 {} 字幕轨本身已是双语，跳过生成额外合并文件",
-                    platform,
-                    source.name,
-                    title,
-                    primary.language
-                );
-                return Ok(());
-            }
-            let secondary_cues = read_youtube_subtitle_cues(&secondary_tmp).await?;
-            crate::utils::subtitle::merge_overlay(&primary_cues, &secondary_cues, Some(&secondary.language))
+    // 双语分支也要按源格式解析：`json3` / `srv*` / `ttml` 都走同一套解析器，
+    // 否则双语设置下这些格式会解析出空列表，整条链路退化。
+    let primary_cues = read_youtube_subtitle_cues(&primary_tmp, &primary.ext).await?;
+    let (merge_language, already_bilingual) = plan_youtube_bilingual_merge(&primary_cues, secondary.as_ref());
+    let merged_cues = match merge_language.as_deref() {
+        Some(merged_language) => {
+            let secondary_ext = secondary.as_ref().map(|item| item.ext.as_str()).unwrap_or("vtt");
+            let secondary_cues = read_youtube_subtitle_cues(&secondary_tmp, secondary_ext).await?;
+            crate::utils::subtitle::merge_overlay(&primary_cues, &secondary_cues, Some(merged_language))
         }
+        // 对照轨缺失、或目标轨本身已内嵌对照语言：都要把目标轨落盘。
+        // 旧实现在后一种情况直接 `return Ok(())` 并删掉两个临时文件，于是双语设置下
+        // 一个字幕文件都不产生，而 `youtube_subtitle_exists()` 只认 `.vtt/.srt/.ass`，
+        // 找不到产物就会每轮重复下载。
         None => primary_cues,
     };
     let _ = remove_file_if_exists(&primary_tmp).await;
@@ -7886,16 +8199,23 @@ async fn download_youtube_bilingual_subtitle(
     if merged_cues.is_empty() {
         bail!("双语字幕解析后没有任何字幕内容");
     }
-    let final_path = match secondary.as_ref() {
-        Some(secondary) => output_path.with_extension(format!("{}-{}.vtt", primary.language, secondary.language)),
-        None => output_path.with_extension(format!("{}.vtt", primary.language)),
-    };
+    let final_path = youtube_bilingual_subtitle_path(output_path, &primary.language, merge_language.as_deref());
     let temporary = output_path.with_extension("subtitle.bilingual.tmp");
-    let rendered = crate::utils::subtitle::render_vtt(&merged_cues);
-    tokio::fs::write(&temporary, rendered.as_bytes()).await?;
-    replace_file(&temporary, &final_path).await?;
-    match secondary.as_ref() {
-        Some(secondary) => info!(
+    write_youtube_subtitle_sidecars(&temporary, &final_path, &merged_cues).await?;
+    if already_bilingual {
+        info!(
+            platform,
+            youtube_id = %metadata.id,
+            path = %final_path.display(),
+            cues = merged_cues.len(),
+            "{}视频源「{}」视频「{}」的 {} 字幕轨本身已是双语，已直接保存该轨（未生成重复合并文件）",
+            platform,
+            source.name,
+            title,
+            primary.language
+        );
+    } else if let Some(merged_language) = merge_language.as_deref() {
+        info!(
             platform,
             youtube_id = %metadata.id,
             path = %final_path.display(),
@@ -7905,10 +8225,11 @@ async fn download_youtube_bilingual_subtitle(
             source.name,
             title,
             primary.language,
-            secondary.language,
+            merged_language,
             merged_cues.len()
-        ),
-        None => warn!(
+        );
+    } else {
+        warn!(
             platform,
             youtube_id = %metadata.id,
             path = %final_path.display(),
@@ -7918,7 +8239,64 @@ async fn download_youtube_bilingual_subtitle(
             title,
             secondary_language,
             primary.language
+        );
+    }
+    Ok(())
+}
+
+/// 规划双语字幕的最终产物，返回 `(需要合并的对照语言, 目标轨本身是否已内嵌对照语言)`。
+///
+/// - `Some(lang)`：把对照轨叠到目标轨上，产物 `{primary}-{lang}.srt`
+/// - `None`：不叠，直接落盘目标轨 `{primary}.srt`
+///
+/// 两种 `None` 都要落盘，区别只在日志；这样「已是双语」不会再退化成零产物。
+/// 每个产物都会同时生成同名 `.ass`（见下方的落盘逻辑）。
+fn plan_youtube_bilingual_merge(
+    primary_cues: &[crate::utils::subtitle::SubtitleCue],
+    secondary: Option<&SubtitleCandidate>,
+) -> (Option<String>, bool) {
+    let Some(secondary) = secondary else {
+        return (None, false);
+    };
+    // 目标轨自己就带对照语言时，`merge_overlay` 会逐句跳过叠加，
+    // 结果与目标轨一致，没必要再写一份重复的双语文件。
+    if crate::utils::subtitle::bilingual_ratio(primary_cues, &secondary.language) >= 0.9 {
+        return (None, true);
+    }
+    (Some(secondary.language.clone()), false)
+}
+
+/// 双语分支的最终文件名：合并时带两个语言码，否则只带目标语言码。
+/// 基准扩展名是 `.srt`；`.ass` 由落盘逻辑按同 stem 生成。
+fn youtube_bilingual_subtitle_path(
+    output_path: &Path,
+    primary_language: &str,
+    merge_language: Option<&str>,
+) -> PathBuf {
+    match merge_language {
+        Some(secondary_language) => {
+            output_path.with_extension(format!("{}-{}.srt", primary_language, secondary_language))
+        }
+        None => output_path.with_extension(format!("{}.srt", primary_language)),
+    }
+}
+
+/// 把解析好的 cue 同时落盘为 `.srt` 与 `.ass` 两个格式（同一份内容）。
+async fn write_youtube_subtitle_sidecars(
+    temporary: &Path,
+    final_path: &Path,
+    cues: &[crate::utils::subtitle::SubtitleCue],
+) -> Result<()> {
+    let rendered = [
+        (final_path.to_path_buf(), crate::utils::subtitle::render_srt(cues)),
+        (
+            final_path.with_extension("ass"),
+            crate::utils::subtitle::render_ass(cues),
         ),
+    ];
+    for (path, body) in rendered {
+        tokio::fs::write(temporary, body.as_bytes()).await?;
+        replace_file(temporary, &path).await?;
     }
     Ok(())
 }
@@ -7931,7 +8309,7 @@ async fn fetch_first_youtube_subtitle(
     path: &Path,
 ) -> Result<Option<SubtitleCandidate>> {
     for (index, candidate) in candidates.iter().enumerate() {
-        match fetch_platform_asset(downloader, source, &[candidate.url.as_str()], path).await {
+        match fetch_youtube_subtitle_track(downloader, source, &candidate.url, path).await {
             Ok(()) => return Ok(Some(candidate.clone())),
             Err(error) => {
                 let _ = remove_file_if_exists(path).await;
@@ -7952,10 +8330,10 @@ async fn fetch_first_youtube_subtitle(
     Ok(None)
 }
 
-async fn read_youtube_subtitle_cues(path: &Path) -> Result<Vec<crate::utils::subtitle::SubtitleCue>> {
+async fn read_youtube_subtitle_cues(path: &Path, ext: &str) -> Result<Vec<crate::utils::subtitle::SubtitleCue>> {
     let bytes = tokio::fs::read(path).await.context("读取字幕临时文件失败")?;
     let text = String::from_utf8_lossy(&bytes);
-    Ok(crate::utils::subtitle::parse_cues(&text))
+    Ok(parse_youtube_subtitle_cues(&text, ext))
 }
 
 /// 按语言优先级展开候选字幕轨，顺序是「语言优先，其次人工优先」。
@@ -8228,7 +8606,7 @@ async fn download_youtube_live_chat(
         "-o",
     ]);
     command.arg(&output_template);
-    append_ytdlp_runtime(&mut command);
+    append_ytdlp_runtime(&mut command).await;
     append_cookies_for_url(&mut command, video_url);
     append_youtube_proxy_for_url(&mut command, video_url);
     command.arg(video_url);
@@ -8291,7 +8669,9 @@ async fn youtube_subtitle_exists(output_path: &Path) -> Result<bool> {
         };
         let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
         if name.starts_with(&format!("{stem}."))
-            && matches!(extension, "vtt" | "srt" | "ass")
+            // `srv*/ttml` 只在「XML 解析不出文本」时才会作为降级产物存在，
+            // 也必须被认出来，否则每轮扫描都会重复下载同一条坏轨。
+            && matches!(extension, "vtt" | "srt" | "ass" | "srv1" | "srv2" | "srv3" | "ttml" | "xml")
             && tokio::fs::metadata(path).await.is_ok_and(|metadata| metadata.len() > 0)
         {
             return Ok(true);
@@ -9697,37 +10077,167 @@ fn is_youtube_transient_error(error: &anyhow::Error) -> bool {
     .any(|needle| text.contains(needle))
 }
 
-pub(crate) fn append_ytdlp_runtime(command: &mut Command) {
-    if let Some((name, path)) = ytdlp_js_runtime() {
-        command.arg("--js-runtimes").arg(format!("{name}:{}", path.display()));
+pub(crate) async fn append_ytdlp_runtime(command: &mut Command) {
+    let Some((name, path)) = ytdlp_js_runtime() else {
+        return;
+    };
+    // 老版本 yt-dlp 不认 `--js-runtimes`，无条件下发会让整条 YouTube 链路因为未知
+    // 参数直接失败（用户可能把 `BILI_SYNC_YTDLP_PATH` 指向旧版二进制）。
+    // 这里按「当前二进制是否支持该参数」判断，只对支持的版本下发。
+    if !ytdlp_supports_js_runtimes().await {
+        return;
     }
+    command.arg("--js-runtimes").arg(format!("{name}:{}", path.display()));
+}
+
+/// `--js-runtimes` 的探测结果缓存键：路径 + mtime + 大小。
+/// 带上 mtime/大小是为了 yt-dlp 原地升级后能重新探测（只看路径会一直用旧结论）。
+type JsRuntimeProbeKey = (PathBuf, Option<std::time::SystemTime>, u64);
+
+/// 探测当前 yt-dlp 是否支持 `--js-runtimes`（`--help` 能看到该选项且命令成功退出）。
+///
+/// 用 `tokio::process` 而不是 `std::process`：这里在 worker 线程上跑，同步等子进程
+/// 会把整个 runtime 线程堵住。探测**失败**（二进制还没就绪、`--help` 非 0 退出）
+/// 不写缓存，等 yt-dlp 就绪后再探一次。
+async fn ytdlp_supports_js_runtimes() -> bool {
+    static CACHE: LazyLock<StdMutex<HashMap<JsRuntimeProbeKey, bool>>> =
+        LazyLock::new(|| StdMutex::new(HashMap::new()));
+    let binary = ytdlp_executable();
+    let key = ytdlp_probe_cache_key(&binary);
+    if let Some(supported) = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .copied()
+    {
+        return supported;
+    }
+    let output = match tokio::process::Command::new(&binary).arg("--help").output().await {
+        Ok(output) => output,
+        Err(error) => {
+            debug!(path = %binary.display(), "探测 yt-dlp 是否支持 --js-runtimes 失败（不缓存）: {error}");
+            return false;
+        }
+    };
+    if !output.status.success() {
+        // 非 0 退出通常是二进制还没下载完 / 当前不可执行，不能当成「不支持」缓存住。
+        debug!(
+            path = %binary.display(),
+            status = ?output.status.code(),
+            "yt-dlp --help 非 0 退出，本轮跳过 --js-runtimes 探测（不缓存）"
+        );
+        return false;
+    }
+    let supported = String::from_utf8_lossy(&output.stdout).contains("--js-runtimes");
+    if !supported {
+        debug!(
+            path = %binary.display(),
+            "当前 yt-dlp 不支持 --js-runtimes，跳过 JS runtime 下发（n challenge 可能失败，建议升级 yt-dlp）"
+        );
+    }
+    CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, supported);
+    supported
+}
+
+fn ytdlp_probe_cache_key(binary: &Path) -> JsRuntimeProbeKey {
+    let metadata = std::fs::metadata(binary).ok();
+    (
+        binary.to_path_buf(),
+        metadata.as_ref().and_then(|meta| meta.modified().ok()),
+        metadata.as_ref().map(|meta| meta.len()).unwrap_or_default(),
+    )
 }
 
 fn ytdlp_js_runtime() -> Option<(&'static str, PathBuf)> {
     if let Ok(configured) = std::env::var("BILI_SYNC_YTDLP_JS_RUNTIME") {
         let path = PathBuf::from(configured);
-        if path.is_file() {
+        if is_executable_file(&path) {
             return Some((ytdlp_js_runtime_name(&path), path));
         }
     }
+    const RUNTIME_NAMES: [&str; 4] = ["node", "bun", "deno", "qjs"];
+    // 1) PATH：跨平台通用。注意 GUI 方式启动时 PATH 可能被裁剪，找不到就再查常见安装位置。
+    if let Some(path) = std::env::var_os("PATH")
+        .and_then(|paths| std::env::split_paths(&paths).find_map(|dir| runtime_executable_in_dir(&dir, &RUNTIME_NAMES)))
+    {
+        return Some((ytdlp_js_runtime_name(&path), path));
+    }
+    // 2) 常见安装位置兜底。
+    let mut candidate_dirs: Vec<PathBuf> = Vec::new();
     #[cfg(windows)]
     {
-        let node_candidates = [
-            PathBuf::from(r"C:\Program Files\nodejs\node.exe"),
-            PathBuf::from(r"C:\Program Files (x86)\nodejs\node.exe"),
-            CONFIG_DIR.join("bin").join("node.exe"),
-        ];
-        if let Some(path) = node_candidates.into_iter().find(|path| path.is_file()) {
-            return Some(("node", path));
-        }
+        candidate_dirs.extend([
+            PathBuf::from(r"C:\Program Files\nodejs"),
+            PathBuf::from(r"C:\Program Files (x86)\nodejs"),
+            CONFIG_DIR.join("bin"),
+        ]);
         if let Ok(profile) = std::env::var("USERPROFILE") {
-            let bun = PathBuf::from(profile).join(".bun").join("bin").join("bun.exe");
-            if bun.is_file() {
-                return Some(("bun", bun));
+            candidate_dirs.push(PathBuf::from(profile).join(".bun").join("bin"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        candidate_dirs.extend([
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/bin"),
+            CONFIG_DIR.join("bin"),
+        ]);
+        if let Ok(home) = std::env::var("HOME") {
+            let home = PathBuf::from(home);
+            candidate_dirs.push(home.join(".bun").join("bin"));
+            candidate_dirs.push(home.join(".deno").join("bin"));
+            // nvm 的 node 按 `~/.nvm/versions/node/<版本>/bin` 布局安装，
+            // 版本目录名排序后优先取较新的。
+            if let Ok(entries) = std::fs::read_dir(home.join(".nvm").join("versions").join("node")) {
+                let mut versions: Vec<PathBuf> = entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir())
+                    .collect();
+                versions.sort();
+                for version in versions.into_iter().rev() {
+                    candidate_dirs.push(version.join("bin"));
+                }
             }
         }
     }
-    None
+    candidate_dirs
+        .into_iter()
+        .find_map(|dir| runtime_executable_in_dir(&dir, &RUNTIME_NAMES))
+        .map(|path| (ytdlp_js_runtime_name(&path), path))
+}
+
+/// 在目录中查找第一个可执行的 JS runtime（Windows 下自动补 `.exe`）。
+fn runtime_executable_in_dir(dir: &Path, names: &[&str]) -> Option<PathBuf> {
+    names.iter().find_map(|name| {
+        #[cfg(windows)]
+        let candidate = dir.join(format!("{name}.exe"));
+        #[cfg(not(windows))]
+        let candidate = dir.join(name);
+        is_executable_file(&candidate).then_some(candidate)
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 fn ytdlp_js_runtime_name(path: &Path) -> &'static str {
     match path
@@ -12253,6 +12763,330 @@ mod tests {
             assert_eq!(
                 super::resolve_ytdlp_release_base_url(mirror),
                 super::YTDLP_RELEASE_BASE_URL
+            );
+        }
+    }
+
+    /// 回归：目标轨本身已是双语时，旧实现删掉两个临时文件后直接 `return Ok(())`，
+    /// 双语设置下一个字幕文件都不写；而 `youtube_subtitle_exists()` 只认
+    /// `.vtt/.srt/.ass`，找不到产物就会每轮重复下载整条字幕轨。
+    /// 现在该分支必须仍规划出一条合法的 `.srt` 产物。
+    #[test]
+    fn already_bilingual_track_is_still_planned_for_a_real_output_file() {
+        use crate::utils::subtitle::{parse_cues, render_srt, SubtitleCue};
+
+        let cues = vec![
+            SubtitleCue {
+                start_ms: 0,
+                end_ms: 1000,
+                text: "Hello world\n你好世界".to_string(),
+            },
+            SubtitleCue {
+                start_ms: 1000,
+                end_ms: 2000,
+                text: "How are you\n最近怎么样".to_string(),
+            },
+        ];
+        let secondary = super::SubtitleCandidate {
+            language: "en".to_string(),
+            url: "https://example.com/en.vtt".to_string(),
+            ext: "vtt".to_string(),
+        };
+
+        // 每条 cue 都内嵌英文 → ratio = 1.0 → 不合并，但标记为「已是双语」。
+        let (merge_language, already_bilingual) = super::plan_youtube_bilingual_merge(&cues, Some(&secondary));
+        assert!(already_bilingual);
+        assert_eq!(merge_language, None);
+
+        let path = super::youtube_bilingual_subtitle_path(
+            std::path::Path::new("/media/movie.mp4"),
+            "zh-Hans",
+            merge_language.as_deref(),
+        );
+        assert_eq!(path.file_name().unwrap().to_string_lossy(), "movie.zh-Hans.srt");
+        assert_eq!(path.extension().and_then(|value| value.to_str()), Some("srt"));
+
+        // 不合并分支直接用 primary_cues 渲染，产物必须非空且能被重新解析。
+        let rendered = render_srt(&cues);
+        assert!(parse_cues(&rendered).len() >= 2, "rendered: {rendered}");
+    }
+
+    /// 正常合并、对照轨缺失两种分支的产物路径必须保持稳定。
+    #[test]
+    fn bilingual_subtitle_paths_cover_all_branches() {
+        let output = std::path::Path::new("/media/movie.mp4");
+        let secondary = super::SubtitleCandidate {
+            language: "en".to_string(),
+            url: "https://example.com/en.vtt".to_string(),
+            ext: "vtt".to_string(),
+        };
+        let chinese_only = vec![crate::utils::subtitle::SubtitleCue {
+            start_ms: 0,
+            end_ms: 1000,
+            text: "你好世界".to_string(),
+        }];
+
+        let (merge_language, already_bilingual) = super::plan_youtube_bilingual_merge(&chinese_only, Some(&secondary));
+        assert!(!already_bilingual);
+        assert_eq!(merge_language.as_deref(), Some("en"));
+        assert_eq!(
+            super::youtube_bilingual_subtitle_path(output, "zh-Hans", merge_language.as_deref())
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "movie.zh-Hans-en.srt"
+        );
+
+        let (merge_language, already_bilingual) = super::plan_youtube_bilingual_merge(&chinese_only, None);
+        assert!(!already_bilingual);
+        assert_eq!(merge_language, None);
+        assert_eq!(
+            super::youtube_bilingual_subtitle_path(output, "zh-Hans", merge_language.as_deref())
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "movie.zh-Hans.srt"
+        );
+    }
+
+    /// 落盘的 `.srt`/`.ass` 必须能被 `youtube_subtitle_exists()` 识别，否则下一轮扫描
+    /// 会把这次「已是双语」的子任务重新做一遍。
+    #[tokio::test]
+    async fn already_bilingual_output_stops_repeated_downloads() {
+        let root = std::env::temp_dir().join(format!("bili-sync-bilingual-output-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let output = root.join("movie.mp4");
+
+        assert!(!super::youtube_subtitle_exists(&output).await.unwrap());
+        let path = super::youtube_bilingual_subtitle_path(&output, "zh-Hans", None);
+        std::fs::write(&path, "1\n00:00:00,000 --> 00:00:01,000\nHello world\n").unwrap();
+        assert!(
+            super::youtube_subtitle_exists(&output).await.unwrap(),
+            "双语分支落盘的 .srt 必须被识别为已有字幕"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn subtitle_candidate(ext: &str) -> super::SubtitleCandidate {
+        super::SubtitleCandidate {
+            language: "zh-Hans".to_string(),
+            url: "https://example.com/subtitle".to_string(),
+            ext: ext.to_string(),
+        }
+    }
+
+    /// 回归：旧实现把 `candidate.ext` 原样写进文件名，`.json3` / `.srv1` 落盘后
+    /// 媒体库不认，`youtube_subtitle_exists()` 也只认 `vtt|srt|ass`，于是每轮重下。
+    /// 现在所有源格式统一解析后落盘为 `.srt`。
+    #[test]
+    fn single_subtitle_paths_normalize_unplayable_formats() {
+        let output = std::path::Path::new("/media/movie.mp4");
+        let cases = ["vtt", "srt", "ass", "json3", "srv1", "ttml"];
+        for ext in cases {
+            let path = super::youtube_single_subtitle_path(output, &subtitle_candidate(ext));
+            assert_eq!(
+                path.file_name().unwrap().to_string_lossy(),
+                "movie.zh-Hans.srt",
+                "ext={ext}"
+            );
+            assert_eq!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("srt"),
+                "ext={ext}"
+            );
+        }
+    }
+
+    /// `json3` 自动字幕要能解析出按时间排序、已清洗标签的 cue。
+    #[test]
+    fn json3_cues_are_parsed_and_sorted() {
+        let json = r#"{"events":[
+            {"tStartMs":1000,"dDurationMs":1500,"segs":[{"utf8":"Hello "},{"utf8":"world"}]},
+            {"tStartMs":0,"dDurationMs":800,"segs":[{"utf8":"<c>第一句</c>"}]},
+            {"tStartMs":3000,"dDurationMs":500,"segs":[]}
+        ]}"#;
+        let cues = super::parse_json3_cues(json);
+        assert_eq!(cues.len(), 2, "空 segs 的事件应被丢弃");
+        assert_eq!(cues[0].start_ms, 0);
+        assert_eq!(cues[0].text, "第一句");
+        assert_eq!(cues[1].start_ms, 1000);
+        assert_eq!(cues[1].end_ms, 2500);
+        assert_eq!(cues[1].text, "Hello world");
+        let rendered = crate::utils::subtitle::render_srt(&cues);
+        assert!(rendered.starts_with("1\n"));
+        assert!(crate::utils::subtitle::parse_cues(&rendered).len() >= 2);
+        assert!(super::parse_json3_cues("not json").is_empty());
+    }
+
+    /// 端到端（不含网络）：json3 下载结果经转码落盘后，`.srt` 与 `.ass` 两个产物
+    /// 都必须生成且能被存在性检查识别，否则下一轮扫描仍会重复下载这条轨。
+    #[tokio::test]
+    async fn json3_subtitle_is_persisted_as_srt_and_ass() {
+        let root = std::env::temp_dir().join(format!("bili-sync-json3-output-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let output = root.join("movie.mp4");
+        let temporary = output.with_extension("zh-Hans.0.subtitle.tmp");
+        let json = r#"{"events":[{"tStartMs":0,"dDurationMs":1000,"segs":[{"utf8":"第一句"}]}]}"#;
+        std::fs::write(&temporary, json).unwrap();
+
+        let candidate = subtitle_candidate("json3");
+        let final_path = super::youtube_single_subtitle_path(&output, &candidate);
+        super::persist_youtube_subtitle(&temporary, &final_path, &candidate.ext)
+            .await
+            .unwrap();
+
+        assert!(!temporary.exists(), "临时文件应已被重命名");
+        assert_eq!(final_path.extension().and_then(|value| value.to_str()), Some("srt"));
+        let srt = std::fs::read_to_string(&final_path).unwrap();
+        assert!(srt.starts_with("1\n"), "srt: {srt}");
+        assert!(srt.contains("第一句"));
+        let ass_path = final_path.with_extension("ass");
+        let ass = std::fs::read_to_string(&ass_path).unwrap();
+        assert!(ass.contains("[Events]"), "ass: {ass}");
+        assert!(ass.contains("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,第一句"));
+        assert!(
+            super::youtube_subtitle_exists(&output).await.unwrap(),
+            "转码后的 .srt 必须被识别为已有字幕，避免重复下载"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `srv3`（`<p t d>`）、`srv1`（`<text start dur>`）、`ttml`（`<p begin end>`）
+    /// 三种 XML 形状都要能解析出带正确时间轴的 cue。
+    #[test]
+    fn xml_timed_subtitles_are_parsed() {
+        let srv3 = r#"<?xml version="1.0" encoding="utf-8"?><timedtext format="3"><body>
+            <p t="1200" d="1800"><s>Hello</s><s> world</s></p>
+            <p t="3000" d="1000">第二句 &amp; 收尾</p>
+        </body></timedtext>"#;
+        let cues = super::parse_youtube_subtitle_cues(srv3, "srv3");
+        assert_eq!(cues.len(), 2, "cues={cues:?}");
+        assert_eq!(cues[0].start_ms, 1200);
+        assert_eq!(cues[0].end_ms, 3000);
+        assert_eq!(cues[0].text, "Hello world");
+        assert_eq!(cues[1].start_ms, 3000);
+        assert_eq!(cues[1].end_ms, 4000);
+        assert_eq!(cues[1].text, "第二句 & 收尾");
+
+        let srv1 = r#"<transcript><text start="1.20" dur="2.5">第一句</text><text start="4" dur="1">第二句</text></transcript>"#;
+        let cues = super::parse_youtube_subtitle_cues(srv1, "srv1");
+        assert_eq!(cues.len(), 2, "cues={cues:?}");
+        assert_eq!(cues[0].start_ms, 1200);
+        assert_eq!(cues[0].end_ms, 3700);
+        assert_eq!(cues[1].start_ms, 4000);
+        assert_eq!(cues[1].end_ms, 5000);
+
+        let ttml = r#"<tt><body><div>
+            <p begin="00:00:01.230" end="00:00:03.400">ttml 第一句</p>
+        </div></body></tt>"#;
+        let cues = super::parse_youtube_subtitle_cues(ttml, "ttml");
+        assert_eq!(cues.len(), 1, "cues={cues:?}");
+        assert_eq!(cues[0].start_ms, 1230);
+        assert_eq!(cues[0].end_ms, 3400);
+        assert_eq!(cues[0].text, "ttml 第一句");
+
+        // `d` 不能被误当成 `dur` 的前缀匹配
+        assert_eq!(super::xml_attr(r#" t="12" dur="3""#, "d"), None);
+        assert_eq!(super::xml_attr(r#" t="12" d="3""#, "d"), Some("3"));
+        assert_eq!(super::parse_cue_time("00:01:02.345", false), Some(62_345));
+        assert_eq!(super::parse_cue_time("1.5s", false), Some(1_500));
+        assert_eq!(super::parse_cue_time("1234", true), Some(1_234));
+    }
+
+    /// XML 字幕解析不出文本时必须按**原后缀**落盘：写不带 `WEBVTT` 头的 `.vtt`
+    /// 会让媒体库解析失败，而存在性检查又认这个后缀，于是这一页永久坏掉。
+    #[tokio::test]
+    async fn unparseable_xml_subtitle_falls_back_to_original_extension() {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-srv3-fallback-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = root.join("movie.mp4");
+        let temporary = output.with_extension("zh-Hans.0.subtitle.tmp");
+        std::fs::write(&temporary, "<timedtext><body>no timing attrs</body></timedtext>").unwrap();
+
+        let candidate = subtitle_candidate("srv3");
+        let final_path = super::youtube_single_subtitle_path(&output, &candidate);
+        super::persist_youtube_subtitle(&temporary, &final_path, &candidate.ext)
+            .await
+            .unwrap();
+
+        assert!(!final_path.exists(), "解析失败不应产出空的 .srt");
+        assert!(
+            !output.with_extension("zh-Hans.vtt").exists(),
+            "不能写不带 WEBVTT 头的 .vtt"
+        );
+        let fallback = output.with_extension("zh-Hans.srv3");
+        assert!(fallback.exists(), "解析失败应按原后缀落盘: {fallback:?}");
+        assert!(
+            super::youtube_subtitle_exists(&output).await.unwrap(),
+            "降级产物必须被识别为已有字幕，避免每轮重复下载"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// JS runtime 查找必须以「可执行」为准：普通文件（无执行位）不算，
+    /// 目录不算；多个候选按 names 顺序取第一个。
+    #[test]
+    fn runtime_executable_lookup_requires_executable_files() {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-js-runtime-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+        let node = root.join(node_name);
+        std::fs::write(&node, b"binary").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(
+                super::runtime_executable_in_dir(&root, &["node", "bun"]),
+                None,
+                "无执行位的普通文件不应被当作 runtime"
+            );
+            std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            super::runtime_executable_in_dir(&root, &["node", "bun"]),
+            Some(node.clone())
+        );
+        // 子目录不是可执行文件
+        std::fs::create_dir_all(root.join("bun")).unwrap();
+        assert_eq!(super::runtime_executable_in_dir(&root, &["bun"]), None);
+        assert!(!super::is_executable_file(&root.join("not-exist")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// runtime 名称映射：按文件名主干识别，未知名称归为 node。
+    #[test]
+    fn runtime_name_is_derived_from_file_stem() {
+        use std::path::PathBuf;
+        let cases = [
+            ("node", "node"),
+            ("node.exe", "node"),
+            ("bun", "bun"),
+            ("deno", "deno"),
+            ("qjs", "quickjs"),
+            ("quickjs", "quickjs"),
+            ("something-else", "node"),
+        ];
+        for (file, expected) in cases {
+            assert_eq!(
+                super::ytdlp_js_runtime_name(&PathBuf::from(file)),
+                expected,
+                "file={file}"
             );
         }
     }
