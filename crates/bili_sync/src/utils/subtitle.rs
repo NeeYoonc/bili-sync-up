@@ -306,18 +306,47 @@ fn clean_caption_line(line: &str) -> String {
     unescaped.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// 只剥掉「真的像标签」的 `<...>`：`<c>`、`</v>`、`<00:00:01.000>`、`<font color="...">`。
+/// 旧实现只要遇到 `<` 就一直吞到行尾，于是字幕正文里的 `a < b`、`x < 3` 会丢掉
+/// 后半句，且没有闭合尖括号时整行后半段都会消失。
 fn strip_inline_tags(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
     let mut output = String::with_capacity(input.len());
-    let mut inside_tag = false;
-    for ch in input.chars() {
-        match ch {
-            '<' => inside_tag = true,
-            '>' if inside_tag => inside_tag = false,
-            _ if !inside_tag => output.push(ch),
-            _ => {}
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '<' {
+            if let Some(end) = (index + 1..chars.len()).find(|&position| chars[position] == '>') {
+                if is_inline_tag_body(&chars[index + 1..end]) {
+                    index = end + 1;
+                    continue;
+                }
+            }
         }
+        output.push(chars[index]);
+        index += 1;
     }
     output
+}
+
+/// 标签体首字符必须是 `/`、字母或数字（`<c>` / `</c>` / `<00:00:01.000>`），
+/// 且内容只能是可信的标签字符。`< b >` 这种数学比较首字符是空白，不算标签；
+/// 未闭合的 `<` 因为找不到 `>`，也会被原样保留。
+fn is_inline_tag_body(body: &[char]) -> bool {
+    const MAX_TAG_LEN: usize = 128;
+    if body.is_empty() || body.len() > MAX_TAG_LEN || body.contains(&'<') {
+        return false;
+    }
+    let first = body[0];
+    if !(first == '/' || first.is_ascii_alphabetic() || first.is_ascii_digit()) {
+        return false;
+    }
+    body.iter().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '/' | ' ' | '.' | ':' | '-' | '_' | '=' | '"' | '\'' | '#' | '%' | ',' | ';'
+            )
+    })
 }
 
 fn unescape_entities(input: &str) -> String {
@@ -329,7 +358,15 @@ fn unescape_entities(input: &str) -> String {
     while let Some(index) = rest.find('&') {
         output.push_str(&rest[..index]);
         let tail = &rest[index..];
-        let Some(end) = tail[..tail.len().min(12)].find(';') else {
+        // 实体名最长十几个字符，只看前 12 个字符即可。
+        // 注意必须按字符边界截断：若 `&` 后紧跟中文（如「&敲」），
+        // 按字节截断会把多字节字符切成两半，直接 panic。
+        let limit = tail
+            .char_indices()
+            .nth(12)
+            .map(|(offset, _)| offset)
+            .unwrap_or(tail.len());
+        let Some(end) = tail[..limit].find(';') else {
             output.push('&');
             rest = &tail[1..];
             continue;
@@ -581,5 +618,35 @@ mod tests {
         assert_eq!(parse_bilingual_language_pair("zh-CN+"), None);
         assert_eq!(primary_language("zh-CN+en"), "zh-CN");
         assert_eq!(primary_language("zh-CN"), "zh-CN");
+    }
+
+    /// 回归：旧实现遇到 `<` 就吞到行尾，正文里的字面小于号会丢失后半句。
+    #[test]
+    fn literal_less_than_signs_survive_inline_tag_stripping() {
+        assert_eq!(clean_cue_text("当 a < b 时成立"), "当 a < b 时成立");
+        assert_eq!(clean_cue_text("x < 3 <c> 之后"), "x < 3 之后");
+        assert_eq!(clean_cue_text("1 < 2 > 0 仍可见"), "1 < 2 > 0 仍可见");
+        assert_eq!(clean_cue_text("<font color=\"#fff\">白色</font>"), "白色");
+        assert_eq!(clean_cue_text("未闭合 <c 的标签"), "未闭合 <c 的标签");
+        // 真正的 ASR 标签仍要剥掉
+        assert_eq!(clean_cue_text("hi<00:00:01.200> there"), "hi there");
+    }
+
+    /// 回归：`&` 后紧跟多字节字符时，实体名窗口不能按字节截断，
+    /// 否则 `tail[..12]` 会切在字符内部而 panic（实网字幕含 “&敲” 一类文本）。
+    #[test]
+    fn unescape_entities_handles_multibyte_after_ampersand() {
+        use super::unescape_entities;
+
+        // 第 12 字节正好落在 '敲'（3 字节）内部，历史实现会 panic
+        assert_eq!(unescape_entities("A&B敲死你"), "A&B敲死你");
+        assert_eq!(unescape_entities("&敲"), "&敲");
+        assert_eq!(unescape_entities("&中文中文中文中文中文"), "&中文中文中文中文中文");
+        // 正常实体仍然照旧解析
+        assert_eq!(unescape_entities("a &amp; b"), "a & b");
+        assert_eq!(unescape_entities("&lt;tag&gt;"), "<tag>");
+        assert_eq!(unescape_entities("&#39;"), "'");
+        // 超长未闭合实体的 '&' 保留原文
+        assert_eq!(unescape_entities("&notarealentity"), "&notarealentity");
     }
 }
