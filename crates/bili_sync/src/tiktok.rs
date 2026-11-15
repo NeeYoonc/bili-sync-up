@@ -1770,7 +1770,7 @@ async fn fetch_tiktok_author_videos(
         "--playlist-end",
         &end_with_probe.to_string(),
     ]);
-    append_ytdlp_runtime(&mut command);
+    append_ytdlp_runtime(&mut command).await;
     append_tiktok_cookies(&mut command);
     append_youtube_proxy(&mut command);
     // yt-dlp 直接吃 `@用户名` 主页时经常报 “Unable to extract secondary user ID”：
