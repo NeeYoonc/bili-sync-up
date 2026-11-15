@@ -1,6 +1,6 @@
 # 更新记录
 
-## 未发布
+## v3.1.7 (2026-11-15)
 
 **B 站**
 
@@ -34,6 +34,10 @@
 **下载 / 工具**
 
 - **aria2 自动下载地址修复（公开分享直链 + 自定义镜像变量）**：此前程序内置的 aria2 下载地址（`r2d.dnof.net` 的 `/file/<id>`）改成 API key 鉴权后，新用户启用 aria2 时下载必然失败（日志报 `401 INVALID_API_KEY`）。现在三个平台直接使用该站免鉴权的公开分享直链（`/files/tools/aria2/...`，与官方同一份文件、sha256 不变）；同时新增 `BILI_SYNC_ARIA2_MIRROR_BASE` / `BILI_SYNC_YTDLP_MIRROR_BASE` 两个镜像变量（设置后只走镜像，内网/代理环境可指向自建目录），下载失败时日志给出手动放置路径。FAQ 里给出了可直接使用的 yt-dlp 镜像地址与离线包。修改对之后新触发 aria2 / yt-dlp 下载任务生效，详见常见问题「aria2 / yt-dlp 下载失败」。
+
+**群晖套件 / 部署**
+
+- **SPK 不再内置 ffmpeg，改为依赖套件源里的 FFmpeg 套件**：此前 SPK 包里自带一份静态 ffmpeg/ffprobe（x86_64 包 73MB、armv8 包 64MB）。现在改为在 `INFO` 里声明依赖 `ffmpeg7`，安装时由套件中心一并装好 FFmpeg 套件，程序启动时自动把 FFmpeg 套件目录加进 PATH，`ffmpeg_path` 已有值不会被覆盖；包体降到约 17MB / 16MB。如果你的套件源里没有 ffmpeg7（例如只有 ffmpeg8），可以用构建变量 `FFMPEG_DEP` 覆盖依赖名。
 
 ## v3.1.6.1 (2026-11-09)
 
