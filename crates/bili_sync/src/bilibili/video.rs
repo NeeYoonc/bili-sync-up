@@ -1,6 +1,6 @@
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use futures::stream::FuturesUnordered;
-use futures::TryStreamExt;
+use futures::StreamExt;
 use prost::Message;
 use reqwest::{Method, StatusCode};
 use std::collections::{HashSet, VecDeque};
@@ -15,7 +15,10 @@ use crate::bilibili::analyzer::PageAnalyzer;
 use crate::bilibili::client::BiliClient;
 use crate::bilibili::credential::encoded_query;
 use crate::bilibili::danmaku::{DanmakuElem, DmSegMobileReply};
-use crate::bilibili::subtitle::{SubTitle, SubTitleBody, SubTitleInfo, SubTitlesInfo, SubtitleDownloadOptions};
+use crate::bilibili::subtitle::{
+    keep_successful, pending_ai_subtitle_for_login, SubTitle, SubTitleBody, SubTitleInfo, SubTitlesInfo,
+    SubtitleDownloadOptions, SubtitleFetchOutcome,
+};
 use crate::bilibili::{Validate, VideoInfo, MIXIN_KEY};
 use crate::hardware::HardwareFingerprint;
 use crate::http::headers::create_api_headers;
@@ -36,6 +39,16 @@ const PLAYURL_RISK_COOLDOWN: Duration = Duration::from_secs(60);
 /// 一旦收到 v_voucher，所有待发起的 playurl 请求统一静默一段时间，
 /// 避免并发任务继续放大风控并刷出成百上千条失败。
 static PLAYURL_RISK_COOLDOWN_UNTIL: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
+
+/// `/x/player/(wbi/)v2` 在字幕仅对登录用户开放时会带上这个标记。
+/// 不同接口版本下它可能是 bool 也可能是 0/1，两种都兼容。
+fn subtitle_login_required(res: &serde_json::Value) -> bool {
+    match &res["data"]["need_login_subtitle"] {
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::Number(value) => value.as_f64().unwrap_or(0.0) != 0.0,
+        _ => false,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayurlRateLimitConfig {
@@ -1799,15 +1812,22 @@ impl<'a> Video<'a> {
     }
 
     pub async fn get_subtitles(&self, page: &PageInfo) -> Result<Vec<SubTitle>> {
+        // 播放页预览只关心轨列表，不关心「是否需要重试」。
         self.get_subtitles_with_options(page, &SubtitleDownloadOptions::default())
             .await
+            .map(|outcome| outcome.subtitles)
     }
 
     pub async fn get_subtitles_with_options(
         &self,
         page: &PageInfo,
         options: &SubtitleDownloadOptions,
-    ) -> Result<Vec<SubTitle>> {
+    ) -> Result<SubtitleFetchOutcome> {
+        // `/x/player/wbi/v2` 是 WBI 签名接口。扫描流程会在下载开始时初始化全局
+        // mixin_key，但字幕任务也可能被单独触发（重试、补下载），此时 `MIXIN_KEY`
+        // 为空会退化成无 `wts`/`w_rid` 的裸请求，被 B 站以 -403 风控挡回。
+        self.ensure_global_mixin_key().await?;
+
         let cid_string = page.cid.to_string();
         let mut query_params = vec![("cid", cid_string.as_str()), ("aid", self.aid.as_str())];
         // 课程（pugv）等没有真实 BV 号的内容用 `av<aid>` 占位，
@@ -1827,35 +1847,120 @@ impl<'a> Video<'a> {
             .await?
             .validate()?;
 
+        let login_required = subtitle_login_required(&res);
+
         // 检查字幕数据是否存在
         let subtitle_data = &res["data"]["subtitle"];
         if subtitle_data.is_null() {
             debug!("视频没有字幕数据");
-            return Ok(Vec::new());
+            return Ok(SubtitleFetchOutcome {
+                subtitles: Vec::new(),
+                // 整段 subtitle 缺失又声明需要登录时，同样属于可恢复的空结果。
+                pending_ai_subtitle: login_required && options.download_ai_subtitle,
+                incomplete_tracks: false,
+            });
         }
 
         // 接口返回的信息，包含了一系列的字幕，每个字幕包含了字幕的语言和 json 下载地址
-        let subtitles_info: SubTitlesInfo = serde_json::from_value(subtitle_data.clone())?;
-        let tasks = subtitles_info
-            .into_downloadable_subtitles(options)
+        let subtitles_info: SubTitlesInfo =
+            serde_json::from_value(subtitle_data.clone()).context("解析 B 站字幕列表失败")?;
+        let requested = subtitles_info.into_downloadable_subtitles(options);
+
+        // B 站未登录时会对部分视频返回 `need_login_subtitle: true` 且 `subtitles: []`。
+        // 旧实现把这个「可恢复的空结果」当成成功，状态位被永久写成 STATUS_OK，
+        // 之后 `should_run()[4]` 恒为 false，即使补上 Cookie 也不会再拉字幕。
+        // 这里不直接报错（否则会变成下载失败通知），而是把「AI 轨待补」标志交给
+        // 工作流做有限次重试，并给出可操作的提示。
+        let pending_ai_subtitle = pending_ai_subtitle_for_login(login_required, options, &requested);
+        if pending_ai_subtitle {
+            warn!(
+                "视频 {} 第 {} 页的 AI 字幕需要登录 B 站账号（need_login_subtitle=true）：请在配置中填入有效 Cookie，字幕子任务将在后续扫描有限次重试",
+                self.bvid, page.page
+            );
+        }
+        if requested.is_empty() {
+            // 真的没有字幕轨（或未开启 AI 字幕）：交给工作流按「完成」收尾，
+            // 不再连续重试刷日志；用户之后打开开关会由配置变更复位状态位。
+            debug!("视频 {} 第 {} 页没有可下载的字幕轨", self.bvid, page.page);
+            return Ok(SubtitleFetchOutcome {
+                subtitles: Vec::new(),
+                pending_ai_subtitle,
+                incomplete_tracks: false,
+            });
+        }
+
+        let total = requested.len();
+        let tasks = requested
             .into_iter()
             .map(|v| self.get_subtitle(v))
             .collect::<FuturesUnordered<_>>();
-        tasks.try_collect().await
+        // 逐条收集而不是 try_collect：一条轨 404/解析失败只丢这一条，其余轨照常落盘。
+        let outcomes: Vec<Result<SubTitle>> = tasks.collect().await;
+        let partial = keep_successful(outcomes).with_context(|| {
+            format!(
+                "视频 {} 第 {} 页的全部 {} 条字幕轨均下载失败",
+                self.bvid, page.page, total
+            )
+        })?;
+        if partial.is_partial() {
+            // 有轨失败不能静默当成功：把这一页按可重试收尾（由 `STATUS_MAX_RETRY` 兜上限），
+            // 否则那条轨会永久缺失，且不会再有任何一次扫描去补。
+            warn!(
+                "视频 {} 第 {} 页有 {} 条字幕轨下载失败，已拿到 {} 条（首个错误: {}），本页将在后续扫描重试",
+                self.bvid,
+                page.page,
+                partial.failed,
+                partial.values.len(),
+                partial.first_error_summary()
+            );
+        }
+        let subtitles = partial.values;
+        let incomplete_tracks = partial.failed > 0;
+        debug!(
+            "视频 {} 第 {} 页字幕轨下载完成：{}/{} 条可用",
+            self.bvid,
+            page.page,
+            subtitles.len(),
+            total
+        );
+        Ok(SubtitleFetchOutcome {
+            subtitles,
+            pending_ai_subtitle,
+            incomplete_tracks,
+        })
     }
 
     async fn get_subtitle(&self, info: SubTitleInfo) -> Result<SubTitle> {
+        // 协议相对地址与绝对地址都会出现，统一走 `normalized_url()`，
+        // 不能再硬编码 `format!("https:{}", url)`（绝对地址会变成 `https:https://...`）。
+        let url = info
+            .normalized_url()
+            .ok_or_else(|| anyhow!("字幕地址无效: lan={}, url={:?}", info.lan, info.subtitle_url))?;
+        // AI 字幕 CDN 在部分账号/地区下需要登录态。旧实现直接用 inner_client 且
+        // 显式传 None，绕过了 `BiliClient::request()` 的 Cookie 注入。
         let mut res = self
             .client
-            .client // 这里可以直接使用 inner_client，因为该请求不需要鉴权
-            .request(Method::GET, format!("https:{}", info.subtitle_url).as_str(), None)
+            .request(Method::GET, &url)
+            .await
             .send()
             .await?
             .error_for_status()?
             .json::<serde_json::Value>()
-            .await?;
-        let body: SubTitleBody = serde_json::from_value(res["body"].take())?;
-        Ok(SubTitle { lan: info.lan, body })
+            .await
+            .with_context(|| format!("读取字幕 JSON 失败: {url}"))?;
+        let body_value = res
+            .get_mut("body")
+            .map(|value| value.take())
+            .filter(|value| value.is_array())
+            .ok_or_else(|| anyhow!("字幕 JSON 缺少 body 数组: {url}"))?;
+        let body: SubTitleBody =
+            serde_json::from_value(body_value).with_context(|| format!("解析字幕 body 失败: {url}"))?;
+        let is_ai = info.is_ai_sub();
+        Ok(SubTitle {
+            lan: info.lan,
+            body,
+            is_ai,
+        })
     }
 
     /// 处理风控验证流程
@@ -2077,6 +2182,63 @@ mod tests {
     fn test_bvid_to_aid() {
         assert_eq!(bvid_to_aid("BV1Tr421n746"), 1401752220u64);
         assert_eq!(bvid_to_aid("BV1sH4y1s7fe"), 1051892992u64);
+    }
+
+    /// B 站真实接口里 `need_login_subtitle` 可能是 bool 或 0/1；
+    /// 未登录时它常与空的 `subtitle.subtitles` 同时出现。
+    #[test]
+    fn subtitle_login_required_detects_all_response_shapes() {
+        assert!(super::subtitle_login_required(&serde_json::json!({
+            "data": { "need_login_subtitle": true, "subtitle": { "subtitles": [] } }
+        })));
+        assert!(super::subtitle_login_required(&serde_json::json!({
+            "data": { "need_login_subtitle": 1 }
+        })));
+        assert!(!super::subtitle_login_required(&serde_json::json!({
+            "data": { "need_login_subtitle": false }
+        })));
+        assert!(!super::subtitle_login_required(&serde_json::json!({
+            "data": { "need_login_subtitle": 0 }
+        })));
+        assert!(!super::subtitle_login_required(&serde_json::json!({
+            "data": { "subtitle": { "subtitles": [] } }
+        })));
+    }
+
+    /// 回归：旧实现只在「一条轨都没有」时才提示登录。B 站未登录时往往仍返回人工轨、
+    /// 只把 AI 轨藏起来，于是「部分视频有 AI 字幕、部分没有」被静默当成正常结果。
+    #[test]
+    fn pending_ai_subtitle_is_reported_when_login_hides_ai_tracks() {
+        use crate::bilibili::subtitle::{pending_ai_subtitle_for_login, SubTitleInfo, SubtitleDownloadOptions};
+
+        let track = |lan: &str| SubTitleInfo {
+            lan: lan.to_string(),
+            subtitle_url: "//aisubtitle.hdslb.com/a.json".to_string(),
+        };
+        let manual_only = vec![track("zh-CN")];
+        let with_ai = vec![track("zh-CN"), track("ai-zh")];
+        let options = SubtitleDownloadOptions::default();
+
+        assert!(pending_ai_subtitle_for_login(true, &options, &manual_only));
+        assert!(
+            !pending_ai_subtitle_for_login(true, &options, &with_ai),
+            "已拿到 AI 轨时结果完整"
+        );
+        assert!(
+            !pending_ai_subtitle_for_login(false, &options, &manual_only),
+            "接口未声明需要登录时不应判定为缺失"
+        );
+        assert!(
+            !pending_ai_subtitle_for_login(
+                true,
+                &SubtitleDownloadOptions {
+                    download_ai_subtitle: false,
+                    ..Default::default()
+                },
+                &manual_only
+            ),
+            "用户没开 AI 字幕时不算缺失"
+        );
     }
 
     #[test]

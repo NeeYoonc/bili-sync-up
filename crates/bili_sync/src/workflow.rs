@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bili_sync_entity::*;
 use chrono::{Datelike, Utc};
 use futures::stream::FuturesUnordered;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt};
 use sea_orm::entity::prelude::*;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{DatabaseBackend, JoinType, QuerySelect, Statement};
@@ -296,6 +296,7 @@ async fn persist_submission_membership_state_to_video(
 }
 
 use crate::adapter::{video_source_from, Args, VideoSource, VideoSourceEnum};
+use crate::bilibili::subtitle::{keep_successful, subtitle_sidecar_path};
 use crate::bilibili::{
     BestStream, BiliClient, BiliError, Dimension, FilterOption, PageAnalyzer, PageInfo, Stream as VideoStream,
     SubtitleDownloadOptions, Video, VideoChapter, VideoInfo,
@@ -316,7 +317,8 @@ use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
 use crate::utils::scan_collector::create_new_video_info;
 use crate::utils::status::{
-    PageStatus, VideoStatus, STATUS_COMPLETED, STATUS_OK, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_UPPER_FACE_INDEX,
+    PageStatus, VideoStatus, PAGE_STATUS_SUBTITLE_INDEX, STATUS_COMPLETED, STATUS_OK, VIDEO_STATUS_NFO_INDEX,
+    VIDEO_STATUS_UPPER_FACE_INDEX,
 };
 
 const DB_LOCK_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
@@ -6266,6 +6268,10 @@ async fn download_video_pages(
             ExecutionStatus::Skipped => debug!("处理视频「{}」{}已成功过，跳过", &video_model.name, task_name),
             ExecutionStatus::Succeeded => debug!("处理视频「{}」{}成功", &video_model.name, task_name),
             ExecutionStatus::Cancelled => info!("处理视频「{}」{}因用户暂停而终止", &video_model.name, task_name),
+            ExecutionStatus::RetryLater(e) => info!(
+                "处理视频「{}」{}结果暂不完整，将在后续扫描有限次重试: {:#}",
+                &video_model.name, task_name, e
+            ),
             ExecutionStatus::Ignored(e) => {
                 let error_msg = e.to_string();
                 if !error_msg.contains("status code: 87007") {
@@ -6559,6 +6565,10 @@ struct PageDownloadOutcome {
     /// 本页未完成（失败/被忽略/被取消）的子任务说明，用于视频级失败汇总里写明具体原因，
     /// 避免只留下「分页下载失败，状态码: 0」这种没有信息量的报错。
     subtask_notes: Vec<String>,
+    /// 除「字幕结果待重试」以外，是否还有真正未完成/失败的子任务。
+    /// 字幕是可选 sidecar，它的有限次重试不应把整个视频判成下载失败并推送错误通知；
+    /// 但视频级「分 P 下载」状态必须保持可重试，否则下一轮根本不会遍历分页。
+    non_retry_incomplete: bool,
 }
 
 /// 汇总单页中“未完成”的子任务说明：哪些子任务为什么没完成（失败原因 / 被忽略原因）。
@@ -6591,11 +6601,29 @@ fn incomplete_subtask_notes(results: &[ExecutionStatus], status_offsets: &[u32; 
                 summarize_message(&format!("{:#}", err), 90)
             ),
             ExecutionStatus::Cancelled => format!("{}因暂停被取消，未完成", task_name),
+            ExecutionStatus::RetryLater(err) => format!(
+                "{}结果暂不完整(有限次重试): {}",
+                task_name,
+                summarize_message(&format!("{:#}", err), 90)
+            ),
             _ => format!("{}未完成({})", task_name, describe_subtask_status(status)),
         };
         notes.push(note);
     }
     notes
+}
+
+/// 视频级「未完成」是否仅由字幕的有限次重试引起。
+///
+/// 这种状态不能按下载失败打 error 并推送通知（本来没字幕的视频会连续误报），
+/// 但也不能按成功收尾——视频级「分 P 下载」一旦置为 STATUS_OK，下一轮
+/// `dispatch_download_page` 直接 Skipped，分页根本不会被遍历，字幕重试也就失效了。
+fn subtitle_retry_is_only_incomplete(
+    target_status: u32,
+    has_non_retry_incomplete: bool,
+    failed_pages_empty: bool,
+) -> bool {
+    target_status != STATUS_OK && !has_non_retry_incomplete && failed_pages_empty
 }
 
 /// 取错误文本第一行并按字符数截短，用于拼进汇总信息（保持单行、别撑爆日志）。
@@ -6730,6 +6758,8 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
         .collect::<FuturesUnordered<_>>();
     let (mut download_abort_reason, mut target_status) = (None, STATUS_OK);
     let mut cancelled_by_user = false;
+    // 是否存在「字幕有限次重试」以外的真实未完成子任务，用于区分可恢复的空字幕与下载失败。
+    let mut has_non_retry_incomplete = false;
     let mut failed_pages: Vec<String> = Vec::new(); // 收集失败的分页信息
     let mut incomplete_pages: Vec<String> = Vec::new(); // 收集未完成分页的具体原因（含被忽略的子任务）
     let mut changed_pages: Vec<page::ActiveModel> = Vec::new();
@@ -6745,6 +6775,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                 }
                 *args.inline_skip_reason_touched.lock().await = true;
                 let model = outcome.model;
+                has_non_retry_incomplete |= outcome.non_retry_incomplete;
                 // 该视频的所有分页的下载状态都会在此返回，需要根据这些状态确认视频层"分 P 下载"子任务的状态
                 // 在过去的实现中，此处仅仅根据 page_download_status 的最高标志位来判断，如果最高标志位是 true 则认为完成
                 // 这样会导致即使分页中有失败到 MAX_RETRY 的情况，视频层的分 P 下载状态也会被认为是 Succeeded，不够准确
@@ -6904,6 +6935,16 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
         return Ok(ExecutionStatus::Cancelled);
     }
     if target_status != STATUS_OK {
+        // 仅字幕结果待重试（例如视频本来没有字幕、或 AI 字幕被登录态挡住）时，
+        // 不能按「下载失败」打 error 并推送错误通知；但仍要返回 RetryLater，
+        // 让视频级「分 P 下载」保持可重试，下一轮才会继续遍历分页补字幕。
+        if subtitle_retry_is_only_incomplete(target_status, has_non_retry_incomplete, failed_pages.is_empty()) {
+            info!(
+                "视频「{}」仅字幕子任务结果暂不完整，其余子任务已完成；后续扫描会有限次重试（状态码: {}）",
+                &args.video_model.name, target_status
+            );
+            return Ok(ExecutionStatus::RetryLater(anyhow!("仅字幕子任务待重试")));
+        }
         // 充电视频在获取详情时已经被upower字段检测并处理，这里不需要特殊的充电视频逻辑
 
         // 提供更详细的错误信息，保留原始错误上下文
@@ -7699,6 +7740,10 @@ async fn download_page(
                 "处理视频「{}」第 {} 页{}因用户暂停而终止",
                 &video_model.name, page_model.pid, task_name
             ),
+            ExecutionStatus::RetryLater(e) => info!(
+                "处理视频「{}」第 {} 页{}结果暂不完整，将在后续扫描有限次重试: {:#}",
+                &video_model.name, page_model.pid, task_name, e
+            ),
             ExecutionStatus::Ignored(e) => {
                 let error_msg = e.to_string();
                 if !error_msg.contains("status code: 87007") {
@@ -8139,6 +8184,15 @@ async fn download_page(
     let final_status: u32 = status.into();
     let final_status_offsets: [u32; 5] = PageStatus::from(final_status).into();
     let subtask_notes = incomplete_subtask_notes(&results, &final_status_offsets);
+    let non_retry_incomplete = final_status_offsets.iter().enumerate().any(|(index, status)| {
+        if *status == STATUS_OK {
+            return false;
+        }
+        // 字幕位处于 RetryLater（状态 1..3）属于预期中的有限次重试，不算真正未完成。
+        let subtitle_retrying =
+            index == PAGE_STATUS_SUBTITLE_INDEX && matches!(results.get(index), Some(ExecutionStatus::RetryLater(_)));
+        !subtitle_retrying
+    });
 
     let mut page_active_model: page::ActiveModel = page_model.into();
     page_active_model.download_status = Set(final_status);
@@ -8163,6 +8217,7 @@ async fn download_page(
         split_chapters,
         skip_reason: media_skip_reason,
         subtask_notes,
+        non_retry_incomplete,
     })
 }
 
@@ -10927,6 +10982,18 @@ pub(crate) struct FetchPageSubtitleInput<'a> {
     token: CancellationToken,
 }
 
+/// 空字幕列表时的收尾判定。
+///
+/// 拆成纯函数是为了能被单测覆盖：这里判错一次，就会让「未登录 + AI 轨被挡」的
+/// 视频被永久钉成 `STATUS_OK`，之后补上 Cookie 也不会再拉。
+pub(crate) fn empty_subtitle_status(pending_ai_subtitle: bool) -> ExecutionStatus {
+    if pending_ai_subtitle {
+        ExecutionStatus::RetryLater(anyhow!("AI 字幕需要登录 B 站账号，本页暂无可用字幕轨"))
+    } else {
+        ExecutionStatus::Succeeded
+    }
+}
+
 pub async fn fetch_page_subtitle(p: FetchPageSubtitleInput<'_>) -> Result<ExecutionStatus> {
     let FetchPageSubtitleInput {
         should_run,
@@ -10950,7 +11017,7 @@ pub async fn fetch_page_subtitle(p: FetchPageSubtitleInput<'_>) -> Result<Execut
         download_ai_subtitle,
         ai_subtitle_language,
     };
-    let subtitles = tokio::select! {
+    let fetched = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
         res = tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, bili_video.get_subtitles_with_options(page_info, &subtitle_options)) => match res {
@@ -10965,6 +11032,9 @@ pub async fn fetch_page_subtitle(p: FetchPageSubtitleInput<'_>) -> Result<Execut
             }
         },
     };
+    let pending_ai_subtitle = fetched.pending_ai_subtitle;
+    let incomplete_tracks = fetched.incomplete_tracks;
+    let subtitles = fetched.subtitles;
     // 双语设置：先从已下载的字幕轨里挑出目标语言与对照语言合并成一条，
     // 无论是否启用 AI 字幕都生效（人工双语轨同样可以合并）。
     let bilingual_subtitle = match bilingual_request {
@@ -11008,15 +11078,41 @@ pub async fn fetch_page_subtitle(p: FetchPageSubtitleInput<'_>) -> Result<Execut
         ensure_parent_dir_for_file(&path).await.map_err(std::io::Error::other)?;
         tokio::fs::write(path, merged.body).await?;
     }
+    if subtitles.is_empty() {
+        // 空列表有两种含义，必须分开处理，否则其中一种会被永久钉成「已完成」：
+        //
+        // 1) AI 轨被登录态挡住（`pending_ai_subtitle`）：未登录时接口会返回
+        //    `need_login_subtitle=true` + 空列表，这是可恢复的，必须走重试，
+        //    否则用户补上 Cookie 后这一页再也不会拉字幕——正是要修的主场景。
+        // 2) 这个视频确实没有字幕轨（或用户没开 AI 字幕）：按完成收尾，
+        //    避免连续重试 3 轮刷 warn；用户之后打开开关会由配置变更复位状态位。
+        if pending_ai_subtitle {
+            warn!(
+                "视频「{}」第 {} 页未取到任何字幕轨，且接口声明 AI 字幕需要登录 B 站账号：补上有效 Cookie 后将在后续扫描重试",
+                video_model.name, page_info.page
+            );
+        } else {
+            debug!(
+                "视频「{}」第 {} 页没有可下载的字幕轨，本轮不写入 .srt",
+                video_model.name, page_info.page
+            );
+        }
+        return Ok(empty_subtitle_status(pending_ai_subtitle));
+    }
+    let total = subtitles.len();
+    // 单轨文件名必须与双语合并产物共用语言标签归一：
+    // `ai-zh` 直接写进 `xxx.ai-zh.srt` 会被媒体库当成未知语言轨。
     let tasks = subtitles
         .into_iter()
         .map(|subtitle| async move {
-            let path = subtitle_path.with_extension(format!("{}.srt", subtitle.lan));
+            let path = subtitle_sidecar_path(subtitle_path, &subtitle.lan, subtitle.is_ai);
             ensure_parent_dir_for_file(&path).await.map_err(std::io::Error::other)?;
-            tokio::fs::write(path, subtitle.body.to_string()).await
+            tokio::fs::write(path, subtitle.body.to_string())
+                .await
+                .map_err(anyhow::Error::from)
         })
         .collect::<FuturesUnordered<_>>();
-    tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, tasks.try_collect::<Vec<()>>())
+    let outcomes: Vec<anyhow::Result<()>> = tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, tasks.collect::<Vec<_>>())
         .await
         .map_err(|_| {
             anyhow!(
@@ -11025,7 +11121,35 @@ pub async fn fetch_page_subtitle(p: FetchPageSubtitleInput<'_>) -> Result<Execut
                 video_model.name,
                 page_info.page
             )
-        })??;
+        })?;
+    // 单个文件写失败只影响该语言轨，其余 .srt 照常保留。
+    let written = keep_successful(outcomes).with_context(|| {
+        format!(
+            "视频「{}」第 {} 页的全部 {} 个字幕文件均写入失败",
+            video_model.name, page_info.page, total
+        )
+    })?;
+    if written.is_partial() {
+        // 写失败的轨不能静默当成功：已落盘的保留，本页按可重试收尾，
+        // 由 `STATUS_MAX_RETRY` 兜住上限，避免一次磁盘瞬时错误永久丢轨。
+        return Ok(ExecutionStatus::RetryLater(anyhow!(
+            "{} 个字幕文件写入失败（已成功 {} 个）: {}",
+            written.failed,
+            written.values.len(),
+            written.first_error_summary()
+        )));
+    }
+    if incomplete_tracks {
+        // 有轨在下载/解析阶段就失败了，重试一轮把缺的补齐。
+        return Ok(ExecutionStatus::RetryLater(anyhow!("部分字幕轨未取到，后续扫描将重试")));
+    }
+    if pending_ai_subtitle {
+        // 人工轨已经落盘，但 AI 轨被登录态挡住：不能把字幕位钉成完成状态，
+        // 否则用户补上 Cookie 后这一页再也不会拉 AI 字幕。
+        return Ok(ExecutionStatus::RetryLater(anyhow!(
+            "AI 字幕需要登录 B 站账号，人工轨已保存、AI 轨待后续扫描补齐"
+        )));
+    }
     Ok(ExecutionStatus::Succeeded)
 }
 
@@ -17720,6 +17844,36 @@ mod tests {
             season_nfo.contains("<title>测试多P视频</title>"),
             "多P Season 结构 season.nfo 应使用视频标题"
         );
+    }
+
+    /// 回归：空字幕结果改为有限次重试后，若把视频级状态直接判为下载失败，
+    /// 每个「本来没有字幕」的视频都会连续收到失败通知。
+    #[test]
+    fn subtitle_retry_only_does_not_report_download_failure() {
+        assert!(super::subtitle_retry_is_only_incomplete(1, false, true));
+        assert!(super::subtitle_retry_is_only_incomplete(3, false, true));
+        // 全部完成时不该走「待重试」分支（应正常返回 Succeeded）
+        assert!(!super::subtitle_retry_is_only_incomplete(super::STATUS_OK, false, true));
+        // 有其它子任务未完成、或有分页直接报错时，仍按真实失败处理
+        assert!(!super::subtitle_retry_is_only_incomplete(1, true, true));
+        assert!(!super::subtitle_retry_is_only_incomplete(1, false, false));
+    }
+
+    /// 回归：空字幕列表 + 「AI 轨被登录态挡住」必须按可重试收尾。
+    /// 旧实现一看到空列表就直接 `Succeeded`，早于 `pending_ai_subtitle` 判断，
+    /// 于是未登录时这类视频一次都不会重试（补上 Cookie 也不会）。
+    #[test]
+    fn empty_subtitle_list_retries_when_ai_track_hidden_by_login() {
+        use crate::error::ExecutionStatus;
+
+        assert!(matches!(
+            super::empty_subtitle_status(true),
+            ExecutionStatus::RetryLater(_)
+        ));
+        assert!(matches!(
+            super::empty_subtitle_status(false),
+            ExecutionStatus::Succeeded
+        ));
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测

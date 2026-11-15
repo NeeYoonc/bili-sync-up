@@ -58,7 +58,8 @@ use crate::utils::live_updates::{
 };
 use crate::utils::model::{is_video_file_size_backfill_pending, queue_video_file_size_backfill};
 use crate::utils::status::{
-    PageStatus, VideoStatus, PAGE_STATUS_NFO_INDEX, VIDEO_STATUS_NFO_INDEX, VIDEO_STATUS_PAGE_DOWNLOAD_INDEX,
+    PageStatus, VideoStatus, PAGE_STATUS_NFO_INDEX, PAGE_STATUS_SUBTITLE_INDEX, VIDEO_STATUS_NFO_INDEX,
+    VIDEO_STATUS_PAGE_DOWNLOAD_INDEX,
 };
 
 const PAGE_STATUS_VIDEO_INDEX: usize = 1;
@@ -1692,7 +1693,10 @@ mod queue_sse_tests {
         let mut buffer = String::new();
 
         loop {
-            let chunk = timeout(Duration::from_secs(3), response.chunk())
+            // 全量测试并行跑时 SSE 推送可能排在其它重负载测试之后，3 秒过紧导致
+            // 偶发「等待 SSE 数据超时」。放宽到 10 秒：没有事件推送时依旧会失败，
+            // 不会掩盖真实缺陷，但不再受调度抖动影响。
+            let chunk = timeout(Duration::from_secs(10), response.chunk())
                 .await
                 .context("等待 SSE 数据超时")??;
             let Some(chunk) = chunk else {
@@ -2918,6 +2922,51 @@ mod queue_sse_tests {
         assert_eq!(
             normalize_video_source_latest_row_at("2026-04-14 12:34:56"),
             Some("2026-04-14 12:34:56".to_string())
+        );
+    }
+
+    /// 回归：首轮字幕开关关闭 / 未登录时，字幕位会被写成 STATUS_OK 并永久挡住重试。
+    /// 用户重新打开字幕选项后必须能把该位（以及 video 级完成标记）复位。
+    #[tokio::test]
+    async fn resetting_subtitle_status_unblocks_already_completed_pages() {
+        let db = create_test_db("subtitle-status-reset").await;
+        insert_test_submission(db.as_ref(), 1, "测试投稿源").await;
+        insert_test_video(db.as_ref(), 1, "测试视频").await;
+        insert_retry_charge_test_page(db.as_ref(), 1, 1).await;
+
+        let completed: u32 = VideoStatus::from([STATUS_OK; 5]).into();
+        video::Entity::update(video::ActiveModel {
+            id: Unchanged(1),
+            download_status: Set(completed),
+            ..Default::default()
+        })
+        .exec(db.as_ref())
+        .await
+        .expect("应能把视频标记为已完成");
+        assert!(VideoStatus::from(completed).get_completed());
+
+        let changed = super::reset_page_subtitle_statuses(db.as_ref(), "submission", 1)
+            .await
+            .expect("应能复位字幕状态");
+        assert_eq!(changed, 1);
+
+        let page_model = page::Entity::find_by_id(1).one(db.as_ref()).await.unwrap().unwrap();
+        let page_status = PageStatus::from(page_model.download_status);
+        assert_eq!(page_status.get(PAGE_STATUS_SUBTITLE_INDEX), 0);
+        assert!(page_status.should_run()[PAGE_STATUS_SUBTITLE_INDEX]);
+        assert!(!page_status.get_completed(), "分页应重新进入未完成状态");
+
+        let video_model = video::Entity::find_by_id(1).one(db.as_ref()).await.unwrap().unwrap();
+        let video_status = VideoStatus::from(video_model.download_status);
+        assert_eq!(video_status.get(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX), 0);
+        assert!(!video_status.get_completed(), "视频应重新进入扫描队列");
+
+        // 幂等：已经待跑的分页不会被重复计数
+        assert_eq!(
+            super::reset_page_subtitle_statuses(db.as_ref(), "submission", 1)
+                .await
+                .unwrap(),
+            0
         );
     }
 }
@@ -8095,6 +8144,169 @@ async fn find_videos_by_source_relation(
     Ok(query.all(conn).await?)
 }
 
+/// 字幕相关选项被重新启用或修改后，把该视频源下分页的「字幕」子任务状态位清 0。
+///
+/// 背景：`Status::set_result()` 会把 `Skipped`/`Succeeded` 一律写成 `STATUS_OK`，
+/// 而 `should_run()` 只检查状态是否小于 `STATUS_MAX_RETRY`。所以只要首轮扫描时
+/// 字幕开关是关的、或当时没登录导致 `subtitles: []`，字幕位就会被永久钉死在
+/// OK；后来把开关打开 / 补上 Cookie 也不会再跑字幕链路。这里在配置变更时
+/// 显式复位，让下一轮扫描真的重试一次。
+///
+/// 同时清掉 video 级「分 P 下载」位和完成标记，否则 `video.download_status >=
+/// STATUS_COMPLETED` 的筛选条件会把整个视频挡在扫描队列之外。
+///
+/// 实现上按「状态值」整批 UPDATE：一个源里分页状态通常只有个位数种取值，
+/// 上万页的源也只需几条 SQL，不再逐页 UPDATE。
+async fn reset_page_subtitle_statuses(conn: &impl ConnectionTrait, source_type: &str, id: i32) -> Result<usize> {
+    // YouTube / 抖音 / TikTok 走的是另一套表，没有 B 站 page 记录
+    if matches!(source_type, "youtube" | "douyin" | "tiktok") {
+        return Ok(0);
+    }
+    let videos = find_videos_by_source_relation(conn, source_type, id).await?;
+    let video_ids: Vec<i32> = videos.iter().map(|model| model.id).collect();
+    if video_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut changed = 0usize;
+    for current_status in distinct_page_download_statuses(conn, &video_ids).await? {
+        let mut page_status = PageStatus::from(current_status);
+        if page_status.get(PAGE_STATUS_SUBTITLE_INDEX) == 0 {
+            continue;
+        }
+        page_status.set(PAGE_STATUS_SUBTITLE_INDEX, 0);
+        let updated: u32 = page_status.into();
+        changed += page::Entity::update_many()
+            .col_expr(page::Column::DownloadStatus, sea_orm::sea_query::Expr::value(updated))
+            .filter(page::Column::VideoId.is_in(video_ids.clone()))
+            .filter(page::Column::DownloadStatus.eq(current_status))
+            .exec(conn)
+            .await?
+            .rows_affected as usize;
+    }
+
+    if changed > 0 {
+        for current_status in distinct_video_download_statuses(conn, &video_ids).await? {
+            let mut video_status = VideoStatus::from(current_status);
+            if video_status.get(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX) != crate::utils::status::STATUS_OK {
+                continue;
+            }
+            video_status.set(VIDEO_STATUS_PAGE_DOWNLOAD_INDEX, 0);
+            let updated: u32 = video_status.into();
+            video::Entity::update_many()
+                .col_expr(video::Column::DownloadStatus, sea_orm::sea_query::Expr::value(updated))
+                .filter(video::Column::Id.is_in(video_ids.clone()))
+                .filter(video::Column::DownloadStatus.eq(current_status))
+                .exec(conn)
+                .await?;
+        }
+    }
+    Ok(changed)
+}
+
+/// 该源下所有分页的 `download_status` 去重值（逐页取回再 UPDATE 会被页数拖慢）。
+async fn distinct_page_download_statuses(conn: &impl ConnectionTrait, video_ids: &[i32]) -> Result<Vec<u32>> {
+    Ok(page::Entity::find()
+        .select_only()
+        .column(page::Column::DownloadStatus)
+        .filter(page::Column::VideoId.is_in(video_ids.to_vec()))
+        .distinct()
+        .into_tuple::<u32>()
+        .all(conn)
+        .await?)
+}
+
+/// 该源下所有视频的 `download_status` 去重值。
+async fn distinct_video_download_statuses(conn: &impl ConnectionTrait, video_ids: &[i32]) -> Result<Vec<u32>> {
+    Ok(video::Entity::find()
+        .select_only()
+        .column(video::Column::DownloadStatus)
+        .filter(video::Column::Id.is_in(video_ids.to_vec()))
+        .distinct()
+        .into_tuple::<u32>()
+        .all(conn)
+        .await?)
+}
+
+/// 读取「变更前」的字幕相关选项，用于判断这次保存是否真的改了字幕设置。
+///
+/// 前端每次保存都会带上完整选项对象，只看 `params` 里是不是 `Some(true)` 会把
+/// 每一次保存都当成「重新打开字幕」，让整个源的字幕被无谓重下。
+async fn previous_bilibili_subtitle_options(
+    conn: &impl ConnectionTrait,
+    source_type: &str,
+    id: i32,
+) -> Option<(bool, bool, String)> {
+    match source_type {
+        "collection" => collection::Entity::find_by_id(id)
+            .one(conn)
+            .await
+            .ok()
+            .flatten()
+            .map(|model| {
+                (
+                    model.download_subtitle,
+                    model.download_ai_subtitle,
+                    model.ai_subtitle_language,
+                )
+            }),
+        // 每种源类型的字幕开关都存在各自的表里（`update_video_source_download_options_internal`
+        // 也是按同一张表读写的）。早期实现把所有 B 站源都当成 `video_source`，于是
+        // 收藏夹改 AI 语言时读不到旧值、UP 主投稿源读到的是另一张表的数据。
+        "submission" => submission::Entity::find_by_id(id)
+            .one(conn)
+            .await
+            .ok()
+            .flatten()
+            .map(|model| {
+                (
+                    model.download_subtitle,
+                    model.download_ai_subtitle,
+                    model.ai_subtitle_language,
+                )
+            }),
+        "favorite" => favorite::Entity::find_by_id(id)
+            .one(conn)
+            .await
+            .ok()
+            .flatten()
+            .map(|model| {
+                (
+                    model.download_subtitle,
+                    model.download_ai_subtitle,
+                    model.ai_subtitle_language,
+                )
+            }),
+        "bangumi" | "pugv" | "manga" => {
+            video_source::Entity::find_by_id(id)
+                .one(conn)
+                .await
+                .ok()
+                .flatten()
+                .map(|model| {
+                    (
+                        model.download_subtitle,
+                        model.download_ai_subtitle,
+                        model.ai_subtitle_language,
+                    )
+                })
+        }
+        "watch_later" => watch_later::Entity::find_by_id(id)
+            .one(conn)
+            .await
+            .ok()
+            .flatten()
+            .map(|model| {
+                (
+                    model.download_subtitle,
+                    model.download_ai_subtitle,
+                    model.ai_subtitle_language,
+                )
+            }),
+        _ => None,
+    }
+}
+
 async fn clear_video_source_relation(conn: &impl ConnectionTrait, source_type: &str, id: i32) -> Result<()> {
     match source_type {
         "collection" => {
@@ -9271,6 +9483,9 @@ pub async fn update_video_source_download_options_internal(
     let txn =
         crate::database::begin_traced_transaction(&db, "api.handler.update_video_source_download_options").await?;
 
+    // 必须在更新前读「变更前」的字幕选项：下面每个分支都会先写库。
+    let previous_subtitle_options = previous_bilibili_subtitle_options(&txn, &source_type, id).await;
+
     let result = match source_type.as_str() {
         "collection" => {
             let collection = collection::Entity::find_by_id(id)
@@ -9879,6 +10094,8 @@ pub async fn update_video_source_download_options_internal(
                 download_charge_videos: false,
                 download_danmaku,
                 download_subtitle,
+                // 外部源表没有独立的 AI 字幕开关列：自动字幕随 `download_subtitle`
+                // 一起启用，回显字幕开关状态即可，避免前端误显示成可独立配置。
                 download_ai_subtitle: download_subtitle,
                 ai_subtitle_language,
                 ai_rename,
@@ -9904,9 +10121,41 @@ pub async fn update_video_source_download_options_internal(
         _ => return Err(anyhow!("不支持的视频源类型: {}", source_type).into()),
     };
 
+    // 只有字幕选项真的变了才复位：接口每次保存都会带上完整选项对象，
+    // 光看 `params` 里是不是 `Some(true)` 会把每一次保存都当成「重新打开字幕」，
+    // 让整个源的字幕被无谓重下。音频开关（audio_only_m4a_only）与字幕无关，不再触发复位。
+    let subtitle_options_changed = match previous_subtitle_options {
+        Some((previous_subtitle, previous_ai_subtitle, previous_language)) => {
+            params.download_subtitle.is_some_and(|value| value != previous_subtitle)
+                || params
+                    .download_ai_subtitle
+                    .is_some_and(|value| value != previous_ai_subtitle)
+                || params.ai_subtitle_language.as_deref().is_some_and(|value| {
+                    ai_subtitle_language_from_request(&Some(value.to_string()), &previous_language) != previous_language
+                })
+        }
+        // 读不到旧值（源已不存在等异常情况）时保守处理：提交了字幕字段就复位。
+        None => params.download_subtitle == Some(true) || params.download_ai_subtitle == Some(true),
+    };
+    let mut subtitle_status_refreshed = false;
+    if subtitle_options_changed {
+        match reset_page_subtitle_statuses(&txn, &source_type, id).await {
+            Ok(changed) if changed > 0 => {
+                info!(
+                    "字幕选项已变更，复位 {} 个分页的字幕子任务状态，等待下一轮重新下载",
+                    changed
+                );
+                subtitle_status_refreshed = true;
+            }
+            Ok(_) => {}
+            // 状态复位失败不应让用户连配置都存不上，只记日志即可
+            Err(err) => warn!("复位字幕子任务状态失败（不影响选项保存）: {:#}", err),
+        }
+    }
+
     txn.commit().await?;
     notify_video_sources_changed();
-    if params.download_charge_videos.is_some() {
+    if params.download_charge_videos.is_some() || subtitle_status_refreshed {
         notify_videos_changed();
     }
     Ok(result)

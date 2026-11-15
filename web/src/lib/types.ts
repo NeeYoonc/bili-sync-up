@@ -326,7 +326,7 @@ export interface VideoSource {
 	download_charge_videos: boolean; // 是否下载充电视频
 	download_danmaku: boolean; // 是否下载弹幕
 	download_subtitle: boolean; // 是否下载字幕
-	download_ai_subtitle: boolean; // 是否下载 B 站 AI 字幕
+	download_ai_subtitle: boolean; // 是否下载 B 站 AI 字幕；外部源无独立开关，回显为字幕开关状态
 	ai_subtitle_language: string; // AI 字幕优先语言
 	ai_rename: boolean; // 是否启用AI重命名
 	ai_rename_video_prompt: string; // AI重命名视频提示词
@@ -535,7 +535,7 @@ export interface AddVideoSourceRequest {
 	download_charge_videos?: boolean; // 是否下载充电视频（默认true）
 	download_danmaku?: boolean; // 是否下载弹幕（默认true）
 	download_subtitle?: boolean; // 是否下载字幕（默认true）
-	download_ai_subtitle?: boolean; // 是否下载 B 站 AI 字幕（默认true）
+	download_ai_subtitle?: boolean; // 是否下载 B 站 AI 字幕（默认 true）；外部源忽略该字段
 	ai_subtitle_language?: string; // AI 字幕优先语言（默认 zh-CN）
 	use_dynamic_api?: boolean; // 投稿源：是否使用动态API
 	ai_rename?: boolean; // 是否启用AI重命名（默认false）
