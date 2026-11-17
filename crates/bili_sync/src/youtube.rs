@@ -5049,6 +5049,15 @@ fn should_placeholder_unavailable_tiktok(error: &anyhow::Error, retry_count: i32
             && retry_count >= TIKTOK_MEDIA_MISSING_PLACEHOLDER_RETRY)
 }
 
+/// 外源平台（YouTube / TikTok / 抖音）派生下载中间文件的暂存路径。
+///
+/// 与 B 站路径共用同一套 `staging_work_path` 规则：同一最终路径永远落到同一个暂存位置，
+/// 崩溃重启后 `.resume` 断点续传仍然有效；未配置暂存目录时返回 `None`，中间文件继续写在
+/// 目标目录旁边（旧行为）。图集（slideshow）不套暂存，见 `download_youtube_media`。
+fn external_media_work_path(output_path: &Path, staging_root: Option<&Path>) -> Option<PathBuf> {
+    crate::workflow::staging_work_path(output_path, staging_root)
+}
+
 async fn download_youtube_media(
     downloader: &UnifiedDownloader,
     source: &youtube_source::Model,
@@ -5248,18 +5257,38 @@ async fn download_youtube_media(
             .with_context(|| format!("无法创建{platform}下载目录: {}", parent.display()))?;
     }
 
-    if media_exists {
-        // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
-    } else if metadata.is_slideshow() {
+    if !media_exists && metadata.is_slideshow() {
         // 图集作品里的视频段会各自成页，主媒体文件（第一个分页）由下载函数返回：
         // 封面、NFO、字幕等附属文件都跟着这个主文件走。
         output_path =
             crate::douyin::download_image_post(downloader, &metadata, &output_path, &filter_option, source).await?;
+    }
+
+    // 外源平台的下载中间文件名是 `最终文件名.video.mp4` / `.audio.m4a` / `.merging.mp4` 等，
+    // 默认直接落在媒体库目录里。配置了「下载暂存目录」后改写进暂存区，成品搬回最终路径；
+    // 图集由 `download_image_post` 自己写最终文件，不套暂存。
+    let media_staging_root = if media_exists || metadata.is_slideshow() {
+        None
+    } else {
+        crate::config::reload_config().download_staging_dir
+    };
+    let staged_media_path = external_media_work_path(&output_path, media_staging_root.as_deref());
+    if let Some(staged_path) = staged_media_path.as_ref() {
+        if let Some(parent) = staged_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("无法创建{platform}下载暂存目录: {}", parent.display()))?;
+        }
+    }
+    let media_work_path = staged_media_path.as_deref().unwrap_or(&output_path);
+
+    if media_exists {
+        // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
     } else if source.audio_only {
         let selected = selected.as_ref().context("图文作品不应进入音频流选择")?;
         if let Some(audio) = selected.audio.as_ref() {
             let urls = format_urls(audio, platform)?;
-            let temporary = output_path.with_extension("download.m4a");
+            let temporary = media_work_path.with_extension("download.m4a");
             if let Err(error) = fetch_platform_asset(downloader, source, &urls, &temporary)
                 .await
                 .with_context(|| format!("使用项目统一下载器下载{platform}音频失败"))
@@ -5272,16 +5301,16 @@ async fn download_youtube_media(
                 return paid_placeholder_result(output_path, &metadata, title, uploader, platform).await;
             }
             if let Some(key) = audio.decryption_key.as_deref() {
-                let decrypted = output_path.with_extension("decrypted.m4a");
+                let decrypted = media_work_path.with_extension("decrypted.m4a");
                 if let Err(error) = crate::douyin::decrypt_dash_stream(&temporary, key, &decrypted).await {
                     let _ = remove_file_if_exists(&temporary).await;
                     let _ = remove_file_if_exists(&decrypted).await;
                     return Err(error);
                 }
-                replace_file(&decrypted, &output_path).await?;
+                replace_file(&decrypted, media_work_path).await?;
                 remove_file_if_exists(&temporary).await?;
             } else {
-                replace_file(&temporary, &output_path).await?;
+                replace_file(&temporary, media_work_path).await?;
             }
         } else {
             // 抖音只提供带音轨的 MP4。先由统一下载器取得用户选择质量的
@@ -5291,8 +5320,8 @@ async fn download_youtube_media(
                 .as_ref()
                 .ok_or_else(|| anyhow!("{platform}未返回可用音频流"))?;
             let urls = format_urls(mixed, platform)?;
-            let source_temporary = output_path.with_extension("audio-source.mp4");
-            let audio_temporary = output_path.with_extension("download.m4a");
+            let source_temporary = media_work_path.with_extension("audio-source.mp4");
+            let audio_temporary = media_work_path.with_extension("download.m4a");
             if let Err(error) = fetch_platform_asset(downloader, source, &urls, &source_temporary)
                 .await
                 .with_context(|| format!("使用项目统一下载器下载{platform}音频源失败"))
@@ -5304,7 +5333,7 @@ async fn download_youtube_media(
                 let _ = remove_file_if_exists(&source_temporary).await;
                 return paid_placeholder_result(output_path, &metadata, title, uploader, platform).await;
             }
-            let decrypted_source = output_path.with_extension("audio-source-decrypted.mp4");
+            let decrypted_source = media_work_path.with_extension("audio-source-decrypted.mp4");
             let extract_source = if let Some(key) = mixed.decryption_key.as_deref() {
                 if let Err(error) = crate::douyin::decrypt_dash_stream(&source_temporary, key, &decrypted_source).await
                 {
@@ -5322,7 +5351,7 @@ async fn download_youtube_media(
                 let _ = remove_file_if_exists(&audio_temporary).await;
                 return Err(error);
             }
-            replace_file(&audio_temporary, &output_path).await?;
+            replace_file(&audio_temporary, media_work_path).await?;
             remove_file_if_exists(&source_temporary).await?;
             remove_file_if_exists(&decrypted_source).await?;
         }
@@ -5333,10 +5362,10 @@ async fn download_youtube_media(
         let video_urls = format_urls(video_stream, platform)?;
         let audio_urls = format_urls(audio_stream, platform)?;
         let video_temporary =
-            output_path.with_extension(format!("video.{}", video_stream.ext.as_deref().unwrap_or("mp4")));
+            media_work_path.with_extension(format!("video.{}", video_stream.ext.as_deref().unwrap_or("mp4")));
         let audio_temporary =
-            output_path.with_extension(format!("audio.{}", audio_stream.ext.as_deref().unwrap_or("m4a")));
-        let merge_temporary = output_path.with_extension("merging.mp4");
+            media_work_path.with_extension(format!("audio.{}", audio_stream.ext.as_deref().unwrap_or("m4a")));
+        let merge_temporary = media_work_path.with_extension("merging.mp4");
         // YouTube 的高画质通常是独立 DASH 音视频流。两条直链都交给项目
         // 原生统一下载器并行传输；音频失败时保留已下载的视频临时文件，
         // 下次重试只重新下载音频，避免大视频（数百 MB）整片重下。
@@ -5407,7 +5436,7 @@ async fn download_youtube_media(
             let _ = remove_file_if_exists(&merge_temporary).await;
             return Err(error);
         }
-        replace_file(&merge_temporary, &output_path).await?;
+        replace_file(&merge_temporary, media_work_path).await?;
         remove_file_if_exists(&video_temporary).await?;
         remove_file_if_exists(&audio_temporary).await?;
     } else {
@@ -5418,7 +5447,7 @@ async fn download_youtube_media(
             .as_ref()
             .ok_or_else(|| anyhow!("{platform}未返回可用的音视频流"))?;
         let urls = format_urls(mixed, platform)?;
-        let temporary = output_path.with_extension(format!("download.{}", mixed.ext.as_deref().unwrap_or("mp4")));
+        let temporary = media_work_path.with_extension(format!("download.{}", mixed.ext.as_deref().unwrap_or("mp4")));
         if let Err(error) = fetch_platform_asset(downloader, source, &urls, &temporary)
             .await
             .with_context(|| format!("使用项目统一下载器下载{platform}混合流失败"))
@@ -5431,17 +5460,23 @@ async fn download_youtube_media(
             return paid_placeholder_result(output_path, &metadata, title, uploader, platform).await;
         }
         if let Some(key) = mixed.decryption_key.as_deref() {
-            let decrypted = output_path.with_extension("decrypted.mp4");
+            let decrypted = media_work_path.with_extension("decrypted.mp4");
             if let Err(error) = crate::douyin::decrypt_dash_stream(&temporary, key, &decrypted).await {
                 let _ = remove_file_if_exists(&temporary).await;
                 let _ = remove_file_if_exists(&decrypted).await;
                 return Err(error);
             }
-            replace_file(&decrypted, &output_path).await?;
+            replace_file(&decrypted, media_work_path).await?;
             remove_file_if_exists(&temporary).await?;
         } else {
-            replace_file(&temporary, &output_path).await?;
+            replace_file(&temporary, media_work_path).await?;
         }
+    }
+
+    // 媒体已合并并通过时长校验，再搬回最终路径；未配置暂存目录时此处是空操作。
+    // sidecar 必须仍然在最终路径生成，所以搬迁要放在 cleanup/ensure_youtube_sidecars 之前。
+    if let Some(staged_path) = staged_media_path.as_ref() {
+        crate::workflow::move_staged_file(staged_path, &output_path).await?;
     }
 
     if source.source_type == "douyin_collection" {
@@ -13092,5 +13127,79 @@ mod tests {
                 "file={file}"
             );
         }
+    }
+
+    #[test]
+    fn external_media_work_path_returns_none_without_staging_root() {
+        use std::path::Path;
+
+        let output = Path::new("/library/youtube/20260101000000-abc.mp4");
+        assert_eq!(super::external_media_work_path(output, None), None);
+    }
+
+    #[test]
+    fn external_media_work_path_is_stable_and_keeps_file_name() {
+        use std::path::Path;
+
+        let root = Path::new("/volume1/staging");
+        let output = Path::new("/library/youtube/20260101000000-abc.mp4");
+        let same = super::external_media_work_path(output, Some(root)).expect("应能派生暂存路径");
+        let again = super::external_media_work_path(output, Some(root)).expect("应能派生暂存路径");
+        let other = super::external_media_work_path(Path::new("/library/youtube/20260101000000-def.mp4"), Some(root))
+            .expect("应能派生暂存路径");
+
+        assert_eq!(same, again);
+        assert_ne!(same, other);
+        assert_eq!(same.file_name(), Some(std::ffi::OsStr::new("20260101000000-abc.mp4")));
+        let expected_dir = root.join(crate::workflow::staging_work_dir_name(output));
+        assert_eq!(same.parent(), Some(expected_dir.as_path()));
+    }
+
+    #[tokio::test]
+    async fn staged_external_media_moves_into_target_dir_and_cleans_staging() {
+        let stamp = std::process::id();
+        let root = std::env::temp_dir().join(format!("bili-sync-external-staging-{stamp}"));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let output = root.join("library").join("20260101000000-abc.mp4");
+        let staging_root = root.join("stage");
+        let work = super::external_media_work_path(&output, Some(&staging_root)).expect("应能派生暂存路径");
+        let work_parent = work.parent().expect("暂存子目录").to_path_buf();
+        tokio::fs::create_dir_all(&work_parent).await.expect("创建暂存目录");
+        tokio::fs::create_dir_all(output.parent().expect("目标目录"))
+            .await
+            .expect("创建目标目录");
+        tokio::fs::write(&work, b"external-media-bytes")
+            .await
+            .expect("写入暂存文件");
+
+        crate::workflow::move_staged_file(&work, &output)
+            .await
+            .expect("应能移动到目标目录");
+
+        assert!(!work.exists(), "暂存文件应已消失");
+        assert_eq!(
+            tokio::fs::read(&output).await.expect("读取目标文件"),
+            b"external-media-bytes".to_vec()
+        );
+        assert!(!work_parent.exists(), "空的暂存子目录应被清理");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[test]
+    fn external_media_staging_keeps_resume_sidecar_next_to_staged_file() {
+        use std::path::Path;
+
+        let root = Path::new("/volume1/staging");
+        let output = Path::new("/library/youtube/20260101000000-abc.mp4");
+        let work = super::external_media_work_path(output, Some(root)).expect("应能派生暂存路径");
+        let video_temporary = work.with_extension("video.mp4");
+        let sidecar = crate::downloader::resume_sidecar_path(&video_temporary);
+
+        assert_eq!(sidecar.parent(), work.parent());
+        assert_eq!(
+            sidecar.file_name(),
+            Some(std::ffi::OsStr::new("20260101000000-abc.video.mp4.resume"))
+        );
+        assert_ne!(sidecar.parent(), output.parent());
     }
 }

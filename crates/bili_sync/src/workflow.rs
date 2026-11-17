@@ -9783,14 +9783,14 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
 
 /// 计算最终文件对应的暂存工作路径：同一最终路径永远派生出同一个暂存位置，
 /// 这样进程崩溃重启后仍能通过 `.resume` 续传。
-fn staging_work_path(final_path: &Path, staging_root: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn staging_work_path(final_path: &Path, staging_root: Option<&Path>) -> Option<PathBuf> {
     let staging_root = staging_root?;
     let file_name = final_path.file_name()?;
     Some(staging_root.join(staging_work_dir_name(final_path)).join(file_name))
 }
 
 /// 用 FNV-1a 64 位哈希把最终路径映射成稳定的暂存子目录名（不引入额外依赖）。
-fn staging_work_dir_name(final_path: &Path) -> String {
+pub(crate) fn staging_work_dir_name(final_path: &Path) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in final_path.to_string_lossy().as_bytes() {
         hash ^= u64::from(*byte);
@@ -9802,7 +9802,7 @@ fn staging_work_dir_name(final_path: &Path) -> String {
 /// 判断 rename 失败是否需要退化为「先拷贝再删除」：只有跨设备（不同文件系统）
 /// 才需要，unix 是 EXDEV(18)，windows 是 ERROR_NOT_SAME_DEVICE(17)，其它错误必须上抛，
 /// 让任务失败重试并保留暂存文件。
-fn staged_move_requires_copy(error_code: Option<i32>) -> bool {
+pub(crate) fn staged_move_requires_copy(error_code: Option<i32>) -> bool {
     matches!(error_code, Some(18) | Some(17))
 }
 
@@ -9810,7 +9810,7 @@ fn staged_move_requires_copy(error_code: Option<i32>) -> bool {
 ///
 /// 同设备优先 `rename`（原子、秒级）；跨设备才退化为 copy + sync + rename + 删源。
 /// 其它错误直接上抛：调用方按任务失败处理并保留暂存文件，下次重试继续复用。
-async fn move_staged_file(from: &Path, to: &Path) -> Result<()> {
+pub(crate) async fn move_staged_file(from: &Path, to: &Path) -> Result<()> {
     if from == to {
         return Ok(());
     }
