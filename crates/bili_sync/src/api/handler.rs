@@ -11801,6 +11801,8 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         aria2_health_check_interval: config.aria2_health_check_interval,
         // 多P视频目录结构配置
         multi_page_use_season_structure: config.multi_page_use_season_structure,
+        // 结构变化（如单P变多P）后自动整理已下载分页
+        auto_reorganize_pages: config.auto_reorganize_pages,
         // 合集目录结构配置
         collection_use_season_structure: config.collection_use_season_structure,
         // 番剧目录结构配置
@@ -12407,6 +12409,8 @@ pub async fn update_config(
             submission_adaptive_max_hours: params.submission_adaptive_max_hours,
             // 多P视频目录结构配置
             multi_page_use_season_structure: params.multi_page_use_season_structure,
+            // 结构变化（如单P变多P）后自动整理已下载分页
+            auto_reorganize_pages: params.auto_reorganize_pages,
             // 合集目录结构配置
             collection_use_season_structure: params.collection_use_season_structure,
             // 番剧目录结构配置
@@ -12535,6 +12539,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "submission_adaptive_scan" => Some("B站源自适应扫描开关"),
         "submission_adaptive_max_hours" => Some("B站源自适应最大间隔"),
         "multi_page_use_season_structure" => Some("多P使用Season目录"),
+        "auto_reorganize_pages" => Some("结构变化时自动整理已下载分页"),
         "collection_use_season_structure" => Some("合集使用Season目录"),
         "bangumi_use_season_structure" => Some("番剧使用Season目录"),
         "upper_path" => Some("UP头像缓存路径"),
@@ -12677,6 +12682,28 @@ mod config_update_tests {
         sync_nfo_time_type(&mut config, NFOTimeType::PubTime, &mut updated_fields);
 
         assert!(updated_fields.is_empty());
+    }
+
+    #[test]
+    fn auto_reorganize_pages_defaults_to_enabled() {
+        assert!(Config::default().auto_reorganize_pages);
+    }
+
+    #[test]
+    fn update_config_request_parses_auto_reorganize_pages() {
+        use crate::api::request::UpdateConfigRequest;
+
+        let false_json = r#"{"auto_reorganize_pages": false}"#;
+        let true_json = r#"{"auto_reorganize_pages": true}"#;
+
+        let disabled: UpdateConfigRequest = serde_json::from_str(false_json).expect("应能解析 false");
+        assert_eq!(disabled.auto_reorganize_pages, Some(false));
+
+        let enabled: UpdateConfigRequest = serde_json::from_str(true_json).expect("应能解析 true");
+        assert_eq!(enabled.auto_reorganize_pages, Some(true));
+
+        let absent: UpdateConfigRequest = serde_json::from_str("{}").expect("空对象应能解析");
+        assert_eq!(absent.auto_reorganize_pages, None);
     }
 }
 
@@ -13614,6 +13641,14 @@ pub async fn update_config_internal(
         }
     }
 
+    // 结构变化（如单P变多P）后是否自动把已下载分页迁入 Season 结构
+    if let Some(enabled) = params.auto_reorganize_pages {
+        if enabled != config.auto_reorganize_pages {
+            config.auto_reorganize_pages = enabled;
+            updated_fields.push("auto_reorganize_pages");
+        }
+    }
+
     // 处理合集目录结构配置
     if let Some(use_season_structure) = params.collection_use_season_structure {
         if use_season_structure != config.collection_use_season_structure {
@@ -14285,6 +14320,14 @@ pub async fn update_config_internal(
                         .update_config_item(
                             "multi_page_use_season_structure",
                             serde_json::to_value(config.multi_page_use_season_structure)?,
+                        )
+                        .await
+                }
+                "auto_reorganize_pages" => {
+                    manager
+                        .update_config_item(
+                            "auto_reorganize_pages",
+                            serde_json::to_value(config.auto_reorganize_pages)?,
                         )
                         .await
                 }

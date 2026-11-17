@@ -151,6 +151,8 @@ pub struct UpdateConfigTask {
     pub submission_adaptive_max_hours: Option<u64>,
     // 多P视频目录结构配置
     pub multi_page_use_season_structure: Option<bool>,
+    // 结构变化（如单P变多P）后自动把已下载分页迁入 Season 结构
+    pub auto_reorganize_pages: Option<bool>,
     // 合集目录结构配置
     pub collection_use_season_structure: Option<bool>,
     // 番剧目录结构配置
@@ -2443,6 +2445,8 @@ impl ConfigTaskQueue {
                 aria2_health_check_interval: None,
                 // 多P视频目录结构配置
                 multi_page_use_season_structure: task.multi_page_use_season_structure,
+                // 结构变化（如单P变多P）后自动整理已下载分页
+                auto_reorganize_pages: task.auto_reorganize_pages,
                 // 合集目录结构配置
                 collection_use_season_structure: task.collection_use_season_structure,
                 // 番剧目录结构配置
@@ -3056,5 +3060,22 @@ mod tests {
         }
 
         assert!(!queue.is_processing(), "保护释放后应清除处理中状态");
+    }
+
+    #[test]
+    fn update_config_task_keeps_auto_reorganize_pages_through_serde() {
+        // 任务队列会把 UpdateConfigTask 序列化进 task_queue.task_data，再读回转成配置请求；
+        // 这里锁住该字段在 JSON 往返中不丢，否则「保存成功但刷新后开关自己变回去」会复现。
+        let raw = r#"{"task_id":"t1","auto_reorganize_pages":false}"#;
+        let task: UpdateConfigTask = serde_json::from_str(raw).expect("更新配置任务应能反序列化");
+        assert_eq!(task.auto_reorganize_pages, Some(false));
+
+        let json = serde_json::to_string(&task).expect("更新配置任务应能序列化");
+        let restored: UpdateConfigTask = serde_json::from_str(&json).expect("序列化结果应能读回");
+        assert_eq!(restored.auto_reorganize_pages, Some(false));
+
+        let absent_json = r#"{"task_id":"t2"}"#;
+        let absent: UpdateConfigTask = serde_json::from_str(absent_json).expect("缺省字段应可反序列化");
+        assert_eq!(absent.auto_reorganize_pages, None);
     }
 }
