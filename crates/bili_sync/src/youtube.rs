@@ -5058,6 +5058,38 @@ fn external_media_work_path(output_path: &Path, staging_root: Option<&Path>) -> 
     crate::workflow::staging_work_path(output_path, staging_root)
 }
 
+/// 旧版本把外源平台的下载中间文件直接放在媒体目录（`<最终文件名>.video.mp4`、
+/// `.audio.m4a`、`.download.m4a` 等）。开启暂存目录后，把这些旧临时文件连同 `.resume`
+/// 搬到暂存工作路径，避免从零重下。返回需要迁移的 (旧路径, 暂存路径) 列表。
+fn legacy_external_media_temp_pairs(
+    output_path: &Path,
+    work_path: &Path,
+    video_ext: Option<&str>,
+    audio_ext: Option<&str>,
+) -> Vec<(PathBuf, PathBuf)> {
+    if output_path == work_path {
+        return Vec::new();
+    }
+    let mut pairs = Vec::new();
+    if let Some(ext) = video_ext {
+        pairs.push((
+            output_path.with_extension(format!("video.{ext}")),
+            work_path.with_extension(format!("video.{ext}")),
+        ));
+    }
+    if let Some(ext) = audio_ext {
+        pairs.push((
+            output_path.with_extension(format!("audio.{ext}")),
+            work_path.with_extension(format!("audio.{ext}")),
+        ));
+    }
+    pairs.push((
+        output_path.with_extension("download.m4a"),
+        work_path.with_extension("download.m4a"),
+    ));
+    pairs
+}
+
 async fn download_youtube_media(
     downloader: &UnifiedDownloader,
     source: &youtube_source::Model,
@@ -5266,7 +5298,7 @@ async fn download_youtube_media(
 
     // 外源平台的下载中间文件名是 `最终文件名.video.mp4` / `.audio.m4a` / `.merging.mp4` 等，
     // 默认直接落在媒体库目录里。配置了「下载暂存目录」后改写进暂存区，成品搬回最终路径；
-    // 图集由 `download_image_post` 自己写最终文件，不套暂存。
+    // 图集由 `download_image_post` 自己走暂存，这里不重复套一层。
     let media_staging_root = if media_exists || metadata.is_slideshow() {
         None
     } else {
@@ -5281,6 +5313,21 @@ async fn download_youtube_media(
         }
     }
     let media_work_path = staged_media_path.as_deref().unwrap_or(&output_path);
+    if media_work_path != output_path.as_path() {
+        // 旧版本留在媒体目录里的中间文件先搬进暂存区，之前下到一半的流可以继续续传。
+        let (video_ext, audio_ext) = selected
+            .as_ref()
+            .map(|streams| {
+                (
+                    streams.video.as_ref().and_then(|stream| stream.ext.as_deref()),
+                    streams.audio.as_ref().and_then(|stream| stream.ext.as_deref()),
+                )
+            })
+            .unwrap_or((None, None));
+        for (legacy, staged) in legacy_external_media_temp_pairs(&output_path, media_work_path, video_ext, audio_ext) {
+            crate::workflow::migrate_legacy_temp_file(&legacy, &staged).await;
+        }
+    }
 
     if media_exists {
         // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
@@ -13201,5 +13248,33 @@ mod tests {
             Some(std::ffi::OsStr::new("20260101000000-abc.video.mp4.resume"))
         );
         assert_ne!(sidecar.parent(), output.parent());
+    }
+    #[test]
+    fn legacy_external_media_temp_pairs_follow_work_path() {
+        let output = std::path::Path::new("/library/YouTube/20091025000000-dQw4w9WgXcQ.mp4");
+        let work = std::path::Path::new("/staging/hash/20091025000000-dQw4w9WgXcQ.mp4");
+
+        let pairs = super::legacy_external_media_temp_pairs(output, work, Some("mp4"), Some("m4a"));
+
+        assert_eq!(
+            pairs,
+            vec![
+                (output.with_extension("video.mp4"), work.with_extension("video.mp4")),
+                (output.with_extension("audio.m4a"), work.with_extension("audio.m4a")),
+                (
+                    output.with_extension("download.m4a"),
+                    work.with_extension("download.m4a")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_external_media_temp_pairs_are_empty_without_staging() {
+        let output = std::path::Path::new("/library/YouTube/20091025000000-dQw4w9WgXcQ.mp4");
+        assert!(
+            super::legacy_external_media_temp_pairs(output, output, Some("mp4"), Some("m4a")).is_empty(),
+            "未启用暂存目录时不应产生迁移动作"
+        );
     }
 }
