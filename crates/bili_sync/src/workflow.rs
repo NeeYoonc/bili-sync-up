@@ -9785,6 +9785,14 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
 /// 这样进程崩溃重启后仍能通过 `.resume` 续传。
 pub(crate) fn staging_work_path(final_path: &Path, staging_root: Option<&Path>) -> Option<PathBuf> {
     let staging_root = staging_root?;
+    // 兜底：配置加载与接口校验都会拦住相对路径，这里再挡一次，避免按进程工作目录写文件。
+    if !staging_root.is_absolute() {
+        warn!(
+            "下载暂存目录不是绝对路径，已忽略并退回媒体目录: {}",
+            staging_root.display()
+        );
+        return None;
+    }
     let file_name = final_path.file_name()?;
     Some(staging_root.join(staging_work_dir_name(final_path)).join(file_name))
 }
@@ -18391,6 +18399,12 @@ mod tests {
     fn staging_work_path_returns_none_without_root() {
         let final_path = Path::new("/library/Shake It/P01.mp4");
         assert_eq!(staging_work_path(final_path, None), None);
+    }
+
+    #[test]
+    fn staging_work_path_ignores_relative_root() {
+        let final_path = Path::new("/library/Shake It/P01.mp4");
+        assert_eq!(staging_work_path(final_path, Some(Path::new("rel/stage"))), None);
     }
 
     #[test]

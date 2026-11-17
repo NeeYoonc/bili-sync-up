@@ -343,14 +343,16 @@ impl ConfigManager {
     pub async fn load_config_bundle(&self) -> Result<ConfigBundle> {
         // 尝试从数据库加载配置
         match self.load_from_database().await {
-            Ok(config) => {
+            Ok(mut config) => {
+                config.sanitize_download_staging_dir();
                 debug!("从数据库加载配置成功");
                 ConfigBundle::from_config_lenient(config)
             }
             Err(e) => {
                 warn!("从数据库加载配置失败: {}, 尝试从TOML加载", e);
                 // 如果数据库加载失败，回退到TOML配置
-                let config = self.load_from_toml()?;
+                let mut config = self.load_from_toml()?;
+                config.sanitize_download_staging_dir();
 
                 // 将TOML配置迁移到数据库
                 if let Err(migrate_err) = self.migrate_to_database(&config).await {
