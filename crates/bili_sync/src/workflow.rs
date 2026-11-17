@@ -3950,6 +3950,237 @@ fn video_status_should_run_upper_face(separate_status: &[bool; 5]) -> bool {
     separate_status[VIDEO_STATUS_UPPER_FACE_INDEX]
 }
 
+/// 迁移计划里的单个文件移动（纯数据，不含任何 IO）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PageRelocation {
+    from: PathBuf,
+    to: PathBuf,
+}
+
+/// 参与迁移决策的单个分页候选信息。
+#[derive(Debug, Clone)]
+struct PageRelocationCandidate {
+    old_path: PathBuf,
+    target_path: PathBuf,
+    old_exists: bool,
+    target_exists: bool,
+    sidecar_names: Vec<String>,
+}
+
+/// 迁移时一并搬运的同 stem 附属文件后缀（字幕/元数据/封面）。
+const RELOCATION_SIDECAR_SUFFIXES: [&str; 5] = [".ass", ".srt", ".nfo", "-thumb.jpg", "-fanart.jpg"];
+
+/// 判断目录里的某个文件名是否是旧分页（stem 等于 `old_stem`）的附属文件，
+/// 返回需要拼到新 stem 后面的后缀部分。
+fn relocation_sidecar_remainder<'a>(name: &'a str, old_stem: &str) -> Option<&'a str> {
+    let remainder = name.strip_prefix(old_stem)?;
+    if !(remainder.starts_with('.') || remainder.starts_with('-')) {
+        return None;
+    }
+    RELOCATION_SIDECAR_SUFFIXES
+        .iter()
+        .any(|suffix| remainder.ends_with(suffix))
+        .then_some(remainder)
+}
+
+/// 纯函数：算出需要迁移的文件清单（不含 IO 与数据库操作，方便单测）。
+fn plan_page_relocations(
+    enabled: bool,
+    video_root: &Path,
+    season_path: &Path,
+    candidates: &[PageRelocationCandidate],
+) -> Vec<PageRelocation> {
+    if !enabled {
+        return Vec::new();
+    }
+    let mut relocations = Vec::new();
+    for candidate in candidates {
+        if !candidate.old_exists || candidate.target_exists || candidate.old_path == candidate.target_path {
+            continue;
+        }
+        // 只处理「文件直接在视频根目录、目标在 Season 目录」这一种结构变化，
+        // 已经在 Season 子目录里的页不会再被搬第二遍。
+        if candidate.old_path.parent() != Some(video_root) || candidate.target_path.parent() != Some(season_path) {
+            continue;
+        }
+        let Some(old_stem) = candidate.old_path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(new_stem) = candidate.target_path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        relocations.push(PageRelocation {
+            from: candidate.old_path.clone(),
+            to: candidate.target_path.clone(),
+        });
+        for name in &candidate.sidecar_names {
+            if let Some(remainder) = relocation_sidecar_remainder(name, old_stem) {
+                relocations.push(PageRelocation {
+                    from: video_root.join(name),
+                    to: season_path.join(format!("{new_stem}{remainder}")),
+                });
+            }
+        }
+    }
+    relocations
+}
+
+/// 列出目录下的普通文件名（用于匹配同 stem 的附属文件，读取失败时返回空列表）。
+async fn collect_relocation_sidecar_names(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(mut entries) = fs::read_dir(dir).await else {
+        return names;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_type().await.map(|kind| kind.is_file()).unwrap_or(false) {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    names
+}
+
+/// 移动单个文件：优先 rename，失败（如跨设备 EXDEV）时回退为复制后删除。
+async fn move_relocation_file(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("创建目标目录失败: {}", parent.display()))?;
+    }
+    match fs::rename(from, to).await {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            fs::copy(from, to).await.with_context(|| {
+                format!(
+                    "迁移文件失败（rename 与 copy 均失败，rename 错误: {rename_error}）: {}",
+                    from.display()
+                )
+            })?;
+            if let Err(remove_error) = fs::remove_file(from).await {
+                warn!(
+                    "迁移文件已复制但删除旧文件失败: {} (err={remove_error})",
+                    from.display()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 结构变化自愈：把仍留在视频根目录、按旧结构命名的分页文件迁入 Season 目录，
+/// 并同步更新数据库里的分页路径。任何单页失败都只记日志，不阻断本次下载。
+async fn relocate_legacy_pages_into_season(
+    config: &crate::config::Config,
+    video_source: &VideoSourceEnum,
+    video_model: &video::Model,
+    pages: &mut [page::Model],
+    connection: &DatabaseConnection,
+    base_path: &Path,
+    season_folder: Option<&str>,
+) {
+    if !config.auto_reorganize_pages || season_folder.is_none() || video_model.single_page.unwrap_or(true) {
+        return;
+    }
+    // 番剧、合集与「UP主合集」模式使用各自的目录命名规则，这里只处理普通投稿多P的 Season 结构变化。
+    if matches!(
+        video_source,
+        VideoSourceEnum::BangumiSource(_) | VideoSourceEnum::Collection(_)
+    ) || config.collection_folder_mode.as_ref() == "up_seasonal"
+    {
+        return;
+    }
+    let Some(video_root) = base_path.parent() else {
+        return;
+    };
+    let sidecar_names = collect_relocation_sidecar_names(video_root).await;
+    let mut candidates = Vec::new();
+    for page_model in pages.iter() {
+        // 仍待下载的页先不动：它可能就是要重新下载，提前搬走旧文件会打乱重下判断。
+        let should_run_page = PageStatus::from(page_model.download_status).should_run();
+        if should_run_page.iter().any(|needs_download| *needs_download) {
+            continue;
+        }
+        let Some(old_path) = page_model
+            .path
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
+        let page_args = page_format_args(video_model, page_model);
+        let Ok(rendered) = crate::config::with_config(|bundle| bundle.render_multi_page_template(&page_args)) else {
+            debug!("分页文件迁移：模板渲染失败，跳过 page_id={}", page_model.id);
+            continue;
+        };
+        let base_name =
+            crate::utils::filenamify::cap_path_segments_bytes(&rendered, crate::utils::filenamify::MAX_BASENAME_BYTES);
+        let extension = old_path.extension().and_then(|value| value.to_str()).unwrap_or("mp4");
+        let target_path = base_path.join(format!("{base_name}.{extension}"));
+        candidates.push(PageRelocationCandidate {
+            old_exists: old_path.is_file(),
+            target_exists: target_path.exists(),
+            old_path,
+            target_path,
+            sidecar_names: sidecar_names.clone(),
+        });
+    }
+    for candidate in &candidates {
+        if candidate.old_exists && candidate.target_exists {
+            warn!(
+                "分页文件已存在 Season 目录，跳过迁移: {} -> {}",
+                candidate.old_path.display(),
+                candidate.target_path.display()
+            );
+        }
+    }
+    let relocations = plan_page_relocations(config.auto_reorganize_pages, video_root, base_path, &candidates);
+    if relocations.is_empty() {
+        return;
+    }
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for relocation in &relocations {
+        match move_relocation_file(&relocation.from, &relocation.to).await {
+            Ok(()) => moved.push((relocation.from.clone(), relocation.to.clone())),
+            Err(error) => warn!(
+                "迁移分页文件失败（不影响本次下载）: {} -> {}: {error:#}",
+                relocation.from.display(),
+                relocation.to.display()
+            ),
+        }
+    }
+    if moved.is_empty() {
+        return;
+    }
+    for page_model in pages.iter_mut() {
+        let Some(current_path) = page_model.path.as_deref().map(PathBuf::from) else {
+            continue;
+        };
+        let Some((_, new_path)) = moved.iter().find(|(from, _)| *from == current_path) else {
+            continue;
+        };
+        let new_path_string = new_path.to_string_lossy().to_string();
+        let active = page::ActiveModel {
+            id: Set(page_model.id),
+            path: Set(Some(new_path_string.clone())),
+            ..Default::default()
+        };
+        match page::Entity::update(active).exec(connection).await {
+            Ok(_) => {
+                info!(
+                    "已将已有分页文件迁入 Season 结构: {} -> {}",
+                    current_path.display(),
+                    new_path.display()
+                );
+                page_model.path = Some(new_path_string);
+            }
+            Err(error) => warn!(
+                "分页文件已迁移但更新数据库路径失败: page_id={}, err={error}",
+                page_model.id
+            ),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn download_video_pages(
     bili_client: &BiliClient,
@@ -5932,6 +6163,19 @@ async fn download_video_pages(
     let inline_chapters_split = Arc::new(TokioMutex::new(false));
     let inline_skip_reason = Arc::new(TokioMutex::new(None));
     let inline_skip_reason_touched = Arc::new(TokioMutex::new(false));
+    // 结构变化自愈：单P先下载、之后追加分P（或模板改成 Season 结构）时，
+    // 旧的分页文件会留在视频根目录，这里在下载新分页前把它们迁进 Season 目录。
+    let mut pages = pages;
+    relocate_legacy_pages_into_season(
+        &current_config,
+        video_source,
+        &final_video_model,
+        &mut pages,
+        connection,
+        &base_path,
+        season_folder.as_deref(),
+    )
+    .await;
     let res_5_fut = Box::pin(
         // 分发并执行分 P 下载的任务
         dispatch_download_page(
@@ -17875,6 +18119,106 @@ mod tests {
             super::empty_subtitle_status(false),
             ExecutionStatus::Succeeded
         ));
+    }
+
+    fn relocation_root_and_season() -> (PathBuf, PathBuf) {
+        let root = PathBuf::from("/tmp/bili-sync-library/Shake It");
+        let season = root.join("Season 01");
+        (root, season)
+    }
+
+    fn legacy_page_candidate(root: &Path, season: &Path) -> PageRelocationCandidate {
+        PageRelocationCandidate {
+            old_path: root.join("2026-03-28-BV1HiXxBuEFt-P01.mp4"),
+            target_path: season.join("P01.mp4"),
+            old_exists: true,
+            target_exists: false,
+            sidecar_names: vec![
+                "2026-03-28-BV1HiXxBuEFt-P01.mp4".to_string(),
+                "2026-03-28-BV1HiXxBuEFt-P01.zh-CN.default.ass".to_string(),
+                "2026-03-28-BV1HiXxBuEFt-P01.zho.ass".to_string(),
+                "2026-03-28-BV1HiXxBuEFt-P01.srt".to_string(),
+                "2026-03-28-BV1HiXxBuEFt-P01.nfo".to_string(),
+                "2026-03-28-BV1HiXxBuEFt-P01-thumb.jpg".to_string(),
+                "2026-03-28-BV1HiXxBuEFt-P01-fanart.jpg".to_string(),
+                "cover.jpg".to_string(),
+            ],
+        }
+    }
+
+    #[test]
+    fn relocation_plan_moves_root_page_and_sidecars_into_season() {
+        let (root, season) = relocation_root_and_season();
+        let relocations = plan_page_relocations(true, &root, &season, &[legacy_page_candidate(&root, &season)]);
+        assert_eq!(relocations.len(), 7);
+        assert_eq!(relocations[0].to, season.join("P01.mp4"));
+        assert_eq!(relocations[0].from, root.join("2026-03-28-BV1HiXxBuEFt-P01.mp4"));
+        assert!(relocations
+            .iter()
+            .any(|item| item.to == season.join("P01.zh-CN.default.ass")));
+        assert!(relocations.iter().any(|item| item.to == season.join("P01.zho.ass")));
+        assert!(relocations.iter().any(|item| item.to == season.join("P01.srt")));
+        assert!(relocations.iter().any(|item| item.to == season.join("P01.nfo")));
+        assert!(relocations.iter().any(|item| item.to == season.join("P01-thumb.jpg")));
+        assert!(relocations.iter().any(|item| item.to == season.join("P01-fanart.jpg")));
+        assert!(!relocations.iter().any(|item| item.to == season.join("P01.cover.jpg")));
+    }
+
+    #[test]
+    fn relocation_plan_skips_page_already_in_season() {
+        let (root, season) = relocation_root_and_season();
+        let mut candidate = legacy_page_candidate(&root, &season);
+        candidate.old_path = season.join("P01.mp4");
+        candidate.target_path = season.join("P01.mp4");
+        assert!(plan_page_relocations(true, &root, &season, &[candidate]).is_empty());
+    }
+
+    #[test]
+    fn relocation_plan_skips_page_already_at_target_path() {
+        let (root, _season) = relocation_root_and_season();
+        let path = root.join("P01.mp4");
+        let candidate = PageRelocationCandidate {
+            old_path: path.clone(),
+            target_path: path,
+            old_exists: true,
+            target_exists: true,
+            sidecar_names: Vec::new(),
+        };
+        assert!(plan_page_relocations(true, &root, &root, &[candidate]).is_empty());
+    }
+
+    #[test]
+    fn relocation_plan_skips_when_target_already_exists() {
+        let (root, season) = relocation_root_and_season();
+        let mut candidate = legacy_page_candidate(&root, &season);
+        candidate.target_exists = true;
+        assert!(plan_page_relocations(true, &root, &season, &[candidate]).is_empty());
+    }
+
+    #[test]
+    fn relocation_plan_is_empty_when_disabled() {
+        let (root, season) = relocation_root_and_season();
+        let candidate = legacy_page_candidate(&root, &season);
+        assert!(plan_page_relocations(false, &root, &season, &[candidate]).is_empty());
+    }
+
+    #[test]
+    fn relocation_sidecar_matching_only_covers_known_suffixes() {
+        assert_eq!(
+            relocation_sidecar_remainder("old.zh-CN.default.ass", "old"),
+            Some(".zh-CN.default.ass")
+        );
+        assert_eq!(relocation_sidecar_remainder("old.ai-zh.srt", "old"), Some(".ai-zh.srt"));
+        assert_eq!(relocation_sidecar_remainder("old.srt", "old"), Some(".srt"));
+        assert_eq!(relocation_sidecar_remainder("old.nfo", "old"), Some(".nfo"));
+        assert_eq!(relocation_sidecar_remainder("old-thumb.jpg", "old"), Some("-thumb.jpg"));
+        assert_eq!(
+            relocation_sidecar_remainder("old-fanart.jpg", "old"),
+            Some("-fanart.jpg")
+        );
+        assert_eq!(relocation_sidecar_remainder("old.mp4", "old"), None);
+        assert_eq!(relocation_sidecar_remainder("other.ass", "old"), None);
+        assert_eq!(relocation_sidecar_remainder("old", "old"), None);
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测
