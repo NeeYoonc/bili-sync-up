@@ -12308,6 +12308,24 @@ pub async fn preview_filename_templates(
     Ok(ApiResponse::ok(FilenamePreviewResponse { items, warnings }))
 }
 
+/// 解析并校验「下载暂存目录」参数。
+///
+/// 空字符串表示取消配置（回退为旧行为）；非空值必须是绝对路径，
+/// 相对路径会按进程工作目录解析，可能把中间文件写到容器工作目录或错误磁盘。
+fn parse_download_staging_dir(raw: &str) -> std::result::Result<Option<std::path::PathBuf>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let path = std::path::PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(format!(
+            "下载暂存目录必须是绝对路径，例如 /Downloads/.bili-sync-staging，检测到: {trimmed}"
+        ));
+    }
+    Ok(Some(path))
+}
+
 /// 更新配置
 #[utoipa::path(
     put,
@@ -12323,6 +12341,13 @@ pub async fn update_config(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     axum::Json(params): axum::Json<crate::api::request::UpdateConfigRequest>,
 ) -> Result<ApiResponse<crate::api::response::UpdateConfigResponse>, ApiError> {
+    // 先校验下载暂存目录，非法值直接拒绝，不进入排队/落库
+    if let Some(staging_dir) = params.download_staging_dir.as_deref() {
+        if let Err(message) = parse_download_staging_dir(staging_dir) {
+            return Err(ApiError::bad_request(message));
+        }
+    }
+
     // 检查是否正在扫描
     if crate::task::is_scanning() {
         // 正在扫描，将更新配置任务加入队列
@@ -12733,6 +12758,26 @@ mod config_update_tests {
 
         let absent: UpdateConfigRequest = serde_json::from_str("{}").expect("空对象应能解析");
         assert_eq!(absent.download_staging_dir, None);
+    }
+
+    #[test]
+    fn parse_download_staging_dir_rejects_relative_path() {
+        let message = super::parse_download_staging_dir("rel/stage").expect_err("相对路径必须被拒绝");
+        assert!(message.contains("绝对路径"), "错误信息应提示需要绝对路径: {message}");
+    }
+
+    #[test]
+    fn parse_download_staging_dir_accepts_absolute_path() {
+        let path = super::parse_download_staging_dir(" /mnt/staging ").expect("绝对路径应通过");
+        assert_eq!(path, Some(std::path::PathBuf::from("/mnt/staging")));
+    }
+
+    #[test]
+    fn parse_download_staging_dir_treats_blank_as_disabled() {
+        assert_eq!(
+            super::parse_download_staging_dir("   ").expect("空字符串应视为未配置"),
+            None
+        );
     }
 }
 
@@ -13679,12 +13724,7 @@ pub async fn update_config_internal(
     }
     // 下载暂存目录：留空字符串表示恢复为「与目标目录相同」
     if let Some(staging_dir) = params.download_staging_dir {
-        let trimmed_staging_dir = staging_dir.trim();
-        let new_staging_dir = if trimmed_staging_dir.is_empty() {
-            None
-        } else {
-            Some(std::path::PathBuf::from(trimmed_staging_dir))
-        };
+        let new_staging_dir = parse_download_staging_dir(&staging_dir).map_err(ApiError::bad_request)?;
         if new_staging_dir != config.download_staging_dir {
             config.download_staging_dir = new_staging_dir;
             updated_fields.push("download_staging_dir");

@@ -807,6 +807,23 @@ impl Default for Config {
 }
 
 impl Config {
+    /// 加载配置时清理非法值：下载暂存目录必须是绝对路径，否则回退为「未配置」。
+    ///
+    /// 相对路径会按进程工作目录解析，可能把下载中间文件写到容器工作目录或错误磁盘，
+    /// 因此这里直接丢弃并打 WARN，让下载回到「与媒体目录相同」的旧行为。
+    pub fn sanitize_download_staging_dir(&mut self) {
+        let Some(staging_dir) = self.download_staging_dir.as_ref() else {
+            return;
+        };
+        if !staging_dir.is_absolute() {
+            warn!(
+                "下载暂存目录配置无效（必须是绝对路径），已忽略并回退为不使用暂存目录: {}",
+                staging_dir.display()
+            );
+            self.download_staging_dir = None;
+        }
+    }
+
     #[cfg(not(test))]
     pub fn check(&self) -> bool {
         let mut ok = true;
@@ -913,5 +930,31 @@ impl Config {
         }
 
         ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn sanitize_download_staging_dir_drops_relative_path() {
+        let mut config = Config {
+            download_staging_dir: Some(PathBuf::from("rel/stage")),
+            ..Default::default()
+        };
+        config.sanitize_download_staging_dir();
+        assert_eq!(config.download_staging_dir, None);
+    }
+
+    #[test]
+    fn sanitize_download_staging_dir_keeps_absolute_path() {
+        let mut config = Config {
+            download_staging_dir: Some(PathBuf::from("/mnt/staging")),
+            ..Default::default()
+        };
+        config.sanitize_download_staging_dir();
+        assert_eq!(config.download_staging_dir.as_deref(), Some(Path::new("/mnt/staging")));
     }
 }
