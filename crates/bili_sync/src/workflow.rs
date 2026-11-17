@@ -18425,40 +18425,45 @@ mod tests {
         let root = unique_temp_dir("staging-move");
         let staging_dir = root.join("staging").join("hash-a");
         let target_dir = root.join("library").join("Shake It");
-        fs::create_dir_all(&staging_dir).await.expect("创建暂存目录");
-        fs::create_dir_all(&target_dir).await.expect("创建目标目录");
+        tokio::fs::create_dir_all(&staging_dir).await.expect("创建暂存目录");
+        tokio::fs::create_dir_all(&target_dir).await.expect("创建目标目录");
         let from = staging_dir.join("P01.mp4");
         let to = target_dir.join("P01.mp4");
-        fs::write(&from, b"staged-bytes").await.expect("写入暂存文件");
+        tokio::fs::write(&from, b"staged-bytes").await.expect("写入暂存文件");
 
         move_staged_file(&from, &to).await.expect("应能移动暂存文件");
 
         assert!(!from.exists());
-        assert_eq!(fs::read(&to).await.expect("读取目标文件"), b"staged-bytes".to_vec());
+        assert_eq!(
+            tokio::fs::read(&to).await.expect("读取目标文件"),
+            b"staged-bytes".to_vec()
+        );
         assert!(!staging_dir.exists(), "空的暂存子目录应被清理");
 
-        let _ = fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[tokio::test]
     async fn move_staged_file_keeps_source_when_target_dir_is_not_writable() {
         let root = unique_temp_dir("staging-error");
         let staging_dir = root.join("staging").join("hash-b");
-        fs::create_dir_all(&staging_dir).await.expect("创建暂存目录");
+        tokio::fs::create_dir_all(&staging_dir).await.expect("创建暂存目录");
         let from = staging_dir.join("P01.mp4");
-        fs::write(&from, b"keep-me").await.expect("写入暂存文件");
+        tokio::fs::write(&from, b"keep-me").await.expect("写入暂存文件");
         // 父路径上放一个同名普通文件，创建目标目录必然失败
         let blocked_parent = root.join("blocked");
-        fs::write(&blocked_parent, b"not-a-dir").await.expect("写入占位文件");
+        tokio::fs::write(&blocked_parent, b"not-a-dir")
+            .await
+            .expect("写入占位文件");
         let to = blocked_parent.join("P01.mp4");
 
         let result = move_staged_file(&from, &to).await;
 
         assert!(result.is_err(), "目标目录不可创建时应报错");
         assert!(from.exists(), "失败时必须保留暂存文件");
-        assert_eq!(fs::read(&from).await.expect("读取暂存文件"), b"keep-me".to_vec());
+        assert_eq!(tokio::fs::read(&from).await.expect("读取暂存文件"), b"keep-me".to_vec());
 
-        let _ = fs::remove_dir_all(&root).await;
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[test]
