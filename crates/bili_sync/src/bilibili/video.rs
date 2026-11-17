@@ -2263,7 +2263,7 @@ mod tests {
     fn test_build_playurl_quality_fallback_levels_range() {
         assert_eq!(build_playurl_quality_fallback_levels(16, 16), vec![16]);
         assert_eq!(build_playurl_quality_fallback_levels(80, 16), vec![80, 64, 32, 16]);
-        assert_eq!(build_playurl_quality_fallback_levels(116, 80), vec![116, 112, 80]);
+        assert_eq!(build_playurl_quality_fallback_levels(116, 80), vec![116, 112, 100, 80]);
         // 传入反向范围时应自动纠正
         assert_eq!(build_playurl_quality_fallback_levels(16, 80), vec![80, 64, 32, 16]);
     }
