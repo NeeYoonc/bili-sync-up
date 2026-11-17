@@ -4856,6 +4856,48 @@ pub(crate) fn image_post_page_paths(output_path: &Path) -> Vec<PathBuf> {
     pages.into_iter().map(|(_, path)| path).collect()
 }
 
+/// 图集作品对应的暂存工作目录：沿用 B 站/外源平台的同一套哈希规则
+/// （`<暂存根>/<最终路径 FNV-1a 64 位哈希>/`），不另造一套，重启后仍能复用暂存内容。
+fn image_post_staging_work_dir(output_path: &Path, staging_root: Option<&Path>) -> Option<PathBuf> {
+    crate::workflow::staging_work_path(output_path, staging_root)?
+        .parent()
+        .map(Path::to_path_buf)
+}
+
+/// 把最终文件映射成暂存工作目录下的同名文件；未启用暂存时原样返回最终路径。
+fn image_post_work_file(final_file: &Path, parent: &Path, work_parent: &Path) -> PathBuf {
+    if work_parent == parent {
+        return final_file.to_path_buf();
+    }
+    match final_file.file_name() {
+        Some(name) => work_parent.join(name),
+        None => final_file.to_path_buf(),
+    }
+}
+
+/// 图集下载全部完成后的收尾：先把 `-images` 整目录搬进媒体目录（跨设备时逐文件拷贝），
+/// 再逐个搬视频分页、配乐与合成 MP4。任何一步失败都保留暂存内容并向上报错。
+async fn commit_image_post_staging(
+    platform: &str,
+    image_dir: &Path,
+    final_image_dir: &Path,
+    staged_moves: &[(PathBuf, PathBuf)],
+) -> Result<()> {
+    crate::workflow::move_staged_dir(image_dir, final_image_dir)
+        .await
+        .with_context(|| format!("把{platform}图集图片目录搬入媒体目录失败"))?;
+    for (from, to) in staged_moves {
+        crate::workflow::move_staged_file(from, to).await.with_context(|| {
+            format!(
+                "把{platform}图集暂存文件搬入媒体目录失败: {} -> {}",
+                from.display(),
+                to.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// 落地图集作品（图文、图片贴、多段动态）。
 ///
 /// 规则：
@@ -4885,7 +4927,19 @@ pub(crate) async fn download_image_post(
         .file_stem()
         .and_then(|value| value.to_str())
         .with_context(|| format!("{platform}图文输出文件名无效"))?;
-    let image_dir = parent.join(format!("{stem}-images"));
+    // 配置了下载暂存目录时，图集所有产物（`-images` 目录、视频段分页、配乐、合成 MP4、
+    // 段级 `.download` 临时文件）都先写进暂存区，全部成功后再一次性搬进媒体目录；
+    // 暂存关闭时工作目录就是媒体目录，行为与旧版本完全一致。
+    let staging_root = crate::config::reload_config().download_staging_dir;
+    let work_dir = image_post_staging_work_dir(output_path, staging_root.as_deref());
+    if let Some(dir) = work_dir.as_deref() {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .with_context(|| format!("创建{platform}图集下载暂存目录失败: {}", dir.display()))?;
+    }
+    let work_parent = work_dir.as_deref().unwrap_or(parent);
+    let image_dir = work_parent.join(format!("{stem}-images"));
+    let final_image_dir = parent.join(format!("{stem}-images"));
     tokio::fs::create_dir_all(&image_dir).await?;
 
     let segments = metadata.slideshow_segments();
@@ -4899,10 +4953,17 @@ pub(crate) async fn download_image_post(
 
     let mut image_paths: Vec<PathBuf> = Vec::new();
     let mut page_paths: Vec<PathBuf> = Vec::with_capacity(video_segment_count);
+    // 需要从暂存搬到媒体目录的文件：(暂存工作路径, 最终路径)。
+    let mut staged_moves: Vec<(PathBuf, PathBuf)> = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
         // 序号按作品内的段顺序连续编号，视频段不会挤掉后面图片段的编号。
         let ordinal = index + 1;
         if !segment.is_video() {
+            let final_path = final_image_dir.join(format!("{ordinal:02}.jpg"));
+            if media_file_ready(&final_path).await {
+                image_paths.push(final_path);
+                continue;
+            }
             let path = image_dir.join(format!("{ordinal:02}.jpg"));
             download_image_segment(downloader, source, &segment.image_urls, &path, ordinal, platform).await?;
             image_paths.push(path);
@@ -4910,37 +4971,52 @@ pub(crate) async fn download_image_post(
         }
         let page = page_paths.len() + 1;
         let target = image_post_page_file(parent, stem, page, video_segment_count);
-        if !media_file_ready(&target).await {
-            // 早前版本把视频段当临时片段下到 `-images/NN.mp4` 再合并成一条视频，
-            // 这里优先复用已经下好的片段，升级后不重复消耗用户流量。
-            let cached = image_dir.join(format!("{ordinal:02}.mp4"));
-            if media_file_ready(&cached).await {
-                replace_file(&cached, &target).await?;
-            } else {
-                download_image_post_segment(
-                    downloader,
-                    source,
-                    segment,
-                    &target,
-                    &image_dir.join(format!("{ordinal:02}.jpg")),
-                    ordinal,
-                    width,
-                    height,
-                    platform,
-                )
-                .await?;
-            }
+        page_paths.push(target.clone());
+        let work_target = image_post_work_file(&target, parent, work_parent);
+        if work_target != target && media_file_ready(&work_target).await {
+            // 上一次进程被中断时已经下好的分页，直接复用并在收尾时搬运。
+            staged_moves.push((work_target, target));
+            continue;
         }
-        page_paths.push(target);
+        if media_file_ready(&target).await {
+            continue;
+        }
+        // 早前版本把视频段当临时片段下到 `-images/NN.mp4` 再合并成一条视频，
+        // 这里优先复用已经下好的片段，升级后不重复消耗用户流量。
+        let cached = final_image_dir.join(format!("{ordinal:02}.mp4"));
+        if media_file_ready(&cached).await {
+            crate::workflow::move_staged_file(&cached, &work_target).await?;
+        } else {
+            download_image_post_segment(
+                downloader,
+                source,
+                segment,
+                &work_target,
+                &image_dir.join(format!("{ordinal:02}.jpg")),
+                ordinal,
+                width,
+                height,
+                platform,
+            )
+            .await?;
+        }
+        if work_target != target {
+            staged_moves.push((work_target, target));
+        }
     }
 
     if video_segment_count == 0 {
         let music_path = parent.join(format!("{stem}-music.mp3"));
-        let has_music = if metadata.music_urls.is_empty() {
-            false
-        } else {
-            if !media_file_ready(&music_path).await {
-                let temporary = parent.join(format!("{stem}-music.download"));
+        let work_music_path = image_post_work_file(&music_path, parent, work_parent);
+        let mut music_for_compose: Option<PathBuf> = None;
+        if !metadata.music_urls.is_empty() {
+            if media_file_ready(&work_music_path).await {
+                if work_music_path != music_path {
+                    staged_moves.push((work_music_path.clone(), music_path.clone()));
+                }
+                music_for_compose = Some(work_music_path);
+            } else if !media_file_ready(&music_path).await {
+                let temporary = work_parent.join(format!("{stem}-music.download"));
                 let urls = metadata.music_urls.iter().map(String::as_str).collect::<Vec<_>>();
                 if let Err(error) = fetch_media(downloader, source, &urls, &temporary)
                     .await
@@ -4949,13 +5025,20 @@ pub(crate) async fn download_image_post(
                     let _ = remove_file_if_exists(&temporary).await;
                     return Err(error);
                 }
-                replace_file(&temporary, &music_path).await?;
+                replace_file(&temporary, &work_music_path).await?;
+                if work_music_path != music_path {
+                    staged_moves.push((work_music_path.clone(), music_path.clone()));
+                }
+                music_for_compose = Some(work_music_path);
+            } else {
+                music_for_compose = Some(music_path.clone());
             }
-            true
-        };
+        }
+        let has_music = music_for_compose.is_some();
         if !source.generate_image_post_video {
             // 关闭图文视频合成时只保留原图（以及可选配乐），避免为静态图片启动
             // 高分辨率 H.264 编码。旧版本留下的幻灯片 MP4 一并清理。
+            commit_image_post_staging(platform, &image_dir, &final_image_dir, &staged_moves).await?;
             remove_file_if_exists(output_path).await?;
             info!(
                 aweme_id = %metadata.id,
@@ -4965,24 +5048,31 @@ pub(crate) async fn download_image_post(
             );
             return Ok(output_path.to_path_buf());
         }
+        let work_output_path = image_post_work_file(output_path, parent, work_parent);
         compose_image_slideshow(
             platform,
             &image_paths,
-            output_path,
-            has_music.then_some(music_path.as_path()),
+            &work_output_path,
+            music_for_compose.as_deref(),
             width,
             height,
         )
         .await?;
+        if work_output_path != output_path {
+            staged_moves.push((work_output_path, output_path.to_path_buf()));
+        }
+        commit_image_post_staging(platform, &image_dir, &final_image_dir, &staged_moves).await?;
         info!(
             aweme_id = %metadata.id,
             segments = segments.len(),
+            music = has_music,
             path = %output_path.display(),
             "{platform}图集原图、配乐和幻灯片 MP4 合成完成"
         );
         return Ok(output_path.to_path_buf());
     }
 
+    commit_image_post_staging(platform, &image_dir, &final_image_dir, &staged_moves).await?;
     // 视频段各自成页后，作品目录里不能再留上一版合并出来的 `<作品>.mp4`，
     // 否则媒体库里同一作品会同时出现「合并版」和「分页版」。
     cleanup_stale_image_post_pages(output_path, parent, stem, &page_paths).await?;
@@ -6574,5 +6664,66 @@ mod tests {
             segments.iter().filter(|segment| segment.is_video()).count(),
             output_path.display()
         );
+    }
+    #[test]
+    fn image_post_staging_work_dir_follows_shared_hash_rule() {
+        let final_path = Path::new("/library/抖音/20260925-7689.mp4");
+        let staging_root = Path::new("/staging");
+        let work_dir = image_post_staging_work_dir(final_path, Some(staging_root)).expect("应能派生暂存目录");
+
+        assert_eq!(
+            work_dir,
+            staging_root.join(crate::workflow::staging_work_dir_name(final_path))
+        );
+        assert_eq!(work_dir.parent(), Some(staging_root));
+        assert_eq!(image_post_staging_work_dir(final_path, None), None);
+    }
+
+    #[test]
+    fn image_post_work_file_maps_into_staging_dir_only_when_enabled() {
+        let parent = Path::new("/library/抖音");
+        let final_file = parent.join("20260925-7689-images").join("01.jpg");
+        assert_eq!(image_post_work_file(&final_file, parent, parent), final_file);
+
+        let work_parent = Path::new("/staging/hash");
+        assert_eq!(
+            image_post_work_file(&final_file, parent, work_parent),
+            work_parent.join("01.jpg")
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_image_post_staging_moves_images_and_pages() {
+        let root = std::env::temp_dir().join(format!("bili-sync-image-post-staging-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        let work_image_dir = root.join("staging").join("hash").join("20260925-7689-images");
+        tokio::fs::create_dir_all(&work_image_dir)
+            .await
+            .expect("创建暂存图片目录");
+        tokio::fs::write(work_image_dir.join("01.jpg"), b"img")
+            .await
+            .expect("写入暂存图片");
+        let work_page = root.join("staging").join("hash").join("20260925-7689-P01.mp4");
+        tokio::fs::write(&work_page, b"page").await.expect("写入暂存分页");
+        let final_image_dir = root.join("library").join("20260925-7689-images");
+        let final_page = root.join("library").join("20260925-7689-P01.mp4");
+
+        commit_image_post_staging(
+            "抖音",
+            &work_image_dir,
+            &final_image_dir,
+            &[(work_page.clone(), final_page.clone())],
+        )
+        .await
+        .expect("提交图集暂存");
+
+        assert_eq!(
+            tokio::fs::read(final_image_dir.join("01.jpg")).await.expect("读取图片"),
+            b"img".to_vec()
+        );
+        assert_eq!(tokio::fs::read(&final_page).await.expect("读取分页"), b"page".to_vec());
+        assert!(!work_page.exists(), "暂存分页应被搬走");
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 }

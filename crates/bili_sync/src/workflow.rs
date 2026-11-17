@@ -9461,6 +9461,9 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
         }
         None => page_path.to_path_buf(),
     };
+    // 旧版本把下载临时文件直接留在媒体目录里，开启暂存目录后先搬到暂存工作路径，
+    // 这样之前下到一半的分片可以继续续传，不用从 0 重下。
+    migrate_legacy_download_temp_files(page_path, &work_page_path).await;
 
     let (total_bytes, video_stream_size_bytes, audio_stream_size_bytes) = if audio_only {
         debug!("音频模式：仅下载音频流，输出 M4A 格式");
@@ -9887,6 +9890,156 @@ async fn remove_empty_staging_dir(from: &Path) {
         if e.kind() != ErrorKind::NotFound {
             debug!("清理暂存子目录失败（忽略）: {}: {}", parent.display(), e);
         }
+    }
+}
+
+/// 把整个暂存目录搬到最终位置：同设备 `rename`；跨设备或目标目录已存在时逐文件搬运
+/// （先拷贝并 `sync_all`，再删源），保证媒体目录里不会出现半成品。失败时保留暂存内容。
+pub(crate) async fn move_staged_dir(from: &Path, to: &Path) -> Result<()> {
+    if from == to {
+        return Ok(());
+    }
+    if !tokio::fs::try_exists(from).await.unwrap_or(false) {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("创建目标目录失败: {}", parent.display()))?;
+    }
+    match fs::rename(from, to).await {
+        Ok(()) => {
+            info!("已将暂存目录移动到目标位置: {} -> {}", from.display(), to.display());
+            return Ok(());
+        }
+        Err(rename_error) if staged_move_requires_copy(rename_error.raw_os_error()) => {
+            info!(
+                "暂存目录与目标目录不在同一设备，改为逐文件拷贝后删除: {} -> {}",
+                from.display(),
+                to.display()
+            );
+        }
+        Err(rename_error) => {
+            if !tokio::fs::try_exists(to).await.unwrap_or(false) {
+                return Err(rename_error)
+                    .with_context(|| format!("移动暂存目录失败: {} -> {}", from.display(), to.display()));
+            }
+            info!("目标目录已存在，改为逐文件合并: {} -> {}", from.display(), to.display());
+        }
+    }
+    let mut pending = vec![from.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let mut entries = fs::read_dir(&dir)
+            .await
+            .with_context(|| format!("读取暂存目录失败: {}", dir.display()))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .with_context(|| format!("遍历暂存目录失败: {}", dir.display()))?
+        {
+            let path = entry.path();
+            let Ok(relative) = path.strip_prefix(from) else {
+                continue;
+            };
+            let target = to.join(relative);
+            let is_dir = entry.file_type().await.map(|kind| kind.is_dir()).unwrap_or(false);
+            if is_dir {
+                fs::create_dir_all(&target)
+                    .await
+                    .with_context(|| format!("创建目标目录失败: {}", target.display()))?;
+                pending.push(path);
+                continue;
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("创建目标目录失败: {}", parent.display()))?;
+            }
+            if tokio::fs::try_exists(&target).await.unwrap_or(false) {
+                let _ = fs::remove_file(&target).await;
+            }
+            move_staged_file(&path, &target).await?;
+        }
+    }
+    if let Err(error) = fs::remove_dir_all(from).await {
+        warn!("清理已搬空的暂存目录失败（已保留）: {}: {}", from.display(), error);
+    }
+    info!("已将暂存目录合并到目标位置: {} -> {}", from.display(), to.display());
+    Ok(())
+}
+
+/// 开启暂存目录后，把旧版本留在媒体目录里的下载临时文件连同 `.resume` 搬到暂存工作路径，
+/// 让之前下到一半的分片可以继续复用。只搬「暂存工作文件不存在」的情况，绝不覆盖暂存文件。
+pub(crate) async fn migrate_legacy_download_temp_files(final_path: &Path, work_path: &Path) {
+    if final_path == work_path {
+        return;
+    }
+    for extension in ["tmp_video", "tmp_audio"] {
+        migrate_legacy_temp_file(
+            &final_path.with_extension(extension),
+            &work_path.with_extension(extension),
+        )
+        .await;
+    }
+}
+
+/// 把单个旧临时文件（连同同名 `.resume`）搬到暂存路径：rename 优先，跨设备退化 copy + 删源。
+/// 任何失败只打 warn 并保持原状，不影响本次下载。
+pub(crate) async fn migrate_legacy_temp_file(legacy: &Path, target: &Path) {
+    if legacy == target
+        || !tokio::fs::try_exists(legacy).await.unwrap_or(false)
+        || tokio::fs::try_exists(target).await.unwrap_or(false)
+    {
+        return;
+    }
+    if let Some(parent) = target.parent() {
+        if let Err(error) = fs::create_dir_all(parent).await {
+            warn!(
+                "创建下载暂存目录失败，旧临时文件保持原状: {}: {}",
+                parent.display(),
+                error
+            );
+            return;
+        }
+    }
+    let legacy_resume = crate::downloader::resume_sidecar_path(legacy);
+    let target_resume = crate::downloader::resume_sidecar_path(target);
+    let moved: Result<bool> = match fs::rename(legacy, target).await {
+        Ok(()) => Ok(false),
+        Err(rename_error) if staged_move_requires_copy(rename_error.raw_os_error()) => fs::copy(legacy, target)
+            .await
+            .map(|_| true)
+            .with_context(|| format!("拷贝旧临时文件失败: {} -> {}", legacy.display(), target.display())),
+        Err(rename_error) => Err(rename_error)
+            .with_context(|| format!("迁移旧临时文件失败: {} -> {}", legacy.display(), target.display())),
+    };
+    match moved {
+        Ok(copied) => {
+            if copied {
+                let _ = fs::remove_file(legacy).await;
+            }
+            if tokio::fs::try_exists(&legacy_resume).await.unwrap_or(false) {
+                match fs::rename(&legacy_resume, &target_resume).await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        if fs::copy(&legacy_resume, &target_resume).await.is_ok() {
+                            let _ = fs::remove_file(&legacy_resume).await;
+                        } else {
+                            warn!(
+                                "迁移旧断点记录失败（下次会重新下载该分片）: {}",
+                                legacy_resume.display()
+                            );
+                        }
+                    }
+                }
+            }
+            info!(
+                "已将旧临时文件迁移到下载暂存目录: {} -> {}",
+                legacy.display(),
+                target.display()
+            );
+        }
+        Err(error) => warn!("{error:#}；旧临时文件保持原状"),
     }
 }
 
@@ -18491,6 +18644,127 @@ mod tests {
         assert_eq!(sidecar.file_name(), Some(std::ffi::OsStr::new("P01.mp4.resume")));
         assert_eq!(sidecar.parent(), work_path.parent());
         assert_ne!(sidecar.parent(), media_sidecar.parent());
+    }
+
+    #[tokio::test]
+    async fn move_staged_dir_renames_directory_into_target() {
+        let root = unique_temp_dir("staging-dir-move");
+        let staging_dir = root.join("staging").join("hash-dir");
+        tokio::fs::create_dir_all(staging_dir.join("nested"))
+            .await
+            .expect("创建暂存目录");
+        tokio::fs::write(staging_dir.join("01.jpg"), b"one")
+            .await
+            .expect("写入暂存文件");
+        tokio::fs::write(staging_dir.join("nested").join("02.mp4"), b"two")
+            .await
+            .expect("写入嵌套暂存文件");
+        let target = root.join("library").join("Shake It-images");
+
+        move_staged_dir(&staging_dir, &target).await.expect("移动暂存目录");
+
+        assert!(!staging_dir.exists(), "源目录应被移走");
+        assert_eq!(
+            tokio::fs::read(target.join("01.jpg")).await.expect("读取目标文件"),
+            b"one".to_vec()
+        );
+        assert_eq!(
+            tokio::fs::read(target.join("nested").join("02.mp4"))
+                .await
+                .expect("读取嵌套目标文件"),
+            b"two".to_vec()
+        );
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn move_staged_dir_merges_files_into_existing_target() {
+        let root = unique_temp_dir("staging-dir-merge");
+        let staging_dir = root.join("staging").join("hash-dir");
+        tokio::fs::create_dir_all(&staging_dir).await.expect("创建暂存目录");
+        tokio::fs::write(staging_dir.join("02.jpg"), b"new")
+            .await
+            .expect("写入暂存文件");
+        let target = root.join("library").join("Shake It-images");
+        tokio::fs::create_dir_all(&target).await.expect("创建目标目录");
+        tokio::fs::write(target.join("01.jpg"), b"old")
+            .await
+            .expect("写入目标文件");
+
+        move_staged_dir(&staging_dir, &target).await.expect("合并暂存目录");
+
+        assert_eq!(
+            tokio::fs::read(target.join("01.jpg")).await.expect("读取目标文件"),
+            b"old".to_vec(),
+            "目标目录里已有的文件不能被覆盖"
+        );
+        assert_eq!(
+            tokio::fs::read(target.join("02.jpg")).await.expect("读取新文件"),
+            b"new".to_vec()
+        );
+        assert!(!staging_dir.exists(), "源目录应被移走");
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_download_temp_files_moves_temp_and_resume() {
+        let root = unique_temp_dir("staging-legacy-migrate");
+        let media_dir = root.join("library").join("Shake It");
+        tokio::fs::create_dir_all(&media_dir).await.expect("创建媒体目录");
+        let final_path = media_dir.join("P01.mp4");
+        let legacy = final_path.with_extension("tmp_video");
+        tokio::fs::write(&legacy, b"partial").await.expect("写入旧临时文件");
+        let legacy_resume = crate::downloader::resume_sidecar_path(&legacy);
+        tokio::fs::write(&legacy_resume, b"P01.mp4\n0,4194303\n")
+            .await
+            .expect("写入旧断点记录");
+        let work_path = root.join("staging").join("hash-dir").join("P01.mp4");
+        let work_temp = work_path.with_extension("tmp_video");
+
+        migrate_legacy_download_temp_files(&final_path, &work_path).await;
+
+        assert!(!legacy.exists(), "旧临时文件应被移走");
+        assert_eq!(
+            tokio::fs::read(&work_temp).await.expect("读取暂存临时文件"),
+            b"partial".to_vec()
+        );
+        assert_eq!(
+            tokio::fs::read(crate::downloader::resume_sidecar_path(&work_temp))
+                .await
+                .expect("读取暂存断点记录"),
+            b"P01.mp4\n0,4194303\n".to_vec(),
+            "断点记录内容必须原样保留"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_temp_file_keeps_newer_staging_file() {
+        let root = unique_temp_dir("staging-legacy-keep");
+        let staging_dir = root.join("staging").join("hash-dir");
+        tokio::fs::create_dir_all(&staging_dir).await.expect("创建暂存目录");
+        let target = staging_dir.join("P01.tmp_video");
+        tokio::fs::write(&target, b"newer").await.expect("写入暂存文件");
+        let legacy = root.join("P01.tmp_video");
+        tokio::fs::write(&legacy, b"older").await.expect("写入旧临时文件");
+
+        migrate_legacy_temp_file(&legacy, &target).await;
+
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("读取暂存文件"),
+            b"newer".to_vec(),
+            "不得覆盖暂存里更新的文件"
+        );
+        assert_eq!(
+            tokio::fs::read(&legacy).await.expect("读取旧临时文件"),
+            b"older".to_vec(),
+            "旧文件应保持原状"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测
