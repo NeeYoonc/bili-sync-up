@@ -68,6 +68,7 @@ use crate::api::handler::{
     batch_update_config_internal,
     cancel_queue_task,
     check_initial_setup,
+    cleanup_staging_residue,
     clear_ai_rename_cache,
     clear_ai_rename_cache_for_source,
     clear_credential,
@@ -332,6 +333,8 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/config/migrate", post(migrate_config_schema))
         .route("/api/config/validate", post(validate_config))
         .route("/api/config/hot-reload/status", get(get_hot_reload_status))
+        // 清理下载暂存残留（当前暂存目录 + 历史暂存目录）
+        .route("/api/config/cleanup-staging", post(cleanup_staging_residue))
         // 初始设置API路由
         .route("/api/setup/check", get(check_initial_setup))
         .route("/api/setup/auth-token", post(setup_auth_token))

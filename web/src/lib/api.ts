@@ -15,6 +15,7 @@ import type {
 	DeleteVideoSourceResponse,
 	DeleteVideoResponse,
 	ConfigResponse,
+	StagingCleanupResponse,
 	FilenamePreviewRequest,
 	FilenamePreviewResponse,
 	RefreshDanmakuResponse,
@@ -976,6 +977,13 @@ class ApiClient {
 	}
 
 	/**
+	 * 清理下载暂存残留（当前暂存目录 + 历史暂存目录，保留根目录）
+	 */
+	async cleanupStagingResidue(): Promise<ApiResponse<StagingCleanupResponse>> {
+		return this.post<StagingCleanupResponse>('/config/cleanup-staging');
+	}
+
+	/**
 	 * 预览文件命名模板
 	 * @param params 当前命名模板配置
 	 */
@@ -1585,6 +1593,11 @@ export const api = {
 	 * 更新配置
 	 */
 	updateConfig: (params: UpdateConfigRequest) => apiClient.updateConfig(params),
+
+	/**
+	 * 清理下载暂存残留
+	 */
+	cleanupStagingResidue: () => apiClient.cleanupStagingResidue(),
 
 	/**
 	 * 预览文件命名模板

@@ -10043,14 +10043,29 @@ pub(crate) async fn migrate_legacy_temp_file(legacy: &Path, target: &Path) {
     }
 }
 
-/// 启动时统计下载暂存目录的残留文件，只记录日志不删除（残留用于断点续传）。
+/// 启动时统计下载暂存目录（含切换前的历史暂存目录）的残留文件，只记录日志不删除。
 ///
+/// 当前暂存目录的残留用于断点续传，历史暂存目录的残留只提示可在设置页清理。
 /// 调用点在 `#[cfg(not(test))]` 的启动流程里，测试构建下没有调用者，因此显式放行 dead_code。
 #[allow(dead_code)]
 pub(crate) async fn log_download_staging_residue(config: &crate::config::Config) {
-    let Some(root) = config.download_staging_dir.as_deref() else {
+    if let Some(root) = config.download_staging_dir.as_deref() {
+        log_single_staging_root_residue(root, false).await;
+    }
+    for root in &config.download_staging_previous_dirs {
+        if config.download_staging_dir.as_deref() == Some(root.as_path()) {
+            continue;
+        }
+        log_single_staging_root_residue(root, true).await;
+    }
+}
+
+/// 统计单个暂存根目录下的残留文件数量与字节数并打日志。
+#[allow(dead_code)]
+async fn log_single_staging_root_residue(root: &Path, historical: bool) {
+    if !root.is_absolute() {
         return;
-    };
+    }
     let (mut file_count, mut total_size) = (0usize, 0u64);
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
@@ -10069,7 +10084,16 @@ pub(crate) async fn log_download_staging_residue(config: &crate::config::Config)
             }
         }
     }
-    if file_count > 1 || total_size > 100 * 1024 * 1024 {
+    if historical {
+        if file_count > 0 {
+            info!(
+                "历史下载暂存目录 {} 中有 {} 个残留文件，共 {:.2} MB；可在设置页点「清理暂存残留」清掉旧目录里的残留",
+                root.display(),
+                file_count,
+                total_size as f64 / 1_048_576.0
+            );
+        }
+    } else if file_count > 1 || total_size > 100 * 1024 * 1024 {
         info!(
             "下载暂存目录 {} 中有 {} 个残留文件，共 {:.2} MB；这些文件用于断点续传，确认没有下载任务时可手动清理",
             root.display(),

@@ -671,6 +671,8 @@ export interface ConfigResponse {
 	// 结构变化时自动整理已下载分页
 	auto_reorganize_pages?: boolean;
 	download_staging_dir?: string;
+	// 历史下载暂存目录（切换暂存目录后遗留的旧目录）
+	download_staging_previous_dirs?: string[];
 	// 合集目录结构配置
 	collection_use_season_structure?: boolean;
 	// 番剧目录结构配置
@@ -1661,4 +1663,11 @@ export interface DatabaseRestoreResponse {
 	message: string;
 	backup_name?: string | null;
 	restart_required: boolean;
+}
+
+// 清理下载暂存残留响应
+export interface StagingCleanupResponse {
+	removed_files: number;
+	removed_bytes: number;
+	cleaned_roots: string[];
 }

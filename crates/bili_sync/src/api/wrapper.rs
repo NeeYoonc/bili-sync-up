@@ -30,6 +30,10 @@ impl<T: Serialize> ApiResponse<T> {
         Self { status_code: 400, data }
     }
 
+    pub fn conflict(data: T) -> Self {
+        Self { status_code: 409, data }
+    }
+
     pub fn internal_server_error(data: T) -> Self {
         Self { status_code: 500, data }
     }
@@ -56,6 +60,10 @@ impl ApiError {
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self(InnerApiError::BadRequest(message.into()).into())
     }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self(InnerApiError::Conflict(message.into()).into())
+    }
 }
 
 impl<E> From<E> for ApiError
@@ -73,6 +81,7 @@ impl IntoResponse for ApiError {
             match inner_error {
                 InnerApiError::NotFound(_) => return ApiResponse::not_found(self.0.to_string()).into_response(),
                 InnerApiError::BadRequest(_) => return ApiResponse::bad_request(self.0.to_string()).into_response(),
+                InnerApiError::Conflict(_) => return ApiResponse::conflict(self.0.to_string()).into_response(),
                 InnerApiError::DatabaseError(_) => {
                     return ApiResponse::internal_server_error(self.0.to_string()).into_response()
                 }

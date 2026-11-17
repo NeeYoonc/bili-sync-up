@@ -6,6 +6,8 @@ pub enum InnerApiError {
     NotFound(i32),
     #[error("Bad request: {0}")]
     BadRequest(String),
+    #[error("Conflict: {0}")]
+    Conflict(String),
     #[error("Database error: {0}")]
     DatabaseError(#[from] sea_orm::DbErr),
 }

@@ -11808,6 +11808,11 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
             .as_ref()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default(),
+        download_staging_previous_dirs: config
+            .download_staging_previous_dirs
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
         // 合集目录结构配置
         collection_use_season_structure: config.collection_use_season_structure,
         // 番剧目录结构配置
@@ -12326,6 +12331,198 @@ fn parse_download_staging_dir(raw: &str) -> std::result::Result<Option<std::path
     Ok(Some(path))
 }
 
+/// 清理暂存残留时最多扫描的根目录数量，避免异常配置放大清理范围。
+const MAX_STAGING_CLEANUP_ROOTS: usize = 8;
+
+/// 清理暂存残留前检查是否有任务在跑；有任务时返回原因，避免边下载边删临时文件。
+fn staging_cleanup_blocked_reason() -> Option<&'static str> {
+    use crate::task::{
+        ADD_TASK_QUEUE, AI_RENAME_HISTORY_TASK_QUEUE, CONFIG_TASK_QUEUE, DELETE_TASK_QUEUE, REFRESH_DANMAKU_TASK_QUEUE,
+        TASK_CONTROLLER, VIDEO_DELETE_TASK_QUEUE,
+    };
+
+    if TASK_CONTROLLER.is_scanning() {
+        return Some("正在扫描或下载中");
+    }
+    if ADD_TASK_QUEUE.is_processing() {
+        return Some("添加视频源任务正在执行中");
+    }
+    if DELETE_TASK_QUEUE.is_processing() {
+        return Some("删除视频源任务正在执行中");
+    }
+    if CONFIG_TASK_QUEUE.is_processing() {
+        return Some("配置更新任务正在执行中");
+    }
+    if VIDEO_DELETE_TASK_QUEUE.is_processing() {
+        return Some("删除视频任务正在执行中");
+    }
+    if REFRESH_DANMAKU_TASK_QUEUE.is_processing() {
+        return Some("刷新弹幕任务正在执行中");
+    }
+    if AI_RENAME_HISTORY_TASK_QUEUE.is_processing() {
+        return Some("AI 重命名历史任务正在执行中");
+    }
+    None
+}
+
+/// 判断某个目录项是否应当被清理跳过（群晖的 `@eaDir` 是缩略图索引，不能动）。
+fn should_skip_staging_cleanup_entry(name: &std::ffi::OsStr) -> bool {
+    name == std::ffi::OsStr::new("@eaDir")
+}
+
+/// 判断路径是否安全地位于暂存根目录内部（根目录本身不删，防止误删挂载点）。
+fn is_staging_cleanup_target(path: &std::path::Path, root: &std::path::Path) -> bool {
+    root.is_absolute() && path != root && path.starts_with(root)
+}
+
+/// 选出本次清理要处理的根目录：当前暂存目录 + 历史暂存目录，去重并限制数量。
+fn staging_cleanup_roots(config: &crate::config::Config) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for root in config
+        .download_staging_dir
+        .iter()
+        .chain(config.download_staging_previous_dirs.iter())
+    {
+        if !root.is_absolute() || roots.contains(root) {
+            continue;
+        }
+        roots.push(root.clone());
+        if roots.len() == MAX_STAGING_CLEANUP_ROOTS {
+            break;
+        }
+    }
+    roots
+}
+
+/// 从历史暂存目录列表里剔除已经清理过的根目录。
+fn remaining_previous_staging_dirs(previous: &[PathBuf], cleaned: &[PathBuf]) -> Vec<PathBuf> {
+    previous.iter().filter(|dir| !cleaned.contains(*dir)).cloned().collect()
+}
+
+/// 删除单个暂存根目录下的全部残留文件与空目录，保留根目录本身；返回（删除文件数，释放字节数）。
+async fn clean_staging_root(root: &std::path::Path) -> (usize, u64) {
+    let mut removed_files = 0usize;
+    let mut removed_bytes = 0u64;
+    if !root.is_absolute() {
+        warn!("跳过清理非绝对路径的下载暂存目录: {}", root.display());
+        return (removed_files, removed_bytes);
+    }
+    if !root.exists() {
+        return (removed_files, removed_bytes);
+    }
+
+    let mut pending_dirs: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if should_skip_staging_cleanup_entry(&entry.file_name()) {
+                continue;
+            }
+            let path = entry.path();
+            if !is_staging_cleanup_target(&path, root) {
+                warn!("跳过疑似越界的暂存残留路径: {}", path.display());
+                continue;
+            }
+            let Ok(metadata) = entry.metadata().await else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending_dirs.push(path.clone());
+                stack.push(path);
+            } else if metadata.is_file() {
+                match tokio::fs::remove_file(&path).await {
+                    Ok(()) => {
+                        removed_files += 1;
+                        removed_bytes += metadata.len();
+                    }
+                    Err(error) => warn!("删除暂存残留文件失败: {}: {}", path.display(), error),
+                }
+            }
+        }
+    }
+    for dir in pending_dirs.into_iter().rev() {
+        if let Err(error) = tokio::fs::remove_dir(&dir).await {
+            debug!("暂存残留目录未能删除（可能非空）: {}: {}", dir.display(), error);
+        }
+    }
+    if let Err(error) = tokio::fs::create_dir_all(root).await {
+        warn!("清理后重建下载暂存目录失败: {}: {}", root.display(), error);
+    }
+    (removed_files, removed_bytes)
+}
+
+/// 清理下载暂存残留（当前暂存目录 + 历史暂存目录下的文件与空目录，根目录保留）。
+#[utoipa::path(
+    post,
+    path = "/api/config/cleanup-staging",
+    responses(
+        (status = 200, description = "清理成功", body = crate::api::response::StagingCleanupResponse),
+        (status = 409, description = "有任务正在执行", body = String),
+        (status = 500, description = "服务器内部错误", body = String)
+    )
+)]
+pub async fn cleanup_staging_residue(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<crate::api::response::StagingCleanupResponse>, ApiError> {
+    if let Some(reason) = staging_cleanup_blocked_reason() {
+        return Err(ApiError::conflict(format!(
+            "{}，请等任务结束后再清理下载暂存残留",
+            reason
+        )));
+    }
+
+    let config = crate::config::reload_config();
+    let roots = staging_cleanup_roots(&config);
+    let mut removed_files = 0usize;
+    let mut removed_bytes = 0u64;
+    let mut cleaned_roots: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        let (root_files, root_bytes) = clean_staging_root(root).await;
+        if root_files == 0 && root_bytes == 0 {
+            continue;
+        }
+        info!(
+            "已清理下载暂存根目录 {}：{} 个文件，释放 {:.2} MB",
+            root.display(),
+            root_files,
+            root_bytes as f64 / 1_048_576.0
+        );
+        removed_files += root_files;
+        removed_bytes += root_bytes;
+        cleaned_roots.push(root.clone());
+    }
+
+    if !cleaned_roots.is_empty() {
+        let previous_dirs = remaining_previous_staging_dirs(&config.download_staging_previous_dirs, &cleaned_roots);
+        if previous_dirs != config.download_staging_previous_dirs {
+            let manager = crate::config::ConfigManager::new(db.as_ref().clone());
+            match manager
+                .update_config_item("download_staging_previous_dirs", serde_json::to_value(&previous_dirs)?)
+                .await
+            {
+                Ok(()) => {
+                    if let Err(error) = crate::config::reload_config_bundle().await {
+                        warn!("清理暂存残留后重新加载配置失败: {:#}", error);
+                    }
+                }
+                Err(error) => warn!("清理暂存残留后更新历史暂存目录记录失败: {:#}", error),
+            }
+        }
+    }
+
+    Ok(ApiResponse::ok(crate::api::response::StagingCleanupResponse {
+        removed_files,
+        removed_bytes,
+        cleaned_roots: cleaned_roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect(),
+    }))
+}
+
 /// 更新配置
 #[utoipa::path(
     put,
@@ -12572,6 +12769,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "multi_page_use_season_structure" => Some("多P使用Season目录"),
         "auto_reorganize_pages" => Some("结构变化时自动整理已下载分页"),
         "download_staging_dir" => Some("下载暂存目录"),
+        "download_staging_previous_dirs" => Some("历史下载暂存目录"),
         "collection_use_season_structure" => Some("合集使用Season目录"),
         "bangumi_use_season_structure" => Some("番剧使用Season目录"),
         "upper_path" => Some("UP头像缓存路径"),
@@ -13726,6 +13924,13 @@ pub async fn update_config_internal(
     if let Some(staging_dir) = params.download_staging_dir {
         let new_staging_dir = parse_download_staging_dir(&staging_dir).map_err(ApiError::bad_request)?;
         if new_staging_dir != config.download_staging_dir {
+            if let Some(previous_dir) = config.download_staging_dir.clone() {
+                crate::config::remember_previous_download_staging_dir(
+                    &mut config.download_staging_previous_dirs,
+                    previous_dir,
+                );
+                updated_fields.push("download_staging_previous_dirs");
+            }
             config.download_staging_dir = new_staging_dir;
             updated_fields.push("download_staging_dir");
         }
@@ -14418,6 +14623,14 @@ pub async fn update_config_internal(
                         .update_config_item(
                             "download_staging_dir",
                             serde_json::to_value(&config.download_staging_dir)?,
+                        )
+                        .await
+                }
+                "download_staging_previous_dirs" => {
+                    manager
+                        .update_config_item(
+                            "download_staging_previous_dirs",
+                            serde_json::to_value(&config.download_staging_previous_dirs)?,
                         )
                         .await
                 }
@@ -23545,4 +23758,105 @@ pub async fn ai_rename_history(
         queued,
         message,
     }))
+}
+
+#[cfg(test)]
+mod staging_cleanup_tests {
+    use super::*;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn staging_cleanup_target_stays_inside_root() {
+        let root = std::path::Path::new("/mnt/staging");
+        assert!(is_staging_cleanup_target(
+            std::path::Path::new("/mnt/staging/a/b.mp4"),
+            root
+        ));
+        assert!(!is_staging_cleanup_target(
+            std::path::Path::new("/mnt/other/b.mp4"),
+            root
+        ));
+        assert!(!is_staging_cleanup_target(root, root));
+        assert!(!is_staging_cleanup_target(
+            std::path::Path::new("rel/staging/a.mp4"),
+            std::path::Path::new("rel/staging")
+        ));
+    }
+
+    #[test]
+    fn staging_cleanup_skips_synology_index_entries() {
+        assert!(should_skip_staging_cleanup_entry(std::ffi::OsStr::new("@eaDir")));
+        assert!(!should_skip_staging_cleanup_entry(std::ffi::OsStr::new(
+            "normal.tmp_video"
+        )));
+    }
+
+    #[test]
+    fn staging_cleanup_roots_dedup_and_skip_relative() {
+        let config = crate::config::Config {
+            download_staging_dir: Some(PathBuf::from("/mnt/current")),
+            download_staging_previous_dirs: vec![
+                PathBuf::from("/mnt/current"),
+                PathBuf::from("rel/old"),
+                PathBuf::from("/mnt/old-a"),
+                PathBuf::from("/mnt/old-a"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            staging_cleanup_roots(&config),
+            vec![PathBuf::from("/mnt/current"), PathBuf::from("/mnt/old-a")]
+        );
+    }
+
+    #[test]
+    fn remaining_previous_staging_dirs_drops_cleaned_roots() {
+        let previous = vec![PathBuf::from("/mnt/old-a"), PathBuf::from("/mnt/old-b")];
+        let cleaned = vec![PathBuf::from("/mnt/old-a")];
+        assert_eq!(
+            remaining_previous_staging_dirs(&previous, &cleaned),
+            vec![PathBuf::from("/mnt/old-b")]
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_staging_root_removes_files_and_keeps_root() {
+        let root = unique_temp_dir("bili-sync-staging-cleanup");
+        let nested = root.join("0123456789abcdef");
+        tokio::fs::create_dir_all(&nested).await.expect("创建测试目录");
+        tokio::fs::write(nested.join("old.tmp_video"), vec![0u8; 1024])
+            .await
+            .expect("写入测试文件");
+        tokio::fs::write(root.join("left.mp4"), vec![0u8; 2048])
+            .await
+            .expect("写入测试文件");
+        let ea_dir = root.join("@eaDir");
+        tokio::fs::create_dir_all(&ea_dir).await.expect("创建索引目录");
+        tokio::fs::write(ea_dir.join("thumb.jpg"), b"index")
+            .await
+            .expect("写索引文件");
+
+        let (removed_files, removed_bytes) = clean_staging_root(&root).await;
+
+        assert_eq!(removed_files, 2);
+        assert_eq!(removed_bytes, 3072);
+        assert!(root.exists(), "暂存根目录本身必须保留");
+        assert!(!nested.exists(), "暂存子目录应当被清空并删除");
+        assert!(ea_dir.join("thumb.jpg").exists(), "群晖索引目录不能删除");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn clean_staging_root_ignores_missing_and_relative_roots() {
+        let missing = unique_temp_dir("bili-sync-staging-missing");
+        assert_eq!(clean_staging_root(&missing).await, (0, 0));
+        assert_eq!(clean_staging_root(std::path::Path::new("rel/staging")).await, (0, 0));
+    }
 }
