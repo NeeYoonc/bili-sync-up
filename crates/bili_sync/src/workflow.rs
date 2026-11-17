@@ -9448,6 +9448,20 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
     debug!("=== 流选择结束 ===");
 
     // 音频模式：只下载音频流
+    // 配置了下载暂存目录时，中间文件先写进暂存目录，校验通过后再移动到最终路径
+    let staging_root = crate::config::reload_config().download_staging_dir;
+    let work_page_path = match staging_work_path(page_path, staging_root.as_deref()) {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("创建下载暂存目录失败: {}", parent.display()))?;
+            }
+            path
+        }
+        None => page_path.to_path_buf(),
+    };
+
     let (total_bytes, video_stream_size_bytes, audio_stream_size_bytes) = if audio_only {
         debug!("音频模式：仅下载音频流，输出 M4A 格式");
         match best_stream_result {
@@ -9463,7 +9477,7 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                     progress_phase: "下载中",
                     progress_file_name: &progress_file_name,
                     urls: &urls,
-                    path: page_path,
+                    path: &work_page_path,
                 })
                 .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
@@ -9482,7 +9496,7 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                     progress_phase: "下载音频流",
                     progress_file_name: &progress_file_name,
                     urls: &audio_urls,
-                    path: page_path,
+                    path: &work_page_path,
                 })
                 .await?;
                 (downloaded_size, None, Some(to_db_file_size(downloaded_size)))
@@ -9502,11 +9516,11 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                     progress_phase: "下载中",
                     progress_file_name: &progress_file_name,
                     urls: &urls,
-                    path: page_path,
+                    path: &work_page_path,
                 })
                 .await?;
                 // 单流下载完成即最终文件，清理可能遗留的断点续传状态
-                let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(page_path)).await;
+                let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&work_page_path)).await;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
             }
         }
@@ -9517,7 +9531,7 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                 match mix_stream {
                     // 老视频可能只返回 FLV 混合流；直接保存为 .mp4 会导致网页端无法播放
                     crate::bilibili::Stream::Flv(_) => {
-                        let tmp_mix_path = page_path.with_extension("tmp_flv");
+                        let tmp_mix_path = work_page_path.with_extension("tmp_flv");
                         let urls = mix_stream.urls();
                         let downloaded_size = download_stream(DownloadStreamInput {
                             downloader,
@@ -9533,10 +9547,12 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                         crate::download_progress::DOWNLOAD_PROGRESS
                             .set_phase(&progress_key, "转封装中")
                             .await;
-                        let final_size = match crate::downloader::remux_with_ffmpeg(&tmp_mix_path, page_path).await {
+                        let final_size = match crate::downloader::remux_with_ffmpeg(&tmp_mix_path, &work_page_path)
+                            .await
+                        {
                             Ok(()) => {
                                 let _ = fs::remove_file(&tmp_mix_path).await;
-                                tokio::fs::metadata(page_path)
+                                tokio::fs::metadata(&work_page_path)
                                     .await
                                     .map(|metadata| metadata.len())
                                     .unwrap_or(downloaded_size)
@@ -9546,8 +9562,8 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                                     "FLV 转封装失败，将保留原始文件（网页端可能无法播放，请检查 ffmpeg 是否可用）: {:#}",
                                     e
                                 );
-                                let _ = fs::remove_file(page_path).await;
-                                fs::rename(&tmp_mix_path, page_path).await?;
+                                let _ = fs::remove_file(&work_page_path).await;
+                                fs::rename(&tmp_mix_path, &work_page_path).await?;
                                 downloaded_size
                             }
                         };
@@ -9564,7 +9580,7 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                             progress_phase: "下载中",
                             progress_file_name: &progress_file_name,
                             urls: &urls,
-                            path: page_path,
+                            path: &work_page_path,
                         })
                         .await?;
                         (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
@@ -9584,7 +9600,7 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                     progress_phase: "下载中",
                     progress_file_name: &progress_file_name,
                     urls: &urls,
-                    path: page_path,
+                    path: &work_page_path,
                 })
                 .await?;
                 (downloaded_size, Some(to_db_file_size(downloaded_size)), None)
@@ -9594,8 +9610,8 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                 audio: Some(audio_stream),
             } => {
                 let (tmp_video_path, tmp_audio_path) = (
-                    page_path.with_extension("tmp_video"),
-                    page_path.with_extension("tmp_audio"),
+                    work_page_path.with_extension("tmp_video"),
+                    work_page_path.with_extension("tmp_audio"),
                 );
 
                 let video_urls = video_stream.urls();
@@ -9662,7 +9678,9 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                 crate::download_progress::DOWNLOAD_PROGRESS
                     .set_phase(&progress_key, "合并中")
                     .await;
-                let res = downloader.merge(&tmp_video_path, &tmp_audio_path, page_path).await;
+                let res = downloader
+                    .merge(&tmp_video_path, &tmp_audio_path, &work_page_path)
+                    .await;
 
                 // 合并失败时的智能处理
                 if let Err(e) = res {
@@ -9704,7 +9722,7 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
                 let _ = remove_file_if_exists(&crate::downloader::resume_sidecar_path(&tmp_audio_path)).await;
 
                 // 获取合并后文件大小，如果失败则使用视频和音频大小之和
-                let final_size = tokio::fs::metadata(page_path)
+                let final_size = tokio::fs::metadata(&work_page_path)
                     .await
                     .map(|metadata| metadata.len())
                     .unwrap_or(video_size + audio_size);
@@ -9717,6 +9735,9 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
             }
         }
     };
+
+    // 大小校验已通过，把暂存文件搬到最终路径；未配置暂存目录时两者相同，函数会直接返回
+    move_staged_file(&work_page_path, page_path).await?;
 
     // 计算并记录下载速度
     let elapsed = start_time.elapsed();
@@ -9750,6 +9771,151 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
         audio_stream_size_bytes,
         skip_reason: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// 下载暂存目录
+//
+// 设置 `download_staging_dir` 后，下载中的中间文件（`.tmp_video` / `.tmp_audio` /
+// `.resume`）先落在该目录，合并与大小校验都通过后再一次性移动到最终路径，媒体库目录
+// 里就不会再出现半成品文件。留空时暂存路径等于最终路径，行为与旧版本完全一致。
+// ---------------------------------------------------------------------------
+
+/// 计算最终文件对应的暂存工作路径：同一最终路径永远派生出同一个暂存位置，
+/// 这样进程崩溃重启后仍能通过 `.resume` 续传。
+pub(crate) fn staging_work_path(final_path: &Path, staging_root: Option<&Path>) -> Option<PathBuf> {
+    let staging_root = staging_root?;
+    let file_name = final_path.file_name()?;
+    Some(staging_root.join(staging_work_dir_name(final_path)).join(file_name))
+}
+
+/// 用 FNV-1a 64 位哈希把最终路径映射成稳定的暂存子目录名（不引入额外依赖）。
+pub(crate) fn staging_work_dir_name(final_path: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in final_path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// 判断 rename 失败是否需要退化为「先拷贝再删除」：只有跨设备（不同文件系统）
+/// 才需要，unix 是 EXDEV(18)，windows 是 ERROR_NOT_SAME_DEVICE(17)，其它错误必须上抛，
+/// 让任务失败重试并保留暂存文件。
+pub(crate) fn staged_move_requires_copy(error_code: Option<i32>) -> bool {
+    matches!(error_code, Some(18) | Some(17))
+}
+
+/// 把暂存文件搬到最终路径。
+///
+/// 同设备优先 `rename`（原子、秒级）；跨设备才退化为 copy + sync + rename + 删源。
+/// 其它错误直接上抛：调用方按任务失败处理并保留暂存文件，下次重试继续复用。
+pub(crate) async fn move_staged_file(from: &Path, to: &Path) -> Result<()> {
+    if from == to {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("创建目标目录失败: {}", parent.display()))?;
+    }
+    match fs::rename(from, to).await {
+        Ok(()) => {
+            info!("已将暂存文件移动到目标目录: {} -> {}", from.display(), to.display());
+        }
+        Err(rename_error) if staged_move_requires_copy(rename_error.raw_os_error()) => {
+            info!(
+                "暂存目录与目标目录不在同一设备，改为拷贝后删除: {} -> {}",
+                from.display(),
+                to.display()
+            );
+            copy_staged_file(from, to).await?;
+            if let Err(remove_error) = fs::remove_file(from).await {
+                warn!(
+                    "删除暂存文件失败（已保留，不影响使用）: {}: {}",
+                    from.display(),
+                    remove_error
+                );
+            }
+            info!("已将暂存文件拷贝到目标目录: {} -> {}", from.display(), to.display());
+        }
+        Err(rename_error) => {
+            return Err(rename_error)
+                .with_context(|| format!("移动暂存文件失败: {} -> {}", from.display(), to.display()));
+        }
+    }
+    remove_empty_staging_dir(from).await;
+    Ok(())
+}
+
+/// 跨设备拷贝：先写 `.part`，sync 落盘后再改名成最终文件，尽量避免目标路径出现半成品。
+async fn copy_staged_file(from: &Path, to: &Path) -> Result<()> {
+    let mut part_path = to.as_os_str().to_os_string();
+    part_path.push(".part");
+    let part_path = PathBuf::from(part_path);
+    fs::copy(from, &part_path)
+        .await
+        .with_context(|| format!("拷贝暂存文件失败: {} -> {}", from.display(), part_path.display()))?;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&part_path)
+        .await
+        .with_context(|| format!("打开拷贝中的文件失败: {}", part_path.display()))?;
+    file.sync_all()
+        .await
+        .with_context(|| format!("同步拷贝文件失败: {}", part_path.display()))?;
+    fs::rename(&part_path, to)
+        .await
+        .with_context(|| format!("重命名拷贝文件失败: {} -> {}", part_path.display(), to.display()))?;
+    Ok(())
+}
+
+/// 迁移成功后清理空的暂存子目录（暂存根目录本身保留）。
+async fn remove_empty_staging_dir(from: &Path) {
+    let Some(parent) = from.parent() else {
+        return;
+    };
+    if let Err(e) = fs::remove_dir(parent).await {
+        if e.kind() != ErrorKind::NotFound {
+            debug!("清理暂存子目录失败（忽略）: {}: {}", parent.display(), e);
+        }
+    }
+}
+
+/// 启动时统计下载暂存目录的残留文件，只记录日志不删除（残留用于断点续传）。
+///
+/// 调用点在 `#[cfg(not(test))]` 的启动流程里，测试构建下没有调用者，因此显式放行 dead_code。
+#[allow(dead_code)]
+pub(crate) async fn log_download_staging_residue(config: &crate::config::Config) {
+    let Some(root) = config.download_staging_dir.as_deref() else {
+        return;
+    };
+    let (mut file_count, mut total_size) = (0usize, 0u64);
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(mut entries) = fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(metadata) = entry.metadata().await else {
+                continue;
+            };
+            if metadata.is_dir() {
+                dirs.push(entry.path());
+            } else if metadata.is_file() {
+                file_count += 1;
+                total_size += metadata.len();
+            }
+        }
+    }
+    if file_count > 1 || total_size > 100 * 1024 * 1024 {
+        info!(
+            "下载暂存目录 {} 中有 {} 个残留文件，共 {:.2} MB；这些文件用于断点续传，确认没有下载任务时可手动清理",
+            root.display(),
+            file_count,
+            total_size as f64 / 1_048_576.0
+        );
+    }
 }
 
 /// 纯音频下载只使用视频流作为音频载体，不能套用视频源的“最低分辨率”。
@@ -18219,6 +18385,98 @@ mod tests {
         assert_eq!(relocation_sidecar_remainder("old.mp4", "old"), None);
         assert_eq!(relocation_sidecar_remainder("other.ass", "old"), None);
         assert_eq!(relocation_sidecar_remainder("old", "old"), None);
+    }
+
+    #[test]
+    fn staging_work_path_returns_none_without_root() {
+        let final_path = Path::new("/library/Shake It/P01.mp4");
+        assert_eq!(staging_work_path(final_path, None), None);
+    }
+
+    #[test]
+    fn staging_work_path_is_stable_and_keeps_file_name() {
+        let root = Path::new("/staging");
+        let first = Path::new("/library/Shake It/P01.mp4");
+        let second = Path::new("/library/Shake It/Season 01/P01.mp4");
+
+        let first_work = staging_work_path(first, Some(root)).expect("应能派生暂存路径");
+        let again = staging_work_path(first, Some(root)).expect("应能派生暂存路径");
+        let second_work = staging_work_path(second, Some(root)).expect("应能派生暂存路径");
+
+        assert_eq!(first_work, again);
+        assert_ne!(first_work, second_work);
+        assert_eq!(first_work.file_name(), Some(std::ffi::OsStr::new("P01.mp4")));
+        assert_eq!(
+            first_work.parent().map(Path::to_path_buf),
+            Some(root.join(staging_work_dir_name(first)))
+        );
+    }
+
+    #[test]
+    fn staged_move_requires_copy_only_for_cross_device_errors() {
+        assert!(staged_move_requires_copy(Some(18)));
+        assert!(staged_move_requires_copy(Some(17)));
+        assert!(!staged_move_requires_copy(Some(13)));
+        assert!(!staged_move_requires_copy(None));
+    }
+
+    #[tokio::test]
+    async fn move_staged_file_moves_file_and_cleans_empty_staging_dir() {
+        let root = unique_temp_dir("staging-move");
+        let staging_dir = root.join("staging").join("hash-a");
+        let target_dir = root.join("library").join("Shake It");
+        tokio::fs::create_dir_all(&staging_dir).await.expect("创建暂存目录");
+        tokio::fs::create_dir_all(&target_dir).await.expect("创建目标目录");
+        let from = staging_dir.join("P01.mp4");
+        let to = target_dir.join("P01.mp4");
+        tokio::fs::write(&from, b"staged-bytes").await.expect("写入暂存文件");
+
+        move_staged_file(&from, &to).await.expect("应能移动暂存文件");
+
+        assert!(!from.exists());
+        assert_eq!(
+            tokio::fs::read(&to).await.expect("读取目标文件"),
+            b"staged-bytes".to_vec()
+        );
+        assert!(!staging_dir.exists(), "空的暂存子目录应被清理");
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn move_staged_file_keeps_source_when_target_dir_is_not_writable() {
+        let root = unique_temp_dir("staging-error");
+        let staging_dir = root.join("staging").join("hash-b");
+        tokio::fs::create_dir_all(&staging_dir).await.expect("创建暂存目录");
+        let from = staging_dir.join("P01.mp4");
+        tokio::fs::write(&from, b"keep-me").await.expect("写入暂存文件");
+        // 父路径上放一个同名普通文件，创建目标目录必然失败
+        let blocked_parent = root.join("blocked");
+        tokio::fs::write(&blocked_parent, b"not-a-dir")
+            .await
+            .expect("写入占位文件");
+        let to = blocked_parent.join("P01.mp4");
+
+        let result = move_staged_file(&from, &to).await;
+
+        assert!(result.is_err(), "目标目录不可创建时应报错");
+        assert!(from.exists(), "失败时必须保留暂存文件");
+        assert_eq!(tokio::fs::read(&from).await.expect("读取暂存文件"), b"keep-me".to_vec());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[test]
+    fn staging_resume_sidecar_stays_next_to_staged_media() {
+        let root = Path::new("/staging");
+        let final_path = Path::new("/library/Shake It/P01.mp4");
+        let work_path = staging_work_path(final_path, Some(root)).expect("应能派生暂存路径");
+        let sidecar = crate::downloader::resume_sidecar_path(&work_path);
+        let media_sidecar = crate::downloader::resume_sidecar_path(final_path);
+
+        assert_eq!(sidecar.file_name(), Some(std::ffi::OsStr::new("P01.mp4.resume")));
+        assert_eq!(sidecar.parent(), work_path.parent());
+        assert_ne!(sidecar.parent(), media_sidecar.parent());
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测

@@ -312,6 +312,8 @@ pub struct UpdateConfigRequest {
     pub multi_page_use_season_structure: Option<bool>,
     // 结构变化（如单P变多P）后自动把已下载分页迁入 Season 结构
     pub auto_reorganize_pages: Option<bool>,
+    /// 下载暂存目录（留空字符串表示与目标目录相同）
+    pub download_staging_dir: Option<String>,
     // 合集目录结构配置
     pub collection_use_season_structure: Option<bool>,
     // 番剧目录结构配置

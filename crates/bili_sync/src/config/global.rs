@@ -318,6 +318,7 @@ pub async fn init_config_with_database(db: sea_orm::DatabaseConnection) -> Resul
         } else {
             info!("您可以访问管理页 http://{}/ 添加视频源", config.bind_address);
         }
+        crate::workflow::log_download_staging_residue(&config).await;
     }
     #[cfg(test)]
     {

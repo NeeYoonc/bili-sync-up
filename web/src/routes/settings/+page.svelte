@@ -436,6 +436,7 @@
 	// 多P视频目录结构配置
 	let multiPageUseSeasonStructure = false;
 	let autoReorganizePages = true;
+	let downloadStagingDir = ''; // 下载暂存目录，留空表示与目标目录相同
 
 	// 合集目录结构配置
 	let collectionUseSeasonStructure = false;
@@ -889,6 +890,7 @@
 		// 多P视频目录结构配置
 		multiPageUseSeasonStructure = config.multi_page_use_season_structure ?? false;
 		autoReorganizePages = config.auto_reorganize_pages ?? true;
+		downloadStagingDir = config.download_staging_dir || '';
 
 		// 合集目录结构配置
 		collectionUseSeasonStructure = config.collection_use_season_structure ?? false;
@@ -1532,6 +1534,7 @@
 			multi_page_use_season_structure: multiPageUseSeasonStructure,
 			// 结构变化时自动整理已下载分页
 			auto_reorganize_pages: autoReorganizePages,
+			download_staging_dir: downloadStagingDir.trim(),
 			// 合集目录结构配置
 			collection_use_season_structure: collectionUseSeasonStructure,
 			// 番剧目录结构配置
@@ -2193,6 +2196,22 @@
 					<p class="text-muted-foreground text-xs">
 						启用后，视频从单P变成多P（或目录结构模板变化）时，已下载的分页文件会自动迁入"Season
 						01"目录，避免同一视频出现混合目录结构；关闭后不再移动任何已下载文件
+					</p>
+				</div>
+
+				<!-- 下载暂存目录 -->
+				<div class="space-y-2">
+					<Label for="download-staging-dir">下载暂存目录</Label>
+					<Input
+						id="download-staging-dir"
+						type="text"
+						bind:value={downloadStagingDir}
+						placeholder="留空表示与目标目录相同"
+					/>
+					<p class="text-muted-foreground text-xs">
+						留空时中间文件直接写在目标文件旁边（与旧版本一致）。填写后，音视频先下载到该目录，合并与大小校验通过后再移动到最终位置，下载目录里不再出现
+						.tmp_video / .tmp_audio / .resume
+						文件；同一存储池内是秒级移动，跨盘会退化成一次整文件拷贝。请填绝对路径，并确保与下载目录在同一账号下可读写。
 					</p>
 				</div>
 
