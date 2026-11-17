@@ -32,7 +32,18 @@ static DATA: &[char] = &[
     'm', 'U', 'S', 'D', 'Q', 'X', '9', 'R', 'd', 'o', 'Z', 'f',
 ];
 
-const PLAYURL_QUALITY_LEVELS: [u32; 10] = [127, 126, 125, 120, 116, 112, 80, 64, 32, 16];
+/// 画质回退列表（高 → 低），请求 playurl 时按此顺序逐个尝试。
+///
+/// 新增画质必须同步这里：`100` 是番剧「智能修复」（大会员专属），只有在番剧 playurl
+/// 的 fnval 带上 8192 位（见 [`BANGUMI_PLAYURL_FNVAL`]）时接口才会返回该档。
+const PLAYURL_QUALITY_LEVELS: [u32; 11] = [127, 126, 125, 120, 116, 112, 100, 80, 64, 32, 16];
+
+/// 番剧 playurl（`pgc/player/web/playurl`）的 fnval。
+///
+/// `12240 = 4048 + 8192`，其中 8192 是「是否需求智能修复」位：不带这一位时接口只返回
+/// `accept_quality=[64,32,16]`，带上后才会多出 qn=100。**只有番剧这条 playurl 使用**；
+/// 普通视频 `/x/player/wbi/playurl` 与课程 pugv 的 fnval 仍是 4048，不要一起改。
+const BANGUMI_PLAYURL_FNVAL: &str = "12240";
 const PLAYURL_RISK_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// 播放请求在批量重置/下载时可能短时间触发 B 站出口 IP 风控。
@@ -162,6 +173,12 @@ fn build_playurl_quality_fallback_levels(mut max_qn: u32, mut min_qn: u32) -> Ve
     } else {
         levels
     }
+}
+
+/// 质量回退列表的字符串形式：playurl 的 `qn` 参数是字符串，而回退列表是数值常量，
+/// 统一从 [`PLAYURL_QUALITY_LEVELS`] 派生，避免两处硬编码数组以后再次漂移。
+fn playurl_quality_level_strings() -> Vec<String> {
+    PLAYURL_QUALITY_LEVELS.iter().map(u32::to_string).collect()
 }
 
 fn is_not_found_like_message(message: &str) -> bool {
@@ -687,7 +704,7 @@ impl<'a> Video<'a> {
     /// 带质量回退的页面分析器获取
     pub async fn get_page_analyzer_with_fallback(&self, page: &PageInfo) -> Result<PageAnalyzer> {
         // 质量回退列表：从最高到最低，恢复原始顺序
-        let quality_levels = ["127", "126", "125", "120", "116", "112", "80", "64", "32", "16"];
+        let quality_levels = playurl_quality_level_strings();
 
         for (attempt, qn) in quality_levels.iter().enumerate() {
             tracing::debug!(
@@ -1352,7 +1369,7 @@ impl<'a> Video<'a> {
     /// 带质量回退的番剧页面分析器获取
     pub async fn get_bangumi_page_analyzer_with_fallback(&self, page: &PageInfo, ep_id: &str) -> Result<PageAnalyzer> {
         // 质量回退列表：从最高到最低，恢复原始顺序
-        let quality_levels = ["127", "126", "125", "120", "116", "112", "80", "64", "32", "16"];
+        let quality_levels = playurl_quality_level_strings();
 
         for (attempt, qn) in quality_levels.iter().enumerate() {
             tracing::debug!(
@@ -1573,15 +1590,15 @@ impl<'a> Video<'a> {
             ("cid", cid_string.as_str()),
             ("qn", qn), // 使用指定的质量参数
             ("otype", "json"),
-            ("fnval", "4048"),                               // 恢复原始fnval值
-            ("fourk", "1"),                                  // 启用4K支持
-            ("voice_balance", "1"),                          // 音频平衡
-            ("isGaiaAvoided", "true"),                       // Gaia避免策略
-            ("web_location", "1315873"),                     // 网页位置标识
-            ("dm_img_str", dm_img_str.as_str()),             // WebGL信息
+            ("fnval", BANGUMI_PLAYURL_FNVAL),    // 带 8192 位才会返回「智能修复」
+            ("fourk", "1"),                      // 启用4K支持
+            ("voice_balance", "1"),              // 音频平衡
+            ("isGaiaAvoided", "true"),           // Gaia避免策略
+            ("web_location", "1315873"),         // 网页位置标识
+            ("dm_img_str", dm_img_str.as_str()), // WebGL信息
             ("dm_cover_img_str", dm_cover_img_str.as_str()), // GPU信息
-            ("dm_img_list", dm_img_list.as_str()),           // 弹幕交互数据
-            ("dm_img_inter", dm_img_inter.as_str()),         // 弹幕交互统计
+            ("dm_img_list", dm_img_list.as_str()), // 弹幕交互数据
+            ("dm_img_inter", dm_img_inter.as_str()), // 弹幕交互统计
         ];
 
         tracing::debug!("番剧API参数: {:?}", params);
@@ -2177,6 +2194,7 @@ pub(crate) fn effective_playurl_qn_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bilibili::analyzer::VideoQuality;
 
     #[test]
     fn test_bvid_to_aid() {
@@ -2276,5 +2294,48 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(40));
 
         *PLAYURL_RISK_COOLDOWN_UNTIL.lock().await = None;
+    }
+
+    #[test]
+    fn playurl_quality_levels_include_ai_repair_and_stay_descending() {
+        assert_eq!(PLAYURL_QUALITY_LEVELS.len(), 11);
+        assert!(PLAYURL_QUALITY_LEVELS.contains(&100));
+        assert!(
+            PLAYURL_QUALITY_LEVELS.windows(2).all(|pair| pair[0] > pair[1]),
+            "画质回退列表必须严格递减：{PLAYURL_QUALITY_LEVELS:?}"
+        );
+    }
+
+    #[test]
+    fn playurl_quality_level_strings_follow_constant_order() {
+        assert_eq!(
+            playurl_quality_level_strings(),
+            vec!["127", "126", "125", "120", "116", "112", "100", "80", "64", "32", "16"]
+        );
+    }
+
+    #[test]
+    fn bangumi_playurl_fnval_requests_ai_repair() {
+        let fnval: u32 = BANGUMI_PLAYURL_FNVAL.parse().expect("番剧 fnval 必须是十进制数字");
+        assert_eq!(fnval & 8192, 8192, "番剧 fnval 必须带智能修复位 8192");
+        assert_eq!(fnval & 4048, 4048, "原有 dash 能力位不能丢");
+        assert_eq!(BANGUMI_PLAYURL_FNVAL, "12240");
+    }
+
+    #[test]
+    fn quality_fallback_range_covers_ai_repair_only_when_1080p_plus_is_allowed() {
+        // 100 夹在 1080P(80) 与 1080P+(112) 之间：上界到 1080P+ 时范围跨越 100，
+        // 上界只到 1080P 时 100 > 80 必然不在范围内。
+        assert!(build_playurl_quality_fallback_levels(127, 16).contains(&100));
+        assert!(build_playurl_quality_fallback_levels(112, 64).contains(&100));
+        assert!(!build_playurl_quality_fallback_levels(127, 112).contains(&100));
+        assert!(!build_playurl_quality_fallback_levels(80, 64).contains(&100));
+        assert_eq!(
+            build_playurl_quality_fallback_levels(
+                VideoQuality::Quality1080pPLUS as u32,
+                VideoQuality::Quality720p as u32
+            ),
+            vec![112, 100, 80, 64]
+        );
     }
 }
