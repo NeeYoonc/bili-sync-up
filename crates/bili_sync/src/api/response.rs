@@ -597,6 +597,8 @@ pub struct ConfigResponse {
     pub multi_page_use_season_structure: bool,
     // 结构变化（如单P变多P）后自动把已下载分页迁入 Season 结构
     pub auto_reorganize_pages: bool,
+    /// 下载暂存目录（未配置时为空字符串）
+    pub download_staging_dir: String,
     // 合集目录结构配置
     pub collection_use_season_structure: bool,
     // 番剧目录结构配置

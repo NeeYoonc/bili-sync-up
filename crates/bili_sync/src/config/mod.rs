@@ -259,6 +259,10 @@ pub struct Config {
     // 结构变化（如单P变多P）后是否自动把已下载的分页文件迁入 Season 目录
     #[serde(default = "default_auto_reorganize_pages")]
     pub auto_reorganize_pages: bool,
+    /// 下载暂存目录：设置后下载中的中间文件先写到该目录，合并与校验通过后再移动到最终位置。
+    /// 留空表示与旧版本行为一致（中间文件直接写在目标文件旁边）。
+    #[serde(default)]
+    pub download_staging_dir: Option<PathBuf>,
     // 推送通知配置
     #[serde(default)]
     pub notification: NotificationConfig,
@@ -736,6 +740,7 @@ impl Clone for Config {
             collection_use_season_structure: self.collection_use_season_structure,
             bangumi_use_season_structure: self.bangumi_use_season_structure,
             auto_reorganize_pages: self.auto_reorganize_pages,
+            download_staging_dir: self.download_staging_dir.clone(),
             notification: self.notification.clone(),
             enable_startup_data_fix: self.enable_startup_data_fix,
             enable_cid_population: self.enable_cid_population,
@@ -791,6 +796,7 @@ impl Default for Config {
             collection_use_season_structure: default_collection_use_season_structure(),
             bangumi_use_season_structure: default_bangumi_use_season_structure(),
             auto_reorganize_pages: default_auto_reorganize_pages(),
+            download_staging_dir: None,
             notification: NotificationConfig::default(),
             enable_startup_data_fix: false, // 默认关闭，减少不必要的日志
             enable_cid_population: false,   // 默认关闭，减少不必要的日志
@@ -838,6 +844,12 @@ impl Config {
         if !self.upper_path.is_absolute() {
             ok = false;
             error!("up 主头像保存的路径应为绝对路径");
+        }
+        if let Some(staging_dir) = &self.download_staging_dir {
+            if !staging_dir.is_absolute() {
+                ok = false;
+                error!("下载暂存目录应为绝对路径，检测到: {}", staging_dir.display());
+            }
         }
         if self.video_name.is_empty() {
             ok = false;

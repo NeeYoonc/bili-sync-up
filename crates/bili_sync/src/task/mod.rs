@@ -153,6 +153,8 @@ pub struct UpdateConfigTask {
     pub multi_page_use_season_structure: Option<bool>,
     // 结构变化（如单P变多P）后自动把已下载分页迁入 Season 结构
     pub auto_reorganize_pages: Option<bool>,
+    /// 下载暂存目录（留空字符串表示与目标目录相同）
+    pub download_staging_dir: Option<String>,
     // 合集目录结构配置
     pub collection_use_season_structure: Option<bool>,
     // 番剧目录结构配置
@@ -2447,6 +2449,7 @@ impl ConfigTaskQueue {
                 multi_page_use_season_structure: task.multi_page_use_season_structure,
                 // 结构变化（如单P变多P）后自动整理已下载分页
                 auto_reorganize_pages: task.auto_reorganize_pages,
+                download_staging_dir: task.download_staging_dir.clone(),
                 // 合集目录结构配置
                 collection_use_season_structure: task.collection_use_season_structure,
                 // 番剧目录结构配置
@@ -3077,5 +3080,14 @@ mod tests {
         let absent_json = r#"{"task_id":"t2"}"#;
         let absent: UpdateConfigTask = serde_json::from_str(absent_json).expect("缺省字段应可反序列化");
         assert_eq!(absent.auto_reorganize_pages, None);
+
+        let staging_raw = r#"{"task_id":"t4","download_staging_dir":"/mnt/staging"}"#;
+        let staging_task: UpdateConfigTask = serde_json::from_str(staging_raw).expect("应能反序列化暂存目录");
+        assert_eq!(staging_task.download_staging_dir.as_deref(), Some("/mnt/staging"));
+
+        let staging_roundtrip = serde_json::to_string(&staging_task).expect("应能序列化暂存目录");
+        let staging_restored: UpdateConfigTask =
+            serde_json::from_str(&staging_roundtrip).expect("应能反序列化往返结果");
+        assert_eq!(staging_restored.download_staging_dir.as_deref(), Some("/mnt/staging"));
     }
 }
