@@ -13724,8 +13724,7 @@ pub async fn update_config_internal(
     }
     // 下载暂存目录：留空字符串表示恢复为「与目标目录相同」
     if let Some(staging_dir) = params.download_staging_dir {
-        let new_staging_dir =
-            parse_download_staging_dir(&staging_dir).map_err(|message| ApiError::bad_request(message))?;
+        let new_staging_dir = parse_download_staging_dir(&staging_dir).map_err(ApiError::bad_request)?;
         if new_staging_dir != config.download_staging_dir {
             config.download_staging_dir = new_staging_dir;
             updated_fields.push("download_staging_dir");

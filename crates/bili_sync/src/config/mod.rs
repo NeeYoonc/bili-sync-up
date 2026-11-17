@@ -940,16 +940,20 @@ mod tests {
 
     #[test]
     fn sanitize_download_staging_dir_drops_relative_path() {
-        let mut config = Config::default();
-        config.download_staging_dir = Some(PathBuf::from("rel/stage"));
+        let mut config = Config {
+            download_staging_dir: Some(PathBuf::from("rel/stage")),
+            ..Default::default()
+        };
         config.sanitize_download_staging_dir();
         assert_eq!(config.download_staging_dir, None);
     }
 
     #[test]
     fn sanitize_download_staging_dir_keeps_absolute_path() {
-        let mut config = Config::default();
-        config.download_staging_dir = Some(PathBuf::from("/mnt/staging"));
+        let mut config = Config {
+            download_staging_dir: Some(PathBuf::from("/mnt/staging")),
+            ..Default::default()
+        };
         config.sanitize_download_staging_dir();
         assert_eq!(config.download_staging_dir.as_deref(), Some(Path::new("/mnt/staging")));
     }
