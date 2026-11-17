@@ -435,6 +435,7 @@
 
 	// 多P视频目录结构配置
 	let multiPageUseSeasonStructure = false;
+	let autoReorganizePages = true;
 
 	// 合集目录结构配置
 	let collectionUseSeasonStructure = false;
@@ -887,6 +888,7 @@
 
 		// 多P视频目录结构配置
 		multiPageUseSeasonStructure = config.multi_page_use_season_structure ?? false;
+		autoReorganizePages = config.auto_reorganize_pages ?? true;
 
 		// 合集目录结构配置
 		collectionUseSeasonStructure = config.collection_use_season_structure ?? false;
@@ -1528,6 +1530,8 @@
 			),
 			// 多P视频目录结构配置
 			multi_page_use_season_structure: multiPageUseSeasonStructure,
+			// 结构变化时自动整理已下载分页
+			auto_reorganize_pages: autoReorganizePages,
 			// 合集目录结构配置
 			collection_use_season_structure: collectionUseSeasonStructure,
 			// 番剧目录结构配置
@@ -2167,6 +2171,28 @@
 					</div>
 					<p class="text-muted-foreground text-xs">
 						启用后将为多P视频创建"Season 01"子文件夹，提升媒体库兼容性（如Emby/Jellyfin）
+					</p>
+				</div>
+
+				<!-- 结构变化时自动整理已下载分页 -->
+				<div class="space-y-2">
+					<div class="flex items-center space-x-2">
+						<input
+							type="checkbox"
+							id="auto-reorganize-pages"
+							bind:checked={autoReorganizePages}
+							class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+						/>
+						<Label
+							for="auto-reorganize-pages"
+							class="text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+						>
+							结构变化时自动整理已下载分页
+						</Label>
+					</div>
+					<p class="text-muted-foreground text-xs">
+						启用后，视频从单P变成多P（或目录结构模板变化）时，已下载的分页文件会自动迁入"Season
+						01"目录，避免同一视频出现混合目录结构；关闭后不再移动任何已下载文件
 					</p>
 				</div>
 

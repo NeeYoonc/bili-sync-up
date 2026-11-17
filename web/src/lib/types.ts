@@ -668,6 +668,8 @@ export interface ConfigResponse {
 	aria2_health_check_interval?: number;
 	// 多P视频目录结构配置
 	multi_page_use_season_structure?: boolean;
+	// 结构变化时自动整理已下载分页
+	auto_reorganize_pages?: boolean;
 	// 合集目录结构配置
 	collection_use_season_structure?: boolean;
 	// 番剧目录结构配置
@@ -857,6 +859,8 @@ export interface UpdateConfigRequest {
 	aria2_health_check_interval?: number;
 	// 多P视频目录结构配置
 	multi_page_use_season_structure?: boolean;
+	// 结构变化时自动整理已下载分页
+	auto_reorganize_pages?: boolean;
 	// 合集目录结构配置
 	collection_use_season_structure?: boolean;
 	// 番剧目录结构配置
