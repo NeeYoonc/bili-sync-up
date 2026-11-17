@@ -5537,7 +5537,10 @@ fn quality_height(quality: VideoQuality) -> i32 {
         VideoQuality::Quality360p => 360,
         VideoQuality::Quality480p => 480,
         VideoQuality::Quality720p => 720,
-        VideoQuality::Quality1080p | VideoQuality::Quality1080pPLUS | VideoQuality::Quality1080p60 => 1080,
+        VideoQuality::Quality1080p
+        | VideoQuality::Quality1080pPLUS
+        | VideoQuality::Quality1080p60
+        | VideoQuality::QualityAiRepair => 1080,
         VideoQuality::Quality4k | VideoQuality::QualityHdr | VideoQuality::QualityDolby => 2160,
         VideoQuality::Quality8k => 4320,
     }

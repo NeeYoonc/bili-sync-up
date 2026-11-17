@@ -19711,6 +19711,7 @@ fn get_video_quality_description(quality: crate::bilibili::VideoQuality) -> Stri
         VideoQuality::Quality480p => "480P".to_string(),
         VideoQuality::Quality720p => "720P".to_string(),
         VideoQuality::Quality1080p => "1080P".to_string(),
+        VideoQuality::QualityAiRepair => "智能修复".to_string(),
         VideoQuality::Quality1080pPLUS => "1080P+".to_string(),
         VideoQuality::Quality1080p60 => "1080P60".to_string(),
         VideoQuality::Quality4k => "4K".to_string(),

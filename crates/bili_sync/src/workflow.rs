@@ -8387,6 +8387,7 @@ fn get_cached_video_quality_description(quality: crate::bilibili::VideoQuality) 
         VideoQuality::Quality480p => "480P",
         VideoQuality::Quality720p => "720P",
         VideoQuality::Quality1080p => "1080P",
+        VideoQuality::QualityAiRepair => "智能修复",
         VideoQuality::Quality1080pPLUS => "1080P+",
         VideoQuality::Quality1080p60 => "1080P60",
         VideoQuality::Quality4k => "4K",
