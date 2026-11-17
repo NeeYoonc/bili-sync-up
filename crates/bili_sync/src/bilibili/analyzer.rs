@@ -27,6 +27,12 @@ pub enum VideoQuality {
     Quality480p = 32,
     Quality720p = 64,
     Quality1080p = 80,
+    /// B 站番剧「智能修复」（AI 增强画质，大会员专属，qn=100）。
+    ///
+    /// 声明位置必须在 `Quality1080p`(80) 与 `Quality1080pPLUS`(112) 之间：`Ord` 由声明顺序
+    /// 决定，B 站画质数值序也是 80 < 100 < 112，两边必须一致，否则按质量过滤（最高/最低画质）
+    /// 会把 100 排到错误的位置。
+    QualityAiRepair = 100,
     Quality1080pPLUS = 112,
     Quality1080p60 = 116,
     Quality4k = 120,
@@ -42,6 +48,7 @@ impl std::fmt::Display for VideoQuality {
             VideoQuality::Quality480p => write!(f, "480P清晰"),
             VideoQuality::Quality720p => write!(f, "720P高清"),
             VideoQuality::Quality1080p => write!(f, "1080P高清"),
+            VideoQuality::QualityAiRepair => write!(f, "智能修复"),
             VideoQuality::Quality1080pPLUS => write!(f, "1080P+高码率"),
             VideoQuality::Quality1080p60 => write!(f, "1080P 60fps"),
             VideoQuality::Quality4k => write!(f, "4K超高清"),
@@ -692,6 +699,8 @@ mod tests {
         assert!(VideoQuality::Quality360p < VideoQuality::Quality480p);
         assert!(VideoQuality::Quality480p < VideoQuality::Quality720p);
         assert!(VideoQuality::Quality720p < VideoQuality::Quality1080p);
+        assert!(VideoQuality::Quality1080p < VideoQuality::QualityAiRepair);
+        assert!(VideoQuality::QualityAiRepair < VideoQuality::Quality1080pPLUS);
         assert!(VideoQuality::Quality1080p < VideoQuality::Quality1080pPLUS);
         assert!(VideoQuality::Quality1080pPLUS < VideoQuality::Quality1080p60);
         assert!(VideoQuality::Quality1080p60 < VideoQuality::Quality4k);
@@ -706,12 +715,19 @@ mod tests {
         assert_eq!(VideoQuality::Quality480p.to_string(), "480P清晰");
         assert_eq!(VideoQuality::Quality720p.to_string(), "720P高清");
         assert_eq!(VideoQuality::Quality1080p.to_string(), "1080P高清");
+        assert_eq!(VideoQuality::QualityAiRepair.to_string(), "智能修复");
         assert_eq!(VideoQuality::Quality1080pPLUS.to_string(), "1080P+高码率");
         assert_eq!(VideoQuality::Quality1080p60.to_string(), "1080P 60fps");
         assert_eq!(VideoQuality::Quality4k.to_string(), "4K超高清");
         assert_eq!(VideoQuality::QualityHdr.to_string(), "HDR真彩");
         assert_eq!(VideoQuality::QualityDolby.to_string(), "杜比视界");
         assert_eq!(VideoQuality::Quality8k.to_string(), "8K超高清");
+    }
+
+    #[test]
+    fn quality_ai_repair_uses_bangumi_quality_id_100() {
+        assert_eq!(VideoQuality::from_repr(100), Some(VideoQuality::QualityAiRepair));
+        assert_eq!(VideoQuality::QualityAiRepair as u32, 100);
     }
 
     #[test]

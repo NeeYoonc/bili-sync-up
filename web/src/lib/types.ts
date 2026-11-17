@@ -248,6 +248,7 @@ export type VideoQuality =
 	| 'Quality720p'
 	| 'Quality1080p'
 	| 'Quality1080pPLUS'
+	| 'QualityAiRepair'
 	| 'Quality1080p60'
 	| 'Quality4k'
 	| 'QualityHdr'

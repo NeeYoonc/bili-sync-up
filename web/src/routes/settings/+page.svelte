@@ -658,6 +658,7 @@
 		{ value: 'Quality4k', label: '4K超高清' },
 		{ value: 'Quality1080p60', label: '1080P 60fps' },
 		{ value: 'Quality1080pPLUS', label: '1080P+高码率' },
+		{ value: 'QualityAiRepair', label: '智能修复（大会员）' },
 		{ value: 'Quality1080p', label: '1080P高清' },
 		{ value: 'Quality720p', label: '720P高清' },
 		{ value: 'Quality480p', label: '480P清晰' },
