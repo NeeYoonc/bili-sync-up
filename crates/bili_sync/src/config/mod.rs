@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -263,6 +263,10 @@ pub struct Config {
     /// 留空表示与旧版本行为一致（中间文件直接写在目标文件旁边）。
     #[serde(default)]
     pub download_staging_dir: Option<PathBuf>,
+    /// 历史下载暂存目录：切换下载暂存目录时保留旧根，用于启动统计与手动清理残留。
+    /// 只由程序维护，不在设置页展示，也不接受配置接口直接写入。
+    #[serde(default)]
+    pub download_staging_previous_dirs: Vec<PathBuf>,
     // 推送通知配置
     #[serde(default)]
     pub notification: NotificationConfig,
@@ -741,6 +745,7 @@ impl Clone for Config {
             bangumi_use_season_structure: self.bangumi_use_season_structure,
             auto_reorganize_pages: self.auto_reorganize_pages,
             download_staging_dir: self.download_staging_dir.clone(),
+            download_staging_previous_dirs: self.download_staging_previous_dirs.clone(),
             notification: self.notification.clone(),
             enable_startup_data_fix: self.enable_startup_data_fix,
             enable_cid_population: self.enable_cid_population,
@@ -797,6 +802,7 @@ impl Default for Config {
             bangumi_use_season_structure: default_bangumi_use_season_structure(),
             auto_reorganize_pages: default_auto_reorganize_pages(),
             download_staging_dir: None,
+            download_staging_previous_dirs: Vec::new(),
             notification: NotificationConfig::default(),
             enable_startup_data_fix: false, // 默认关闭，减少不必要的日志
             enable_cid_population: false,   // 默认关闭，减少不必要的日志
@@ -806,22 +812,64 @@ impl Default for Config {
     }
 }
 
+/// 历史下载暂存目录最多保留的数量，避免配置无限增长。
+pub const MAX_DOWNLOAD_STAGING_PREVIOUS_DIRS: usize = 5;
+
+/// 清理历史下载暂存目录列表：只保留绝对路径、按出现顺序去重、剔除与当前暂存目录重复的项，
+/// 并限制最多 [`MAX_DOWNLOAD_STAGING_PREVIOUS_DIRS`] 个。
+pub fn sanitize_download_staging_previous_dirs(previous_dirs: &mut Vec<PathBuf>, current: Option<&Path>) {
+    let mut sanitized: Vec<PathBuf> = Vec::with_capacity(previous_dirs.len());
+    for dir in previous_dirs.drain(..) {
+        if !dir.is_absolute() {
+            continue;
+        }
+        if current.is_some_and(|current| current == dir.as_path()) {
+            continue;
+        }
+        if sanitized.contains(&dir) {
+            continue;
+        }
+        sanitized.push(dir);
+        if sanitized.len() == MAX_DOWNLOAD_STAGING_PREVIOUS_DIRS {
+            break;
+        }
+    }
+    *previous_dirs = sanitized;
+}
+
+/// 记录被替换下来的旧暂存目录：只记绝对路径、去重（已存在时移到最新位置），
+/// 最多保留最近 [`MAX_DOWNLOAD_STAGING_PREVIOUS_DIRS`] 个。
+pub fn remember_previous_download_staging_dir(previous_dirs: &mut Vec<PathBuf>, previous: PathBuf) {
+    if !previous.is_absolute() {
+        return;
+    }
+    previous_dirs.retain(|dir| dir != &previous);
+    previous_dirs.push(previous);
+    let overflow = previous_dirs.len().saturating_sub(MAX_DOWNLOAD_STAGING_PREVIOUS_DIRS);
+    if overflow > 0 {
+        previous_dirs.drain(..overflow);
+    }
+}
+
 impl Config {
     /// 加载配置时清理非法值：下载暂存目录必须是绝对路径，否则回退为「未配置」。
     ///
     /// 相对路径会按进程工作目录解析，可能把下载中间文件写到容器工作目录或错误磁盘，
     /// 因此这里直接丢弃并打 WARN，让下载回到「与媒体目录相同」的旧行为。
     pub fn sanitize_download_staging_dir(&mut self) {
-        let Some(staging_dir) = self.download_staging_dir.as_ref() else {
-            return;
-        };
-        if !staging_dir.is_absolute() {
-            warn!(
-                "下载暂存目录配置无效（必须是绝对路径），已忽略并回退为不使用暂存目录: {}",
-                staging_dir.display()
-            );
-            self.download_staging_dir = None;
+        if let Some(staging_dir) = self.download_staging_dir.as_ref() {
+            if !staging_dir.is_absolute() {
+                warn!(
+                    "下载暂存目录配置无效（必须是绝对路径），已忽略并回退为不使用暂存目录: {}",
+                    staging_dir.display()
+                );
+                self.download_staging_dir = None;
+            }
         }
+        sanitize_download_staging_previous_dirs(
+            &mut self.download_staging_previous_dirs,
+            self.download_staging_dir.as_deref(),
+        );
     }
 
     #[cfg(not(test))]
@@ -956,5 +1004,39 @@ mod tests {
         };
         config.sanitize_download_staging_dir();
         assert_eq!(config.download_staging_dir.as_deref(), Some(Path::new("/mnt/staging")));
+    }
+
+    #[test]
+    fn sanitize_download_staging_previous_dirs_drops_relative_duplicates_and_current() {
+        let mut previous = vec![
+            PathBuf::from("/mnt/old-a"),
+            PathBuf::from("rel/stage"),
+            PathBuf::from("/mnt/current"),
+            PathBuf::from("/mnt/old-a"),
+            PathBuf::from("/mnt/old-b"),
+        ];
+        sanitize_download_staging_previous_dirs(&mut previous, Some(Path::new("/mnt/current")));
+        assert_eq!(previous, vec![PathBuf::from("/mnt/old-a"), PathBuf::from("/mnt/old-b")]);
+    }
+
+    #[test]
+    fn remember_previous_download_staging_dir_keeps_recent_five() {
+        let mut previous = Vec::new();
+        for index in 0..7 {
+            remember_previous_download_staging_dir(&mut previous, PathBuf::from(format!("/mnt/staging-{index}")));
+        }
+        assert_eq!(previous.len(), MAX_DOWNLOAD_STAGING_PREVIOUS_DIRS);
+        assert_eq!(
+            previous.first().map(PathBuf::as_path),
+            Some(Path::new("/mnt/staging-2"))
+        );
+        assert_eq!(previous.last().map(PathBuf::as_path), Some(Path::new("/mnt/staging-6")));
+    }
+
+    #[test]
+    fn remember_previous_download_staging_dir_ignores_relative_paths() {
+        let mut previous = vec![PathBuf::from("/mnt/old")];
+        remember_previous_download_staging_dir(&mut previous, PathBuf::from("rel/stage"));
+        assert_eq!(previous, vec![PathBuf::from("/mnt/old")]);
     }
 }

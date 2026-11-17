@@ -437,6 +437,7 @@
 	let multiPageUseSeasonStructure = false;
 	let autoReorganizePages = true;
 	let downloadStagingDir = ''; // 下载暂存目录，留空表示与目标目录相同
+	let cleaningStaging = false; // 是否正在清理下载暂存残留
 
 	// 合集目录结构配置
 	let collectionUseSeasonStructure = false;
@@ -1577,6 +1578,25 @@
 		}
 	}
 
+	async function cleanupStagingResidue() {
+		cleaningStaging = true;
+		try {
+			const response = await runRequest(() => api.cleanupStagingResidue(), {
+				context: '清理暂存残留失败'
+			});
+			if (!response) return;
+			const removedBytes = response.data.removed_bytes ?? 0;
+			const cleanedRoots = response.data.cleaned_roots ?? [];
+			toast.success(`已清理 ${response.data.removed_files} 个文件`, {
+				description: `释放 ${(removedBytes / 1024 / 1024).toFixed(2)} MB${
+					cleanedRoots.length > 0 ? `，涉及 ${cleanedRoots.length} 个暂存目录` : ''
+				}`
+			});
+		} finally {
+			cleaningStaging = false;
+		}
+	}
+
 	async function saveCredential() {
 		const params = {
 			sessdata: sessdata.trim(),
@@ -2213,6 +2233,22 @@
 						.tmp_video / .tmp_audio / .resume
 						文件；同一存储池内是秒级移动，跨盘会退化成一次整文件拷贝。留空表示不启用；填写时必须是绝对路径（相对路径会被拒绝），并确保与下载目录在同一账号下可读写。
 					</p>
+					<div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onclick={cleanupStagingResidue}
+							disabled={cleaningStaging || saving}
+							class="w-full sm:w-auto"
+						>
+							<RefreshCwIcon class={cleaningStaging ? 'animate-spin' : ''} />
+							{cleaningStaging ? '清理中...' : '清理暂存残留'}
+						</Button>
+						<span class="text-muted-foreground text-xs">
+							只在没有下载任务时可用；会清空当前与历史暂存目录里的残留文件（暂存目录本身保留）
+						</span>
+					</div>
 				</div>
 
 				<!-- 合集Season结构设置 -->

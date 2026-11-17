@@ -599,6 +599,8 @@ pub struct ConfigResponse {
     pub auto_reorganize_pages: bool,
     /// 下载暂存目录（未配置时为空字符串）
     pub download_staging_dir: String,
+    /// 历史下载暂存目录（切换暂存目录后遗留的旧目录，可在设置页清理残留）
+    pub download_staging_previous_dirs: Vec<String>,
     // 合集目录结构配置
     pub collection_use_season_structure: bool,
     // 番剧目录结构配置
@@ -633,6 +635,17 @@ pub struct ConfigResponse {
     pub ai_rename: AiRenameConfigResponse,
     // 服务器绑定地址
     pub bind_address: String,
+}
+
+/// 清理下载暂存残留响应
+#[derive(Serialize, ToSchema)]
+pub struct StagingCleanupResponse {
+    /// 本次删除的残留文件数量
+    pub removed_files: usize,
+    /// 本次释放的字节数
+    pub removed_bytes: u64,
+    /// 实际清理过的暂存根目录（当前暂存目录与历史暂存目录）
+    pub cleaned_roots: Vec<String>,
 }
 
 // 文件命名预览响应结构体
