@@ -2606,14 +2606,34 @@ pub(crate) async fn fetch_aweme_detail_for_source(
 /// 抖音作者源的作品详情：普通 Web 详情接口优先；对「日常」（story）作品，
 /// 普通详情接口会返回空详情（日常在独立的 story 数据空间），此时回退到
 /// 移动端日常列表接口按 aweme_id 查找，让图文日常能拿到原图与配乐直链。
+///
+/// 另有一类「日常」短视频：详情接口成功返回，但 `video.play_addr.url_list`
+/// 为空（条目本身不下发直链）。这类条目通常在 `share_post_origin_item` 里内嵌
+/// 了带直链的原始投稿，优先用它的 `video` 替换；详情里也没有内嵌媒体时，再拉
+/// 一次「日常」列表，按「时长 + 配乐」匹配同一作品的普通投稿后继续下载。
 async fn fetch_douyin_author_detail(source_url: &str, aweme_id: &str) -> Result<serde_json::Value> {
     match fetch_aweme_detail(aweme_id).await {
-        Ok(detail) => Ok(detail),
+        Ok(detail) => {
+            let has_images = detail
+                .get("images")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|images| !images.is_empty());
+            // 图集本来就正常（图片/配乐直链与视频无关），不要为它多发一次日常列表请求。
+            if has_images {
+                return Ok(detail);
+            }
+            // 详情自带自己的直链或内嵌的原始投稿时直接用，不必再请求列表。
+            if let Some(resolved) = douyin_detail_with_embedded_media(&detail) {
+                return Ok(resolved);
+            }
+            Ok(resolve_douyin_story_media(source_url, &detail).await)
+        }
         Err(regular_error) => {
             let fallback = async {
                 let sec_uid = resolve_sec_user_id(source_url).await?;
                 let items = fetch_story_items(&sec_uid, 200).await?;
-                find_aweme_in_items(&items, aweme_id).context("日常列表中没有找到该作品")
+                let item = find_aweme_in_items(&items, aweme_id).context("日常列表中没有找到该作品")?;
+                Ok::<serde_json::Value, anyhow::Error>(douyin_list_item_with_media(&item, &items))
             }
             .await;
             match fallback {
@@ -2636,6 +2656,224 @@ fn find_aweme_in_items(items: &[serde_json::Value], aweme_id: &str) -> Option<se
         .iter()
         .find(|item| text(item, &["aweme_id", "group_id"]).as_deref() == Some(aweme_id))
         .cloned()
+}
+
+/// 判断一条抖音作品 JSON 是否带有可直接下载的播放地址。
+///
+/// 「日常」短视频（`is_story=1` / `aweme_type=109`）的条目经常只有
+/// `play_addr.uri`，`url_list` 为空；这里统一检查常见的播放地址字段。
+/// 判断 `video` 对象里是否带有可下载的 http 直链。
+fn douyin_video_has_playable_media(video: &serde_json::Value) -> bool {
+    let direct = ["play_addr", "play_addr_h264", "play_addr_265", "download_addr"]
+        .into_iter()
+        .any(|key| !urls_from_value(video.get(key)).is_empty());
+    direct
+        || video
+            .get("bit_rate")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|entry| !urls_from_value(entry.get("play_addr")).is_empty())
+}
+
+/// 取「日常」条目内嵌的原始投稿（普通投稿）对象：`share_post_origin_item`。
+fn douyin_share_post_origin_item(item: &serde_json::Value) -> Option<&serde_json::Value> {
+    item.get("share_post_origin_item").filter(|origin| origin.is_object())
+}
+
+/// 条目是否带有可下载媒体：自己的 `video`，或内嵌原始投稿的 `video`。
+fn douyin_item_has_playable_media(item: &serde_json::Value) -> bool {
+    let own = item.get("video").is_some_and(douyin_video_has_playable_media);
+    own || douyin_share_post_origin_item(item)
+        .and_then(|origin| origin.get("video"))
+        .is_some_and(douyin_video_has_playable_media)
+}
+
+/// 用内嵌原始投稿的 `video` 替换「日常」条目的视频信息，保留原有元数据。
+///
+/// 标题等元数据仍沿用「日常」条目；只有条目标题为空时才用原始投稿的 `desc` 补全。
+fn with_douyin_origin_media(story: &serde_json::Value, origin: &serde_json::Value) -> serde_json::Value {
+    let mut merged = story.clone();
+    let Some(object) = merged.as_object_mut() else {
+        return merged;
+    };
+    if let Some(video) = origin.get("video") {
+        object.insert("video".to_string(), video.clone());
+    }
+    let story_desc_empty = text(story, &["desc"]).is_none_or(|desc| desc.trim().is_empty());
+    if story_desc_empty {
+        if let Some(desc) = text(origin, &["desc"]) {
+            object.insert("desc".to_string(), serde_json::Value::String(desc));
+        }
+    }
+    merged
+}
+
+/// 条目自身没有直链、但内嵌的原始投稿有可下载媒体时，返回补好 `video` 的条目副本。
+///
+/// 命中时打 INFO 日志（带 `story_aweme_id` 与 `origin_aweme_id`），否则返回 `None`。
+fn douyin_item_with_embedded_origin_media(item: &serde_json::Value) -> Option<serde_json::Value> {
+    if item.get("video").is_some_and(douyin_video_has_playable_media) {
+        return None;
+    }
+    let origin = douyin_share_post_origin_item(item)?;
+    if !origin.get("video").is_some_and(douyin_video_has_playable_media) {
+        return None;
+    }
+    let story_aweme_id = text(item, &["aweme_id", "group_id"]).unwrap_or_default();
+    let origin_aweme_id = text(origin, &["aweme_id", "group_id"]).unwrap_or_default();
+    info!(
+        target: "bili_sync_rs::douyin",
+        story_aweme_id = %story_aweme_id,
+        origin_aweme_id = %origin_aweme_id,
+        "抖音「日常」短视频无直链，已使用内嵌的原始投稿播放地址"
+    );
+    Some(with_douyin_origin_media(item, origin))
+}
+
+/// 详情对象自身可用（自己的直链或内嵌原始投稿）时返回可用条目，否则返回 `None`，
+/// 表示还需要再拉一次「日常」列表。
+fn douyin_detail_with_embedded_media(detail: &serde_json::Value) -> Option<serde_json::Value> {
+    if detail.get("video").is_some_and(douyin_video_has_playable_media) {
+        return Some(detail.clone());
+    }
+    douyin_item_with_embedded_origin_media(detail)
+}
+
+/// 给「日常」条目补上可下载媒体：自身直链 → 内嵌原始投稿 → 顶层列表启发式匹配。
+///
+/// 全部不中时原样返回条目，让上层沿用原有错误信息与登录过期提示。
+fn douyin_list_item_with_media(item: &serde_json::Value, items: &[serde_json::Value]) -> serde_json::Value {
+    if item.get("video").is_some_and(douyin_video_has_playable_media) {
+        return item.clone();
+    }
+    if let Some(media) = douyin_item_with_embedded_origin_media(item) {
+        return media;
+    }
+    let story_aweme_id = text(item, &["aweme_id", "group_id"]).unwrap_or_default();
+    let Some(twin) = find_douyin_story_media_twin(items, item) else {
+        debug!(
+            target: "bili_sync_rs::douyin",
+            aweme_id = %story_aweme_id,
+            "抖音「日常」短视频无直链，也未找到可用的普通投稿"
+        );
+        return item.clone();
+    };
+    let twin_aweme_id = text(&twin, &["aweme_id", "group_id"]).unwrap_or_default();
+    info!(
+        target: "bili_sync_rs::douyin",
+        story_aweme_id = %story_aweme_id,
+        twin_aweme_id = %twin_aweme_id,
+        "抖音「日常」短视频无直链，已匹配同一作品的普通投稿"
+    );
+    with_douyin_media_from(item, &twin)
+}
+
+/// 是否为「日常」（story）作品条目。
+fn douyin_item_is_story_item(item: &serde_json::Value) -> bool {
+    item.get("is_story").and_then(value_as_bool).unwrap_or(false) || integer(item, &["aweme_type"]) == Some(109)
+}
+
+fn douyin_item_duration_ms(item: &serde_json::Value) -> Option<i64> {
+    item.pointer("/video/duration").and_then(serde_json::Value::as_i64)
+}
+
+fn douyin_item_music_id(item: &serde_json::Value) -> Option<String> {
+    text(item.get("music")?, &["id"])
+}
+
+/// 在「日常」列表里为无直链的短视频寻找同一作品的普通投稿。
+///
+/// 匹配条件：不是「日常」条目、有可用播放地址、`video.duration` 与配乐
+/// `music.id` 都与目标完全一致。只有唯一候选（或存在 `desc` 完全一致的
+/// 候选）时才返回，避免把不同作品错配到一起。
+fn find_douyin_story_media_twin(items: &[serde_json::Value], story: &serde_json::Value) -> Option<serde_json::Value> {
+    let duration = douyin_item_duration_ms(story)?;
+    let music_id = douyin_item_music_id(story)?;
+    let story_id = text(story, &["aweme_id", "group_id"]);
+    let candidates = items
+        .iter()
+        .filter(|item| {
+            let same_id = match (&story_id, text(item, &["aweme_id", "group_id"])) {
+                (Some(story_id), Some(item_id)) => story_id == &item_id,
+                _ => false,
+            };
+            !same_id
+                && !douyin_item_is_story_item(item)
+                && douyin_item_has_playable_media(item)
+                && douyin_item_duration_ms(item) == Some(duration)
+                && douyin_item_music_id(item).as_deref() == Some(music_id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => None,
+        [only] => Some(only.clone()),
+        _ => {
+            let story_desc = text(story, &["desc"]);
+            let matched = candidates
+                .iter()
+                .filter(|item| text(item, &["desc"]) == story_desc)
+                .cloned()
+                .collect::<Vec<_>>();
+            match matched.as_slice() {
+                [only] => Some(only.clone()),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// 用带直链作品的 `video` 字段替换「日常」条目的视频信息，保留原有元数据。
+fn with_douyin_media_from(target: &serde_json::Value, media: &serde_json::Value) -> serde_json::Value {
+    let Some(video) = media.get("video") else {
+        return media.clone();
+    };
+    let mut merged = target.clone();
+    if let Some(object) = merged.as_object_mut() {
+        object.insert("video".to_string(), video.clone());
+    }
+    merged
+}
+
+/// 「日常」短视频详情没有播放地址时，从同一作者的日常列表里找可下载的同款作品。
+///
+/// 优先用列表里同一条目的直链；否则按「时长 + 配乐」匹配同一作品的普通投稿。
+/// 任何一步失败都只记 debug 并返回 `None`，让调用方继续沿用普通详情。
+/// 「日常」短视频没有直链时，拉取作者的「日常」列表，再补上可下载媒体。
+///
+/// 优先使用列表里同一条目自身或它内嵌的原始投稿；都不可用时才用
+/// 「时长 + 配乐」启发式匹配普通投稿。任何一步失败都原样返回详情。
+async fn resolve_douyin_story_media(source_url: &str, detail: &serde_json::Value) -> serde_json::Value {
+    let aweme_id = text(detail, &["aweme_id", "group_id"]).unwrap_or_default();
+    let sec_uid = match resolve_sec_user_id(source_url).await {
+        Ok(sec_uid) => sec_uid,
+        Err(error) => {
+            debug!(
+                target: "bili_sync_rs::douyin",
+                aweme_id,
+                error = %error,
+                "抖音「日常」短视频缺少播放地址，解析作者失败"
+            );
+            return detail.clone();
+        }
+    };
+    let items = match fetch_story_items(&sec_uid, 200).await {
+        Ok(items) => items,
+        Err(error) => {
+            debug!(
+                target: "bili_sync_rs::douyin",
+                aweme_id,
+                error = %error,
+                "抖音「日常」短视频缺少播放地址，获取日常列表失败"
+            );
+            return detail.clone();
+        }
+    };
+    match find_aweme_in_items(&items, &aweme_id) {
+        Some(item) => douyin_list_item_with_media(&item, &items),
+        None => douyin_list_item_with_media(detail, &items),
+    }
 }
 
 async fn fetch_theater_aweme_detail(album_id: &str, aweme_id: &str) -> Result<Option<serde_json::Value>> {
@@ -6919,6 +7157,247 @@ mod tests {
             super::douyin_login_expiry_hint_from_jar("not a cookie jar").is_none(),
             "解析不出会话 Cookie 时不应给提示"
         );
+    }
+
+    fn test_douyin_media_video(duration: i64, playable_url: Option<&str>) -> serde_json::Value {
+        match playable_url {
+            Some(url) => serde_json::json!({
+                "duration": duration,
+                "play_addr": {"uri": "v0d00fg10000", "url_list": [url]},
+                "bit_rate": [{"play_addr": {"url_list": [url]}}],
+            }),
+            None => serde_json::json!({
+                "duration": duration,
+                "play_addr": {"uri": "v0d00fg10000", "url_list": []},
+                "bit_rate": [{"play_addr": {"url_list": []}}],
+            }),
+        }
+    }
+
+    fn test_douyin_item(
+        aweme_id: &str,
+        desc: &str,
+        music_id: &str,
+        duration: i64,
+        playable_url: Option<&str>,
+        story: bool,
+    ) -> serde_json::Value {
+        let aweme_type = if story { 109 } else { 0 };
+        serde_json::json!({
+            "aweme_id": aweme_id,
+            "desc": desc,
+            "aweme_type": aweme_type,
+            "is_story": story,
+            "music": {"id": music_id},
+            "video": test_douyin_media_video(duration, playable_url),
+        })
+    }
+
+    #[test]
+    fn douyin_item_has_playable_media_detects_direct_and_bit_rate_urls() {
+        let play_addr = serde_json::json!({
+            "video": {"play_addr": {"uri": "v0d00", "url_list": ["https://example.com/a.mp4"]}}
+        });
+        assert!(super::douyin_item_has_playable_media(&play_addr));
+        let bit_rate = serde_json::json!({
+            "video": {
+                "play_addr": {"uri": "v0d00", "url_list": []},
+                "bit_rate": [{"play_addr": {"url_list": ["https://example.com/b.mp4"]}}]
+            }
+        });
+        assert!(super::douyin_item_has_playable_media(&bit_rate));
+        let h264 = serde_json::json!({
+            "video": {
+                "play_addr": {"uri": "v0d00", "url_list": []},
+                "play_addr_h264": {"url_list": ["https://example.com/c.mp4"]}
+            }
+        });
+        assert!(super::douyin_item_has_playable_media(&h264));
+        let uri_only = test_douyin_item("1", "只有 uri", "2", 1000, None, true);
+        assert!(!super::douyin_item_has_playable_media(&uri_only));
+        assert!(!super::douyin_item_has_playable_media(
+            &serde_json::json!({"aweme_id": "1"})
+        ));
+    }
+
+    #[test]
+    fn douyin_story_media_twin_matches_duration_and_music() {
+        let story = test_douyin_item(
+            "7709010759556768881",
+            "日常标题",
+            "7708616590141328137",
+            362150,
+            None,
+            true,
+        );
+        let twin = test_douyin_item(
+            "7708616425019034899",
+            "普通投稿",
+            "7708616590141328137",
+            362150,
+            Some("https://example.com/twin.mp4"),
+            false,
+        );
+        let unrelated = test_douyin_item("1", "无关", "2", 1000, Some("https://example.com/x.mp4"), false);
+        let items = vec![story.clone(), twin, unrelated];
+        let found = super::find_douyin_story_media_twin(&items, &story).expect("应匹配到普通投稿");
+        assert_eq!(
+            super::text(&found, &["aweme_id"]).as_deref(),
+            Some("7708616425019034899")
+        );
+        assert!(super::douyin_item_has_playable_media(&found));
+    }
+
+    #[test]
+    fn douyin_story_media_twin_rejects_mismatched_duration_or_music() {
+        let story = test_douyin_item("7707880140633986993", "日常", "7707651983979105039", 270806, None, true);
+        let wrong_duration = test_douyin_item(
+            "2",
+            "时长不同",
+            "7707651983979105039",
+            270807,
+            Some("https://example.com/2.mp4"),
+            false,
+        );
+        let wrong_music = test_douyin_item("3", "配乐不同", "999", 270806, Some("https://example.com/3.mp4"), false);
+        let items = vec![story.clone(), wrong_duration, wrong_music];
+        assert!(super::find_douyin_story_media_twin(&items, &story).is_none());
+    }
+
+    #[test]
+    fn douyin_story_media_twin_gives_up_on_ambiguous_candidates() {
+        let story = test_douyin_item("4", "日常", "777", 1000, None, true);
+        let first = test_douyin_item("5", "投稿A", "777", 1000, Some("https://example.com/5.mp4"), false);
+        let second = test_douyin_item("6", "投稿B", "777", 1000, Some("https://example.com/6.mp4"), false);
+        let items = vec![story.clone(), first, second];
+        assert!(
+            super::find_douyin_story_media_twin(&items, &story).is_none(),
+            "多个候选且 desc 都不同时应放弃匹配"
+        );
+
+        let mut story_with_desc = story;
+        story_with_desc["desc"] = serde_json::json!("投稿B");
+        let found = super::find_douyin_story_media_twin(&items, &story_with_desc).expect("desc 唯一时应命中");
+        assert_eq!(super::text(&found, &["aweme_id"]).as_deref(), Some("6"));
+    }
+
+    #[test]
+    fn douyin_story_media_twin_ignores_story_item_with_direct_link() {
+        let story = test_douyin_item("7", "日常", "888", 1000, None, true);
+        let story_with_link = test_douyin_item("7", "日常", "888", 1000, Some("https://example.com/7.mp4"), true);
+        let items = vec![story.clone(), story_with_link];
+        assert!(
+            super::find_douyin_story_media_twin(&items, &story).is_none(),
+            "普通投稿候选不应包含「日常」条目本身"
+        );
+    }
+
+    #[test]
+    fn douyin_item_has_playable_media_counts_embedded_origin() {
+        let mut story = test_douyin_item("1", "日常", "2", 1000, None, true);
+        assert!(!super::douyin_item_has_playable_media(&story));
+        story["share_post_origin_item"] =
+            test_douyin_item("3", "原始投稿", "2", 1000, Some("https://example.com/o.mp4"), false);
+        assert!(super::douyin_item_has_playable_media(&story));
+        assert!(super::douyin_share_post_origin_item(&story).is_some());
+        story["share_post_origin_item"] = serde_json::json!("not an object");
+        assert!(super::douyin_share_post_origin_item(&story).is_none());
+        assert!(!super::douyin_item_has_playable_media(&story));
+    }
+
+    #[test]
+    fn douyin_detail_with_embedded_media_returns_origin_video_without_list() {
+        let mut detail = test_douyin_item("7709010759556768881", "", "7708616590141328137", 362150, None, true);
+        detail["share_post_origin_item"] = test_douyin_item(
+            "7708616425019034899",
+            "原始投稿标题",
+            "7708616590141328137",
+            362150,
+            Some("https://example.com/origin.mp4"),
+            false,
+        );
+        let resolved =
+            super::douyin_detail_with_embedded_media(&detail).expect("详情内嵌原始投稿应直接命中，不需要再拉列表");
+        assert_eq!(
+            super::text(&resolved, &["aweme_id"]).as_deref(),
+            Some("7709010759556768881"),
+            "「日常」条目自己的 aweme_id 必须保留"
+        );
+        assert_eq!(
+            super::text(&resolved, &["desc"]).as_deref(),
+            Some("原始投稿标题"),
+            "原标题为空时用原始投稿的 desc 补全"
+        );
+        let urls = resolved
+            .pointer("/video/play_addr/url_list")
+            .and_then(serde_json::Value::as_array)
+            .expect("应带上原始投稿的播放地址");
+        assert_eq!(
+            urls.first().and_then(serde_json::Value::as_str),
+            Some("https://example.com/origin.mp4")
+        );
+    }
+
+    #[test]
+    fn douyin_list_item_prefers_embedded_origin_over_heuristic_twin() {
+        let mut story = test_douyin_item("10", "日常", "999", 1000, None, true);
+        story["share_post_origin_item"] = test_douyin_item(
+            "11",
+            "原始投稿",
+            "999",
+            1000,
+            Some("https://example.com/origin.mp4"),
+            false,
+        );
+        let twin = test_douyin_item(
+            "12",
+            "普通投稿",
+            "999",
+            1000,
+            Some("https://example.com/twin.mp4"),
+            false,
+        );
+        let items = vec![story.clone(), twin];
+        let resolved = super::douyin_list_item_with_media(&story, &items);
+        let urls = resolved
+            .pointer("/video/play_addr/url_list")
+            .and_then(serde_json::Value::as_array)
+            .expect("应优先用内嵌原始投稿的播放地址");
+        assert_eq!(
+            urls.first().and_then(serde_json::Value::as_str),
+            Some("https://example.com/origin.mp4")
+        );
+    }
+
+    #[test]
+    fn douyin_list_item_falls_back_to_heuristic_when_origin_has_no_media() {
+        let mut story = test_douyin_item("13", "日常", "888", 1000, None, true);
+        story["share_post_origin_item"] = test_douyin_item("14", "原始投稿(无地址)", "888", 1000, None, false);
+        let twin = test_douyin_item(
+            "15",
+            "普通投稿",
+            "888",
+            1000,
+            Some("https://example.com/twin.mp4"),
+            false,
+        );
+        let items = vec![story.clone(), twin];
+        let resolved = super::douyin_list_item_with_media(&story, &items);
+        let urls = resolved
+            .pointer("/video/play_addr/url_list")
+            .and_then(serde_json::Value::as_array)
+            .expect("内嵌投稿不可用时应回落到启发式匹配");
+        assert_eq!(
+            urls.first().and_then(serde_json::Value::as_str),
+            Some("https://example.com/twin.mp4")
+        );
+    }
+
+    #[test]
+    fn douyin_list_item_keeps_original_when_nothing_matches() {
+        let story = test_douyin_item("16", "日常", "777", 1000, None, true);
+        let resolved = super::douyin_list_item_with_media(&story, std::slice::from_ref(&story));
+        assert_eq!(resolved, story);
     }
 
     #[test]
