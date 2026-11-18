@@ -3958,48 +3958,26 @@ async fn extract_metadata_native(
         .flatten()
         .filter_map(native_format)
         .collect::<Vec<_>>();
+    // 「日常」作品的 `video_model` 可能是空字符串或非法 JSON。这里先把错误暂存，
+    // 继续尝试 `play_addr` 回退；只有回退也拿不到格式时才把原始错误抛出去，
+    // 保证真正的「CENC 加密 DASH」等错误不会被吞掉。
+    let mut video_model_error: Option<anyhow::Error> = None;
     if formats.is_empty() && slides.is_empty() {
-        if let Some(video_model) = video.and_then(|video| {
-            video
-                .get("video_model")
-                .or_else(|| video.get("videoModel"))
-                .or_else(|| video.get("dynamic_video"))
-                .or_else(|| video.get("dynamicVideo"))
-        }) {
-            formats.extend(encrypted_dash_formats(video_model)?);
+        if let Some(video) = video {
+            video_model_error = resolve_video_model_formats(video, &mut formats);
+            if let Some(error) = &video_model_error {
+                debug!(
+                    target: "bili_sync_rs::douyin",
+                    aweme_id,
+                    error = %error,
+                    "抖音作品 video_model 为空或无法解析，回落到播放地址"
+                );
+            }
         }
     }
     if formats.is_empty() && slides.is_empty() {
         let video = video.context("抖音作品详情既没有视频流也没有原图")?;
-        let width = json_i32(video.get("width"));
-        let height = json_i32(video.get("height"));
-        if let Some((url, fallback_urls)) = media_urls(video.get("play_addr")) {
-            formats.push(ExternalMediaFormat {
-                format_id: Some("douyin-default".to_string()),
-                url: Some(url),
-                protocol: Some("https".to_string()),
-                ext: Some("mp4".to_string()),
-                vcodec: Some(
-                    if video.get("is_h265").and_then(serde_json::Value::as_i64) == Some(1) {
-                        "h265"
-                    } else {
-                        "h264"
-                    }
-                    .to_string(),
-                ),
-                acodec: Some("aac".to_string()),
-                width,
-                height,
-                fps: None,
-                tbr: None,
-                vbr: None,
-                abr: Some(128.0),
-                dynamic_range: Some("SDR".to_string()),
-                is_original: false,
-                decryption_key: None,
-                fallback_urls,
-            });
-        }
+        push_play_addr_format(video, &mut formats);
     }
     if slides.is_empty() {
         if let Some(video) = video {
@@ -4011,6 +3989,9 @@ async fn extract_metadata_native(
         }
     }
     if formats.is_empty() && slides.is_empty() {
+        if let Some(error) = video_model_error {
+            return Err(error);
+        }
         let detail_keys = detail
             .as_object()
             .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
@@ -4084,6 +4065,61 @@ async fn extract_metadata_native(
         music_urls,
         creators: None,
     })
+}
+
+/// 解析 `video.video_model` 里的放映厅 DASH 格式；`video_model` 为空或解析失败时
+/// 返回暂存错误，调用方应继续尝试 `play_addr` 回退。
+fn resolve_video_model_formats(
+    video: &serde_json::Value,
+    formats: &mut Vec<ExternalMediaFormat>,
+) -> Option<anyhow::Error> {
+    let video_model = video
+        .get("video_model")
+        .or_else(|| video.get("videoModel"))
+        .or_else(|| video.get("dynamic_video"))
+        .or_else(|| video.get("dynamicVideo"))?;
+    match encrypted_dash_formats(video_model) {
+        Ok(model_formats) => {
+            formats.extend(model_formats);
+            None
+        }
+        Err(error) => Some(error),
+    }
+}
+
+/// 从 `video.play_addr` 构造兜底的单文件 MP4 格式；没有播放地址时返回 `false`。
+fn push_play_addr_format(video: &serde_json::Value, formats: &mut Vec<ExternalMediaFormat>) -> bool {
+    let Some((url, fallback_urls)) = media_urls(video.get("play_addr")) else {
+        return false;
+    };
+    let width = json_i32(video.get("width"));
+    let height = json_i32(video.get("height"));
+    formats.push(ExternalMediaFormat {
+        format_id: Some("douyin-default".to_string()),
+        url: Some(url),
+        protocol: Some("https".to_string()),
+        ext: Some("mp4".to_string()),
+        vcodec: Some(
+            if video.get("is_h265").and_then(serde_json::Value::as_i64) == Some(1) {
+                "h265"
+            } else {
+                "h264"
+            }
+            .to_string(),
+        ),
+        acodec: Some("aac".to_string()),
+        width,
+        height,
+        fps: None,
+        tbr: None,
+        vbr: None,
+        abr: Some(128.0),
+        dynamic_range: Some("SDR".to_string()),
+        is_original: false,
+        decryption_key: None,
+        fallback_urls,
+    });
+    true
 }
 
 /// 读取当前抖音源实际生效的“优先原画”设置：源级配置优先，否则使用全局配置。
@@ -4451,11 +4487,23 @@ fn native_format(value: &serde_json::Value) -> Option<ExternalMediaFormat> {
 fn encrypted_dash_formats(value: &serde_json::Value) -> Result<Vec<ExternalMediaFormat>> {
     let parsed;
     let root = if let Some(raw) = value.as_str() {
+        // 「日常」等作品会把 `video_model` 填成空字符串或纯空白，表示没有放映厅
+        // DASH 数据。这不是解析错误：当作空结果返回，让调用方继续回落到 `play_addr`。
+        if raw.trim().is_empty() {
+            return Ok(Vec::new());
+        }
         parsed = serde_json::from_str::<serde_json::Value>(raw).context("解析抖音放映厅 video_model 失败")?;
         &parsed
     } else {
         value
     };
+    // 解析结果是 null / 空对象 / 空数组时同样视为「没有放映厅数据」，不报错。
+    let is_empty_container = root.is_null()
+        || root.as_object().is_some_and(serde_json::Map::is_empty)
+        || root.as_array().is_some_and(Vec::is_empty);
+    if is_empty_container {
+        return Ok(Vec::new());
+    }
     let model = root
         .get("videoModel")
         .or_else(|| root.get("video_model"))
@@ -6725,5 +6773,58 @@ mod tests {
         assert!(!work_page.exists(), "暂存分页应被搬走");
 
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[test]
+    fn encrypted_dash_formats_treats_empty_video_model_as_no_data() {
+        for value in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ] {
+            let formats = super::encrypted_dash_formats(&value).expect("空 video_model 应视为没有数据");
+            assert!(formats.is_empty(), "空 video_model 不应产生任何格式: {value}");
+        }
+    }
+
+    #[test]
+    fn video_model_empty_falls_back_to_play_addr() {
+        let video = serde_json::json!({
+            "video_model": "",
+            "play_addr": {"url_list": ["https://example.com/x.mp4"]},
+            "width": 1080,
+            "height": 1920,
+            "duration": 10000
+        });
+        let mut formats = Vec::new();
+        assert!(
+            super::resolve_video_model_formats(&video, &mut formats).is_none(),
+            "空 video_model 不应产生错误"
+        );
+        assert!(formats.is_empty(), "空 video_model 不应产生格式");
+        assert!(
+            super::push_play_addr_format(&video, &mut formats),
+            "应从 play_addr 得到兜底格式"
+        );
+        assert_eq!(formats.len(), 1);
+        assert_eq!(formats[0].url.as_deref(), Some("https://example.com/x.mp4"));
+    }
+
+    #[test]
+    fn invalid_video_model_keeps_error_when_play_addr_missing() {
+        let video = serde_json::json!({"video_model": "{", "width": 1080, "height": 1920});
+        let mut formats = Vec::new();
+        let error = super::resolve_video_model_formats(&video, &mut formats).expect("非法 JSON 应保留原始错误");
+        assert!(
+            error.to_string().contains("解析抖音放映厅 video_model 失败"),
+            "原始错误原因不应被吞掉: {error:#}"
+        );
+        assert!(
+            !super::push_play_addr_format(&video, &mut formats),
+            "没有 play_addr 时不应产生格式"
+        );
+        assert!(formats.is_empty());
     }
 }
