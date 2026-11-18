@@ -1224,7 +1224,7 @@ const YOUTUBE_COOKIE_NETWORK_MARKERS: [&str; 6] = [
     "proxy",
 ];
 
-const YOUTUBE_COOKIE_PROXY_HINT: &str = "这通常是网络或外源代理问题：请在设置页把「外源代理」填成这台机器/容器能访问的地址（Docker 里别写 127.0.0.1，要用宿主 IP，例如 http://192.168.2.59:7897），并用 `curl -x <代理> -I https://www.youtube.com/feed/channels` 确认能返回 303/200";
+const YOUTUBE_COOKIE_PROXY_HINT: &str = "这通常是网络或外源代理问题：请在设置页把「外源代理」填成这台机器/容器能访问的地址（Docker 里别写 127.0.0.1，要用宿主 IP，例如 http://192.168.1.100:7890），并用 `curl -x <代理> -I https://www.youtube.com/feed/channels` 确认能返回 303/200";
 
 const YOUTUBE_COOKIE_REEXPORT_HINT: &str = "Cookie 可能已失效，请在已登录 YouTube 的浏览器里重新导出 cookies.txt";
 
