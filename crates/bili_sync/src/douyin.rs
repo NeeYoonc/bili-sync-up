@@ -3988,6 +3988,35 @@ async fn extract_metadata_native(
             }
         }
     }
+    if let Some(video) = video {
+        let bit_rate = video
+            .get("bit_rate")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        let video_model_present = video
+            .get("video_model")
+            .or_else(|| video.get("videoModel"))
+            .or_else(|| video.get("dynamic_video"))
+            .or_else(|| video.get("dynamicVideo"))
+            .is_some_and(|value| match value.as_str() {
+                Some(raw) => !raw.trim().is_empty(),
+                None => !value.is_null(),
+            });
+        let play_addr_urls = video
+            .get("play_addr")
+            .and_then(|play_addr| play_addr.get("url_list"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        debug!(
+            target: "bili_sync_rs::douyin",
+            aweme_id,
+            bit_rate,
+            video_model_present,
+            play_addr_urls,
+            formats = formats.len(),
+            "抖音作品解析结果"
+        );
+    }
     if formats.is_empty() && slides.is_empty() {
         if let Some(error) = video_model_error {
             return Err(error);
