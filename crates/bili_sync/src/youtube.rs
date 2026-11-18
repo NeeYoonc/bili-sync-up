@@ -390,22 +390,25 @@ pub async fn check_youtube_session() -> Result<ApiResponse<YouTubeSessionCheckRe
             "尚未导入 YouTube 登录凭证，请先在设置页导入 cookies.txt 或传输登录状态",
         ));
     }
-    let (state, message) = match tokio::time::timeout(Duration::from_secs(60), probe_youtube_subscription_channels())
-        .await
-    {
-        Ok(Ok(_)) => (
-            YoutubeSessionState::Valid,
-            "登录状态有效（已顺带完成一次会话续约）".to_string(),
-        ),
-        Ok(Err(YoutubeSessionError::Expired(error))) => {
-            (YoutubeSessionState::Expired, format!("探测返回未登录：{error:#}"))
-        }
-        Ok(Err(YoutubeSessionError::Unclear(error))) => (YoutubeSessionState::Unclear, format!("无法判断：{error:#}")),
-        Err(_) => (
-            YoutubeSessionState::Unclear,
-            "联网验证超时（代理过慢或不可用），凭证已保留".to_string(),
-        ),
-    };
+    let (state, message) =
+        match tokio::time::timeout(Duration::from_secs(60), probe_youtube_subscription_channels()).await {
+            Ok(Ok(_)) => (
+                YoutubeSessionState::Valid,
+                "登录状态有效（已顺带完成一次会话续约）".to_string(),
+            ),
+            Ok(Err(YoutubeSessionError::Expired(error))) => (
+                YoutubeSessionState::Expired,
+                format!("探测返回未登录：{error:#}。{}", youtube_cookie_failure_hint(&error)),
+            ),
+            Ok(Err(YoutubeSessionError::Unclear(error))) => (
+                YoutubeSessionState::Unclear,
+                format!("无法判断：{error:#}。{}", youtube_cookie_failure_hint(&error)),
+            ),
+            Err(_) => (
+                YoutubeSessionState::Unclear,
+                "联网验证超时（代理过慢或不可用），凭证已保留".to_string(),
+            ),
+        };
     record_youtube_session_check(state, message.clone());
     Ok(ApiResponse::ok(YouTubeSessionCheckResponse {
         state: state.as_str().to_string(),
@@ -1211,6 +1214,48 @@ fn is_youtube_auth_cookie_domain(domain: &str) -> bool {
         || domain.ends_with(".google.com")
 }
 
+/// 网络/代理类错误的特征片段：用于判断该提示「检查外源代理」还是「重新导出 Cookie」。
+const YOUTUBE_COOKIE_NETWORK_MARKERS: [&str; 6] = [
+    "error sending request",
+    "connect",
+    "timed out",
+    "timeout",
+    "dns",
+    "proxy",
+];
+
+const YOUTUBE_COOKIE_PROXY_HINT: &str = "这通常是网络或外源代理问题：请在设置页把「外源代理」填成这台机器/容器能访问的地址（Docker 里别写 127.0.0.1，要用宿主 IP，例如 http://192.168.2.59:7897），并用 `curl -x <代理> -I https://www.youtube.com/feed/channels` 确认能返回 303/200";
+
+const YOUTUBE_COOKIE_REEXPORT_HINT: &str = "Cookie 可能已失效，请在已登录 YouTube 的浏览器里重新导出 cookies.txt";
+
+/// 按错误链判断是网络/代理问题还是 Cookie 失效，返回对应中文提示。
+fn youtube_cookie_failure_hint(error: &anyhow::Error) -> &'static str {
+    let chain = format!("{error:#}").to_ascii_lowercase();
+    if YOUTUBE_COOKIE_NETWORK_MARKERS
+        .iter()
+        .any(|marker| chain.contains(marker))
+    {
+        YOUTUBE_COOKIE_PROXY_HINT
+    } else {
+        YOUTUBE_COOKIE_REEXPORT_HINT
+    }
+}
+
+/// 组装 Cookie 导入失败的对外错误信息。
+///
+/// anyhow 默认 `Display` 只打印最外层 context（例如「访问 YouTube 已订阅频道页面失败」），
+/// 会把底层的 `error sending request …: connection refused` 吞掉，用户无法判断是代理不通
+/// 还是 Cookie 过期；这里用 `{:#}` 保留完整 cause 链，并按链路特征给出下一步建议。
+fn youtube_cookie_import_failure_message(error: &anyhow::Error, diagnostic: &str) -> String {
+    let chain = format!("{error:#}");
+    let hint = youtube_cookie_failure_hint(error);
+    if diagnostic.is_empty() {
+        format!("YouTube cookies.txt 验证失败：{chain}。{hint}")
+    } else {
+        format!("YouTube cookies.txt 验证失败：{chain}。{hint}（{diagnostic}）")
+    }
+}
+
 fn youtube_cookie_diagnostic(contents: &str) -> String {
     let helper_version = contents
         .lines()
@@ -1416,6 +1461,8 @@ pub async fn import_youtube_cookie_file(
         return Err(ApiError::from(error));
     }
     if let Err(error) = validate_youtube_login_cookie().await {
+        // 完整 cause 链只写日志，方便用户贴日志时区分「代理不通」和「Cookie 失效」。
+        warn!(error = ?error, "YouTube cookies.txt 验证失败，已回滚导入前凭证");
         match previous {
             Some(previous) => {
                 if let Err(restore) = set_youtube_cookies(&previous).await {
@@ -1426,10 +1473,9 @@ pub async fn import_youtube_cookie_file(
             }
             None => clear_youtube_login_state("新导入的凭证验证失败，且没有可回滚的旧凭证").await,
         }
-        return Err(ApiError::bad_request(format!(
-            "YouTube cookies.txt 验证失败：{}（{}）",
-            error,
-            youtube_cookie_diagnostic(&request.cookies)
+        return Err(ApiError::bad_request(youtube_cookie_import_failure_message(
+            &error,
+            &youtube_cookie_diagnostic(&request.cookies),
         )));
     }
 
@@ -13276,5 +13322,42 @@ mod tests {
             super::legacy_external_media_temp_pairs(output, output, Some("mp4"), Some("m4a")).is_empty(),
             "未启用暂存目录时不应产生迁移动作"
         );
+    }
+
+    #[test]
+    fn youtube_cookie_import_failure_message_keeps_cause_chain_for_network_errors() {
+        let error = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "tcp connect error: Connection refused (os error 111)",
+        ))
+        .context("访问 YouTube 已订阅频道页面失败")
+        .context("error sending request for url (https://www.youtube.com/feed/channels)");
+        let message = super::youtube_cookie_import_failure_message(&error, "助手 未知旧版，YouTube Cookie 3 个");
+        assert!(message.contains("error sending request"), "{message}");
+        assert!(message.contains("访问 YouTube 已订阅频道页面失败"), "{message}");
+        assert!(message.contains("Connection refused"), "{message}");
+        assert!(message.contains("外源代理"), "{message}");
+        assert!(!message.contains("重新导出"), "{message}");
+        assert!(message.ends_with("（助手 未知旧版，YouTube Cookie 3 个）"), "{message}");
+    }
+
+    #[test]
+    fn youtube_cookie_import_failure_message_suggests_reexport_for_expired_cookies() {
+        let error = super::youtube_cookie_expired_error();
+        let message = super::youtube_cookie_import_failure_message(&error, "助手 1.0，YouTube Cookie 2 个");
+        assert!(message.contains("YouTube Cookie 已失效或不完整"), "{message}");
+        assert!(message.contains("重新导出"), "{message}");
+        assert!(!message.contains("外源代理"), "{message}");
+        assert!(message.ends_with("（助手 1.0，YouTube Cookie 2 个）"), "{message}");
+    }
+
+    #[test]
+    fn youtube_cookie_import_failure_message_detects_timeout_markers() {
+        let error = anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "operation timed out"))
+            .context("访问 YouTube 已订阅频道页面失败");
+        let message = super::youtube_cookie_import_failure_message(&error, "");
+        assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains("外源代理"), "{message}");
+        assert!(!message.contains("（）"), "{message}");
     }
 }
