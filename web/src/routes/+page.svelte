@@ -892,6 +892,7 @@
 								<BarChart
 									data={dayMultiCounts}
 									x="day"
+									seriesLayout="stack"
 									axis="x"
 									series={[
 										{
