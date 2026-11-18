@@ -3604,6 +3604,49 @@ fn douyin_has_session() -> bool {
     douyin_cookie_text().is_some_and(|contents| is_netscape_douyin_cookie_file(&contents))
 }
 
+/// 从 Netscape cookies.txt 文本里解析抖音登录会话 Cookie 的过期时间；
+/// 会话 Cookie 已过期时返回一句可直接给用户看的中文提示，否则返回 `None`。
+fn douyin_login_expiry_hint_from_jar(jar: &str) -> Option<String> {
+    const SESSION_COOKIE_NAMES: [&str; 3] = ["sessionid", "sessionid_ss", "sid_tt"];
+    let mut earliest_expiry: Option<i64> = None;
+    for line in jar.lines() {
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let columns = line.split('\t').collect::<Vec<_>>();
+        if columns.len() < 7 || !is_douyin_cookie_domain(columns[0]) {
+            continue;
+        }
+        if !SESSION_COOKIE_NAMES.contains(&columns[5]) {
+            continue;
+        }
+        let Ok(expiry) = columns[4].trim().parse::<i64>() else {
+            continue;
+        };
+        // 过期时间为 0 的是浏览器会话 Cookie（关闭浏览器即失效），没有可判断的时间戳。
+        if expiry <= 0 {
+            continue;
+        }
+        earliest_expiry = Some(earliest_expiry.map_or(expiry, |current| current.min(expiry)));
+    }
+    let expiry = earliest_expiry?;
+    if chrono::Utc::now().timestamp() <= expiry {
+        return None;
+    }
+    let expired_at = chrono::DateTime::from_timestamp(expiry, 0)?
+        .format("%Y-%m-%d")
+        .to_string();
+    Some(format!("抖音登录凭证已于 {expired_at} 过期，请重新导入抖音 Cookie"))
+}
+
+/// 读取当前抖音 Cookie，判断登录会话是否已过期。
+fn douyin_login_expiry_hint() -> Option<String> {
+    douyin_cookie_text()
+        .as_deref()
+        .and_then(douyin_login_expiry_hint_from_jar)
+}
+
 /// 返回可传给 yt-dlp `--cookies` 的抖音 cookie 文件路径（数据库影子文件或旧版文件）。
 fn douyin_cookie_file() -> Option<PathBuf> {
     let contents = douyin_cookie_text()?;
@@ -3976,8 +4019,13 @@ async fn extract_metadata_native(
         }
     }
     if formats.is_empty() && slides.is_empty() {
-        let video = video.context("抖音作品详情既没有视频流也没有原图")?;
-        push_play_addr_format(video, &mut formats);
+        if let Some(video) = video {
+            push_play_addr_format(video, &mut formats);
+        } else if let Some(hint) = douyin_login_expiry_hint() {
+            bail!("抖音作品拿不到播放地址：{hint}（这类「日常」作品需要有效的登录状态）");
+        } else {
+            bail!("抖音作品详情既没有视频流也没有原图");
+        }
     }
     if slides.is_empty() {
         if let Some(video) = video {
@@ -4029,6 +4077,17 @@ async fn extract_metadata_native(
             .and_then(serde_json::Value::as_object)
             .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
             .unwrap_or_default();
+        // 字段列表只留在 debug 日志里，避免把一大串内部字段塞进用户可见错误和 DB。
+        debug!(
+            target: "bili_sync_rs::douyin",
+            aweme_id,
+            detail_keys = %detail_keys,
+            video_keys = %video_keys,
+            "抖音作品详情没有可用的原生 MP4 地址"
+        );
+        if let Some(hint) = douyin_login_expiry_hint() {
+            bail!("抖音作品拿不到播放地址：{hint}（这类「日常」作品需要有效的登录状态）");
+        }
         bail!("抖音作品详情没有可用的原生 MP4 地址（作品字段：{detail_keys}；视频字段：{video_keys}）");
     }
     let author = detail.get("author");
@@ -6839,6 +6898,27 @@ mod tests {
         );
         assert_eq!(formats.len(), 1);
         assert_eq!(formats[0].url.as_deref(), Some("https://example.com/x.mp4"));
+    }
+
+    #[test]
+    fn expired_login_jar_reports_expiry_date() {
+        let jar = "# Netscape HTTP Cookie File\n.douyin.com\tTRUE\t/\tTRUE\t1600000000\tsessionid\tabc\n";
+        let hint = super::douyin_login_expiry_hint_from_jar(jar).expect("过期会话应给出提示");
+        assert!(hint.contains("2020-09-13"), "提示应带过期日期: {hint}");
+        assert!(hint.contains("重新导入抖音 Cookie"), "提示应告诉用户怎么修: {hint}");
+    }
+
+    #[test]
+    fn fresh_login_jar_has_no_expiry_hint() {
+        let jar = "# Netscape HTTP Cookie File\n.douyin.com\tTRUE\t/\tTRUE\t4000000000\tsessionid\tabc\n";
+        assert!(
+            super::douyin_login_expiry_hint_from_jar(jar).is_none(),
+            "未过期不应给提示"
+        );
+        assert!(
+            super::douyin_login_expiry_hint_from_jar("not a cookie jar").is_none(),
+            "解析不出会话 Cookie 时不应给提示"
+        );
     }
 
     #[test]
