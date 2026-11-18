@@ -480,6 +480,39 @@
 		}
 	}
 
+	// 堆叠柱状图的圆角：只有视觉上最底层 / 最顶层的平台保留圆角，中间接缝保持直角。
+	// 否则每段柱子四角都圆，段与段拼接处会各留一个白色缺口。
+	type BarKey = 'bilibili' | 'youtube' | 'douyin' | 'tiktok';
+	type BarRounded = 'all' | 'none' | 'top' | 'bottom';
+	const barKeys: BarKey[] = ['bilibili', 'youtube', 'douyin', 'tiktok'];
+	let barRounded: Record<BarKey, BarRounded> = {
+		bilibili: 'all',
+		youtube: 'none',
+		douyin: 'none',
+		tiktok: 'none'
+	};
+	// 按 7 天合计判断「视觉上最底 / 最顶」的平台：YouTube / TikTok 常年为 0，不能写死下标
+	$: barRounded = (() => {
+		const totals = barKeys.map((key) =>
+			dayMultiCounts.reduce((sum, item) => sum + (item[key] ?? 0), 0)
+		);
+		const filled = barKeys.filter((_, index) => totals[index] > 0);
+		const first = filled[0];
+		const last = filled[filled.length - 1];
+		return Object.fromEntries(
+			barKeys.map((key) => [
+				key,
+				key === first && key === last
+					? 'all'
+					: key === first
+						? 'bottom'
+						: key === last
+							? 'top'
+							: 'none'
+			])
+		) as Record<BarKey, BarRounded>;
+	})();
+
 	const memoryChartConfig = {
 		used: {
 			label: '整体占用',
@@ -898,29 +931,31 @@
 										{
 											key: 'bilibili',
 											label: 'B站',
-											color: videoChartConfig.bilibili.color
+											color: videoChartConfig.bilibili.color,
+											props: { rounded: barRounded.bilibili, radius: 6 }
 										},
 										{
 											key: 'youtube',
 											label: 'YouTube',
-											color: videoChartConfig.youtube.color
+											color: videoChartConfig.youtube.color,
+											props: { rounded: barRounded.youtube, radius: 6 }
 										},
 										{
 											key: 'douyin',
 											label: '抖音',
-											color: videoChartConfig.douyin.color
+											color: videoChartConfig.douyin.color,
+											props: { rounded: barRounded.douyin, radius: 6 }
 										},
 										{
 											key: 'tiktok',
 											label: 'TikTok',
-											color: videoChartConfig.tiktok.color
+											color: videoChartConfig.tiktok.color,
+											props: { rounded: barRounded.tiktok, radius: 6 }
 										}
 									]}
 									props={{
 										bars: {
 											stroke: 'none',
-											rounded: 'all',
-											radius: 6,
 											initialHeight: 0
 										},
 										highlight: { area: { fill: 'none' } },
