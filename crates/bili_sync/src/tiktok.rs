@@ -4952,6 +4952,7 @@ mod tests {
             &output_path,
             &crate::bilibili::FilterOption::default(),
             &sample_tiktok_source(),
+            None,
         )
         .await
         .expect("图片贴下载失败");

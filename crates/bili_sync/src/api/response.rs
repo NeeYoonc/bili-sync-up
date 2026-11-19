@@ -601,6 +601,8 @@ pub struct ConfigResponse {
     pub download_staging_dir: String,
     /// 历史下载暂存目录（切换暂存目录后遗留的旧目录，可在设置页清理残留）
     pub download_staging_previous_dirs: Vec<String>,
+    /// 自动创建的下载暂存目录（暂存目录留空时按视频源目录派生，可在设置页清理残留）
+    pub download_staging_auto_dirs: Vec<String>,
     // 合集目录结构配置
     pub collection_use_season_structure: bool,
     // 番剧目录结构配置

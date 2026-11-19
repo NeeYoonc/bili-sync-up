@@ -3940,6 +3940,8 @@ struct DownloadPageArgs<'a> {
     inline_chapters_split: Arc<TokioMutex<bool>>,
     inline_skip_reason: Arc<TokioMutex<Option<String>>>,
     inline_skip_reason_touched: Arc<TokioMutex<bool>>,
+    /// 本轮下载使用的暂存根目录（留空表示不使用暂存目录，与旧版本行为一致）
+    staging_root: Option<PathBuf>,
 }
 
 fn video_status_should_run_nfo(separate_status: &[bool; 5]) -> bool {
@@ -6176,6 +6178,9 @@ async fn download_video_pages(
         season_folder.as_deref(),
     )
     .await;
+    // 下载暂存目录：留空时按视频源目录自动派生（默认开启），整轮只解析一次后逐层传递。
+    let download_staging_root =
+        prepare_download_staging_root(&current_config, Some(video_source.path()), &base_path, Some(connection)).await;
     let res_5_fut = Box::pin(
         // 分发并执行分 P 下载的任务
         dispatch_download_page(
@@ -6195,6 +6200,7 @@ async fn download_video_pages(
                 inline_chapters_split: inline_chapters_split.clone(),
                 inline_skip_reason: inline_skip_reason.clone(),
                 inline_skip_reason_touched: inline_skip_reason_touched.clone(),
+                staging_root: download_staging_root.clone(),
             },
             token.clone(),
         ),
@@ -6979,6 +6985,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
             let downloader = args.downloader;
             let base_path = args.base_path;
             let filter_option = args.filter_option;
+            let staging_root = args.staging_root.clone();
             let chapter_episode_plan = args.chapter_episode_plans.get(&page_model.id).cloned();
             async move {
                 let result = download_page(
@@ -6990,6 +6997,7 @@ async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: CancellationT
                     semaphore_clone.as_ref(),
                     downloader,
                     base_path,
+                    staging_root.as_deref(),
                     chapter_episode_plan,
                     filter_option,
                     token_clone,
@@ -7358,6 +7366,7 @@ async fn download_page(
     semaphore: &Semaphore,
     downloader: &UnifiedDownloader,
     base_path: &Path,
+    staging_root: Option<&Path>,
     chapter_episode_plan: Option<ChapterEpisodePlan>,
     filter_option: &FilterOption,
     token: CancellationToken,
@@ -7817,6 +7826,7 @@ async fn download_page(
         audio_only,
         download_charge_videos: video_source.download_charge_videos(),
         filter_option,
+        staging_root,
         token: token.clone(),
     }));
     let res_3_fut = Box::pin(generate_page_nfo(
@@ -9248,6 +9258,7 @@ struct DownloadPageStreamsInput<'a> {
     page_path: &'a Path,
     audio_only: bool,
     filter_option: &'a FilterOption,
+    staging_root: Option<&'a Path>,
 }
 
 async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Result<PageVideoFetchResult> {
@@ -9261,6 +9272,7 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
         page_path,
         audio_only,
         filter_option,
+        staging_root,
     } = p;
     // 首页「正在下载」进度：任务键 = 视频ID:分页ID，标题/文件名用于展示
     let progress_key = format!("bilibili:{}:{}", video_model.id, page_id);
@@ -9448,9 +9460,8 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
     debug!("=== 流选择结束 ===");
 
     // 音频模式：只下载音频流
-    // 配置了下载暂存目录时，中间文件先写进暂存目录，校验通过后再移动到最终路径
-    let staging_root = crate::config::reload_config().download_staging_dir;
-    let work_page_path = match staging_work_path(page_path, staging_root.as_deref()) {
+    // 启用了下载暂存目录（含自动模式）时，中间文件先写进暂存目录，校验通过后再移动到最终路径
+    let work_page_path = match staging_work_path(page_path, staging_root) {
         Some(path) => {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)
@@ -9784,6 +9795,114 @@ async fn download_page_video_from_streams(p: DownloadPageStreamsInput<'_>) -> Re
 // 里就不会再出现半成品文件。留空时暂存路径等于最终路径，行为与旧版本完全一致。
 // ---------------------------------------------------------------------------
 
+/// 自动模式下使用的暂存目录名：放在视频源目录的上一级，避免中间文件污染媒体库。
+pub(crate) const AUTO_STAGING_DIR_NAME: &str = ".bili-sync-staging";
+
+/// 解析本轮下载要用的下载暂存根目录。
+///
+/// - 显式配置了绝对路径：直接使用；
+/// - 没配置（自动模式）：放到视频源目录的上一级，同一父目录下的多个源共用同一个暂存区；
+/// - 拿不到视频源目录：退到媒体目录下的隐藏目录。
+pub(crate) fn resolve_download_staging_root(
+    configured: Option<&Path>,
+    source_root: Option<&Path>,
+    fallback_media_dir: &Path,
+) -> Option<PathBuf> {
+    if let Some(configured) = configured {
+        if configured.is_absolute() {
+            return Some(configured.to_path_buf());
+        }
+        return None;
+    }
+    if let Some(source_root) = source_root {
+        let parent = source_root.parent().unwrap_or(source_root);
+        return Some(parent.join(AUTO_STAGING_DIR_NAME));
+    }
+    Some(fallback_media_dir.join(AUTO_STAGING_DIR_NAME))
+}
+
+/// 准备本轮下载要用的暂存根目录并确保它可用。
+///
+/// 自动模式下优先在视频源目录的上一级创建；父目录不可写时退回视频源目录内部；
+/// 仍失败则退回「不使用暂存目录」（与旧版本行为一致）。自动创建成功的根会记进配置，
+/// 供启动统计与「清理暂存残留」接口覆盖。
+pub(crate) async fn prepare_download_staging_root(
+    config: &crate::config::Config,
+    source_root: Option<&Path>,
+    fallback_media_dir: &Path,
+    db: Option<&DatabaseConnection>,
+) -> Option<PathBuf> {
+    let auto_mode = config.download_staging_dir.is_none();
+    let resolved =
+        resolve_download_staging_root(config.download_staging_dir.as_deref(), source_root, fallback_media_dir)?;
+    if !resolved.is_absolute() {
+        warn!(
+            "下载暂存目录 {} 不是绝对路径，已忽略并退回媒体目录（自动模式下请检查视频源路径配置）",
+            resolved.display()
+        );
+        return None;
+    }
+    match fs::create_dir_all(&resolved).await {
+        Ok(()) => {
+            if auto_mode {
+                persist_download_staging_auto_dir(config, &resolved, db).await;
+            }
+            Some(resolved)
+        }
+        Err(error) if auto_mode => {
+            warn!(
+                "自动下载暂存目录 {} 无法创建（{:#}），尝试改用视频源目录内部的暂存目录",
+                resolved.display(),
+                error
+            );
+            if let Some(fallback) = source_root.map(|root| root.join(AUTO_STAGING_DIR_NAME)) {
+                if fs::create_dir_all(&fallback).await.is_ok() {
+                    persist_download_staging_auto_dir(config, &fallback, db).await;
+                    return Some(fallback);
+                }
+            }
+            warn!("下载暂存目录不可用，本次下载回退为与旧版本一致（中间文件写在媒体目录旁）");
+            None
+        }
+        Err(error) => {
+            warn!(
+                "下载暂存目录 {} 无法创建（{:#}），本次下载回退为与旧版本一致（中间文件写在媒体目录旁）",
+                resolved.display(),
+                error
+            );
+            None
+        }
+    }
+}
+
+/// 把自动派生的暂存目录记进配置，供启动统计与清理接口覆盖。
+async fn persist_download_staging_auto_dir(
+    config: &crate::config::Config,
+    dir: &Path,
+    db: Option<&DatabaseConnection>,
+) {
+    let Some(db) = db else {
+        return;
+    };
+    if config.download_staging_auto_dirs.iter().any(|existing| existing == dir) {
+        return;
+    }
+    let mut auto_dirs = config.download_staging_auto_dirs.clone();
+    crate::config::remember_download_staging_auto_dir(&mut auto_dirs, dir.to_path_buf());
+    let manager = crate::config::ConfigManager::new(db.clone());
+    match serde_json::to_value(&auto_dirs) {
+        Ok(value) => match manager.update_config_item("download_staging_auto_dirs", value).await {
+            Ok(()) => {
+                if let Err(error) = crate::config::reload_config_bundle().await {
+                    warn!("记录自动下载暂存目录后重新加载配置失败: {:#}", error);
+                }
+            }
+            Err(error) => warn!("记录自动下载暂存目录失败: {:#}", error),
+        },
+        Err(error) => warn!("序列化自动下载暂存目录失败: {:#}", error),
+    }
+}
+
 /// 计算最终文件对应的暂存工作路径：同一最终路径永远派生出同一个暂存位置，
 /// 这样进程崩溃重启后仍能通过 `.resume` 续传。
 pub(crate) fn staging_work_path(final_path: &Path, staging_root: Option<&Path>) -> Option<PathBuf> {
@@ -10052,10 +10171,16 @@ pub(crate) async fn log_download_staging_residue(config: &crate::config::Config)
     if let Some(root) = config.download_staging_dir.as_deref() {
         log_single_staging_root_residue(root, false).await;
     }
-    for root in &config.download_staging_previous_dirs {
-        if config.download_staging_dir.as_deref() == Some(root.as_path()) {
+    let mut seen: Vec<&Path> = Vec::new();
+    for root in config
+        .download_staging_previous_dirs
+        .iter()
+        .chain(config.download_staging_auto_dirs.iter())
+    {
+        if config.download_staging_dir.as_deref() == Some(root.as_path()) || seen.contains(&root.as_path()) {
             continue;
         }
+        seen.push(root.as_path());
         log_single_staging_root_residue(root, true).await;
     }
 }
@@ -10125,6 +10250,7 @@ struct FetchPageVideoInput<'a> {
     audio_only: bool,
     download_charge_videos: bool,
     filter_option: &'a FilterOption,
+    staging_root: Option<&'a Path>,
     token: CancellationToken,
 }
 
@@ -10141,6 +10267,7 @@ async fn fetch_page_video(p: FetchPageVideoInput<'_>) -> Result<PageVideoFetchRe
         audio_only,
         download_charge_videos,
         filter_option,
+        staging_root,
         token,
     } = p;
     if !should_run {
@@ -10291,6 +10418,7 @@ async fn fetch_page_video(p: FetchPageVideoInput<'_>) -> Result<PageVideoFetchRe
             page_path,
             audio_only,
             filter_option,
+            staging_root,
         })
         .await;
 
@@ -17207,6 +17335,7 @@ mod tests {
             audio_only: false,
             download_charge_videos: false,
             filter_option: &FilterOption::default(),
+            staging_root: None,
             token: CancellationToken::new(),
         })
         .await
@@ -18789,6 +18918,54 @@ mod tests {
         );
 
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[test]
+    fn resolve_download_staging_root_prefers_explicit_absolute_path() {
+        let resolved = resolve_download_staging_root(
+            Some(Path::new("/mnt/staging")),
+            Some(Path::new("/mnt/library/合集")),
+            Path::new("/mnt/library/合集"),
+        );
+        assert_eq!(resolved, Some(PathBuf::from("/mnt/staging")));
+    }
+
+    #[test]
+    fn resolve_download_staging_root_uses_parent_of_source_root() {
+        let resolved = resolve_download_staging_root(
+            None,
+            Some(Path::new("/mnt/library/合集")),
+            Path::new("/mnt/library/合集"),
+        );
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("/mnt/library").join(AUTO_STAGING_DIR_NAME))
+        );
+    }
+
+    #[test]
+    fn resolve_download_staging_root_keeps_source_root_when_no_parent() {
+        let resolved = resolve_download_staging_root(None, Some(Path::new("/")), Path::new("/mnt/library"));
+        assert_eq!(resolved, Some(Path::new("/").join(AUTO_STAGING_DIR_NAME)));
+    }
+
+    #[test]
+    fn resolve_download_staging_root_falls_back_to_media_dir() {
+        let resolved = resolve_download_staging_root(None, None, Path::new("/mnt/library/合集"));
+        assert_eq!(
+            resolved,
+            Some(Path::new("/mnt/library/合集").join(AUTO_STAGING_DIR_NAME))
+        );
+    }
+
+    #[test]
+    fn resolve_download_staging_root_rejects_relative_explicit_path() {
+        let resolved = resolve_download_staging_root(
+            Some(Path::new("rel/stage")),
+            Some(Path::new("/mnt/library/合集")),
+            Path::new("/mnt/library/合集"),
+        );
+        assert_eq!(resolved, None);
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测
