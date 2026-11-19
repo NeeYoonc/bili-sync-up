@@ -2774,7 +2774,6 @@ pub async fn reset_unified_youtube_video(
     if resetted {
         notify_videos_changed();
         notify_queue_status_changed();
-        crate::task::resume_scanning();
     }
     let response = get_unified_youtube_video(db, id).await?;
     Ok(ResetVideoResponse {
@@ -2799,7 +2798,6 @@ pub async fn reset_all_unified_youtube_videos(
     if count > 0 {
         notify_videos_changed();
         notify_queue_status_changed();
-        crate::task::resume_scanning();
     }
     Ok(ResetAllVideosResponse {
         resetted: count > 0,
@@ -2891,7 +2889,6 @@ pub async fn reset_specific_unified_youtube_tasks(
     if count > 0 {
         notify_videos_changed();
         notify_queue_status_changed();
-        crate::task::resume_scanning();
     }
     Ok(ResetAllVideosResponse {
         resetted: count > 0,
