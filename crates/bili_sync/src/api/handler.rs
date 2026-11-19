@@ -4965,12 +4965,7 @@ pub async fn reset_all_videos(
         }
     }
 
-    // 触发立即扫描（缩短等待）
-    crate::task::resume_scanning();
-    // 触发立即扫描（缩短等待）
-    if resetted {
-        crate::task::resume_scanning();
-    }
+    // 重置只更新状态，等下一轮扫描任务处理，不唤醒扫描循环
     Ok(ApiResponse::ok(ResetAllVideosResponse {
         resetted,
         resetted_videos_count: resetted_videos_info.len(),
