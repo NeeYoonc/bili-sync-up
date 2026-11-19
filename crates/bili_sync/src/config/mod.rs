@@ -267,6 +267,10 @@ pub struct Config {
     /// 只由程序维护，不在设置页展示，也不接受配置接口直接写入。
     #[serde(default)]
     pub download_staging_previous_dirs: Vec<PathBuf>,
+    /// 自动创建过的下载暂存目录（下载暂存目录留空时按视频源目录自动派生）：
+    /// 用于启动统计与「清理暂存残留」覆盖这些隐藏目录。只由程序维护。
+    #[serde(default)]
+    pub download_staging_auto_dirs: Vec<PathBuf>,
     // 推送通知配置
     #[serde(default)]
     pub notification: NotificationConfig,
@@ -746,6 +750,7 @@ impl Clone for Config {
             auto_reorganize_pages: self.auto_reorganize_pages,
             download_staging_dir: self.download_staging_dir.clone(),
             download_staging_previous_dirs: self.download_staging_previous_dirs.clone(),
+            download_staging_auto_dirs: self.download_staging_auto_dirs.clone(),
             notification: self.notification.clone(),
             enable_startup_data_fix: self.enable_startup_data_fix,
             enable_cid_population: self.enable_cid_population,
@@ -803,6 +808,7 @@ impl Default for Config {
             auto_reorganize_pages: default_auto_reorganize_pages(),
             download_staging_dir: None,
             download_staging_previous_dirs: Vec::new(),
+            download_staging_auto_dirs: Vec::new(),
             notification: NotificationConfig::default(),
             enable_startup_data_fix: false, // 默认关闭，减少不必要的日志
             enable_cid_population: false,   // 默认关闭，减少不必要的日志
@@ -851,6 +857,37 @@ pub fn remember_previous_download_staging_dir(previous_dirs: &mut Vec<PathBuf>, 
     }
 }
 
+/// 自动下载暂存目录最多保留的数量，避免配置无限增长。
+pub const MAX_DOWNLOAD_STAGING_AUTO_DIRS: usize = 16;
+
+/// 清理自动下载暂存目录列表：只保留绝对路径、去重，并限制个数。
+pub fn sanitize_download_staging_auto_dirs(auto_dirs: &mut Vec<PathBuf>) {
+    let mut sanitized: Vec<PathBuf> = Vec::with_capacity(auto_dirs.len());
+    for dir in auto_dirs.drain(..) {
+        if !dir.is_absolute() || sanitized.contains(&dir) {
+            continue;
+        }
+        sanitized.push(dir);
+        if sanitized.len() == MAX_DOWNLOAD_STAGING_AUTO_DIRS {
+            break;
+        }
+    }
+    *auto_dirs = sanitized;
+}
+
+/// 记录自动派生并使用过的下载暂存目录：只记绝对路径、去重（已存在时移到最新位置）。
+pub fn remember_download_staging_auto_dir(auto_dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !dir.is_absolute() {
+        return;
+    }
+    auto_dirs.retain(|existing| existing != &dir);
+    auto_dirs.push(dir);
+    let overflow = auto_dirs.len().saturating_sub(MAX_DOWNLOAD_STAGING_AUTO_DIRS);
+    if overflow > 0 {
+        auto_dirs.drain(..overflow);
+    }
+}
+
 impl Config {
     /// 加载配置时清理非法值：下载暂存目录必须是绝对路径，否则回退为「未配置」。
     ///
@@ -870,6 +907,7 @@ impl Config {
             &mut self.download_staging_previous_dirs,
             self.download_staging_dir.as_deref(),
         );
+        sanitize_download_staging_auto_dirs(&mut self.download_staging_auto_dirs);
     }
 
     #[cfg(not(test))]
@@ -1038,5 +1076,37 @@ mod tests {
         let mut previous = vec![PathBuf::from("/mnt/old")];
         remember_previous_download_staging_dir(&mut previous, PathBuf::from("rel/stage"));
         assert_eq!(previous, vec![PathBuf::from("/mnt/old")]);
+    }
+
+    #[test]
+    fn remember_download_staging_auto_dir_dedupes_and_keeps_recent_sixteen() {
+        let mut auto_dirs = Vec::new();
+        for index in 0..20 {
+            remember_download_staging_auto_dir(&mut auto_dirs, PathBuf::from(format!("/mnt/auto-{index}")));
+        }
+        assert_eq!(auto_dirs.len(), MAX_DOWNLOAD_STAGING_AUTO_DIRS);
+        assert_eq!(auto_dirs.first().map(PathBuf::as_path), Some(Path::new("/mnt/auto-4")));
+        assert_eq!(auto_dirs.last().map(PathBuf::as_path), Some(Path::new("/mnt/auto-19")));
+        remember_download_staging_auto_dir(&mut auto_dirs, PathBuf::from("/mnt/auto-4"));
+        assert_eq!(auto_dirs.last().map(PathBuf::as_path), Some(Path::new("/mnt/auto-4")));
+        assert_eq!(auto_dirs.len(), MAX_DOWNLOAD_STAGING_AUTO_DIRS);
+    }
+
+    #[test]
+    fn sanitize_download_staging_auto_dirs_drops_relative_and_duplicates() {
+        let mut auto_dirs = vec![
+            PathBuf::from("/mnt/a"),
+            PathBuf::from("rel/auto"),
+            PathBuf::from("/mnt/a"),
+            PathBuf::from("/mnt/b"),
+        ];
+        sanitize_download_staging_auto_dirs(&mut auto_dirs);
+        assert_eq!(auto_dirs, vec![PathBuf::from("/mnt/a"), PathBuf::from("/mnt/b")]);
+    }
+
+    #[test]
+    fn config_default_has_no_auto_staging_dirs() {
+        let config = Config::default();
+        assert!(config.download_staging_auto_dirs.is_empty());
     }
 }

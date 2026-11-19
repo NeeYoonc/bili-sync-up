@@ -4324,6 +4324,11 @@ async fn download_video(
     if !media_pending && sidecar_pending {
         return run_youtube_sidecar_tasks(db, video).await;
     }
+    // 下载暂存目录：与 B 站使用同一套解析（留空时按视频源目录的上一级自动派生）。
+    let staging_config = crate::config::reload_config();
+    let source_root = std::path::Path::new(&source.path);
+    let download_staging_root =
+        crate::workflow::prepare_download_staging_root(&staging_config, Some(source_root), source_root, Some(db)).await;
     loop {
         info!(
             platform = platform_label,
@@ -4348,7 +4353,7 @@ async fn download_video(
         let attempt_started = Instant::now();
         let result = match tokio::time::timeout(
             EXTERNAL_MEDIA_ATTEMPT_TIMEOUT,
-            download_youtube_media(downloader, &source, &video),
+            download_youtube_media(downloader, &source, &video, download_staging_root.as_deref()),
         )
         .await
         {
@@ -5137,6 +5142,7 @@ async fn download_youtube_media(
     downloader: &UnifiedDownloader,
     source: &youtube_source::Model,
     video: &youtube_video::Model,
+    staging_root: Option<&Path>,
 ) -> Result<DownloadedYouTubeMedia> {
     let platform = source_platform_label(source);
     let mut metadata = match extract_youtube_metadata(&video.url, Some(source)).await {
@@ -5335,8 +5341,15 @@ async fn download_youtube_media(
     if !media_exists && metadata.is_slideshow() {
         // 图集作品里的视频段会各自成页，主媒体文件（第一个分页）由下载函数返回：
         // 封面、NFO、字幕等附属文件都跟着这个主文件走。
-        output_path =
-            crate::douyin::download_image_post(downloader, &metadata, &output_path, &filter_option, source).await?;
+        output_path = crate::douyin::download_image_post(
+            downloader,
+            &metadata,
+            &output_path,
+            &filter_option,
+            source,
+            staging_root,
+        )
+        .await?;
     }
 
     // 外源平台的下载中间文件名是 `最终文件名.video.mp4` / `.audio.m4a` / `.merging.mp4` 等，
@@ -5345,9 +5358,9 @@ async fn download_youtube_media(
     let media_staging_root = if media_exists || metadata.is_slideshow() {
         None
     } else {
-        crate::config::reload_config().download_staging_dir
+        staging_root
     };
-    let staged_media_path = external_media_work_path(&output_path, media_staging_root.as_deref());
+    let staged_media_path = external_media_work_path(&output_path, media_staging_root);
     if let Some(staged_path) = staged_media_path.as_ref() {
         if let Some(parent) = staged_path.parent() {
             tokio::fs::create_dir_all(parent)

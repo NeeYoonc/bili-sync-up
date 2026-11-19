@@ -673,6 +673,7 @@ export interface ConfigResponse {
 	download_staging_dir?: string;
 	// 历史下载暂存目录（切换暂存目录后遗留的旧目录）
 	download_staging_previous_dirs?: string[];
+	download_staging_auto_dirs?: string[];
 	// 合集目录结构配置
 	collection_use_season_structure?: boolean;
 	// 番剧目录结构配置

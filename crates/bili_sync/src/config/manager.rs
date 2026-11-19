@@ -90,6 +90,7 @@ pub(crate) fn describe_config_key(key: &str) -> &'static str {
         "auto_reorganize_pages" => "结构变化时自动整理已下载分页",
         "download_staging_dir" => "下载暂存目录",
         "download_staging_previous_dirs" => "历史下载暂存目录",
+        "download_staging_auto_dirs" => "自动下载暂存目录",
         "collection_use_season_structure" => "合集目录Season结构",
         "bangumi_use_season_structure" => "番剧目录Season结构",
         "notification" => "通知配置",

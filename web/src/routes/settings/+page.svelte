@@ -2226,12 +2226,15 @@
 						id="download-staging-dir"
 						type="text"
 						bind:value={downloadStagingDir}
-						placeholder="留空=不启用；必须填绝对路径，例如 /volume1/downloads/.staging"
+						placeholder="留空=自动使用下载目录上一级的 .bili-sync-staging（推荐）"
 					/>
 					<p class="text-muted-foreground text-xs">
-						留空时中间文件直接写在目标文件旁边（与旧版本一致）。填写后，音视频先下载到该目录，合并与大小校验通过后再移动到最终位置，下载目录里不再出现
+						留空时自动把中间文件写到下载目录上一级的隐藏目录 .bili-sync-staging（例如
+						/volume1/downloads/合集 →
+						/volume1/downloads/.bili-sync-staging），上一级不可写时会退回视频源目录内部，媒体库里不会出现
 						.tmp_video / .tmp_audio / .resume
-						文件；同一存储池内是秒级移动，跨盘会退化成一次整文件拷贝。留空表示不启用；填写时必须是绝对路径（相对路径会被拒绝），并确保与下载目录在同一账号下可读写。
+						半成品；同一存储池内是秒级移动，跨盘会退化成一次整文件拷贝。
+						也可以填写绝对路径固定到指定目录（相对路径会被拒绝），并确保与下载目录在同一账号下可读写。
 					</p>
 					<div class="flex flex-col gap-2 sm:flex-row sm:items-center">
 						<Button

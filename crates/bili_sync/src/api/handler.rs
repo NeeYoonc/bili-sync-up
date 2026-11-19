@@ -11808,6 +11808,11 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
             .iter()
             .map(|path| path.to_string_lossy().to_string())
             .collect(),
+        download_staging_auto_dirs: config
+            .download_staging_auto_dirs
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
         // 合集目录结构配置
         collection_use_season_structure: config.collection_use_season_structure,
         // 番剧目录结构配置
@@ -12327,7 +12332,7 @@ fn parse_download_staging_dir(raw: &str) -> std::result::Result<Option<std::path
 }
 
 /// 清理暂存残留时最多扫描的根目录数量，避免异常配置放大清理范围。
-const MAX_STAGING_CLEANUP_ROOTS: usize = 8;
+const MAX_STAGING_CLEANUP_ROOTS: usize = 32;
 
 /// 清理暂存残留前检查是否有任务在跑；有任务时返回原因，避免边下载边删临时文件。
 fn staging_cleanup_blocked_reason() -> Option<&'static str> {
@@ -12377,6 +12382,7 @@ fn staging_cleanup_roots(config: &crate::config::Config) -> Vec<PathBuf> {
         .download_staging_dir
         .iter()
         .chain(config.download_staging_previous_dirs.iter())
+        .chain(config.download_staging_auto_dirs.iter())
     {
         if !root.is_absolute() || roots.contains(root) {
             continue;
@@ -12392,6 +12398,11 @@ fn staging_cleanup_roots(config: &crate::config::Config) -> Vec<PathBuf> {
 /// 从历史暂存目录列表里剔除已经清理过的根目录。
 fn remaining_previous_staging_dirs(previous: &[PathBuf], cleaned: &[PathBuf]) -> Vec<PathBuf> {
     previous.iter().filter(|dir| !cleaned.contains(*dir)).cloned().collect()
+}
+
+/// 从自动暂存目录列表里剔除已经清理过的根目录。
+fn remaining_auto_staging_dirs(auto: &[PathBuf], cleaned: &[PathBuf]) -> Vec<PathBuf> {
+    auto.iter().filter(|dir| !cleaned.contains(*dir)).cloned().collect()
 }
 
 /// 删除单个暂存根目录下的全部残留文件与空目录，保留根目录本身；返回（删除文件数，释放字节数）。
@@ -12492,18 +12503,30 @@ pub async fn cleanup_staging_residue(
 
     if !cleaned_roots.is_empty() {
         let previous_dirs = remaining_previous_staging_dirs(&config.download_staging_previous_dirs, &cleaned_roots);
+        let auto_dirs = remaining_auto_staging_dirs(&config.download_staging_auto_dirs, &cleaned_roots);
+        let manager = crate::config::ConfigManager::new(db.as_ref().clone());
+        let mut persisted = false;
         if previous_dirs != config.download_staging_previous_dirs {
-            let manager = crate::config::ConfigManager::new(db.as_ref().clone());
             match manager
                 .update_config_item("download_staging_previous_dirs", serde_json::to_value(&previous_dirs)?)
                 .await
             {
-                Ok(()) => {
-                    if let Err(error) = crate::config::reload_config_bundle().await {
-                        warn!("清理暂存残留后重新加载配置失败: {:#}", error);
-                    }
-                }
+                Ok(()) => persisted = true,
                 Err(error) => warn!("清理暂存残留后更新历史暂存目录记录失败: {:#}", error),
+            }
+        }
+        if auto_dirs != config.download_staging_auto_dirs {
+            match manager
+                .update_config_item("download_staging_auto_dirs", serde_json::to_value(&auto_dirs)?)
+                .await
+            {
+                Ok(()) => persisted = true,
+                Err(error) => warn!("清理暂存残留后更新自动暂存目录记录失败: {:#}", error),
+            }
+        }
+        if persisted {
+            if let Err(error) = crate::config::reload_config_bundle().await {
+                warn!("清理暂存残留后重新加载配置失败: {:#}", error);
             }
         }
     }
@@ -12765,6 +12788,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "auto_reorganize_pages" => Some("结构变化时自动整理已下载分页"),
         "download_staging_dir" => Some("下载暂存目录"),
         "download_staging_previous_dirs" => Some("历史下载暂存目录"),
+        "download_staging_auto_dirs" => Some("自动下载暂存目录"),
         "collection_use_season_structure" => Some("合集使用Season目录"),
         "bangumi_use_season_structure" => Some("番剧使用Season目录"),
         "upper_path" => Some("UP头像缓存路径"),
@@ -23853,5 +23877,28 @@ mod staging_cleanup_tests {
         let missing = unique_temp_dir("bili-sync-staging-missing");
         assert_eq!(clean_staging_root(&missing).await, (0, 0));
         assert_eq!(clean_staging_root(std::path::Path::new("rel/staging")).await, (0, 0));
+    }
+
+    #[test]
+    fn staging_cleanup_roots_include_auto_staging_dirs() {
+        let config = crate::config::Config {
+            download_staging_dir: Some(PathBuf::from("/mnt/current")),
+            download_staging_auto_dirs: vec![PathBuf::from("/mnt/auto"), PathBuf::from("rel/auto")],
+            ..Default::default()
+        };
+        assert_eq!(
+            staging_cleanup_roots(&config),
+            vec![PathBuf::from("/mnt/current"), PathBuf::from("/mnt/auto")]
+        );
+    }
+
+    #[test]
+    fn remaining_auto_staging_dirs_drops_cleaned_roots() {
+        let auto = vec![PathBuf::from("/mnt/auto-a"), PathBuf::from("/mnt/auto-b")];
+        let cleaned = vec![PathBuf::from("/mnt/auto-a")];
+        assert_eq!(
+            remaining_auto_staging_dirs(&auto, &cleaned),
+            vec![PathBuf::from("/mnt/auto-b")]
+        );
     }
 }

@@ -5288,6 +5288,7 @@ pub(crate) async fn download_image_post(
     output_path: &Path,
     filter: &FilterOption,
     source: &youtube_source::Model,
+    staging_root: Option<&Path>,
 ) -> Result<PathBuf> {
     let platform = if crate::tiktok::is_tiktok_source(source) {
         "TikTok"
@@ -5304,8 +5305,7 @@ pub(crate) async fn download_image_post(
     // 配置了下载暂存目录时，图集所有产物（`-images` 目录、视频段分页、配乐、合成 MP4、
     // 段级 `.download` 临时文件）都先写进暂存区，全部成功后再一次性搬进媒体目录；
     // 暂存关闭时工作目录就是媒体目录，行为与旧版本完全一致。
-    let staging_root = crate::config::reload_config().download_staging_dir;
-    let work_dir = image_post_staging_work_dir(output_path, staging_root.as_deref());
+    let work_dir = image_post_staging_work_dir(output_path, staging_root);
     if let Some(dir) = work_dir.as_deref() {
         tokio::fs::create_dir_all(dir)
             .await
@@ -6909,6 +6909,7 @@ mod tests {
             &output_path,
             &FilterOption::default(),
             &sample_douyin_source(),
+            None,
         )
         .await
         .expect("图集下载失败");
