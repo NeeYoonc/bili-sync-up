@@ -1016,7 +1016,7 @@ async fn collect_video_source_base_paths(
 fn process_path_with_filenamify(input: &str) -> String {
     // 修复：采用与下载流程相同的两阶段处理
     // 阶段1：先对内容进行安全化，保护模板分隔符
-    let temp_placeholder = "🔒TEMP_PATH_SEP🔒";
+    let temp_placeholder = "\u{E001}TEMP_PATH_SEP\u{E001}";
     let protected_input = input.replace("___PATH_SEP___", temp_placeholder);
 
     // 阶段2：对保护后的内容进行安全化处理（内容中的斜杠会被转换为下划线）
