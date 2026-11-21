@@ -11798,6 +11798,8 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         multi_page_use_season_structure: config.multi_page_use_season_structure,
         // 结构变化（如单P变多P）后自动整理已下载分页
         auto_reorganize_pages: config.auto_reorganize_pages,
+        // 文件名严格清洗
+        filename_strict_cleaning: config.filename_strict_cleaning,
         download_staging_dir: config
             .download_staging_dir
             .as_ref()
@@ -12656,6 +12658,8 @@ pub async fn update_config(
             multi_page_use_season_structure: params.multi_page_use_season_structure,
             // 结构变化（如单P变多P）后自动整理已下载分页
             auto_reorganize_pages: params.auto_reorganize_pages,
+            // 文件名严格清洗
+            filename_strict_cleaning: params.filename_strict_cleaning,
             download_staging_dir: params.download_staging_dir.clone(),
             // 合集目录结构配置
             collection_use_season_structure: params.collection_use_season_structure,
@@ -12786,6 +12790,7 @@ fn config_update_field_display_name(field: &str) -> String {
         "submission_adaptive_max_hours" => Some("B站源自适应最大间隔"),
         "multi_page_use_season_structure" => Some("多P使用Season目录"),
         "auto_reorganize_pages" => Some("结构变化时自动整理已下载分页"),
+        "filename_strict_cleaning" => Some("文件名严格清洗"),
         "download_staging_dir" => Some("下载暂存目录"),
         "download_staging_previous_dirs" => Some("历史下载暂存目录"),
         "download_staging_auto_dirs" => Some("自动下载暂存目录"),
@@ -12953,6 +12958,23 @@ mod config_update_tests {
 
         let absent: UpdateConfigRequest = serde_json::from_str("{}").expect("空对象应能解析");
         assert_eq!(absent.auto_reorganize_pages, None);
+    }
+
+    #[test]
+    fn filename_strict_cleaning_defaults_to_enabled() {
+        assert!(Config::default().filename_strict_cleaning);
+    }
+
+    #[test]
+    fn update_config_request_parses_filename_strict_cleaning() {
+        use crate::api::request::UpdateConfigRequest;
+
+        let disabled: UpdateConfigRequest =
+            serde_json::from_str(r#"{"filename_strict_cleaning": false}"#).expect("应能解析 false");
+        assert_eq!(disabled.filename_strict_cleaning, Some(false));
+
+        let absent: UpdateConfigRequest = serde_json::from_str("{}").expect("空对象应能解析");
+        assert_eq!(absent.filename_strict_cleaning, None);
     }
 
     #[test]
@@ -13939,6 +13961,13 @@ pub async fn update_config_internal(
             updated_fields.push("auto_reorganize_pages");
         }
     }
+    // 文件名严格清洗开关
+    if let Some(enabled) = params.filename_strict_cleaning {
+        if enabled != config.filename_strict_cleaning {
+            config.filename_strict_cleaning = enabled;
+            updated_fields.push("filename_strict_cleaning");
+        }
+    }
     // 下载暂存目录：留空字符串表示恢复为「与目标目录相同」
     if let Some(staging_dir) = params.download_staging_dir {
         let new_staging_dir = parse_download_staging_dir(&staging_dir).map_err(ApiError::bad_request)?;
@@ -14634,6 +14663,14 @@ pub async fn update_config_internal(
                         .update_config_item(
                             "auto_reorganize_pages",
                             serde_json::to_value(config.auto_reorganize_pages)?,
+                        )
+                        .await
+                }
+                "filename_strict_cleaning" => {
+                    manager
+                        .update_config_item(
+                            "filename_strict_cleaning",
+                            serde_json::to_value(config.filename_strict_cleaning)?,
                         )
                         .await
                 }

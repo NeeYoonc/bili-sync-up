@@ -153,6 +153,8 @@ pub struct UpdateConfigTask {
     pub multi_page_use_season_structure: Option<bool>,
     // 结构变化（如单P变多P）后自动把已下载分页迁入 Season 结构
     pub auto_reorganize_pages: Option<bool>,
+    // 文件名严格清洗：去掉标题里的 emoji、颜文字等特殊字符
+    pub filename_strict_cleaning: Option<bool>,
     /// 下载暂存目录（留空字符串表示与目标目录相同）
     pub download_staging_dir: Option<String>,
     // 合集目录结构配置
@@ -2449,6 +2451,8 @@ impl ConfigTaskQueue {
                 multi_page_use_season_structure: task.multi_page_use_season_structure,
                 // 结构变化（如单P变多P）后自动整理已下载分页
                 auto_reorganize_pages: task.auto_reorganize_pages,
+                // 文件名严格清洗
+                filename_strict_cleaning: task.filename_strict_cleaning,
                 download_staging_dir: task.download_staging_dir.clone(),
                 // 合集目录结构配置
                 collection_use_season_structure: task.collection_use_season_structure,
@@ -3080,6 +3084,13 @@ mod tests {
         let absent_json = r#"{"task_id":"t2"}"#;
         let absent: UpdateConfigTask = serde_json::from_str(absent_json).expect("缺省字段应可反序列化");
         assert_eq!(absent.auto_reorganize_pages, None);
+
+        let strict_raw = r#"{"task_id":"t3","filename_strict_cleaning":false}"#;
+        let strict_task: UpdateConfigTask = serde_json::from_str(strict_raw).expect("文件名严格清洗字段应能反序列化");
+        assert_eq!(strict_task.filename_strict_cleaning, Some(false));
+        let strict_roundtrip = serde_json::to_string(&strict_task).expect("应能序列化");
+        let strict_restored: UpdateConfigTask = serde_json::from_str(&strict_roundtrip).expect("序列化结果应能读回");
+        assert_eq!(strict_restored.filename_strict_cleaning, Some(false));
 
         let staging_raw = r#"{"task_id":"t4","download_staging_dir":"/mnt/staging"}"#;
         let staging_task: UpdateConfigTask = serde_json::from_str(staging_raw).expect("应能反序列化暂存目录");

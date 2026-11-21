@@ -61,6 +61,9 @@ pub async fn reload_config_bundle() -> Result<()> {
         warn!("检测到模板配置变化，现有视频重新处理时将从原始路径重新计算");
     }
 
+    // 同步依赖配置的全局开关
+    crate::utils::filenamify::set_strict_cleaning_enabled(new_bundle.config.filename_strict_cleaning);
+
     // 原子性更新配置包
     CONFIG_BUNDLE.store(Arc::new(new_bundle));
     debug!("配置包已重新加载并验证");
@@ -304,6 +307,9 @@ pub async fn init_config_with_database(db: sea_orm::DatabaseConnection) -> Resul
 
     // 设置全局配置管理器
     set_config_manager(manager);
+
+    // 同步依赖配置的全局开关
+    crate::utils::filenamify::set_strict_cleaning_enabled(new_bundle.config.filename_strict_cleaning);
 
     // 更新全局配置包
     CONFIG_BUNDLE.store(Arc::new(new_bundle));

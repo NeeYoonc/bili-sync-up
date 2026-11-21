@@ -259,6 +259,9 @@ pub struct Config {
     // 结构变化（如单P变多P）后是否自动把已下载的分页文件迁入 Season 目录
     #[serde(default = "default_auto_reorganize_pages")]
     pub auto_reorganize_pages: bool,
+    /// 文件名严格清洗：去掉标题里的 emoji、颜文字等特殊字符
+    #[serde(default = "default_filename_strict_cleaning")]
+    pub filename_strict_cleaning: bool,
     /// 下载暂存目录：设置后下载中的中间文件先写到该目录，合并与校验通过后再移动到最终位置。
     /// 留空表示与旧版本行为一致（中间文件直接写在目标文件旁边）。
     #[serde(default)]
@@ -311,6 +314,10 @@ fn default_bangumi_use_season_structure() -> bool {
 
 fn default_auto_reorganize_pages() -> bool {
     true // 默认在结构变化后自动整理已下载的分页文件
+}
+
+fn default_filename_strict_cleaning() -> bool {
+    true // 默认严格清洗文件名（去掉 emoji / 颜文字）
 }
 
 fn default_cdn_sorting() -> bool {
@@ -748,6 +755,7 @@ impl Clone for Config {
             collection_use_season_structure: self.collection_use_season_structure,
             bangumi_use_season_structure: self.bangumi_use_season_structure,
             auto_reorganize_pages: self.auto_reorganize_pages,
+            filename_strict_cleaning: self.filename_strict_cleaning,
             download_staging_dir: self.download_staging_dir.clone(),
             download_staging_previous_dirs: self.download_staging_previous_dirs.clone(),
             download_staging_auto_dirs: self.download_staging_auto_dirs.clone(),
@@ -806,6 +814,7 @@ impl Default for Config {
             collection_use_season_structure: default_collection_use_season_structure(),
             bangumi_use_season_structure: default_bangumi_use_season_structure(),
             auto_reorganize_pages: default_auto_reorganize_pages(),
+            filename_strict_cleaning: default_filename_strict_cleaning(),
             download_staging_dir: None,
             download_staging_previous_dirs: Vec::new(),
             download_staging_auto_dirs: Vec::new(),
@@ -1108,5 +1117,10 @@ mod tests {
     fn config_default_has_no_auto_staging_dirs() {
         let config = Config::default();
         assert!(config.download_staging_auto_dirs.is_empty());
+    }
+
+    #[test]
+    fn filename_strict_cleaning_defaults_to_enabled() {
+        assert!(Config::default().filename_strict_cleaning);
     }
 }

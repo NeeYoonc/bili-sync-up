@@ -597,6 +597,8 @@ pub struct ConfigResponse {
     pub multi_page_use_season_structure: bool,
     // 结构变化（如单P变多P）后自动把已下载分页迁入 Season 结构
     pub auto_reorganize_pages: bool,
+    // 文件名严格清洗：去掉标题里的 emoji、颜文字等特殊字符
+    pub filename_strict_cleaning: bool,
     /// 下载暂存目录（未配置时为空字符串）
     pub download_staging_dir: String,
     /// 历史下载暂存目录（切换暂存目录后遗留的旧目录，可在设置页清理残留）

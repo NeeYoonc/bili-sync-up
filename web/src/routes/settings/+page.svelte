@@ -436,6 +436,7 @@
 	// 多P视频目录结构配置
 	let multiPageUseSeasonStructure = false;
 	let autoReorganizePages = true;
+	let filenameStrictCleaning = true;
 	let downloadStagingDir = ''; // 下载暂存目录，留空表示与目标目录相同
 	let cleaningStaging = false; // 是否正在清理下载暂存残留
 
@@ -891,6 +892,7 @@
 		// 多P视频目录结构配置
 		multiPageUseSeasonStructure = config.multi_page_use_season_structure ?? false;
 		autoReorganizePages = config.auto_reorganize_pages ?? true;
+		filenameStrictCleaning = config.filename_strict_cleaning ?? true;
 		downloadStagingDir = config.download_staging_dir || '';
 
 		// 合集目录结构配置
@@ -1535,6 +1537,7 @@
 			multi_page_use_season_structure: multiPageUseSeasonStructure,
 			// 结构变化时自动整理已下载分页
 			auto_reorganize_pages: autoReorganizePages,
+			filename_strict_cleaning: filenameStrictCleaning,
 			download_staging_dir: downloadStagingDir.trim(),
 			// 合集目录结构配置
 			collection_use_season_structure: collectionUseSeasonStructure,
@@ -2216,6 +2219,27 @@
 					<p class="text-muted-foreground text-xs">
 						启用后，视频从单P变成多P（或目录结构模板变化）时，已下载的分页文件会自动迁入"Season
 						01"目录，避免同一视频出现混合目录结构；关闭后不再移动任何已下载文件
+					</p>
+				</div>
+
+				<!-- 文件名严格清洗 -->
+				<div class="space-y-2">
+					<div class="flex items-center space-x-2">
+						<input
+							type="checkbox"
+							id="filename-strict-cleaning"
+							bind:checked={filenameStrictCleaning}
+							class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+						/>
+						<Label
+							for="filename-strict-cleaning"
+							class="text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+						>
+							文件名严格清洗
+						</Label>
+					</div>
+					<p class="text-muted-foreground text-xs">
+						启用后会去掉标题里的 emoji、颜文字等特殊字符，避免部分网盘/文件系统不接受这类文件名；关闭后恢复原样。只影响新下载的文件名，不会改动已下载的文件
 					</p>
 				</div>
 
