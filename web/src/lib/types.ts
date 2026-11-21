@@ -670,6 +670,8 @@ export interface ConfigResponse {
 	multi_page_use_season_structure?: boolean;
 	// 结构变化时自动整理已下载分页
 	auto_reorganize_pages?: boolean;
+	// 文件名严格清洗：去掉标题里的 emoji、颜文字等特殊字符
+	filename_strict_cleaning?: boolean;
 	download_staging_dir?: string;
 	// 历史下载暂存目录（切换暂存目录后遗留的旧目录）
 	download_staging_previous_dirs?: string[];
@@ -865,6 +867,8 @@ export interface UpdateConfigRequest {
 	multi_page_use_season_structure?: boolean;
 	// 结构变化时自动整理已下载分页
 	auto_reorganize_pages?: boolean;
+	// 文件名严格清洗：去掉标题里的 emoji、颜文字等特殊字符
+	filename_strict_cleaning?: boolean;
 	download_staging_dir?: string;
 	// 合集目录结构配置
 	collection_use_season_structure?: boolean;

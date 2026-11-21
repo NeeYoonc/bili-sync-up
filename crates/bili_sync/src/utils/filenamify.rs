@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 macro_rules! regex {
     ($re:literal $(,)?) => {{
         static RE: once_cell::sync::OnceCell<regex::Regex> = once_cell::sync::OnceCell::new();
@@ -14,8 +16,22 @@ const MAX_FILENAME_BYTES: usize = 200;
 /// 后缀，避免基名刚好卡线：`.zh-CN.default.ass`=18、`.mp4.tmp_video`=14、
 /// `-fanart.jpg`=11、`.srt`=4。
 pub const MAX_BASENAME_BYTES: usize = 235;
-const UNIX_SEP_PLACEHOLDER: &str = "🔒UNIX_SEP_PROTECTED🔒";
-const WIN_SEP_PLACEHOLDER: &str = "🔒WIN_SEP_PROTECTED🔒";
+// 用 Unicode 私用区字符做占位符：这些字符不会出现在正常标题里，也不会被严格清洗误删。
+const UNIX_SEP_PLACEHOLDER: &str = "\u{E000}UNIX_SEP_PROTECTED\u{E000}";
+const WIN_SEP_PLACEHOLDER: &str = "\u{E000}WIN_SEP_PROTECTED\u{E000}";
+
+/// 是否启用「严格清洗」：去掉 emoji、颜文字组合符等特殊字符。
+static STRICT_CLEANING: AtomicBool = AtomicBool::new(true);
+
+/// 设置是否启用文件名严格清洗。
+pub fn set_strict_cleaning_enabled(enabled: bool) {
+    STRICT_CLEANING.store(enabled, Ordering::Relaxed);
+}
+
+/// 当前是否启用严格清洗。
+pub fn strict_cleaning_enabled() -> bool {
+    STRICT_CLEANING.load(Ordering::Relaxed)
+}
 
 pub fn filenamify<S: AsRef<str>>(input: S) -> String {
     filenamify_with_options(input, false)
@@ -127,6 +143,62 @@ fn truncate_segment_bytes(segment: &str, max_bytes: usize) -> String {
     }
 }
 
+/// 判断字符是否属于严格清洗要删除的类别：emoji（Extended_Pictographic 的主要区间）、
+/// 变体选择符/零宽连接符，以及颜文字常用的组合符（Mn）与间隔修饰符（Sk）的常见区间。
+fn is_strict_cleaning_char(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(
+        cp,
+        // emoji / 图形符号
+        0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x2300..=0x23FF
+            // 变体选择符、零宽连接符
+            | 0xFE0E
+            | 0xFE0F
+            | 0x200D
+            // 颜文字常用的组合符（Mn）
+            | 0x0300..=0x036F
+            | 0x0483..=0x0489
+            | 0x0591..=0x05BD
+            | 0x0610..=0x061A
+            | 0x064B..=0x065F
+            | 0x0670
+            | 0x06D6..=0x06DC
+            | 0x06DF..=0x06E4
+            | 0x06E7..=0x06E8
+            | 0x06EA..=0x06ED
+            | 0x0F71..=0x0F84
+            | 0x0F86..=0x0F87
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x20D0..=0x20FF
+            | 0xFE20..=0xFE2F
+            // 颜文字常用的间隔修饰符（Sk）与其它修饰字母
+            | 0x02B0..=0x02FF
+            | 0x00A8
+            | 0x00AF
+            | 0x00B4
+            | 0x00B8
+    )
+}
+
+/// 删除 emoji、颜文字组合符等特殊字符。仅在真的删除了字符时重新整理分隔符，
+/// 以保证没有特殊字符的既有文件名输出完全不变。
+fn strict_clean_special_characters(input: &str) -> String {
+    if !input.chars().any(is_strict_cleaning_char) {
+        return input.to_string();
+    }
+    let mut cleaned = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if is_strict_cleaning_char(ch) {
+            cleaned.push('_');
+        } else {
+            cleaned.push(ch);
+        }
+    }
+    let collapsed = regex!("_{2,}").replace_all(&cleaned, "_").into_owned();
+    collapsed.trim_matches(|c| c == '_' || c == ' ').to_string()
+}
+
 /// 带选项的文件名安全化函数
 ///
 /// # 参数
@@ -195,6 +267,11 @@ pub fn filenamify_with_options<S: AsRef<str>>(input: S, preserve_template_separa
     // 8. 只去除开头和结尾的空格
     input = input.trim().to_string();
 
+    // 8.5 严格清洗：去掉 emoji、颜文字组合符等特殊字符（默认开启，可在设置里关闭）
+    if strict_cleaning_enabled() {
+        input = strict_clean_special_characters(&input);
+    }
+
     // 9. 确保文件名不为空
     if input.is_empty() {
         input = "unnamed".to_string();
@@ -215,6 +292,9 @@ pub fn filenamify_with_options<S: AsRef<str>>(input: S, preserve_template_separa
 #[cfg(test)]
 mod tests {
     use super::{filenamify, filenamify_with_options};
+
+    /// 串行化会修改全局严格清洗开关的用例。
+    static STRICT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_filenamify() {
@@ -412,5 +492,54 @@ mod tests {
         assert!(capped.len() + ".mp4.tmp_video".len() <= 255);
         assert!(capped.starts_with("S339E006 - "));
         assert!(capped.contains("【一小时高效英语听力磨耳朵】"));
+    }
+
+    #[test]
+    fn test_strict_cleaning_removes_emoji() {
+        let _guard = STRICT_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let cleaned = filenamify("测试🎃👻⭐标题❤️");
+        assert!(!cleaned.chars().any(super::is_strict_cleaning_char));
+        assert!(cleaned.contains("测试"));
+        assert!(cleaned.contains("标题"));
+    }
+
+    #[test]
+    fn test_strict_cleaning_removes_kaomoji_modifiers() {
+        let _guard = STRICT_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let cleaned = filenamify("(•̀ω•́)✧");
+        assert!(!cleaned.chars().any(super::is_strict_cleaning_char));
+        assert!(cleaned.contains('ω'));
+        assert!(!cleaned.starts_with('_'));
+        assert!(!cleaned.ends_with('_'));
+    }
+
+    #[test]
+    fn test_strict_cleaning_can_be_disabled() {
+        let _guard = STRICT_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        super::set_strict_cleaning_enabled(false);
+        let cleaned = filenamify("测试🎃标题");
+        super::set_strict_cleaning_enabled(true);
+        assert!(cleaned.contains('🎃'));
+    }
+
+    #[test]
+    fn test_strict_cleaning_keeps_template_separators() {
+        let _guard = STRICT_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let cleaned = filenamify_with_options("A__UNIX_SEP__测试🎃B", true);
+        assert!(cleaned.contains("__UNIX_SEP__"));
+        assert!(!cleaned.chars().any(super::is_strict_cleaning_char));
+    }
+
+    #[test]
+    fn test_strict_cleaning_falls_back_to_unnamed() {
+        let _guard = STRICT_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(filenamify("🎃👻"), "unnamed");
+    }
+
+    #[test]
+    fn test_strict_cleaning_keeps_normal_titles_unchanged() {
+        let _guard = STRICT_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(filenamify("【4K修复】中文标题 ABC 123"), "【4K修复】中文标题 ABC 123");
+        assert_eq!(filenamify("_foo_bar_"), "_foo_bar_");
     }
 }

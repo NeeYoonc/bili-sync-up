@@ -88,6 +88,7 @@ pub(crate) fn describe_config_key(key: &str) -> &'static str {
         "aria2_health_check_interval" => "aria2健康检查间隔",
         "multi_page_use_season_structure" => "多P目录Season结构",
         "auto_reorganize_pages" => "结构变化时自动整理已下载分页",
+        "filename_strict_cleaning" => "文件名严格清洗",
         "download_staging_dir" => "下载暂存目录",
         "download_staging_previous_dirs" => "历史下载暂存目录",
         "download_staging_auto_dirs" => "自动下载暂存目录",
