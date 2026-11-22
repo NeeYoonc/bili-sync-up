@@ -83,6 +83,8 @@
 	function getStatusText(status: number): string {
 		if (status === 7) {
 			return '已完成';
+		} else if (status === 6) {
+			return '作品已删除';
 		} else if (status === 0) {
 			return '未开始';
 		} else {
@@ -93,6 +95,8 @@
 	function getSegmentColor(status: number): string {
 		if (status === 7) {
 			return 'bg-green-500'; // 绿色 - 成功
+		} else if (status === 6) {
+			return 'bg-slate-400'; // 灰色 - 作品已删除/已失效，不是失败
 		} else if (status === 0) {
 			return 'bg-yellow-500'; // 黄色 - 未开始
 		} else {
@@ -110,6 +114,15 @@
 				text: '无效',
 				color: 'outline',
 				description: 'B站已返回视频失效状态，已下载的本地文件和封面会继续保留显示。'
+			};
+		}
+
+		// 作品被作者删除/设为私密：后端把五个子任务都标成 6，优先于「部分失败」展示
+		if (downloadStatus.includes(6)) {
+			return {
+				text: '作品已删除',
+				color: 'outline',
+				description: '作品已被作者删除或设为私密，已跳过下载；如需重试可点重置。'
 			};
 		}
 
@@ -159,6 +172,7 @@
 		}
 	}
 
+	$: isUnavailable = video.download_status.includes(6);
 	$: overallStatus = getOverallStatus(video.download_status);
 	$: completed = video.download_status.filter((status) => status === 7).length;
 	$: total = video.download_status.length;
@@ -360,9 +374,9 @@
 				on:error={handleCoverImageError}
 			/>
 			<!-- 类型标识和选择框统一排列在封面左上角 -->
-			{#if selectionMode || video.is_image_post || video.is_story || video.is_charge_video || video.skip_reason}
+			{#if selectionMode || video.is_image_post || video.is_story || video.is_charge_video || video.skip_reason || isUnavailable}
 				<div
-					class="absolute top-2 left-2 z-20 flex max-w-[calc(100%-88px)] flex-wrap items-center gap-1.5"
+					class="absolute top-2 left-2 z-20 flex max-w-[calc(100%-88px)] flex-col items-start gap-1.5"
 				>
 					{#if selectionMode}
 						<input
@@ -379,6 +393,14 @@
 							title={imagePostBadgeTitle}
 						>
 							{imagePostBadgeLabel}
+						</Badge>
+					{/if}
+					{#if isUnavailable}
+						<Badge
+							class="border border-slate-400/60 bg-slate-500/90 text-xs text-white shadow-md hover:bg-slate-500/90"
+							title={overallStatus.description}
+						>
+							作品已删除
 						</Badge>
 					{/if}
 					{#if video.is_story}
@@ -415,7 +437,7 @@
 			{/if}
 
 			<!-- 状态徽章覆盖在封面上 -->
-			<div class="absolute top-2 right-2 z-20">
+			<div class="absolute top-2 right-2 z-20" class:hidden={isUnavailable}>
 				<Tooltip.Root>
 					<Tooltip.Trigger>
 						<Badge
@@ -625,6 +647,11 @@
 					• <strong>重置失败</strong>：仅重置失败的任务<br />
 					• <strong>强制重置</strong>：重置所有任务，重新下载
 				</p>
+				{#if isUnavailable}
+					<p class="text-muted-foreground mt-1 text-sm">
+						作品已被作者删除或设为私密，请使用「强制重置」重新尝试下载。
+					</p>
+				{/if}
 			</AlertDialog.Description>
 		</AlertDialog.Header>
 		<AlertDialog.Footer>

@@ -103,7 +103,7 @@ export interface YouTubeVideo {
 	thumbnail?: string | null;
 	published_at?: string | null;
 	duration_seconds?: number | null;
-	download_status: 'pending' | 'downloading' | 'completed' | 'failed' | 'skipped';
+	download_status: 'pending' | 'downloading' | 'completed' | 'failed' | 'skipped' | 'unavailable';
 	retry_count: number;
 	output_path?: string | null;
 	error_message?: string | null;
