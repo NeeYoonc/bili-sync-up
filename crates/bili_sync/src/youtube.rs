@@ -5138,6 +5138,15 @@ fn legacy_external_media_temp_pairs(
     pairs
 }
 
+/// 外源媒体是否需要进入「音视频流选择/下载」分支。
+///
+/// 图集（slideshow）已经由 `download_image_post` 单独下载完成，`selected` 恒为 `None`；
+/// 媒体已落盘时也不再重复下载。两者都必须跳过流选择，否则会误报
+/// 「图文作品不应进入混合流选择」并把已完成的作品标记为失败（v3.1.8 回归）。
+fn should_select_external_streams(media_exists: bool, is_slideshow: bool) -> bool {
+    !media_exists && !is_slideshow
+}
+
 async fn download_youtube_media(
     downloader: &UnifiedDownloader,
     source: &youtube_source::Model,
@@ -5385,8 +5394,12 @@ async fn download_youtube_media(
         }
     }
 
-    if media_exists {
-        // 媒体已落盘时不重复下载，但仍继续执行字幕等独立子任务。
+    // 媒体已落盘、或图集已在上方由 `download_image_post` 下载完成（纯图集或合成 MP4、视频分页）
+    // 时，不再进入音视频流选择：此时 `selected` 为 `None`，继续走下面的分支会误报
+    // 「图文作品不应进入混合流选择」并把已完成的作品标记为失败。字幕等独立子任务仍照常执行。
+    // 图集优先于 `source.audio_only`，与 v3.1.7 的旧链路保持一致。
+    if !should_select_external_streams(media_exists, metadata.is_slideshow()) {
+        // 媒体已落盘或图集已下载完成时不重复下载，但仍继续执行字幕等独立子任务。
     } else if source.audio_only {
         let selected = selected.as_ref().context("图文作品不应进入音频流选择")?;
         if let Some(audio) = selected.audio.as_ref() {
@@ -13369,5 +13382,25 @@ mod tests {
         assert!(message.contains("timed out"), "{message}");
         assert!(message.contains("外源代理"), "{message}");
         assert!(!message.contains("（）"), "{message}");
+    }
+
+    #[test]
+    fn external_stream_selection_is_needed_for_fresh_regular_video() {
+        assert!(super::should_select_external_streams(false, false));
+    }
+
+    #[test]
+    fn external_stream_selection_is_skipped_when_media_exists() {
+        assert!(!super::should_select_external_streams(true, false));
+    }
+
+    #[test]
+    fn external_stream_selection_is_skipped_for_slideshow() {
+        assert!(!super::should_select_external_streams(false, true));
+    }
+
+    #[test]
+    fn external_stream_selection_is_skipped_for_existing_slideshow() {
+        assert!(!super::should_select_external_streams(true, true));
     }
 }
