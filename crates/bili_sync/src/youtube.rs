@@ -4545,7 +4545,20 @@ async fn download_video(
             Err(error) => {
                 let retry_count = video.retry_count.saturating_add(1);
                 let error_text = error.to_string();
-                let permanent_failure = error_text.contains("CENC 加密 DASH") || error_text.contains("付费/加密内容");
+                // 抖音作品被删除/设为私密时错误链里是「作品可能已被作者删除或设为私密」，
+                // 这种错误重试多少次都不会成功，直接按永久失败处理。
+                let unavailable_work =
+                    is_douyin_source(&source) && crate::douyin::is_unavailable_work_error(&format!("{:#}", error));
+                if unavailable_work {
+                    warn!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        youtube_id = %video.youtube_id,
+                        "抖音作品已被作者删除或设为私密，停止重试"
+                    );
+                }
+                let permanent_failure =
+                    error_text.contains("CENC 加密 DASH") || error_text.contains("付费/加密内容") || unavailable_work;
                 let exhausted = permanent_failure || retry_count >= MAX_DOWNLOAD_RETRIES;
                 // 与 B 站一致：把失败次数写进「媒体」子任务的状态位（视频级 index 4、
                 // 分页级 index 1）。只改 download_status 字符串的话，卡片右上角读到的
