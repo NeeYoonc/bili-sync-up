@@ -2,6 +2,12 @@ use crate::error::ExecutionStatus;
 
 pub(super) static STATUS_MAX_RETRY: u32 = 0b100;
 pub static STATUS_OK: u32 = 0b111;
+/// 表示该子任务对应的作品已经失效（作者删除或设为私密）。
+///
+/// 它不是「失败」：重试也不会成功，所以子任务不再进入重试；
+/// 同时也不是「成功」，前端据此显示「已删除」而不是「部分失败」。
+/// `reset_failed` 会把它清回 `0b000`，用户手动重置后可以重新尝试。
+pub static STATUS_UNAVAILABLE: u32 = 0b110;
 pub static STATUS_COMPLETED: u32 = 1 << 31;
 
 /// 用来表示下载的状态，不想写太多列了，所以仅使用一个 u32 表示。
@@ -64,6 +70,17 @@ impl<const N: usize> Status<N> {
             self.set_completed(false);
         }
         changed
+    }
+
+    /// 把所有子任务标记为「作品已失效」（STATUS_UNAVAILABLE），并打上完成标记。
+    ///
+    /// 用于作者删除/设为私密这类永久不可用的作品：既不再重试，也不显示成失败，
+    /// 前端可以据此显示「已删除」；用户 reset 后 `reset_failed` 会清回未开始。
+    pub fn mark_unavailable(&mut self) {
+        for i in 0..N {
+            self.set_status(i, STATUS_UNAVAILABLE);
+        }
+        self.set_completed(true);
     }
 
     /// 覆盖某个子任务的状态
@@ -336,6 +353,28 @@ mod test {
         assert_eq!(status.get(PAGE_STATUS_SUBTITLE_INDEX), STATUS_OK);
         assert!(!status.should_run()[PAGE_STATUS_SUBTITLE_INDEX]);
         assert!(status.get_completed());
+    }
+
+    #[test]
+    fn test_mark_unavailable_sets_all_subtasks_and_completes() {
+        let mut status = VideoStatus::from([7, 1, 0, 4, 7]);
+        assert!(!status.get_completed());
+        status.mark_unavailable();
+        assert_eq!(<[u32; 5]>::from(status), [6, 6, 6, 6, 6]);
+        assert!(status.get_completed());
+        assert_eq!(status.should_run(), [false; 5]);
+        assert_eq!(status.get(0), STATUS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn test_reset_failed_clears_unavailable_back_to_pending() {
+        let mut status = PageStatus::default();
+        status.mark_unavailable();
+        assert!(status.get_completed());
+        assert!(status.reset_failed(), "reset_failed 应把 6 重置为 0");
+        assert_eq!(<[u32; 5]>::from(status), [0; 5]);
+        assert!(!status.get_completed());
+        assert_eq!(status.should_run(), [true; 5]);
     }
 
     #[test]
