@@ -1597,6 +1597,7 @@ async fn persist_tiktok_posts(
         .and_then(|value| Local.from_local_datetime(&value).single())
         .map(|value| value.timestamp());
     let mut scanned_video_ids = HashSet::new();
+    let mut renamed_uppers: HashSet<(String, String)> = HashSet::new();
     let mut added = 0u64;
     for post in posts {
         scanned_video_ids.insert(post.id.clone());
@@ -1619,6 +1620,7 @@ async fn persist_tiktok_posts(
             .await?
         {
             deleted_video_ids.remove(&post.id);
+            crate::workflow::note_renamed_upper(&mut renamed_uppers, &existing.uploader, &post.uploader);
             // 封面直链带签名会过期：扫描到同一视频时用最新封面刷新旧直链，
             // 避免视频管理页封面长期停留在已过期的 403 直链上。
             let thumbnail_refreshed = post
@@ -1695,6 +1697,19 @@ async fn persist_tiktok_posts(
         .insert(db)
         .await?;
         added += 1;
+    }
+    if !renamed_uppers.is_empty() {
+        let source_root = Path::new(&source.path);
+        for (old_upper, new_upper) in renamed_uppers {
+            if let Err(error) =
+                crate::workflow::migrate_external_upper_rename(db, source_root, source.id, &old_upper, &new_upper).await
+            {
+                warn!(
+                    "UP 主改名迁移失败: old='{}', new='{}', error={:#}",
+                    old_upper, new_upper, error
+                );
+            }
+        }
     }
     known_video_ids.into_iter().for_each(|id| {
         scanned_video_ids.insert(id);
