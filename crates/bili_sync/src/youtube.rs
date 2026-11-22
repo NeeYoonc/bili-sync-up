@@ -44,7 +44,7 @@ use crate::task::TASK_CONTROLLER;
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::live_updates::{notify_queue_status_changed, notify_video_sources_changed, notify_videos_changed};
 use crate::utils::notification::{NewVideoInfo, SourceScanResult};
-use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK};
+use crate::utils::status::{PageStatus, VideoStatus, STATUS_OK, STATUS_UNAVAILABLE};
 use crate::utils::time_format::now_standard_string;
 
 const YTDLP_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -62,6 +62,8 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 /// 到点直接放弃本次尝试，走正常的失败/重试逻辑。
 const EXTERNAL_MEDIA_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 const MAX_DOWNLOAD_RETRIES: i32 = 4;
+/// 作品已被作者删除/设为私密时写进 `error_message` 的人类可读说明。
+const UNAVAILABLE_WORK_MESSAGE: &str = "作品已被作者删除或设为私密，已跳过下载（可重置后重试）";
 /// TikTok「只回元数据、媒体字段全空」这类失败连续重试到此轮数后，才落「无法下载视频」
 /// 占位并停止自动重试。保留前几轮正常重试，是为了给用户换出口节点留出恢复机会。
 const TIKTOK_MEDIA_MISSING_PLACEHOLDER_RETRY: i32 = 2;
@@ -2296,12 +2298,18 @@ fn youtube_text_from_task_status(video_task_status: u32, page_task_status: u32) 
     let page_status = PageStatus::from(page_task_status);
     let mut any_pending = false;
     let mut any_failed = false;
+    let mut any_ok = false;
     for index in 0..5 {
         for status in [video_status.get(index), page_status.get(index)] {
             if status == 0 {
                 any_pending = true;
+            } else if status == STATUS_UNAVAILABLE {
+                // 「已失效」不算失败：作品被删除/设私密，重试也没有意义，不计入 failed/pending。
+                continue;
             } else if status < STATUS_OK {
                 any_failed = true;
+            } else {
+                any_ok = true;
             }
         }
     }
@@ -2309,6 +2317,9 @@ fn youtube_text_from_task_status(video_task_status: u32, page_task_status: u32) 
         "failed".to_string()
     } else if any_pending {
         "pending".to_string()
+    } else if !any_ok {
+        // 十个子任务全是 STATUS_UNAVAILABLE：整条作品已失效。
+        "unavailable".to_string()
     } else {
         "completed".to_string()
     }
@@ -4545,20 +4556,45 @@ async fn download_video(
             Err(error) => {
                 let retry_count = video.retry_count.saturating_add(1);
                 let error_text = error.to_string();
-                // 抖音作品被删除/设为私密时错误链里是「作品可能已被作者删除或设为私密」，
-                // 这种错误重试多少次都不会成功，直接按永久失败处理。
+                // 抖音作品被作者删除/设为私密时，错误链里是「作品可能已被作者删除或设为私密」。
+                // 这种状态既不是失败（重试也没用）也不是成功：写独立的「已删除」状态位，
+                // 五个子任务全部置 STATUS_UNAVAILABLE 并打上完成标记，前端据此显示「已删除」。
                 let unavailable_work =
                     is_douyin_source(&source) && crate::douyin::is_unavailable_work_error(&format!("{:#}", error));
                 if unavailable_work {
+                    let chained = format!("{:#}", error);
+                    let mut video_status = VideoStatus::from(video.video_task_status);
+                    video_status.mark_unavailable();
+                    let mut page_status = PageStatus::from(video.page_task_status);
+                    page_status.mark_unavailable();
+                    active.video_task_status = Set(video_status.into());
+                    active.page_task_status = Set(page_status.into());
+                    active.download_status = Set("unavailable".to_string());
+                    active.error_message = Set(Some(UNAVAILABLE_WORK_MESSAGE.to_string()));
+                    active.updated_at = Set(now_standard_string());
+                    video = active.update(db).await?;
+                    // 完整错误链（含 yt-dlp 输出、HTTP 状态）只留在 debug，避免刷屏。
+                    debug!(
+                        platform = platform_label,
+                        source_id = source.id,
+                        youtube_id = %video.youtube_id,
+                        error = %chained,
+                        "抖音作品已失效的完整错误链"
+                    );
                     warn!(
                         platform = platform_label,
                         source_id = source.id,
                         youtube_id = %video.youtube_id,
-                        "抖音作品已被作者删除或设为私密，停止重试"
+                        "{}视频源「{}」视频「{}」已失效：作品被作者删除或设为私密，已跳过，不再重试",
+                        platform_label,
+                        source.name,
+                        video.title
                     );
+                    notify_videos_changed();
+                    notify_queue_status_changed();
+                    return Ok(());
                 }
-                let permanent_failure =
-                    error_text.contains("CENC 加密 DASH") || error_text.contains("付费/加密内容") || unavailable_work;
+                let permanent_failure = error_text.contains("CENC 加密 DASH") || error_text.contains("付费/加密内容");
                 let exhausted = permanent_failure || retry_count >= MAX_DOWNLOAD_RETRIES;
                 // 与 B 站一致：把失败次数写进「媒体」子任务的状态位（视频级 index 4、
                 // 分页级 index 1）。只改 download_status 字符串的话，卡片右上角读到的
@@ -13453,5 +13489,38 @@ mod tests {
     #[test]
     fn external_stream_selection_is_skipped_for_existing_slideshow() {
         assert!(!super::should_select_external_streams(true, true));
+    }
+
+    #[test]
+    fn unavailable_bits_map_to_unavailable_status_text() {
+        let mut video = super::VideoStatus::default();
+        video.mark_unavailable();
+        let mut page = super::PageStatus::default();
+        page.mark_unavailable();
+        let video_bits: u32 = video.into();
+        let page_bits: u32 = page.into();
+        assert_eq!(
+            super::youtube_text_from_task_status(video_bits, page_bits),
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn unavailable_status_resets_back_to_pending_and_message_is_human_readable() {
+        let mut video = super::VideoStatus::default();
+        video.mark_unavailable();
+        let mut page = super::PageStatus::default();
+        page.mark_unavailable();
+        assert!(video.reset_failed());
+        assert!(page.reset_failed());
+        let video_bits: u32 = video.into();
+        let page_bits: u32 = page.into();
+        assert_eq!(super::youtube_text_from_task_status(video_bits, page_bits), "pending");
+        let message = super::UNAVAILABLE_WORK_MESSAGE;
+        assert!(message.contains("已删除") || message.contains("设为私密"), "{message}");
+        assert!(
+            !message.contains("真实错误已持久化"),
+            "面向用户的文案不应包含机器话术: {message}"
+        );
     }
 }
