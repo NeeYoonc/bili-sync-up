@@ -1422,6 +1422,38 @@ pub(crate) fn note_renamed_upper(renames: &mut HashSet<(String, String)>, old_up
     renames.insert((old_upper.to_string(), new_upper.to_string()));
 }
 
+/// B 站视频里用于占位的「作者名」，这些值不是真正的 UP 主，不能当作改名处理。
+pub(crate) fn is_placeholder_upper_name(upper_name: &str) -> bool {
+    matches!(upper_name.trim(), "" | "未知" | "番剧" | "课程" | "漫画" | "UP主")
+}
+
+/// 判断一次 UP 主改名是否值得做目录/数据库迁移。
+pub(crate) fn should_migrate_bilibili_upper_rename(old_upper: &str, new_upper: &str) -> bool {
+    let old_upper = old_upper.trim();
+    let new_upper = new_upper.trim();
+    old_upper != new_upper && !is_placeholder_upper_name(old_upper) && !is_placeholder_upper_name(new_upper)
+}
+
+/// 投稿/动态源改名规划：返回（旧 UP 名, 旧源目录）。
+///
+/// 投稿/动态源的 `VideoInfo` 不携带作者字段，历史视频行的 `upper_name` 也可能是占位「未知」，
+/// 因此只能靠「数据库里上一版 submission 行的 upper_name/path」与接口返回的新名字对比来发现改名。
+pub(crate) fn plan_submission_upper_rename(
+    previous: Option<(&str, &str)>,
+    new_upper: &str,
+) -> Option<(String, PathBuf)> {
+    let (old_upper, old_path) = previous?;
+    let old_upper = old_upper.trim();
+    let old_path = old_path.trim();
+    if old_path.is_empty() {
+        return None;
+    }
+    if !should_migrate_bilibili_upper_rename(old_upper, new_upper) {
+        return None;
+    }
+    Some((old_upper.to_string(), PathBuf::from(old_path)))
+}
+
 /// 规划「旧 UP 名目录 → 新 UP 名目录」的合并路径。
 ///
 /// 目录名沿用下载时同一套 `filenamify` 规则，避免全角括号等字符导致
@@ -1603,14 +1635,65 @@ pub(crate) async fn migrate_bilibili_upper_rename(
     old_upper: &str,
     new_upper: &str,
 ) -> Result<(usize, usize)> {
-    let Some((old_dir, new_dir)) = plan_upper_rename(video_source.path(), old_upper, new_upper) else {
-        return Ok((0, 0));
-    };
     let videos = video::Entity::find()
         .filter(video_source.filter_expr())
-        .filter(video::Column::UpperName.eq(old_upper))
+        .filter(video::Column::UpperName.eq(old_upper.trim()))
         .all(db)
         .await?;
+    apply_bilibili_upper_rename(db, videos, video_source.path(), old_upper, new_upper).await
+}
+
+/// 按源路径迁移 B 站 UP 主目录与数据库路径（投稿/动态源改名时使用。
+///
+/// 目前投稿/动态源改按 submission id 迁移，因为这类视频行的 `upper_name` 可能仍是占位「未知」；
+/// 这个入口保留给「只有源目录、拿不到源 id」的调用方与后续手动修复使用。
+#[allow(dead_code, reason = "保留按源路径迁移的通用入口，供拿不到源 id 的调用方复用")]
+pub(crate) async fn migrate_bilibili_upper_rename_for_path(
+    db: &DatabaseConnection,
+    source_path: &Path,
+    old_upper: &str,
+    new_upper: &str,
+) -> Result<(usize, usize)> {
+    let source_prefix = source_path.to_string_lossy();
+    let videos: Vec<video::Model> = video::Entity::find()
+        .filter(video::Column::UpperName.eq(old_upper.trim()))
+        .all(db)
+        .await?
+        .into_iter()
+        .filter(|video_model| {
+            let path = video_model.path.trim();
+            path.is_empty() || path.starts_with(source_prefix.as_ref())
+        })
+        .collect();
+    apply_bilibili_upper_rename(db, videos, source_path, old_upper, new_upper).await
+}
+
+/// 按投稿源 id 迁移（投稿/动态源的视频行 `upper_name` 可能是占位「未知」，只能按源筛选）。
+pub(crate) async fn migrate_bilibili_upper_rename_for_submission(
+    db: &DatabaseConnection,
+    submission_id: i32,
+    source_path: &Path,
+    old_upper: &str,
+    new_upper: &str,
+) -> Result<(usize, usize)> {
+    let videos = video::Entity::find()
+        .filter(video::Column::SubmissionId.eq(submission_id))
+        .all(db)
+        .await?;
+    apply_bilibili_upper_rename(db, videos, source_path, old_upper, new_upper).await
+}
+
+/// 执行一次 UP 主改名迁移：合并磁盘目录 + 更新视频/分页路径。
+async fn apply_bilibili_upper_rename(
+    db: &DatabaseConnection,
+    videos: Vec<video::Model>,
+    source_root: &Path,
+    old_upper: &str,
+    new_upper: &str,
+) -> Result<(usize, usize)> {
+    let Some((old_dir, new_dir)) = plan_upper_rename(source_root, old_upper, new_upper) else {
+        return Ok((0, 0));
+    };
     if old_dir.is_dir() {
         info!("检测到 UP 主改名：「{}」→「{}」，开始迁移", old_upper, new_upper);
     } else if videos.is_empty() {
@@ -1942,12 +2025,7 @@ pub async fn refresh_video_source<'a>(
                 };
                 let old_upper = old_upper.trim();
                 let new_upper = upper_name.trim();
-                if old_upper.is_empty() || new_upper.is_empty() || old_upper == new_upper {
-                    continue;
-                }
-                if matches!(old_upper, "未知" | "番剧" | "课程" | "漫画" | "UP主")
-                    || matches!(new_upper, "未知" | "番剧" | "课程" | "漫画" | "UP主")
-                {
+                if !should_migrate_bilibili_upper_rename(old_upper, new_upper) {
                     continue;
                 }
                 note_renamed_upper(&mut upper_renames, old_upper, new_upper);
@@ -19360,6 +19438,43 @@ mod tests {
             .expect("缺失源目录应安静返回");
         assert_eq!((moved, conflicts), (0, 0));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn is_placeholder_upper_name_matches_placeholders() {
+        for name in ["未知", "番剧", "课程", "漫画", "UP主", "", "   "] {
+            assert!(is_placeholder_upper_name(name), "{name:?} 应视为占位名");
+        }
+        assert!(!is_placeholder_upper_name("老番茄"));
+    }
+
+    #[test]
+    fn should_migrate_bilibili_upper_rename_skips_placeholder_and_same_name() {
+        assert!(should_migrate_bilibili_upper_rename("老番茄", "老番茄改名了"));
+        assert!(!should_migrate_bilibili_upper_rename("老番茄", " 老番茄 "));
+        assert!(!should_migrate_bilibili_upper_rename("未知", "老番茄"));
+        assert!(!should_migrate_bilibili_upper_rename("老番茄", "未知"));
+        assert!(!should_migrate_bilibili_upper_rename("", "老番茄"));
+    }
+
+    #[test]
+    fn plan_submission_upper_rename_accepts_real_rename() {
+        let planned = plan_submission_upper_rename(Some(("老番茄", "/library/老番茄")), "老番茄改名了");
+        assert_eq!(planned, Some(("老番茄".to_string(), PathBuf::from("/library/老番茄"))));
+    }
+
+    #[test]
+    fn plan_submission_upper_rename_skips_missing_path_or_unchanged_name() {
+        assert_eq!(plan_submission_upper_rename(None, "新名字"), None);
+        assert_eq!(plan_submission_upper_rename(Some(("老番茄", "")), "新名字"), None);
+        assert_eq!(
+            plan_submission_upper_rename(Some(("老番茄", "/library/老番茄")), "老番茄"),
+            None
+        );
+        assert_eq!(
+            plan_submission_upper_rename(Some(("未知", "/library/未知")), "老番茄"),
+            None
+        );
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测
