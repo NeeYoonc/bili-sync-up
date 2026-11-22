@@ -1455,6 +1455,23 @@ fn is_cross_device_file_error(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(18) | Some(17))
 }
 
+fn count_files_recursively(root: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                count_files_recursively(&path)
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
 fn merge_directory_contents_blocking(src: &Path, dst: &Path) -> Result<(usize, usize)> {
     let mut moved_files = 0usize;
     let mut conflicts = 0usize;
@@ -1482,11 +1499,14 @@ fn merge_directory_contents_blocking(src: &Path, dst: &Path) -> Result<(usize, u
             }
             continue;
         }
+        let moving_files = if file_type.is_dir() {
+            count_files_recursively(&entry_path)
+        } else {
+            1
+        };
         match std::fs::rename(&entry_path, &target_path) {
             Ok(()) => {
-                if !file_type.is_dir() {
-                    moved_files += 1;
-                }
+                moved_files += moving_files;
             }
             Err(error) if is_cross_device_file_error(&error) && file_type.is_dir() => {
                 let (nested_moved, nested_conflicts) = merge_directory_contents_blocking(&entry_path, &target_path)?;
