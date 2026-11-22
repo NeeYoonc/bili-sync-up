@@ -5272,6 +5272,32 @@ async fn commit_image_post_staging(
     Ok(())
 }
 
+/// 图集里真正需要写 `<作品>-images/` 的图片段数量。
+///
+/// 视频段的封面图只用于兜底生成静止片段，不算原图，因此不参与计数。
+fn image_post_image_segment_count(segments: &[ExternalImageSlide]) -> usize {
+    segments.iter().filter(|segment| !segment.is_video()).count()
+}
+
+/// 准备图集原图目录：只有存在图片段时才创建，纯视频段作品不建空目录。
+async fn prepare_image_post_image_dir(image_dir: &Path, segments: &[ExternalImageSlide]) -> Result<()> {
+    if image_post_image_segment_count(segments) == 0 {
+        return Ok(());
+    }
+    tokio::fs::create_dir_all(image_dir).await?;
+    Ok(())
+}
+
+/// 删除图集遗留的空 `<作品>-images/` 目录；只删空目录，目录不存在/非空都忽略。
+async fn remove_image_dir_if_empty(image_dir: &Path) {
+    match tokio::fs::remove_dir(image_dir).await {
+        Ok(()) => debug!(path = %image_dir.display(), "已清理空的图集图片目录"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+        Err(error) => warn!(path = %image_dir.display(), %error, "清理空的图集图片目录失败"),
+    }
+}
+
 /// 落地图集作品（图文、图片贴、多段动态）。
 ///
 /// 规则：
@@ -5314,12 +5340,15 @@ pub(crate) async fn download_image_post(
     let work_parent = work_dir.as_deref().unwrap_or(parent);
     let image_dir = work_parent.join(format!("{stem}-images"));
     let final_image_dir = parent.join(format!("{stem}-images"));
-    tokio::fs::create_dir_all(&image_dir).await?;
 
     let segments = metadata.slideshow_segments();
     if segments.is_empty() {
         bail!("{platform}图文作品没有可下载的图片或视频片段");
     }
+    // 纯视频段的图文作品不需要原图目录；只有真的存在图片段时才创建
+    // `<作品>-images/`，否则媒体目录里会留下一个空目录。
+    let image_segment_count = image_post_image_segment_count(&segments);
+    prepare_image_post_image_dir(&image_dir, &segments).await?;
     let video_segment_count = segments.iter().filter(|segment| segment.is_video()).count();
     let max_short_edge = quality_height(filter.video_max_quality).clamp(360, 2160);
     let width = max_short_edge - (max_short_edge % 2);
@@ -5447,6 +5476,10 @@ pub(crate) async fn download_image_post(
     }
 
     commit_image_post_staging(platform, &image_dir, &final_image_dir, &staged_moves).await?;
+    if image_segment_count == 0 {
+        // 纯视频段的图文作品不该有 `<作品>-images/`：顺手清掉旧版本或历史残留的空目录。
+        remove_image_dir_if_empty(&final_image_dir).await;
+    }
     // 视频段各自成页后，作品目录里不能再留上一版合并出来的 `<作品>.mp4`，
     // 否则媒体库里同一作品会同时出现「合并版」和「分页版」。
     cleanup_stale_image_post_pages(output_path, parent, stem, &page_paths).await?;
@@ -5499,6 +5532,13 @@ async fn download_image_post_segment(
                 "{platform}图集第 {} 段视频片段下载失败，改用该段封面静图生成静止片段",
                 ordinal
             );
+            // 纯视频段的图文作品没有提前创建 `-images/`，回退用封面图生成
+            // 静止片段时临时建出来（仍然落在暂存目录/媒体目录内，收尾会清理）。
+            if let Some(fallback_parent) = fallback_image.parent() {
+                tokio::fs::create_dir_all(fallback_parent)
+                    .await
+                    .with_context(|| format!("创建{platform}图集封面兜底目录失败: {}", fallback_parent.display()))?;
+            }
             download_image_segment(
                 downloader,
                 source,
@@ -6864,6 +6904,98 @@ mod tests {
             .trim()
             .parse()
             .expect("解析 ffprobe 时长失败")
+    }
+
+    fn image_post_test_slide(image_urls: &[&str], video_urls: &[&str]) -> ExternalImageSlide {
+        ExternalImageSlide {
+            image_urls: image_urls.iter().map(|url| (*url).to_string()).collect(),
+            video_urls: video_urls.iter().map(|url| (*url).to_string()).collect(),
+            duration: None,
+        }
+    }
+
+    fn image_post_test_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-image-post-dir-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).expect("创建临时目录");
+        root
+    }
+
+    #[test]
+    fn image_post_image_segment_count_ignores_video_segments() {
+        let mixed = vec![
+            image_post_test_slide(&["https://img/1.jpg"], &[]),
+            image_post_test_slide(&["https://img/cover.jpg"], &["https://video/1.mp4"]),
+            image_post_test_slide(&[], &["https://video/2.mp4"]),
+        ];
+        assert_eq!(image_post_image_segment_count(&mixed), 1);
+        let video_only = vec![
+            image_post_test_slide(&["https://img/cover.jpg"], &["https://video/1.mp4"]),
+            image_post_test_slide(&[], &["https://video/2.mp4"]),
+        ];
+        assert_eq!(image_post_image_segment_count(&video_only), 0);
+    }
+
+    #[tokio::test]
+    async fn prepare_image_post_image_dir_skips_pure_video_post() {
+        let root = image_post_test_root("skip-video");
+        let image_dir = root.join("20260925-7689-images");
+        let segments = vec![
+            image_post_test_slide(&["https://img/cover.jpg"], &["https://video/1.mp4"]),
+            image_post_test_slide(&[], &["https://video/2.mp4"]),
+        ];
+        prepare_image_post_image_dir(&image_dir, &segments)
+            .await
+            .expect("准备图片目录失败");
+        assert!(!image_dir.exists(), "纯视频段作品不应该创建 -images 目录");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn prepare_image_post_image_dir_creates_dir_for_image_segments() {
+        let root = image_post_test_root("create-images");
+        let image_dir = root.join("20260925-7689-images");
+        let segments = vec![
+            image_post_test_slide(&["https://img/1.jpg"], &[]),
+            image_post_test_slide(&[], &["https://video/1.mp4"]),
+        ];
+        prepare_image_post_image_dir(&image_dir, &segments)
+            .await
+            .expect("准备图片目录失败");
+        assert!(image_dir.is_dir(), "有图片段时应创建 -images 目录");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn remove_image_dir_if_empty_removes_empty_and_keeps_non_empty() {
+        let root = image_post_test_root("remove-empty");
+        let empty_dir = root.join("empty-images");
+        tokio::fs::create_dir_all(&empty_dir).await.expect("创建空目录");
+        remove_image_dir_if_empty(&empty_dir).await;
+        assert!(!empty_dir.exists(), "空 -images 目录应被删除");
+
+        let non_empty_dir = root.join("non-empty-images");
+        tokio::fs::create_dir_all(&non_empty_dir).await.expect("创建非空目录");
+        tokio::fs::write(non_empty_dir.join("01.jpg"), b"img")
+            .await
+            .expect("写入图片");
+        remove_image_dir_if_empty(&non_empty_dir).await;
+        assert!(non_empty_dir.is_dir(), "非空 -images 目录必须保留");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn remove_image_dir_if_empty_ignores_missing_dir() {
+        let root = image_post_test_root("missing");
+        remove_image_dir_if_empty(&root.join("not-exists-images")).await;
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// 真实链路测试的公共流程：解析作品 → 逐段下载 → 校验落地结构。
