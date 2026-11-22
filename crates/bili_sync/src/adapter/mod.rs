@@ -846,6 +846,8 @@ mod tests {
         assert_eq!(favorite.name, "自定义收藏夹名");
         assert_eq!(favorite.path, "/new/favorite");
 
+        // 投稿源与合集/收藏夹不同：它的名字要跟随 B 站接口返回的 UP 名，
+        // 否则库里的名字永远停在旧名，扫描时无法发现 UP 主改名（目录/路径自愈依赖它）。
         sync_submission(&db, "自定义UP名", "/old/submission").await;
         sync_submission(&db, "接口UP名", "/new/submission").await;
         let submission = submission_entity::Entity::find()
@@ -854,7 +856,7 @@ mod tests {
             .await
             .expect("查询投稿源应成功")
             .expect("投稿源应存在");
-        assert_eq!(submission.upper_name, "自定义UP名");
+        assert_eq!(submission.upper_name, "接口UP名");
         assert_eq!(submission.path, "/new/submission");
     }
 }

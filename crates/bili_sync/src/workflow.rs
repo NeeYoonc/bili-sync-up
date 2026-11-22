@@ -1410,6 +1410,343 @@ pub async fn process_video_source(
 }
 
 /// 更新番剧缓存
+/// 收集「同一个视频命中已有行、但本次取回的作者名变了」的 UP 主改名对。
+///
+/// 只比较非空的作者名；同一次扫描里多个视频命中同一对改名时自动去重。
+pub(crate) fn note_renamed_upper(renames: &mut HashSet<(String, String)>, old_upper: &str, new_upper: &str) {
+    let old_upper = old_upper.trim();
+    let new_upper = new_upper.trim();
+    if old_upper.is_empty() || new_upper.is_empty() || old_upper == new_upper {
+        return;
+    }
+    renames.insert((old_upper.to_string(), new_upper.to_string()));
+}
+
+/// B 站视频里用于占位的「作者名」，这些值不是真正的 UP 主，不能当作改名处理。
+pub(crate) fn is_placeholder_upper_name(upper_name: &str) -> bool {
+    matches!(upper_name.trim(), "" | "未知" | "番剧" | "课程" | "漫画" | "UP主")
+}
+
+/// 判断一次 UP 主改名是否值得做目录/数据库迁移。
+pub(crate) fn should_migrate_bilibili_upper_rename(old_upper: &str, new_upper: &str) -> bool {
+    let old_upper = old_upper.trim();
+    let new_upper = new_upper.trim();
+    old_upper != new_upper && !is_placeholder_upper_name(old_upper) && !is_placeholder_upper_name(new_upper)
+}
+
+/// 投稿/动态源改名规划：返回（旧 UP 名, 旧源目录）。
+///
+/// 投稿/动态源的 `VideoInfo` 不携带作者字段，历史视频行的 `upper_name` 也可能是占位「未知」，
+/// 因此只能靠「数据库里上一版 submission 行的 upper_name/path」与接口返回的新名字对比来发现改名。
+pub(crate) fn plan_submission_upper_rename(
+    previous: Option<(&str, &str)>,
+    new_upper: &str,
+) -> Option<(String, PathBuf)> {
+    let (old_upper, old_path) = previous?;
+    let old_upper = old_upper.trim();
+    let old_path = old_path.trim();
+    if old_path.is_empty() {
+        return None;
+    }
+    if !should_migrate_bilibili_upper_rename(old_upper, new_upper) {
+        return None;
+    }
+    Some((old_upper.to_string(), PathBuf::from(old_path)))
+}
+
+/// 规划「旧 UP 名目录 → 新 UP 名目录」的合并路径。
+///
+/// 目录名沿用下载时同一套 `filenamify` 规则，避免全角括号等字符导致
+/// 旧目录名匹配不上；两者清洗后相同、任一为空或两者都不存在时返回 None。
+pub(crate) fn plan_upper_rename(source_root: &Path, old_upper: &str, new_upper: &str) -> Option<(PathBuf, PathBuf)> {
+    let old_upper = old_upper.trim();
+    let new_upper = new_upper.trim();
+    if old_upper.is_empty() || new_upper.is_empty() {
+        return None;
+    }
+    let old_dir_name = crate::utils::filenamify::filenamify(old_upper);
+    let new_dir_name = crate::utils::filenamify::filenamify(new_upper);
+    if old_dir_name.is_empty() || new_dir_name.is_empty() || old_dir_name == new_dir_name {
+        return None;
+    }
+    Some((source_root.join(old_dir_name), source_root.join(new_dir_name)))
+}
+
+/// 把数据库里记录了旧 UP 目录的路径前缀替换成新目录前缀。
+pub(crate) fn replace_upper_path_prefix(path: &str, old_dir: &Path, new_dir: &Path) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let relative = Path::new(trimmed).strip_prefix(old_dir).ok()?;
+    Some(new_dir.join(relative).to_string_lossy().to_string())
+}
+
+fn is_cross_device_file_error(error: &std::io::Error) -> bool {
+    // Linux EXDEV = 18；Windows ERROR_NOT_SAME_DEVICE = 17。
+    matches!(error.raw_os_error(), Some(18) | Some(17))
+}
+
+fn count_files_recursively(root: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                count_files_recursively(&path)
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+fn merge_directory_contents_blocking(src: &Path, dst: &Path) -> Result<(usize, usize)> {
+    let mut moved_files = 0usize;
+    let mut conflicts = 0usize;
+    if !src.is_dir() {
+        return Ok((moved_files, conflicts));
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let target_path = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if target_path.exists() {
+            if file_type.is_dir() {
+                let (nested_moved, nested_conflicts) = merge_directory_contents_blocking(&entry_path, &target_path)?;
+                moved_files += nested_moved;
+                conflicts += nested_conflicts;
+            } else {
+                conflicts += 1;
+                warn!(
+                    "合并 UP 主目录时遇到同名文件，保留目标文件并把旧文件留在原处: target='{}', source='{}'",
+                    target_path.display(),
+                    entry_path.display()
+                );
+            }
+            continue;
+        }
+        let moving_files = if file_type.is_dir() {
+            count_files_recursively(&entry_path)
+        } else {
+            1
+        };
+        match std::fs::rename(&entry_path, &target_path) {
+            Ok(()) => {
+                moved_files += moving_files;
+            }
+            Err(error) if is_cross_device_file_error(&error) && file_type.is_dir() => {
+                let (nested_moved, nested_conflicts) = merge_directory_contents_blocking(&entry_path, &target_path)?;
+                moved_files += nested_moved;
+                conflicts += nested_conflicts;
+            }
+            Err(error) if is_cross_device_file_error(&error) => {
+                std::fs::copy(&entry_path, &target_path)?;
+                let _ = std::fs::remove_file(&entry_path);
+                moved_files += 1;
+            }
+            Err(error) => {
+                warn!(
+                    "合并 UP 主目录时移动文件失败，保留旧文件: source='{}', target='{}', error={}",
+                    entry_path.display(),
+                    target_path.display(),
+                    error
+                );
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(src);
+    Ok((moved_files, conflicts))
+}
+
+/// 把旧 UP 目录里的内容合并进新目录：目标不存在直接 rename，同名文件保留目标、
+/// 旧文件留在原处（绝不覆盖），最后自底向上清理空目录。
+pub(crate) async fn merge_directory_contents(src: &Path, dst: &Path) -> Result<(usize, usize)> {
+    let src = src.to_path_buf();
+    let dst = dst.to_path_buf();
+    tokio::task::spawn_blocking(move || merge_directory_contents_blocking(&src, &dst)).await?
+}
+
+/// 外源平台（YouTube / 抖音 / TikTok）UP 主改名迁移：合并旧目录并修正
+/// `you_tube_video.uploader` 与 `output_path` 前缀。
+pub(crate) async fn migrate_external_upper_rename(
+    db: &DatabaseConnection,
+    source_root: &Path,
+    source_id: i32,
+    old_upper: &str,
+    new_upper: &str,
+) -> Result<(usize, usize)> {
+    let Some((old_dir, new_dir)) = plan_upper_rename(source_root, old_upper, new_upper) else {
+        return Ok((0, 0));
+    };
+    let rows = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(source_id))
+        .filter(youtube_video::Column::Uploader.eq(old_upper))
+        .all(db)
+        .await?;
+    if old_dir.is_dir() {
+        info!("检测到 UP 主改名：「{}」→「{}」，开始迁移", old_upper, new_upper);
+    } else if rows.is_empty() {
+        return Ok((0, 0));
+    }
+    let mut moved_files = 0usize;
+    if old_dir.is_dir() {
+        let (moved, conflicts) = merge_directory_contents(&old_dir, &new_dir).await?;
+        moved_files = moved;
+        if conflicts > 0 {
+            warn!(
+                "合并 UP 主目录时存在同名文件冲突，已保留目标文件: old='{}', new='{}', conflicts={}",
+                old_dir.display(),
+                new_dir.display(),
+                conflicts
+            );
+        }
+    }
+    let migrated_videos = rows.len();
+    for row in rows {
+        let mut active: youtube_video::ActiveModel = row.clone().into();
+        if let Some(output_path) = row.output_path.as_deref() {
+            if let Some(updated) = replace_upper_path_prefix(output_path, &old_dir, &new_dir) {
+                active.output_path = Set(Some(updated));
+            }
+        }
+        active.uploader = Set(new_upper.to_string());
+        active.updated_at = Set(now_standard_string());
+        active.update(db).await?;
+    }
+    notify_videos_changed();
+    info!(
+        "已迁移 {} 个视频、{} 个文件（UP 主「{}」→「{}」）",
+        migrated_videos, moved_files, old_upper, new_upper
+    );
+    Ok((migrated_videos, moved_files))
+}
+
+/// B 站 UP 主改名迁移：合并旧目录并修正 `video.upper_name` / `video.path`
+/// 以及该视频下 `page.path` 的路径前缀。
+pub(crate) async fn migrate_bilibili_upper_rename(
+    db: &DatabaseConnection,
+    video_source: &VideoSourceEnum,
+    old_upper: &str,
+    new_upper: &str,
+) -> Result<(usize, usize)> {
+    let videos = video::Entity::find()
+        .filter(video_source.filter_expr())
+        .filter(video::Column::UpperName.eq(old_upper.trim()))
+        .all(db)
+        .await?;
+    apply_bilibili_upper_rename(db, videos, video_source.path(), old_upper, new_upper).await
+}
+
+/// 按源路径迁移 B 站 UP 主目录与数据库路径（投稿/动态源改名时使用。
+///
+/// 目前投稿/动态源改按 submission id 迁移，因为这类视频行的 `upper_name` 可能仍是占位「未知」；
+/// 这个入口保留给「只有源目录、拿不到源 id」的调用方与后续手动修复使用。
+#[allow(dead_code, reason = "保留按源路径迁移的通用入口，供拿不到源 id 的调用方复用")]
+pub(crate) async fn migrate_bilibili_upper_rename_for_path(
+    db: &DatabaseConnection,
+    source_path: &Path,
+    old_upper: &str,
+    new_upper: &str,
+) -> Result<(usize, usize)> {
+    let source_prefix = source_path.to_string_lossy();
+    let videos: Vec<video::Model> = video::Entity::find()
+        .filter(video::Column::UpperName.eq(old_upper.trim()))
+        .all(db)
+        .await?
+        .into_iter()
+        .filter(|video_model| {
+            let path = video_model.path.trim();
+            path.is_empty() || path.starts_with(source_prefix.as_ref())
+        })
+        .collect();
+    apply_bilibili_upper_rename(db, videos, source_path, old_upper, new_upper).await
+}
+
+/// 按投稿源 id 迁移（投稿/动态源的视频行 `upper_name` 可能是占位「未知」，只能按源筛选）。
+pub(crate) async fn migrate_bilibili_upper_rename_for_submission(
+    db: &DatabaseConnection,
+    submission_id: i32,
+    source_path: &Path,
+    old_upper: &str,
+    new_upper: &str,
+) -> Result<(usize, usize)> {
+    let videos = video::Entity::find()
+        .filter(video::Column::SubmissionId.eq(submission_id))
+        .all(db)
+        .await?;
+    apply_bilibili_upper_rename(db, videos, source_path, old_upper, new_upper).await
+}
+
+/// 执行一次 UP 主改名迁移：合并磁盘目录 + 更新视频/分页路径。
+async fn apply_bilibili_upper_rename(
+    db: &DatabaseConnection,
+    videos: Vec<video::Model>,
+    source_root: &Path,
+    old_upper: &str,
+    new_upper: &str,
+) -> Result<(usize, usize)> {
+    let Some((old_dir, new_dir)) = plan_upper_rename(source_root, old_upper, new_upper) else {
+        return Ok((0, 0));
+    };
+    if old_dir.is_dir() {
+        info!("检测到 UP 主改名：「{}」→「{}」，开始迁移", old_upper, new_upper);
+    } else if videos.is_empty() {
+        return Ok((0, 0));
+    }
+    let mut moved_files = 0usize;
+    if old_dir.is_dir() {
+        let (moved, conflicts) = merge_directory_contents(&old_dir, &new_dir).await?;
+        moved_files = moved;
+        if conflicts > 0 {
+            warn!(
+                "合并 UP 主目录时存在同名文件冲突，已保留目标文件: old='{}', new='{}', conflicts={}",
+                old_dir.display(),
+                new_dir.display(),
+                conflicts
+            );
+        }
+    }
+    let migrated_videos = videos.len();
+    for video_model in videos {
+        let updated_path = replace_upper_path_prefix(&video_model.path, &old_dir, &new_dir);
+        let mut active: video::ActiveModel = video_model.clone().into();
+        active.upper_name = Set(new_upper.to_string());
+        if let Some(updated) = updated_path.clone() {
+            active.path = Set(updated);
+        }
+        active.update(db).await?;
+        if updated_path.is_some() {
+            let pages = page::Entity::find()
+                .filter(page::Column::VideoId.eq(video_model.id))
+                .all(db)
+                .await?;
+            for page_model in pages {
+                let Some(page_path) = page_model.path.as_deref() else {
+                    continue;
+                };
+                let Some(updated_page_path) = replace_upper_path_prefix(page_path, &old_dir, &new_dir) else {
+                    continue;
+                };
+                let mut page_active: page::ActiveModel = page_model.into();
+                page_active.path = Set(Some(updated_page_path));
+                page_active.update(db).await?;
+            }
+        }
+    }
+    notify_videos_changed();
+    info!(
+        "已迁移 {} 个视频、{} 个文件（UP 主「{}」→「{}」）",
+        migrated_videos, moved_files, old_upper, new_upper
+    );
+    Ok((migrated_videos, moved_files))
+}
+
 async fn update_bangumi_cache(
     source_id: i32,
     connection: &DatabaseConnection,
@@ -1668,7 +2005,43 @@ pub async fn refresh_video_source<'a>(
         // 收藏夹源：先收集 B站 当前分P数（仅当这批数据包含收藏夹条目时非空）
         let favorite_page_map = collect_favorite_page_counts(&videos_info);
 
+        // UP 主改名自愈：本次扫描取回的作者名与库里已有行的 upper_name 不一致时，
+        // 收集 (旧, 新) 对，入库后统一合并旧目录并修正数据库路径。
+        let mut upper_renames: HashSet<(String, String)> = HashSet::new();
+        if !temp_video_infos.is_empty() {
+            let scanned_bvids: Vec<String> = temp_video_infos.iter().map(|(_, bvid, _, _, _)| bvid.clone()).collect();
+            let existing_videos = video::Entity::find()
+                .filter(video_source.filter_expr())
+                .filter(video::Column::Bvid.is_in(scanned_bvids))
+                .all(connection)
+                .await?;
+            let existing_upper_names: HashMap<String, String> = existing_videos
+                .into_iter()
+                .map(|existing| (existing.bvid, existing.upper_name))
+                .collect();
+            for (_title, bvid, upper_name, _, _) in &temp_video_infos {
+                let Some(old_upper) = existing_upper_names.get(bvid) else {
+                    continue;
+                };
+                let old_upper = old_upper.trim();
+                let new_upper = upper_name.trim();
+                if !should_migrate_bilibili_upper_rename(old_upper, new_upper) {
+                    continue;
+                }
+                note_renamed_upper(&mut upper_renames, old_upper, new_upper);
+            }
+        }
+
         create_videos(videos_info, video_source, connection).await?;
+
+        for (old_upper, new_upper) in upper_renames {
+            if let Err(error) = migrate_bilibili_upper_rename(connection, video_source, &old_upper, &new_upper).await {
+                warn!(
+                    "UP 主改名迁移失败: old='{}', new='{}', error={:#}",
+                    old_upper, new_upper, error
+                );
+            }
+        }
 
         // 收藏夹源：对比 B站 当前分P数与本地记录，检测已收藏多P视频是否新增分P；
         // 若检测到新增，重置 single_page/download_status 以重新拉取详情并下载新分P。
@@ -18966,6 +19339,142 @@ mod tests {
             Path::new("/mnt/library/合集"),
         );
         assert_eq!(resolved, None);
+    }
+
+    fn upper_rename_test_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bili-sync-upper-rename-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).expect("创建测试目录");
+        root
+    }
+
+    #[test]
+    fn plan_upper_rename_uses_filenamified_directory_names() {
+        let root = Path::new("/mnt/library/关注douyin");
+        let (old_dir, new_dir) = plan_upper_rename(root, "白铭（想接正片）", "白铭").expect("应规划出迁移路径");
+        assert_eq!(old_dir, root.join("白铭(想接正片)"));
+        assert_eq!(new_dir, root.join("白铭"));
+    }
+
+    #[test]
+    fn plan_upper_rename_skips_identical_or_empty_names() {
+        let root = Path::new("/mnt/library/关注douyin");
+        assert_eq!(plan_upper_rename(root, "白铭", "白铭"), None);
+        assert_eq!(plan_upper_rename(root, "", "白铭"), None);
+        assert_eq!(plan_upper_rename(root, "白铭", "  "), None);
+    }
+
+    #[test]
+    fn replace_upper_path_prefix_rewrites_only_matching_prefix() {
+        let old_dir = Path::new("/mnt/library/关注douyin/白铭(想接正片)");
+        let new_dir = Path::new("/mnt/library/关注douyin/白铭");
+        let updated = replace_upper_path_prefix(
+            "/mnt/library/关注douyin/白铭(想接正片)/作品/2024-01-01-稿件.mp4",
+            old_dir,
+            new_dir,
+        );
+        assert_eq!(
+            updated.as_deref(),
+            Some("/mnt/library/关注douyin/白铭/作品/2024-01-01-稿件.mp4")
+        );
+        assert_eq!(
+            replace_upper_path_prefix("/mnt/library/其它/作品.mp4", old_dir, new_dir),
+            None
+        );
+        assert_eq!(replace_upper_path_prefix("", old_dir, new_dir), None);
+    }
+
+    #[tokio::test]
+    async fn merge_directory_contents_moves_files_into_existing_target() {
+        let root = upper_rename_test_root("merge-existing");
+        let src = root.join("白铭(想接正片)");
+        let dst = root.join("白铭");
+        std::fs::create_dir_all(src.join("作品")).expect("创建源目录");
+        std::fs::create_dir_all(&dst).expect("创建目标目录");
+        std::fs::write(src.join("作品").join("a.mp4"), b"a").expect("写入源文件");
+        std::fs::write(src.join("b.nfo"), b"b").expect("写入源文件");
+        std::fs::write(dst.join("c.mp4"), b"c").expect("写入目标文件");
+        let (moved, conflicts) = merge_directory_contents(&src, &dst).await.expect("合并应成功");
+        assert_eq!(moved, 2);
+        assert_eq!(conflicts, 0);
+        assert!(dst.join("作品").join("a.mp4").is_file());
+        assert!(dst.join("b.nfo").is_file());
+        assert!(dst.join("c.mp4").is_file());
+        assert!(!src.join("b.nfo").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn merge_directory_contents_keeps_target_on_conflict() {
+        let root = upper_rename_test_root("merge-conflict");
+        let src = root.join("白铭(想接正片)");
+        let dst = root.join("白铭");
+        std::fs::create_dir_all(&src).expect("创建源目录");
+        std::fs::create_dir_all(&dst).expect("创建目标目录");
+        std::fs::write(src.join("same.mp4"), b"old").expect("写入旧文件");
+        std::fs::write(dst.join("same.mp4"), b"new").expect("写入新文件");
+        let (moved, conflicts) = merge_directory_contents(&src, &dst).await.expect("合并应成功");
+        assert_eq!(moved, 0);
+        assert_eq!(conflicts, 1);
+        assert_eq!(std::fs::read(dst.join("same.mp4")).expect("读取目标文件"), b"new");
+        assert_eq!(std::fs::read(src.join("same.mp4")).expect("旧文件应保留"), b"old");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn merge_directory_contents_is_idempotent_when_old_dir_missing() {
+        let root = upper_rename_test_root("merge-missing");
+        let src = root.join("不存在");
+        let dst = root.join("白铭");
+        let (moved, conflicts) = merge_directory_contents(&src, &dst)
+            .await
+            .expect("缺失源目录应安静返回");
+        assert_eq!((moved, conflicts), (0, 0));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn is_placeholder_upper_name_matches_placeholders() {
+        for name in ["未知", "番剧", "课程", "漫画", "UP主", "", "   "] {
+            assert!(is_placeholder_upper_name(name), "{name:?} 应视为占位名");
+        }
+        assert!(!is_placeholder_upper_name("老番茄"));
+    }
+
+    #[test]
+    fn should_migrate_bilibili_upper_rename_skips_placeholder_and_same_name() {
+        assert!(should_migrate_bilibili_upper_rename("老番茄", "老番茄改名了"));
+        assert!(!should_migrate_bilibili_upper_rename("老番茄", " 老番茄 "));
+        assert!(!should_migrate_bilibili_upper_rename("未知", "老番茄"));
+        assert!(!should_migrate_bilibili_upper_rename("老番茄", "未知"));
+        assert!(!should_migrate_bilibili_upper_rename("", "老番茄"));
+    }
+
+    #[test]
+    fn plan_submission_upper_rename_accepts_real_rename() {
+        let planned = plan_submission_upper_rename(Some(("老番茄", "/library/老番茄")), "老番茄改名了");
+        assert_eq!(planned, Some(("老番茄".to_string(), PathBuf::from("/library/老番茄"))));
+    }
+
+    #[test]
+    fn plan_submission_upper_rename_skips_missing_path_or_unchanged_name() {
+        assert_eq!(plan_submission_upper_rename(None, "新名字"), None);
+        assert_eq!(plan_submission_upper_rename(Some(("老番茄", "")), "新名字"), None);
+        assert_eq!(
+            plan_submission_upper_rename(Some(("老番茄", "/library/老番茄")), "老番茄"),
+            None
+        );
+        assert_eq!(
+            plan_submission_upper_rename(Some(("未知", "/library/未知")), "老番茄"),
+            None
+        );
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测

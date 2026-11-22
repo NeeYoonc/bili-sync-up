@@ -18,7 +18,9 @@ use crate::error::{ErrorClassifier, ErrorType};
 
 pub(super) fn submission_sync_on_conflict() -> OnConflict {
     OnConflict::column(submission::Column::UpperId)
-        .update_columns([submission::Column::Path])
+        // 投稿/动态源没有作者字段，UP 主改名只能靠「库里的旧 upper_name」与接口新名字对比发现，
+        // 因此 upsert 时必须把 upper_name 一起更新，否则数据库里永远是旧名字。
+        .update_columns([submission::Column::Path, submission::Column::UpperName])
         .to_owned()
 }
 
@@ -357,6 +359,19 @@ pub(super) async fn submission_from<'a>(
             let upper_mid = upper.mid.parse::<i64>()?;
             let upper_name = upper.name;
 
+            // 投稿/动态源本身不带作者字段，改名只能靠源级对比发现：
+            // 在 upsert 之前先取库里的旧 UP 名与目录，upsert 之后再迁移旧目录与数据库路径。
+            let previous_submission = submission::Entity::find()
+                .filter(submission::Column::UpperId.eq(upper_mid))
+                .one(connection)
+                .await?;
+            let rename_plan = crate::workflow::plan_submission_upper_rename(
+                previous_submission
+                    .as_ref()
+                    .map(|record| (record.upper_name.as_str(), record.path.as_str())),
+                &upper_name,
+            );
+
             // 重新创建带有UP主名称的Submission实例，用于后续的视频流处理和日志显示
             let submission_with_name = Submission::with_name(bili_client, upper_id.to_owned(), upper_name.clone());
             submission::Entity::insert(submission::ActiveModel {
@@ -381,6 +396,24 @@ pub(super) async fn submission_from<'a>(
                 .one(connection)
                 .await?
                 .context("submission not found")?;
+
+            // upsert 之后数据库里已经是新名字，此时再把旧目录/旧数据库路径迁移到新名字。
+            if let Some((old_upper, old_path)) = rename_plan {
+                if let Err(error) = crate::workflow::migrate_bilibili_upper_rename_for_submission(
+                    connection,
+                    submission_record.id,
+                    &old_path,
+                    &old_upper,
+                    &submission_record.upper_name,
+                )
+                .await
+                {
+                    warn!(
+                        "UP 主改名迁移失败: old='{}', new='{}', error={:#}",
+                        old_upper, submission_record.upper_name, error
+                    );
+                }
+            }
 
             (submission_record, submission_with_name)
         }

@@ -3577,6 +3577,7 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         .unwrap_or_default();
     let mut deleted_video_ids = parse_video_id_set(source.deleted_video_ids.as_deref());
     let mut scanned_video_ids = HashSet::new();
+    let mut renamed_uppers: HashSet<(String, String)> = HashSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(item) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -3618,6 +3619,15 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
             .await?
         {
             deleted_video_ids.remove(youtube_id);
+            // 命中已有行时对比作者名：UP 主改名后旧目录与旧 uploader 需要在扫描末尾迁移。
+            crate::workflow::note_renamed_upper(
+                &mut renamed_uppers,
+                &existing.uploader,
+                item.get("uploader")
+                    .or_else(|| item.get("channel"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(""),
+            );
             // 回填早期扫描缺失的封面（TikTok 平铺项没有顶层 thumbnail 字段，
             // 旧数据封面为空时在此补上，视频管理卡片即可显示平台封面）。
             if existing.thumbnail.as_deref().is_none_or(str::is_empty) {
@@ -3711,6 +3721,19 @@ async fn scan_source(db: &DatabaseConnection, source: &youtube_source::Model) ->
         .await?;
         deleted_video_ids.remove(youtube_id);
         added += 1;
+    }
+    if !renamed_uppers.is_empty() {
+        let source_root = Path::new(&source.path);
+        for (old_upper, new_upper) in renamed_uppers {
+            if let Err(error) =
+                crate::workflow::migrate_external_upper_rename(db, source_root, source.id, &old_upper, &new_upper).await
+            {
+                warn!(
+                    "UP 主改名迁移失败: old='{}', new='{}', error={:#}",
+                    old_upper, new_upper, error
+                );
+            }
+        }
     }
     let mut active: youtube_source::ActiveModel = source.clone().into();
     known_video_ids.into_iter().for_each(|youtube_id| {
@@ -3809,6 +3832,7 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
         .and_then(|value| Local.from_local_datetime(&value).single())
         .map(|value| value.timestamp());
     let mut scanned_video_ids = HashSet::new();
+    let mut renamed_uppers: HashSet<(String, String)> = HashSet::new();
     let mut added = 0u64;
     for post in posts {
         scanned_video_ids.insert(post.id.clone());
@@ -3831,6 +3855,7 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
             .await?
         {
             deleted_video_ids.remove(&post.id);
+            crate::workflow::note_renamed_upper(&mut renamed_uppers, &existing.uploader, &post.uploader);
             if existing.is_image_post != post.is_image_post
                 || existing.is_story != post.is_story
                 || existing.episode_number != post.episode_number
@@ -3905,6 +3930,19 @@ async fn scan_douyin_source(db: &DatabaseConnection, source: &youtube_source::Mo
         .insert(db)
         .await?;
         added += 1;
+    }
+    if !renamed_uppers.is_empty() {
+        let source_root = Path::new(&source.path);
+        for (old_upper, new_upper) in renamed_uppers {
+            if let Err(error) =
+                crate::workflow::migrate_external_upper_rename(db, source_root, source.id, &old_upper, &new_upper).await
+            {
+                warn!(
+                    "UP 主改名迁移失败: old='{}', new='{}', error={:#}",
+                    old_upper, new_upper, error
+                );
+            }
+        }
     }
     known_video_ids.into_iter().for_each(|id| {
         scanned_video_ids.insert(id);
