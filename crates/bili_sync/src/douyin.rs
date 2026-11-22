@@ -2554,11 +2554,36 @@ pub(crate) async fn fetch_aweme_detail(aweme_id: &str) -> Result<serde_json::Val
             text(&response, &["status_msg", "message"]).unwrap_or_default()
         );
     }
-    response
+    if let Some(detail) = response
         .get("aweme_detail")
         .cloned()
         .filter(serde_json::Value::is_object)
-        .ok_or_else(|| anyhow!("抖音作品详情为空，请重新导入电脑浏览器刚导出的抖音 Cookie"))
+    {
+        return Ok(detail);
+    }
+    // 详情为空不一定就是 Cookie 问题：作者删除或把作品设为私密时，接口同样返回空详情。
+    // 先探测登录状态，只有登录本身有问题时才提示重新导入 Cookie。
+    let login_valid = probe_douyin_login().await == DouyinLoginProbe::Valid;
+    bail!(douyin_detail_empty_error(login_valid))
+}
+
+/// 详情接口返回空对象时的错误文案。
+///
+/// 登录状态正常说明不是 Cookie 问题，作品通常已被作者删除或设为私密；
+/// 登录异常或无法判断时才提示重新导入 Cookie。
+fn douyin_detail_empty_error(login_valid: bool) -> String {
+    if login_valid {
+        "抖音作品详情为空：登录状态正常，作品可能已被作者删除或设为私密".to_string()
+    } else {
+        "抖音作品详情为空，请重新导入电脑浏览器刚导出的抖音 Cookie".to_string()
+    }
+}
+
+/// 判断错误信息是否表示作品已不可访问（作者删除或设为私密）。
+///
+/// 这类错误重试也不会成功，外源下载循环据此直接判定为永久失败。
+pub(crate) fn is_unavailable_work_error(message: &str) -> bool {
+    message.contains("作品可能已被作者删除或设为私密")
 }
 
 /// 放映厅和短剧的列表接口本身已经返回完整 aweme（包括视频码率和播放地址）。
@@ -7547,5 +7572,46 @@ mod tests {
             "没有 play_addr 时不应产生格式"
         );
         assert!(formats.is_empty());
+    }
+
+    #[test]
+    fn douyin_detail_empty_error_points_to_deleted_work_when_login_valid() {
+        let message = super::douyin_detail_empty_error(true);
+        assert!(
+            message.contains("作品可能已被作者删除或设为私密"),
+            "登录正常时应提示作品已删除/私密: {message}"
+        );
+        assert!(
+            !message.contains("重新导入"),
+            "登录正常时不应再提示重导 Cookie: {message}"
+        );
+    }
+
+    #[test]
+    fn douyin_detail_empty_error_keeps_cookie_hint_when_login_unclear() {
+        let message = super::douyin_detail_empty_error(false);
+        assert!(
+            message.contains("重新导入电脑浏览器刚导出的抖音 Cookie"),
+            "登录异常时应保留重导 Cookie 提示: {message}"
+        );
+        assert!(!message.contains("作者删除"), "登录异常时不应断言作品已删除: {message}");
+    }
+
+    #[test]
+    fn unavailable_work_error_matches_deleted_or_private_work() {
+        let message = super::douyin_detail_empty_error(true);
+        assert!(super::is_unavailable_work_error(&message));
+        assert!(super::is_unavailable_work_error(
+            "抖音原生详情接口失败：抖音作品详情为空：登录状态正常，作品可能已被作者删除或设为私密"
+        ));
+    }
+
+    #[test]
+    fn unavailable_work_error_ignores_cookie_and_network_errors() {
+        assert!(!super::is_unavailable_work_error(
+            "抖音 Cookie 已失效或不完整，请在登录抖音的同一浏览器配置中重新传输登录状态"
+        ));
+        assert!(!super::is_unavailable_work_error("访问抖音接口超时"));
+        assert!(!super::is_unavailable_work_error(""));
     }
 }
