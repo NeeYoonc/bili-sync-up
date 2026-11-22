@@ -15,6 +15,8 @@
 	// 获取状态显示信息
 	function getStatusInfo(value: number) {
 		if (value === 7) return { label: '已完成', class: 'text-green-600', dotClass: 'bg-green-500' };
+		if (value === 6)
+			return { label: '作品已删除', class: 'text-slate-500', dotClass: 'bg-slate-400' };
 		if (value >= 1 && value <= 4)
 			return { label: `失败${value}次`, class: 'text-red-600', dotClass: 'bg-red-500' };
 		return { label: '未开始', class: 'text-yellow-600', dotClass: 'bg-yellow-500' };

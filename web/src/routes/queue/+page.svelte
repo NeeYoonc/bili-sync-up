@@ -188,6 +188,7 @@
 			return video.retry_count > 0 ? `等待重试 ${video.retry_count}/4` : '等待下载';
 		if (video.download_status === 'downloading') return '下载中';
 		if (video.download_status === 'skipped') return '已跳过（未达最低分辨率）';
+		if (video.download_status === 'unavailable') return '作品已删除';
 		if (video.download_status === 'completed') {
 			if (video.error_message?.includes('最低分辨率')) return '已跳过（未达最低分辨率）';
 			return video.error_message ? '媒体完成/附属项异常' : '已完成';
