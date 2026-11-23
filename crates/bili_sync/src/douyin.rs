@@ -7614,4 +7614,22 @@ mod tests {
         assert!(!super::is_unavailable_work_error("访问抖音接口超时"));
         assert!(!super::is_unavailable_work_error(""));
     }
+
+    #[test]
+    fn manual_import_path_still_clears_douyin_credentials() {
+        let source = include_str!("douyin.rs");
+        // 只统计生产代码：include_str! 会把本测试模块也算进来，测试里的字面量会多算一次。
+        let prod = source.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(source);
+        let call = "clear_douyin_login_state().await";
+        assert_eq!(
+            prod.matches(call).count(),
+            1,
+            "自动路径不应清理抖音凭证，只有用户主动导入时才允许清理"
+        );
+        let import_at = prod
+            .find("pub async fn import_douyin_cookie_file")
+            .expect("导入函数应存在");
+        let clear_at = prod.find(call).expect("导入路径应保留清理调用");
+        assert!(clear_at > import_at, "清理调用必须位于用户主动导入路径内");
+    }
 }
