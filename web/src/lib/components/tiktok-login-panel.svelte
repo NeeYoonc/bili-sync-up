@@ -6,6 +6,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
+	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
 	import type { TikTokStatusResponse } from '$lib/types';
 	import {
 		CheckCircle2,
@@ -15,6 +16,7 @@
 		Download,
 		LoaderCircle,
 		RefreshCw,
+		Trash2,
 		Upload
 	} from 'lucide-svelte';
 
@@ -26,6 +28,8 @@
 	let manualSecUid = '';
 	let manualSecUidLoaded = false;
 	let savingSecUid = false;
+	let clearing = false;
+	let confirmClearOpen = false;
 
 	async function loadManualSecUid() {
 		try {
@@ -91,6 +95,22 @@
 		}
 	}
 
+	async function clearCredentials() {
+		confirmClearOpen = false;
+		clearing = true;
+		try {
+			const response = await api.clearTikTokCookies();
+			toast.success(response.data.message);
+			await refresh();
+		} catch (error) {
+			toast.error('删除凭证失败', {
+				description: error instanceof Error ? error.message : String(error)
+			});
+		} finally {
+			clearing = false;
+		}
+	}
+
 	onMount(() => {
 		refresh();
 		loadManualSecUid();
@@ -142,6 +162,24 @@
 							手动导入 cookies.txt
 						</span>
 					</label>
+
+					{#if status?.logged_in}
+						<Button
+							variant="outline"
+							size="sm"
+							class="text-destructive"
+							onclick={() => (confirmClearOpen = true)}
+							disabled={clearing}
+							title="删除本地保存的登录凭证，需要重新导入才能访问需要登录的内容"
+						>
+							{#if clearing}
+								<LoaderCircle class="mr-1 h-4 w-4 animate-spin" />删除中
+							{:else}
+								<Trash2 class="mr-1 h-4 w-4" />删除当前凭证
+							{/if}
+						</Button>
+					{/if}
+
 					<Button variant="ghost" size="sm" class="ml-auto" onclick={refresh}>
 						<RefreshCw class="mr-1 h-4 w-4" />刷新状态
 					</Button>
@@ -215,6 +253,23 @@
 					{/if}
 				</div>
 			</div>
+
+			<AlertDialog.Root bind:open={confirmClearOpen}>
+				<AlertDialog.Content>
+					<AlertDialog.Header>
+						<AlertDialog.Title>删除当前凭证</AlertDialog.Title>
+						<AlertDialog.Description>
+							删除后会清除本地保存的登录凭证，需要重新导入才能访问需要登录的内容。确定删除？
+						</AlertDialog.Description>
+					</AlertDialog.Header>
+					<AlertDialog.Footer>
+						<AlertDialog.Cancel>取消</AlertDialog.Cancel>
+						<Button variant="destructive" onclick={clearCredentials} disabled={clearing}>
+							{clearing ? '删除中...' : '确定删除'}
+						</Button>
+					</AlertDialog.Footer>
+				</AlertDialog.Content>
+			</AlertDialog.Root>
 		</CardContent>
 	{/if}
 </Card>

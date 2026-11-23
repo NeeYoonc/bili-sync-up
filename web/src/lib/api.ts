@@ -58,6 +58,7 @@ import type {
 	LatestIngestResponse,
 	BetaImageUpdateStatusResponse,
 	YouTubeLoginResponse,
+	CredentialClearResponse,
 	YouTubeStatusResponse,
 	YouTubeSessionCheck,
 	DouyinStatusResponse,
@@ -290,6 +291,11 @@ class ApiClient {
 		return this.post<YouTubeLoginResponse>('/youtube/cookies', { cookies });
 	}
 
+	/** 删除本地保存的 YouTube 登录凭证；本来没凭证也返回成功（幂等）。 */
+	async clearYouTubeCookies(): Promise<ApiResponse<CredentialClearResponse>> {
+		return this.delete<CredentialClearResponse>('/youtube/cookies');
+	}
+
 	async getYouTubeSources(): Promise<ApiResponse<YouTubeSource[]>> {
 		return this.get<YouTubeSource[]>('/youtube/sources');
 	}
@@ -326,6 +332,12 @@ class ApiClient {
 	async importDouyinCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
 		return this.post<YouTubeLoginResponse>('/douyin/cookies', { cookies });
 	}
+
+	/** 删除本地保存的抖音登录凭证；本来没凭证也返回成功（幂等）。 */
+	async clearDouyinCookies(): Promise<ApiResponse<CredentialClearResponse>> {
+		return this.delete<CredentialClearResponse>('/douyin/cookies');
+	}
+
 	async searchDouyin(keyword: string): Promise<ApiResponse<YouTubeSearchResponse>> {
 		return this.get<YouTubeSearchResponse>('/douyin/search', { keyword });
 	}
@@ -338,6 +350,12 @@ class ApiClient {
 	async importTikTokCookies(cookies: string): Promise<ApiResponse<YouTubeLoginResponse>> {
 		return this.post<YouTubeLoginResponse>('/tiktok/cookies', { cookies });
 	}
+
+	/** 删除本地保存的 TikTok 登录凭证；本来没凭证也返回成功（幂等）。 */
+	async clearTikTokCookies(): Promise<ApiResponse<CredentialClearResponse>> {
+		return this.delete<CredentialClearResponse>('/tiktok/cookies');
+	}
+
 	async getTikTokSecUid(): Promise<ApiResponse<TikTokSecUidStatusResponse>> {
 		return this.get<TikTokSecUidStatusResponse>('/tiktok/secuid');
 	}
@@ -1484,6 +1502,9 @@ export const api = {
 	/** 从电脑端登录助手或 cookies.txt 导入 YouTube 登录状态。 */
 	importYouTubeCookies: (cookies: string) => apiClient.importYouTubeCookies(cookies),
 
+	/** 删除本地保存的 YouTube 登录凭证（幂等）。 */
+	clearYouTubeCookies: () => apiClient.clearYouTubeCookies(),
+
 	/** 联网验证一次 YouTube 登录状态（不会删除已保存的凭证）。 */
 	checkYouTubeSession: () => apiClient.checkYouTubeSession(),
 
@@ -1502,6 +1523,7 @@ export const api = {
 	getYouTubeQueueStatus: () => apiClient.getYouTubeQueueStatus(),
 	getDouyinStatus: () => apiClient.getDouyinStatus(),
 	importDouyinCookies: (cookies: string) => apiClient.importDouyinCookies(cookies),
+	clearDouyinCookies: () => apiClient.clearDouyinCookies(),
 	getDouyinFollowings: () => apiClient.getDouyinFollowings(),
 	getDouyinCatalog: (sourceType: string, keyword?: string) =>
 		apiClient.getDouyinCatalog(sourceType, keyword),
@@ -1618,6 +1640,7 @@ export const api = {
 	getTikTokSecUid: () => apiClient.getTikTokSecUid(),
 	setTikTokSecUid: (secUid: string) => apiClient.setTikTokSecUid(secUid),
 	importTikTokCookies: (cookies: string) => apiClient.importTikTokCookies(cookies),
+	clearTikTokCookies: () => apiClient.clearTikTokCookies(),
 	getTikTokSourceVideos: (params: {
 		url?: string;
 		source_type: string;

@@ -167,6 +167,13 @@ export interface YouTubeLoginResponse {
 	message: string;
 }
 
+/** 删除外源平台（YouTube/抖音/TikTok）本地凭证的返回；幂等，本来没凭证也返回成功 */
+export interface CredentialClearResponse {
+	platform: string;
+	logged_in: boolean;
+	message: string;
+}
+
 export interface UpdateYouTubeSourceRequest {
 	name?: string;
 	path?: string;
