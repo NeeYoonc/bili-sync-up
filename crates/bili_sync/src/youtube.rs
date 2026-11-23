@@ -9853,6 +9853,20 @@ const EXTERNAL_LOGIN_GUARD_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60)
 /// 就是不可逆的。
 const YOUTUBE_SESSION_RECHECK_DELAY: Duration = Duration::from_secs(30);
 
+/// 抖音登录状态疑似失效后，等多久再复查一次。
+///
+/// 抖音的风控/限流同样会让账号资料接口拿不到 `user.uid`，单次探测的假阳性
+/// 概率比 YouTube 更高；与 YouTube 一样只在连续两次判失效后才提示，且**绝不**
+/// 在守护任务里删除用户凭证（删除不可逆，误判代价远大于保留过期凭证）。
+const EXTERNAL_LOGIN_GUARD_RECHECK_DELAY: Duration = Duration::from_secs(5 * 60);
+
+/// 抖音登录疑似失效时给用户的建议（同一条文案用于通知与日志）。
+const DOUYIN_EXPIRED_SUGGESTION: &str =
+    "风控/网络异常也可能表现为未登录；若扫描持续提示需要新鲜 Cookie，请在设置页重新导入 douyin cookies.txt";
+
+/// 抖音登录疑似失效时推送的通知正文。
+const DOUYIN_EXPIRED_NOTIFICATION: &str = "抖音登录状态疑似失效（凭证已保留，未清理）。风控/网络异常也可能表现为未登录；若扫描持续提示需要新鲜 Cookie，请重新导入 douyin cookies.txt";
+
 /// 最近一次联网登录探测的结论。
 ///
 /// `Unclear` 是独立的一档：代理抖动、风控页、同意条款页都落在这里，既不能当成
@@ -9901,6 +9915,48 @@ fn last_youtube_session_check() -> Option<YoutubeSessionCheck> {
         .clone()
 }
 
+/// 抖音登录探测的结论，只用于守护任务内部去重（不对外暴露）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DouyinSessionState {
+    Valid,
+    Expired,
+    Unclear,
+}
+
+/// 最近一次抖音登录探测的结论。
+#[derive(Debug, Clone, Copy)]
+struct DouyinSessionCheck {
+    state: DouyinSessionState,
+    message: &'static str,
+}
+
+static DOUYIN_SESSION_CHECK: LazyLock<StdMutex<Option<DouyinSessionCheck>>> = LazyLock::new(|| StdMutex::new(None));
+
+fn record_douyin_session_check(state: DouyinSessionState, message: &'static str) {
+    let mut guard = DOUYIN_SESSION_CHECK.lock().unwrap_or_else(|error| error.into_inner());
+    *guard = Some(DouyinSessionCheck { state, message });
+}
+
+fn last_douyin_session_check() -> Option<DouyinSessionCheck> {
+    *DOUYIN_SESSION_CHECK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// 登录守护探测到抖音 `Expired` 时，是否要删除本地凭证。
+///
+/// 永远返回 `false`：`Expired` 也可能是风控/限流造成的假阳性，删除凭证不可逆；
+/// 凭证只在用户主动重新导入（`crate::douyin::import_douyin_cookie_file`）时清理。
+fn douyin_expired_should_delete_credentials() -> bool {
+    false
+}
+
+/// 连续两次探测为 `Expired` 时是否要推送通知。
+///
+/// 上一次结论已经是 `Expired` 就不再重复推送：守护任务每 6 小时跑一次，
+/// 凭证又不再自动清理，不去重就会变成每 6 小时一条重复通知。
+fn douyin_expired_should_notify(previous: Option<DouyinSessionState>) -> bool {
+    previous != Some(DouyinSessionState::Expired)
+}
+
 /// 外源登录状态守护调度器。
 ///
 /// 定期探测 YouTube/抖音登录状态：有效则顺带完成一次浏览器式会话续约；明确
@@ -9929,17 +9985,56 @@ async fn guard_external_login_states() -> Result<()> {
     // 抖音：探测即续约（signed_get 内部会刷新 msToken/webid/verifyFp 并合并 Set-Cookie）。
     match crate::douyin::probe_douyin_login().await {
         crate::douyin::DouyinLoginProbe::Valid => {
+            record_douyin_session_check(DouyinSessionState::Valid, "登录状态有效，已完成会话续约");
             info!(target: "bili_sync_rs::douyin", "抖音登录状态有效，已完成会话续约");
         }
         crate::douyin::DouyinLoginProbe::Expired => {
-            crate::douyin::clear_douyin_login_state().await;
-            record_external_login_expired(
-                "抖音",
-                "抖音登录状态已过期或未登录，已清理残留会话；请重新在设置页导入电脑浏览器导出的 douyin.com cookies.txt",
-            )
-            .await;
+            // 单次探测拿不到 user.uid 不足以证明 Cookie 真的失效：风控/限流同样
+            // 表现为未登录。与 YouTube 一致，先保留凭证、等一会儿复查，绝不在
+            // 守护任务里删除用户凭证。
+            warn!(
+                target: "bili_sync_rs::douyin",
+                delay_secs = EXTERNAL_LOGIN_GUARD_RECHECK_DELAY.as_secs(),
+                "抖音登录状态疑似失效（凭证已保留，未清理），{} 秒后复查确认；{}",
+                EXTERNAL_LOGIN_GUARD_RECHECK_DELAY.as_secs(),
+                DOUYIN_EXPIRED_SUGGESTION
+            );
+            tokio::time::sleep(EXTERNAL_LOGIN_GUARD_RECHECK_DELAY).await;
+            match crate::douyin::probe_douyin_login().await {
+                crate::douyin::DouyinLoginProbe::Valid => {
+                    record_douyin_session_check(DouyinSessionState::Valid, "复查通过（首次探测疑似误判），已保留会话");
+                    info!(target: "bili_sync_rs::douyin", "抖音登录状态复查通过，保留现有会话");
+                }
+                crate::douyin::DouyinLoginProbe::Expired => {
+                    let previous = last_douyin_session_check().map(|check| check.state);
+                    record_douyin_session_check(DouyinSessionState::Expired, DOUYIN_EXPIRED_SUGGESTION);
+                    // 显式开关位：目前永远为 false，保证自动路径永不删凭证。
+                    if douyin_expired_should_delete_credentials() {
+                        crate::douyin::clear_douyin_login_state().await;
+                    }
+                    warn!(
+                        target: "bili_sync_rs::douyin",
+                        "抖音登录状态连续两次探测疑似失效（凭证已保留，未清理）：{}",
+                        DOUYIN_EXPIRED_SUGGESTION
+                    );
+                    if douyin_expired_should_notify(previous) {
+                        record_external_login_expired("抖音", DOUYIN_EXPIRED_NOTIFICATION).await;
+                    } else {
+                        info!(
+                            target: "bili_sync_rs::douyin",
+                            suggestion = last_douyin_session_check().map(|check| check.message).unwrap_or(""),
+                            "抖音登录状态仍为疑似失效，此前已提示过，本次不重复推送"
+                        );
+                    }
+                }
+                _ => {
+                    record_douyin_session_check(DouyinSessionState::Unclear, "复查结果不确定（网络/风控），凭证已保留");
+                    debug!(target: "bili_sync_rs::douyin", "抖音登录状态复查结果不确定（网络或风控），保留现有会话");
+                }
+            }
         }
         crate::douyin::DouyinLoginProbe::Unclear => {
+            record_douyin_session_check(DouyinSessionState::Unclear, "检查结果不确定（网络/风控），凭证已保留");
             debug!(target: "bili_sync_rs::douyin", "抖音登录状态检查结果不确定（网络或风控），保留现有会话");
         }
         crate::douyin::DouyinLoginProbe::NotConfigured => {
@@ -13502,6 +13597,63 @@ mod tests {
         assert_eq!(
             super::youtube_text_from_task_status(video_bits, page_bits),
             "unavailable"
+        );
+    }
+
+    #[test]
+    fn douyin_expired_never_deletes_credentials() {
+        assert!(
+            !super::douyin_expired_should_delete_credentials(),
+            "抖音登录探测为 Expired 时不允许删除凭证（风控假阳性会让用户凭证凭空消失）"
+        );
+    }
+
+    #[test]
+    fn douyin_expired_notification_is_deduplicated() {
+        use super::{douyin_expired_should_notify, DouyinSessionState};
+        assert!(douyin_expired_should_notify(None), "首次疑似失效应当推送");
+        assert!(douyin_expired_should_notify(Some(DouyinSessionState::Valid)));
+        assert!(douyin_expired_should_notify(Some(DouyinSessionState::Unclear)));
+        assert!(
+            !douyin_expired_should_notify(Some(DouyinSessionState::Expired)),
+            "上一次已是 Expired 时不应重复推送"
+        );
+    }
+
+    #[test]
+    fn douyin_expired_notification_only_fires_inside_dedupe_guard() {
+        let source = include_str!("youtube.rs");
+        let call = "record_external_login_expired(\"抖音\"";
+        assert_eq!(source.matches(call).count(), 1, "抖音登录通知只应有一个调用点");
+        let at = source.find(call).expect("应有抖音通知调用点");
+        let prefix = &source[at.saturating_sub(400)..at];
+        assert!(
+            prefix.contains("douyin_expired_should_notify(previous)"),
+            "抖音登录通知必须包在去重判断里，否则每 6 小时重复推送"
+        );
+    }
+
+    #[test]
+    fn douyin_session_check_records_latest_state_and_recheck_resets_dedupe() {
+        use super::{
+            douyin_expired_should_notify, last_douyin_session_check, record_douyin_session_check, DouyinSessionState,
+        };
+        record_douyin_session_check(DouyinSessionState::Expired, "疑似失效");
+        let expired = last_douyin_session_check().expect("应记录最新结论");
+        assert_eq!(expired.state, DouyinSessionState::Expired);
+        assert_eq!(expired.message, "疑似失效");
+        assert!(
+            !douyin_expired_should_notify(Some(expired.state)),
+            "连续两次 Expired 只提示一次"
+        );
+        // 复查通过后记录 Valid，下一次再判失效应当重新推送。
+        record_douyin_session_check(DouyinSessionState::Valid, "复查通过（首次探测疑似误判），已保留会话");
+        let valid = last_douyin_session_check().expect("应记录最新结论");
+        assert_eq!(valid.state, DouyinSessionState::Valid);
+        assert_eq!(valid.message, "复查通过（首次探测疑似误判），已保留会话");
+        assert!(
+            douyin_expired_should_notify(Some(valid.state)),
+            "复查通过后再次失效应重新推送"
         );
     }
 
