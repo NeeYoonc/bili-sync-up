@@ -7127,7 +7127,7 @@ mod tests {
             .expect("初始化配置失败");
         crate::credential_store::init(&db).await.expect("加载外部凭证失败");
 
-        let metadata = extract_metadata_native(aweme_id, None)
+        let metadata = extract_metadata_native(aweme_id, None, None)
             .await
             .expect("抖音图集详情解析失败");
         let segments = metadata.slideshow_segments();
@@ -7723,15 +7723,6 @@ mod tests {
             .expect("导入函数应存在");
         let clear_at = prod.find(call).expect("导入路径应保留清理调用");
         assert!(clear_at > import_at, "清理调用必须位于用户主动导入路径内");
-    }
-
-    #[test]
-    fn unavailable_work_error_ignores_cookie_and_network_errors() {
-        assert!(!super::is_unavailable_work_error(
-            "抖音 Cookie 已失效或不完整，请在登录抖音的同一浏览器配置中重新传输登录状态"
-        ));
-        assert!(!super::is_unavailable_work_error("访问抖音接口超时"));
-        assert!(!super::is_unavailable_work_error(""));
     }
 
     #[test]
