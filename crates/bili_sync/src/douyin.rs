@@ -2680,6 +2680,12 @@ pub(crate) fn is_douyin_risk_control_error(message: &str) -> bool {
     message.contains("疑似账号或出口 IP 被风控")
 }
 
+/// 这类错误已经定性（已删除 / 疑似风控），再退回 yt-dlp 只会多打一条 WARN、
+/// 多一次请求（风控期更糟），所以直接上抛原生错误。
+fn should_skip_douyin_ytdlp_fallback(native_message: &str) -> bool {
+    is_unavailable_work_error(native_message) || is_douyin_risk_control_error(native_message)
+}
+
 /// 详情接口返回空对象时的错误文案。
 ///
 /// 登录状态正常说明不是 Cookie 问题，作品通常已被作者删除或设为私密；
@@ -4335,13 +4341,19 @@ pub(crate) async fn extract_metadata(
     match extract_metadata_native(aweme_id, source, control_aweme_id).await {
         Ok(metadata) => Ok(metadata),
         Err(native_error) => {
-            if native_error.to_string().contains("CENC 加密 DASH") {
+            let native_text = format!("{:#}", native_error);
+            if native_text.contains("CENC 加密 DASH") {
+                return Err(native_error);
+            }
+            // 已删除/疑似风控已经被定性，yt-dlp 回退不可能改变结论，只会多一条 WARN
+            // 和一次多余的请求（风控期再加一次请求只会让风控更重）。
+            if should_skip_douyin_ytdlp_fallback(&native_text) {
                 return Err(native_error);
             }
             warn!(
                 target: "bili_sync_rs::douyin",
                 aweme_id,
-                error = %native_error,
+                error = %native_text,
                 "抖音原生详情接口失败，改用 yt-dlp 解析媒体直链"
             );
             let url = format!("https://www.douyin.com/video/{aweme_id}");
@@ -7822,6 +7834,40 @@ mod tests {
         );
         assert!(!super::is_douyin_risk_control_error("访问抖音接口超时"));
         assert!(!super::is_douyin_risk_control_error(""));
+    }
+
+    #[test]
+    fn skip_ytdlp_fallback_only_for_terminal_errors() {
+        assert!(
+            super::should_skip_douyin_ytdlp_fallback(super::DOUYIN_RISK_CONTROL_MESSAGE),
+            "疑似风控不应再走 yt-dlp 回退"
+        );
+        assert!(
+            super::should_skip_douyin_ytdlp_fallback(&super::douyin_detail_empty_error(true)),
+            "已删除/私密不应再走 yt-dlp 回退"
+        );
+        assert!(
+            !super::should_skip_douyin_ytdlp_fallback("抖音原生详情接口失败：CENC 加密 DASH"),
+            "CENC 走另一条早退分支，语义上不算「已定性」，这里返回 false 即可"
+        );
+        assert!(!super::should_skip_douyin_ytdlp_fallback("访问抖音接口超时"));
+        assert!(!super::should_skip_douyin_ytdlp_fallback(""));
+    }
+
+    #[test]
+    fn extract_metadata_skips_ytdlp_before_calling_it() {
+        let source = include_str!("douyin.rs");
+        let prod = source.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(source);
+        let skip_at = prod
+            .find("should_skip_douyin_ytdlp_fallback(&native_text)")
+            .expect("extract_metadata 里应先调用 should_skip_douyin_ytdlp_fallback");
+        let ytdlp_at = prod
+            .find("extract_ytdlp_metadata(&url")
+            .expect("extract_metadata 里应有 yt-dlp 回退调用");
+        assert!(
+            skip_at < ytdlp_at,
+            "必须先判定「已删除/风控」再决定是否调用 yt-dlp，否则终端错误仍会多打一条 WARN"
+        );
     }
 
     #[test]
