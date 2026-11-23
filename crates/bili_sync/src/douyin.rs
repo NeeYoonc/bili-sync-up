@@ -7618,14 +7618,14 @@ mod tests {
     #[test]
     fn manual_import_path_still_clears_douyin_credentials() {
         let source = include_str!("douyin.rs");
-        let clear_calls = source.matches("clear_douyin_login_state().await").count();
+        // 用拼接构造 needle，避免把本测试源码里的字面量也统计进去。
+        let clear_call = format!("clear_douyin_login_state{}", "().await");
+        let clear_calls = source.matches(clear_call.as_str()).count();
         assert_eq!(clear_calls, 1, "自动路径不应清理抖音凭证，只有用户主动导入时才允许清理");
         let import_at = source
             .find("pub async fn import_douyin_cookie_file")
             .expect("导入函数应存在");
-        let clear_at = source
-            .find("clear_douyin_login_state().await")
-            .expect("导入路径应保留清理调用");
+        let clear_at = source.find(clear_call.as_str()).expect("导入路径应保留清理调用");
         assert!(clear_at > import_at, "清理调用必须位于用户主动导入路径内");
     }
 }
