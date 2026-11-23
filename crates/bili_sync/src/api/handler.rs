@@ -42,13 +42,13 @@ use crate::api::response::{
     AddVideoSourceResponse, BangumiSeasonInfo, BangumiSourceListResponse, BangumiSourceOption,
     BetaImageUpdateStatusResponse, ConfigChangeInfo, ConfigHistoryResponse, ConfigItemResponse,
     ConfigMigrationReportResponse, ConfigMigrationStatusResponse, ConfigReloadResponse, ConfigResponse,
-    ConfigValidationResponse, CredentialFieldStatus, CredentialRefreshTestResponse, DashBoardResponse,
-    DeleteVideoResponse, DeleteVideoSourceResponse, FilenamePreviewFile, FilenamePreviewItem, FilenamePreviewResponse,
-    HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse,
-    QRUserInfo, RefreshDanmakuResponse, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse,
-    RetryChargeVideosResponse, SetupAuthTokenResponse, SubmissionVideosResponse, UpdateConfigResponse,
-    UpdateCredentialResponse, UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourceTag,
-    VideoSourcesResponse, VideosResponse,
+    ConfigValidationResponse, CredentialClearResponse, CredentialFieldStatus, CredentialRefreshTestResponse,
+    DashBoardResponse, DeleteVideoResponse, DeleteVideoSourceResponse, FilenamePreviewFile, FilenamePreviewItem,
+    FilenamePreviewResponse, HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo,
+    QRGenerateResponse, QRPollResponse, QRUserInfo, RefreshDanmakuResponse, ResetAllVideosResponse, ResetVideoResponse,
+    ResetVideoSourcePathResponse, RetryChargeVideosResponse, SetupAuthTokenResponse, SubmissionVideosResponse,
+    UpdateConfigResponse, UpdateCredentialResponse, UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource,
+    VideoSourceTag, VideoSourcesResponse, VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::bilibili::{FilterOption, DEFAULT_AI_SUBTITLE_LANGUAGE};
@@ -18974,6 +18974,76 @@ pub async fn get_current_user() -> Result<ApiResponse<crate::api::response::QRUs
     }))
 }
 
+/// 删除凭证后的提示文案。
+///
+/// 删除接口是幂等的：本来就没有凭证时也返回 200，只是提示语不同。抽成纯函数
+/// 方便单测两个分支，handler 里只负责调用。
+fn credential_clear_message(platform: &str, existed: bool) -> String {
+    if existed {
+        format!("已删除{platform}登录凭证")
+    } else {
+        format!("{platform}登录凭证已不存在（本就没有可删除的凭证）")
+    }
+}
+
+/// 凭证库里是否至少存在一个指定 key（用于生成幂等提示语）。
+fn credential_store_has_any(keys: &[&str]) -> bool {
+    keys.iter().any(|key| crate::credential_store::has(key))
+}
+
+/// 删除 YouTube 登录凭证（设置页「删除当前凭证」）。
+///
+/// 幂等：没有凭证时同样返回成功。删除后清空最近一次探测结论，让设置页回到「未导入」。
+pub async fn clear_youtube_credentials() -> Result<ApiResponse<CredentialClearResponse>, ApiError> {
+    let existed = credential_store_has_any(&[crate::credential_store::keys::YOUTUBE_COOKIES]);
+    crate::youtube::clear_youtube_login_state("用户主动删除凭证（设置页）").await;
+    crate::youtube::clear_youtube_session_check();
+    info!(target: "bili_sync_rs::youtube", "已删除 YouTube 登录凭证（用户主动操作）");
+    Ok(ApiResponse::ok(CredentialClearResponse {
+        platform: "youtube".to_string(),
+        logged_in: false,
+        message: credential_clear_message("YouTube", existed),
+    }))
+}
+
+/// 删除抖音登录凭证（设置页「删除当前凭证」）。
+///
+/// 幂等：没有凭证时同样返回成功。登录守护不会再自动删凭证，这里是唯一的删除入口之一。
+pub async fn clear_douyin_credentials() -> Result<ApiResponse<CredentialClearResponse>, ApiError> {
+    let existed = credential_store_has_any(&[
+        crate::credential_store::keys::DOUYIN_COOKIES,
+        crate::credential_store::keys::DOUYIN_SECSDK,
+        crate::credential_store::keys::DOUYIN_MSTOKEN,
+        crate::credential_store::keys::DOUYIN_WEBID,
+        crate::credential_store::keys::DOUYIN_VERIFY_FP,
+    ]);
+    crate::douyin::clear_douyin_login_state().await;
+    crate::youtube::clear_douyin_session_check();
+    info!(target: "bili_sync_rs::douyin", "已删除抖音登录凭证（用户主动操作）");
+    Ok(ApiResponse::ok(CredentialClearResponse {
+        platform: "douyin".to_string(),
+        logged_in: false,
+        message: credential_clear_message("抖音", existed),
+    }))
+}
+
+/// 删除 TikTok 登录凭证（设置页「删除当前凭证」）。
+///
+/// 幂等：没有凭证时同样返回成功。只删登录 Cookie / localStorage，不动手填的 secUid。
+pub async fn clear_tiktok_credentials() -> Result<ApiResponse<CredentialClearResponse>, ApiError> {
+    let existed = credential_store_has_any(&[
+        crate::credential_store::keys::TIKTOK_COOKIES,
+        crate::credential_store::keys::TIKTOK_LOCALSTORAGE,
+    ]);
+    crate::tiktok::clear_tiktok_login_state().await;
+    info!(target: "bili_sync_rs::tiktok", "已删除 TikTok 登录凭证（用户主动操作）");
+    Ok(ApiResponse::ok(CredentialClearResponse {
+        platform: "tiktok".to_string(),
+        logged_in: false,
+        message: credential_clear_message("TikTok", existed),
+    }))
+}
+
 /// 清除当前凭证
 #[utoipa::path(
     post,
@@ -23937,5 +24007,40 @@ mod staging_cleanup_tests {
             remaining_auto_staging_dirs(&auto, &cleaned),
             vec![PathBuf::from("/mnt/auto-b")]
         );
+    }
+}
+
+#[cfg(test)]
+mod credential_clear_tests {
+    use super::*;
+
+    #[test]
+    fn credential_clear_message_is_idempotent() {
+        assert_eq!(credential_clear_message("YouTube", true), "已删除YouTube登录凭证");
+        let empty = credential_clear_message("抖音", false);
+        assert!(
+            empty.contains("本就没有可删除的凭证"),
+            "无凭证时提示要说明幂等：{empty}"
+        );
+        assert!(empty.contains("抖音"));
+    }
+
+    #[test]
+    fn credential_clear_response_serializes_expected_fields() {
+        let response = CredentialClearResponse {
+            platform: "tiktok".to_string(),
+            logged_in: false,
+            message: credential_clear_message("TikTok", true),
+        };
+        let value = serde_json::to_value(&response).expect("序列化失败");
+        assert_eq!(value["platform"], "tiktok");
+        assert_eq!(value["logged_in"], false);
+        assert_eq!(value["message"], "已删除TikTok登录凭证");
+    }
+
+    #[test]
+    fn credential_store_has_any_handles_empty_and_unknown_keys() {
+        assert!(!credential_store_has_any(&[]));
+        assert!(!credential_store_has_any(&["definitely-not-a-credential-key"]));
     }
 }

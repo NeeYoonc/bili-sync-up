@@ -609,7 +609,7 @@ fn is_tiktok_cookie_domain(domain: &str) -> bool {
 }
 
 /// 清理 TikTok 登录状态：数据库凭证 + 旧版/历史残留文件。
-async fn clear_tiktok_login_state() {
+pub(crate) async fn clear_tiktok_login_state() {
     for key in [
         crate::credential_store::keys::TIKTOK_COOKIES,
         crate::credential_store::keys::TIKTOK_LOCALSTORAGE,
