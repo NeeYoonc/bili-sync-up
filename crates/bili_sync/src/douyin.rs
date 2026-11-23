@@ -2565,22 +2565,36 @@ pub(crate) async fn fetch_aweme_detail_with_control(
                     Some(control_aweme_id) => Some(probe_aweme_detail_available(control_aweme_id).await),
                     None => None,
                 };
-                if classify_empty_detail_error(control_available) == EmptyDetailAction::Unavailable {
-                    debug!(
-                        target: "bili_sync_rs::douyin",
-                        aweme_id,
-                        ?control_aweme_id,
-                        "抖音详情接口返回空响应，对照作品可正常解析，按作品不可访问处理"
-                    );
-                    bail!(douyin_detail_empty_error(true));
+                match classify_douyin_unavailable(control_available) {
+                    DouyinEmptyAction::Unavailable => {
+                        debug!(
+                            target: "bili_sync_rs::douyin",
+                            aweme_id,
+                            ?control_aweme_id,
+                            "抖音详情接口返回空响应，对照作品可正常解析，按作品不可访问处理"
+                        );
+                        bail!(douyin_detail_empty_error(true));
+                    }
+                    DouyinEmptyAction::RiskControl => {
+                        debug!(
+                            target: "bili_sync_rs::douyin",
+                            aweme_id,
+                            ?control_aweme_id,
+                            error = %format!("{:#}", error),
+                            "抖音详情接口持续空响应，对照作品也无法解析，疑似风控，本轮按可重试处理"
+                        );
+                        bail!(DOUYIN_RISK_CONTROL_MESSAGE);
+                    }
+                    DouyinEmptyAction::OriginalError => {
+                        debug!(
+                            target: "bili_sync_rs::douyin",
+                            aweme_id,
+                            ?control_aweme_id,
+                            ?control_available,
+                            "抖音详情接口返回空响应，无法确认只有本作品不可访问，按原始错误保留重试"
+                        );
+                    }
                 }
-                debug!(
-                    target: "bili_sync_rs::douyin",
-                    aweme_id,
-                    ?control_aweme_id,
-                    ?control_available,
-                    "抖音详情接口返回空响应，无法确认只有本作品不可访问，按原始错误保留重试"
-                );
             }
             return Err(error);
         }
@@ -2634,20 +2648,42 @@ pub(crate) async fn probe_aweme_detail_available(aweme_id: &str) -> bool {
 }
 
 /// 详情接口空响应时，如何上报本次失败。
+///
+/// 三种情况必须分开：只有当前作品不可访问（已删除/私密）、对照作品也拿不到
+/// （疑似风控/网络问题）、没有对照可用（无法定性）。风控不该被当成「已删除」，
+/// 否则正常作品会被误标；也不该按普通失败连打 4 次，那只会让风控更重。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EmptyDetailAction {
+pub(crate) enum DouyinEmptyAction {
     /// 对照作品能正常解析：只有当前作品不可访问，按「已删除/私密」上报（可被判为永久失败）。
     Unavailable,
-    /// 对照作品也解析不到，或没有对照可用：按原始错误返回，保留重试机会。
+    /// 对照作品也解析不到：疑似账号或出口 IP 被风控，本轮跳过、等下一轮扫描再试。
+    RiskControl,
+    /// 没有对照作品可用，无法区分：按原始错误返回，保留常规重试。
     OriginalError,
 }
 
+/// 疑似风控时对外的短文案（下载失败会把它写进 `error_message` 并只打一条 WARN）。
+pub(crate) const DOUYIN_RISK_CONTROL_MESSAGE: &str =
+    "抖音详情接口持续空响应，疑似账号或出口 IP 被风控，本轮跳过，等下一轮扫描再试";
+
 /// 根据对照作品的探测结果决定空响应如何上报。
-fn classify_empty_detail_error(control_available: Option<bool>) -> EmptyDetailAction {
+pub(crate) fn classify_douyin_unavailable(control_available: Option<bool>) -> DouyinEmptyAction {
     match control_available {
-        Some(true) => EmptyDetailAction::Unavailable,
-        Some(false) | None => EmptyDetailAction::OriginalError,
+        Some(true) => DouyinEmptyAction::Unavailable,
+        Some(false) => DouyinEmptyAction::RiskControl,
+        None => DouyinEmptyAction::OriginalError,
     }
+}
+
+/// 判断错误信息是否表示「疑似风控」（而不是作品被删除或其它真错误）。
+pub(crate) fn is_douyin_risk_control_error(message: &str) -> bool {
+    message.contains("疑似账号或出口 IP 被风控")
+}
+
+/// 这类错误已经定性（已删除 / 疑似风控），再退回 yt-dlp 只会多打一条 WARN、
+/// 多一次请求（风控期更糟），所以直接上抛原生错误。
+fn should_skip_douyin_ytdlp_fallback(native_message: &str) -> bool {
+    is_unavailable_work_error(native_message) || is_douyin_risk_control_error(native_message)
 }
 
 /// 详情接口返回空对象时的错误文案。
@@ -4305,13 +4341,19 @@ pub(crate) async fn extract_metadata(
     match extract_metadata_native(aweme_id, source, control_aweme_id).await {
         Ok(metadata) => Ok(metadata),
         Err(native_error) => {
-            if native_error.to_string().contains("CENC 加密 DASH") {
+            let native_text = format!("{:#}", native_error);
+            if native_text.contains("CENC 加密 DASH") {
+                return Err(native_error);
+            }
+            // 已删除/疑似风控已经被定性，yt-dlp 回退不可能改变结论，只会多一条 WARN
+            // 和一次多余的请求（风控期再加一次请求只会让风控更重）。
+            if should_skip_douyin_ytdlp_fallback(&native_text) {
                 return Err(native_error);
             }
             warn!(
                 target: "bili_sync_rs::douyin",
                 aweme_id,
-                error = %native_error,
+                error = %native_text,
                 "抖音原生详情接口失败，改用 yt-dlp 解析媒体直链"
             );
             let url = format!("https://www.douyin.com/video/{aweme_id}");
@@ -7751,22 +7793,80 @@ mod tests {
     }
 
     #[test]
-    fn empty_detail_classification_needs_available_control() {
-        use super::{classify_empty_detail_error, EmptyDetailAction};
+    fn empty_detail_classification_separates_risk_control_from_unavailable() {
+        use super::{classify_douyin_unavailable, DouyinEmptyAction};
         assert_eq!(
-            classify_empty_detail_error(Some(true)),
-            EmptyDetailAction::Unavailable,
-            "对照作品可读时应按不可访问上报"
+            classify_douyin_unavailable(Some(true)),
+            DouyinEmptyAction::Unavailable,
+            "对照作品可读时才按不可访问上报"
         );
         assert_eq!(
-            classify_empty_detail_error(Some(false)),
-            EmptyDetailAction::OriginalError,
-            "对照作品也失败时不能断言作品已删除"
+            classify_douyin_unavailable(Some(false)),
+            DouyinEmptyAction::RiskControl,
+            "对照作品也解析不到应判为疑似风控，而不是作品已删除"
         );
         assert_eq!(
-            classify_empty_detail_error(None),
-            EmptyDetailAction::OriginalError,
+            classify_douyin_unavailable(None),
+            DouyinEmptyAction::OriginalError,
             "没有对照作品时保守处理，保留重试"
+        );
+    }
+
+    #[test]
+    fn risk_control_error_is_distinguishable_from_unavailable() {
+        let risk_message = super::DOUYIN_RISK_CONTROL_MESSAGE;
+        assert!(
+            risk_message.contains("疑似账号或出口 IP 被风控"),
+            "风控文案要能一眼看出是风控：{risk_message}"
+        );
+        assert!(
+            super::is_douyin_risk_control_error(risk_message),
+            "风控判定函数应命中风控文案"
+        );
+        assert!(
+            !super::is_unavailable_work_error(risk_message),
+            "风控不能被当成「已删除」"
+        );
+        let deleted_message = super::douyin_detail_empty_error(true);
+        assert!(
+            !super::is_douyin_risk_control_error(&deleted_message),
+            "已删除文案不能被判成风控：{deleted_message}"
+        );
+        assert!(!super::is_douyin_risk_control_error("访问抖音接口超时"));
+        assert!(!super::is_douyin_risk_control_error(""));
+    }
+
+    #[test]
+    fn skip_ytdlp_fallback_only_for_terminal_errors() {
+        assert!(
+            super::should_skip_douyin_ytdlp_fallback(super::DOUYIN_RISK_CONTROL_MESSAGE),
+            "疑似风控不应再走 yt-dlp 回退"
+        );
+        assert!(
+            super::should_skip_douyin_ytdlp_fallback(&super::douyin_detail_empty_error(true)),
+            "已删除/私密不应再走 yt-dlp 回退"
+        );
+        assert!(
+            !super::should_skip_douyin_ytdlp_fallback("抖音原生详情接口失败：CENC 加密 DASH"),
+            "CENC 走另一条早退分支，语义上不算「已定性」，这里返回 false 即可"
+        );
+        assert!(!super::should_skip_douyin_ytdlp_fallback("访问抖音接口超时"));
+        assert!(!super::should_skip_douyin_ytdlp_fallback(""));
+    }
+
+    #[test]
+    fn extract_metadata_skips_ytdlp_before_calling_it() {
+        let source = include_str!("douyin.rs");
+        let prod = source.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(source);
+        let skip_at = prod
+            .find("should_skip_douyin_ytdlp_fallback(&native_text)")
+            .expect("extract_metadata 里应先调用 should_skip_douyin_ytdlp_fallback");
+        let ytdlp_at = prod
+            .find("extract_ytdlp_metadata(&url")
+            .expect("extract_metadata 里应有 yt-dlp 回退调用");
+        assert!(
+            skip_at < ytdlp_at,
+            "必须先判定「已删除/风控」再决定是否调用 yt-dlp，否则终端错误仍会多打一条 WARN"
         );
     }
 

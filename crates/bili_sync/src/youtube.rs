@@ -4325,6 +4325,31 @@ async fn run_youtube_sidecar_tasks(db: &DatabaseConnection, video: youtube_video
     Ok(())
 }
 
+/// 抖音作品下载失败时的处置方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DouyinFailurePlan {
+    /// 作品已被作者删除或设为私密：写「已删除」状态并停止重试。
+    Unavailable,
+    /// 疑似账号或出口 IP 被风控：本轮直接跳过、不涨重试次数，等下一轮扫描再试。
+    RiskControlSkipRound,
+    /// 其它真错误：按常规重试节奏处理（抖音 30s 起阶梯退避）。
+    Retry,
+}
+
+/// 把「是否抖音 / 是否已删除 / 是否疑似风控」映射成处置方式。
+///
+/// 单独抽出来是为了让「风控不再连打 4 次」「已删除仍永久失败」这两条不变量
+/// 能被单测直接验证，不必起网络请求。
+fn plan_douyin_failure(is_douyin: bool, unavailable_work: bool, risk_control: bool) -> DouyinFailurePlan {
+    if is_douyin && unavailable_work {
+        DouyinFailurePlan::Unavailable
+    } else if is_douyin && risk_control {
+        DouyinFailurePlan::RiskControlSkipRound
+    } else {
+        DouyinFailurePlan::Retry
+    }
+}
+
 /// 给抖音作品的详情解析挑一个「对照作品」ID：同源、最近一条已下载成功且
 /// `output_path` 非空的其它作品。
 ///
@@ -4592,43 +4617,72 @@ async fn download_video(
             Err(error) => {
                 let retry_count = video.retry_count.saturating_add(1);
                 let error_text = error.to_string();
-                // 抖音作品被作者删除/设为私密时，错误链里是「作品可能已被作者删除或设为私密」。
-                // 这种状态既不是失败（重试也没用）也不是成功：写独立的「已删除」状态位，
-                // 五个子任务全部置 STATUS_UNAVAILABLE 并打上完成标记，前端据此显示「已删除」。
-                let unavailable_work =
-                    is_douyin_source(&source) && crate::douyin::is_unavailable_work_error(&format!("{:#}", error));
-                if unavailable_work {
-                    let chained = format!("{:#}", error);
-                    let mut video_status = VideoStatus::from(video.video_task_status);
-                    video_status.mark_unavailable();
-                    let mut page_status = PageStatus::from(video.page_task_status);
-                    page_status.mark_unavailable();
-                    active.video_task_status = Set(video_status.into());
-                    active.page_task_status = Set(page_status.into());
-                    active.download_status = Set("unavailable".to_string());
-                    active.error_message = Set(Some(UNAVAILABLE_WORK_MESSAGE.to_string()));
-                    active.updated_at = Set(now_standard_string());
-                    video = active.update(db).await?;
-                    // 完整错误链（含 yt-dlp 输出、HTTP 状态）只留在 debug，避免刷屏。
-                    debug!(
-                        platform = platform_label,
-                        source_id = source.id,
-                        youtube_id = %video.youtube_id,
-                        error = %chained,
-                        "抖音作品已失效的完整错误链"
-                    );
-                    warn!(
-                        platform = platform_label,
-                        source_id = source.id,
-                        youtube_id = %video.youtube_id,
-                        "{}视频源「{}」视频「{}」已失效：作品被作者删除或设为私密，已跳过，不再重试",
-                        platform_label,
-                        source.name,
-                        video.title
-                    );
-                    notify_videos_changed();
-                    notify_queue_status_changed();
-                    return Ok(());
+                let chained = format!("{:#}", error);
+                // 抖音的失败要分三种：已删除/私密（永久失败）、疑似风控（本轮跳过）、其它真错误
+                // （常规重试）。风控时连打 4 次只会让风控更重、日志更吵，所以这里直接结束本轮。
+                let douyin_source = is_douyin_source(&source);
+                let unavailable_work = douyin_source && crate::douyin::is_unavailable_work_error(&chained);
+                let risk_control = douyin_source && crate::douyin::is_douyin_risk_control_error(&chained);
+                match plan_douyin_failure(douyin_source, unavailable_work, risk_control) {
+                    DouyinFailurePlan::RiskControlSkipRound => {
+                        active.download_status = Set("pending".to_string());
+                        active.error_message = Set(Some(crate::douyin::DOUYIN_RISK_CONTROL_MESSAGE.to_string()));
+                        active.updated_at = Set(now_standard_string());
+                        video = active.update(db).await?;
+                        // 完整错误链只在 debug，避免风控期间每轮刷屏。
+                        debug!(
+                            platform = platform_label,
+                            source_id = source.id,
+                            youtube_id = %video.youtube_id,
+                            error = %chained,
+                            "抖音疑似风控失败的完整错误链"
+                        );
+                        warn!(
+                            platform = platform_label,
+                            source_id = source.id,
+                            youtube_id = %video.youtube_id,
+                            "{}视频源「{}」视频「{}」暂不可解析：抖音详情接口持续空响应，疑似账号或出口 IP 被风控，本轮跳过，等下一轮扫描再试",
+                            platform_label,
+                            source.name,
+                            video.title
+                        );
+                        notify_videos_changed();
+                        notify_queue_status_changed();
+                        return Ok(());
+                    }
+                    DouyinFailurePlan::Unavailable => {
+                        let mut video_status = VideoStatus::from(video.video_task_status);
+                        video_status.mark_unavailable();
+                        let mut page_status = PageStatus::from(video.page_task_status);
+                        page_status.mark_unavailable();
+                        active.video_task_status = Set(video_status.into());
+                        active.page_task_status = Set(page_status.into());
+                        active.download_status = Set("unavailable".to_string());
+                        active.error_message = Set(Some(UNAVAILABLE_WORK_MESSAGE.to_string()));
+                        active.updated_at = Set(now_standard_string());
+                        video = active.update(db).await?;
+                        // 完整错误链（含 yt-dlp 输出、HTTP 状态）只留在 debug，避免刷屏。
+                        debug!(
+                            platform = platform_label,
+                            source_id = source.id,
+                            youtube_id = %video.youtube_id,
+                            error = %chained,
+                            "抖音作品已失效的完整错误链"
+                        );
+                        warn!(
+                            platform = platform_label,
+                            source_id = source.id,
+                            youtube_id = %video.youtube_id,
+                            "{}视频源「{}」视频「{}」已失效：作品被作者删除或设为私密，已跳过，不再重试",
+                            platform_label,
+                            source.name,
+                            video.title
+                        );
+                        notify_videos_changed();
+                        notify_queue_status_changed();
+                        return Ok(());
+                    }
+                    DouyinFailurePlan::Retry => {}
                 }
                 let permanent_failure = error_text.contains("CENC 加密 DASH") || error_text.contains("付费/加密内容");
                 let exhausted = permanent_failure || retry_count >= MAX_DOWNLOAD_RETRIES;
@@ -10735,6 +10789,43 @@ pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn douyin_risk_control_skips_round_instead_of_four_retries() {
+        assert_eq!(
+            super::plan_douyin_failure(true, false, true),
+            super::DouyinFailurePlan::RiskControlSkipRound,
+            "疑似风控时应本轮跳过，不进入 30/60/90/120 秒的 4 连重试"
+        );
+        assert_eq!(
+            super::plan_douyin_failure(true, false, false),
+            super::DouyinFailurePlan::Retry,
+            "普通真错误仍按常规重试"
+        );
+    }
+
+    #[test]
+    fn douyin_deleted_work_still_goes_permanent() {
+        assert_eq!(
+            super::plan_douyin_failure(true, true, false),
+            super::DouyinFailurePlan::Unavailable,
+            "已删除/私密作品仍走永久失败，不受风控分支影响"
+        );
+        // 两者同时命中时以「已删除」为准（#330/#335 的语义优先）。
+        assert_eq!(
+            super::plan_douyin_failure(true, true, true),
+            super::DouyinFailurePlan::Unavailable
+        );
+    }
+
+    #[test]
+    fn non_douyin_errors_never_enter_douyin_plan() {
+        assert_eq!(
+            super::plan_douyin_failure(false, true, true),
+            super::DouyinFailurePlan::Retry,
+            "非抖音来源不应被抖音分支截走"
+        );
+    }
+
     #[test]
     fn douyin_empty_response_uses_control_aweme_from_database() {
         let source = include_str!("youtube.rs");
