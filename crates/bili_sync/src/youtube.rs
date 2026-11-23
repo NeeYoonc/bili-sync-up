@@ -10752,6 +10752,7 @@ mod tests {
             "对照 ID 应传给元数据解析"
         );
     }
+    #[test]
     fn clear_youtube_session_check_drops_last_check() {
         super::record_youtube_session_check(super::YoutubeSessionState::Valid, "登录状态有效");
         assert!(super::last_youtube_session_check().is_some());
