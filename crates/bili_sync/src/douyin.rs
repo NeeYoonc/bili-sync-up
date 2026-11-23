@@ -379,6 +379,16 @@ pub async fn import_douyin_cookie_file(
         ));
     }
     validate_cookie_contents(&request.cookies).await?;
+    // 游客 Cookie（只有 ttwid / UIFID / fpk 之类设备与风控字段）也能通过格式校验和
+    // 首页可达性校验，但作者作品、收藏夹、我的喜欢等接口全部要求登录会话，导入后
+    // 只会得到「导入成功但扫描全是警告」。这里在写入前就拦下，避免覆盖原有可用凭证。
+    if douyin_login_cookie_name(&request.cookies).is_none() {
+        return Err(ApiError::bad_request(
+            "这份 Cookie 里没有抖音登录会话（缺 sessionid / sid_tt / uid_tt 等），说明导出时浏览器并未登录抖音。请用已登录抖音的普通浏览器窗口重新传输；无痕窗口或未登录的浏览器配置都不行",
+        ));
+    }
+    // 自检失败要回滚，先快照导入前的旧凭证。
+    let snapshot = DouyinCredentialSnapshot::capture();
     // 先清理旧会话（数据库 + 历史文件），再将新会话写入数据库。
     clear_douyin_login_state().await;
     set_douyin_cookies(&request.cookies).await?;
@@ -434,6 +444,32 @@ pub async fn import_douyin_cookie_file(
             "导入抖音 cookies 未携带 secsdk 签名会话（local_storage 为空）：请用电脑端登录助手完整传输，勿只导入 cookies.txt"
         );
     }
+    // 端到端自检：字段齐全不代表会话有效（可能已被平台注销），再请求一次当前登录
+    // 用户资料确认。明确「用户未登录」时回滚，避免把可用会话换成坏会话。
+    let verified_suffix = match verify_douyin_import().await {
+        DouyinImportVerification::LoggedIn { uid, nickname } => {
+            info!(
+                target: "bili_sync_rs::douyin",
+                %uid,
+                %nickname,
+                "抖音登录凭证自检通过（账号：{nickname}）"
+            );
+            format!("；登录态已校验（账号：{nickname}）")
+        }
+        DouyinImportVerification::NotLoggedIn(detail) => {
+            snapshot.restore().await;
+            return Err(ApiError::bad_request(format!(
+                "导入的抖音凭证不是登录状态（{detail}），原有凭证未被覆盖。请在已登录抖音的普通浏览器窗口里重新传输登录状态"
+            )));
+        }
+        DouyinImportVerification::Unconfirmed(detail) => {
+            warn!(
+                target: "bili_sync_rs::douyin",
+                "抖音登录凭证自检未能确认（{detail}），已按导入成功处理；若扫描持续失败请检查外源网络或稍后重新导入"
+            );
+            "；⚠ 登录态自检未通过（可能被风控或网络拦截），若扫描仍失败请稍后重新导入".to_string()
+        }
+    };
     let device_suffix = if imported_device_fields > 0 {
         format!("及 {imported_device_fields} 项浏览器设备参数")
     } else {
@@ -446,7 +482,9 @@ pub async fn import_douyin_cookie_file(
     };
     Ok(ApiResponse::ok(YouTubeLoginResponse {
         logged_in: true,
-        message: format!("已导入抖音登录凭证{device_suffix}；作者作品扫描和媒体解析将使用此状态{secsdk_suffix}"),
+        message: format!(
+            "已导入抖音登录凭证{device_suffix}{verified_suffix}；作者作品扫描和媒体解析将使用此状态{secsdk_suffix}"
+        ),
     }))
 }
 
@@ -4254,6 +4292,139 @@ fn ensure_session() -> Result<()> {
     }
 }
 
+/// 抖音「已登录」相关的会话 Cookie 名。
+///
+/// 游客访问 douyin.com 只会拿到 ttwid / UIFID / fpk1 / __ac_signature 这类设备与风控
+/// Cookie，不会出现下面这些字段；而作者作品、收藏夹、我的喜欢等接口都要求登录会话。
+const DOUYIN_LOGIN_COOKIE_NAMES: [&str; 6] = [
+    "sessionid",
+    "sessionid_ss",
+    "sid_tt",
+    "uid_tt",
+    "uid_tt_ss",
+    "sid_guard",
+];
+
+/// 从 Netscape cookies.txt 里找出第一条登录会话 Cookie 名；游客 Cookie 返回 `None`。
+fn douyin_login_cookie_name(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        if line.trim_start().starts_with('#') {
+            return None;
+        }
+        let columns = line.split('\t').collect::<Vec<_>>();
+        if columns.len() < 7 || !is_douyin_cookie_domain(columns[0]) {
+            return None;
+        }
+        let name = columns[5].trim();
+        DOUYIN_LOGIN_COOKIE_NAMES
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(name))
+            .then(|| name.to_string())
+    })
+}
+
+/// 导入抖音凭证前的旧会话快照，用于自检失败时回滚。
+///
+/// `import_douyin_cookie_file` 会先清理旧凭证再写入新凭证，如果新凭证其实是
+/// 「游客 Cookie」，清理动作就把原本可用的会话弄丢了。这里在清理前抓一份快照，
+/// 自检判定未登录时写回去。
+struct DouyinCredentialSnapshot {
+    values: Vec<(&'static str, Option<String>)>,
+}
+
+impl DouyinCredentialSnapshot {
+    fn capture() -> Self {
+        Self {
+            values: [
+                crate::credential_store::keys::DOUYIN_COOKIES,
+                crate::credential_store::keys::DOUYIN_SECSDK,
+                crate::credential_store::keys::DOUYIN_MSTOKEN,
+                crate::credential_store::keys::DOUYIN_WEBID,
+                crate::credential_store::keys::DOUYIN_VERIFY_FP,
+            ]
+            .into_iter()
+            .map(|key| (key, crate::credential_store::get(key)))
+            .collect(),
+        }
+    }
+
+    async fn restore(self) {
+        for (key, value) in self.values {
+            let result = match value {
+                Some(value) => crate::credential_store::set(key, &value).await,
+                None if crate::credential_store::has(key) => crate::credential_store::delete(key).await,
+                None => Ok(()),
+            };
+            if let Err(error) = result {
+                warn!(target: "bili_sync_rs::douyin", key, error = %error, "回滚抖音登录凭证失败");
+            }
+        }
+        info!(target: "bili_sync_rs::douyin", "已回滚到导入前的抖音登录凭证");
+    }
+}
+
+/// 导入后的登录态自检结论。
+enum DouyinImportVerification {
+    /// 确认已登录，附带 uid 与昵称。
+    LoggedIn { uid: String, nickname: String },
+    /// 平台明确表示未登录（响应正常但没有登录用户）。
+    NotLoggedIn(String),
+    /// 风控/网络/签名器异常，无法判断登录态，不应据此回滚。
+    Unconfirmed(String),
+}
+
+/// 用刚写入的凭证请求「当前登录用户资料」，确认拿到的确实是登录态。
+///
+/// 只检查 Cookie 字段名可能被「有 sessionid 但已失效」的情况骗过，所以这里做一次
+/// 端到端确认：`user.uid` 非空才算登录成功。风控与网络错误一律归为
+/// `Unconfirmed`，避免把可用会话误判成未登录而回滚。
+async fn verify_douyin_import() -> DouyinImportVerification {
+    match signed_get(DOUYIN_PROFILE_SELF_API, common_query_pairs()).await {
+        Ok(value) => {
+            let user = value.get("user").filter(|user| user.is_object());
+            let uid = user
+                .and_then(|user| user.get("uid"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !uid.is_empty() {
+                let nickname = user
+                    .and_then(|user| user.get("nickname"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                return DouyinImportVerification::LoggedIn { uid, nickname };
+            }
+            let detail =
+                text(&value, &["status_msg", "message"]).unwrap_or_else(|| "抖音未返回登录用户资料".to_string());
+            DouyinImportVerification::NotLoggedIn(detail)
+        }
+        Err(error) => {
+            let detail = format!("{error:#}");
+            // 签名器缺失/风控/网络类失败都不能证明「未登录」。
+            let unconfirmed = [
+                "secsdk",
+                "签名",
+                "HTTP 403",
+                "HTTP 429",
+                "空响应",
+                "timed out",
+                "超时",
+                "请求抖音",
+            ]
+            .iter()
+            .any(|needle| detail.contains(needle));
+            if unconfirmed {
+                DouyinImportVerification::Unconfirmed(detail)
+            } else {
+                DouyinImportVerification::NotLoggedIn(detail)
+            }
+        }
+    }
+}
+
 fn is_netscape_douyin_cookie_file(contents: &str) -> bool {
     let has_header = contents
         .lines()
@@ -6311,6 +6482,29 @@ pub(crate) async fn migrate_legacy_douyin_credentials() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 游客 Cookie（只有 ttwid / UIFID / fpk 这类设备字段）必须识别为「未登录」，
+    /// 否则导入会假成功，随后作者作品、收藏夹、我的喜欢全部失败。
+    #[test]
+    fn guest_douyin_cookie_file_has_no_login_cookie() {
+        let guest = "# Netscape HTTP Cookie File\n\
+                     .douyin.com\tTRUE\t/\tTRUE\t1817540764\tUIFID_TEMP\tabc\n\
+                     .douyin.com\tTRUE\t/\tTRUE\t1826457384\tttwid\txyz\n";
+        assert!(is_netscape_douyin_cookie_file(guest));
+        assert_eq!(douyin_login_cookie_name(guest), None);
+    }
+
+    /// 只要带登录会话 Cookie（含 `#HttpOnly_` 前缀写法）就应放行。
+    #[test]
+    fn douyin_cookie_file_with_session_cookie_is_accepted() {
+        let logged_in = "# Netscape HTTP Cookie File\n\
+                          #HttpOnly_.douyin.com\tTRUE\t/\tTRUE\t1817540764\tsessionid\tabc\n\
+                          .douyin.com\tTRUE\t/\tTRUE\t1826457384\tttwid\txyz\n";
+        assert_eq!(douyin_login_cookie_name(logged_in).as_deref(), Some("sessionid"));
+        let sid_tt = "# Netscape HTTP Cookie File\n\
+                      .douyin.com\tTRUE\t/\tTRUE\t1817540764\tuid_tt\tabc\n";
+        assert_eq!(douyin_login_cookie_name(sid_tt).as_deref(), Some("uid_tt"));
+    }
 
     /// 合集链接的多种形态都要能取到 mix_id；作者主页链接不能被误判。
     #[test]
