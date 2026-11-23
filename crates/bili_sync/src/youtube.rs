@@ -3009,7 +3009,7 @@ async fn regenerate_youtube_artifacts(
     // UP头像/UP主信息也要元数据：抖音合集/放映厅/收藏源的 source.url 是作品列表
     // 链接，只有作品元数据里的频道主页地址能解析出作者头像，拿源链接会直接失败。
     let metadata = if regen.cover || regen.nfo || regen.upper_face || regen.upper_info {
-        let metadata = extract_youtube_metadata(&video.url, Some(&source))
+        let metadata = extract_youtube_metadata(&video.url, Some(&source), None)
             .await
             .with_context(|| format!("重新解析{platform}元数据失败"))?;
         Some(metadata)
@@ -4325,6 +4325,31 @@ async fn run_youtube_sidecar_tasks(db: &DatabaseConnection, video: youtube_video
     Ok(())
 }
 
+/// 给抖音作品的详情解析挑一个「对照作品」ID：同源、最近一条已下载成功且
+/// `output_path` 非空的其它作品。
+///
+/// 用途见 [`crate::douyin::fetch_aweme_detail_with_control`]：详情接口空响应时，
+/// 只有对照作品能正常解析才敢断言当前作品被删除/设私密；查不到对照就返回 `None`，
+/// 让上层按原始错误保留重试，避免风控期间误标正常作品。
+async fn find_douyin_control_aweme_id(db: &DatabaseConnection, video: &youtube_video::Model) -> Option<String> {
+    let candidates = youtube_video::Entity::find()
+        .filter(youtube_video::Column::SourceId.eq(video.source_id))
+        .filter(youtube_video::Column::DownloadStatus.eq("completed"))
+        .filter(youtube_video::Column::YoutubeId.ne(video.youtube_id.clone()))
+        .order_by_desc(youtube_video::Column::Id)
+        .limit(20)
+        .all(db)
+        .await
+        .ok()?;
+    candidates.into_iter().find_map(|candidate| {
+        let has_output = candidate
+            .output_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty());
+        has_output.then_some(candidate.youtube_id)
+    })
+}
+
 async fn download_video(
     db: &DatabaseConnection,
     downloader: &UnifiedDownloader,
@@ -4400,9 +4425,20 @@ async fn download_video(
         // 整次尝试套一层硬超时：任何环节卡死都不能让任务永久停在「下载中」。
         // 计时用于「下载完成」日志里的耗时/平均速度，与 B 站保持同一模板。
         let attempt_started = Instant::now();
+        let control_aweme_id = if is_douyin_source(&source) {
+            find_douyin_control_aweme_id(db, &video).await
+        } else {
+            None
+        };
         let result = match tokio::time::timeout(
             EXTERNAL_MEDIA_ATTEMPT_TIMEOUT,
-            download_youtube_media(downloader, &source, &video, download_staging_root.as_deref()),
+            download_youtube_media(
+                downloader,
+                &source,
+                &video,
+                download_staging_root.as_deref(),
+                control_aweme_id.as_deref(),
+            ),
         )
         .await
         {
@@ -5239,9 +5275,10 @@ async fn download_youtube_media(
     source: &youtube_source::Model,
     video: &youtube_video::Model,
     staging_root: Option<&Path>,
+    control_aweme_id: Option<&str>,
 ) -> Result<DownloadedYouTubeMedia> {
     let platform = source_platform_label(source);
-    let mut metadata = match extract_youtube_metadata(&video.url, Some(source)).await {
+    let mut metadata = match extract_youtube_metadata(&video.url, Some(source), control_aweme_id).await {
         Ok(metadata) => metadata,
         Err(error) if should_placeholder_unavailable_tiktok(&error, video.retry_count) => {
             // TikTok「明确不可下载」分两类（判定见 should_placeholder_unavailable_tiktok）：
@@ -5889,10 +5926,14 @@ fn external_metadata_has_video_stream(metadata: &ExternalMediaMetadata) -> bool 
     })
 }
 
-async fn extract_youtube_metadata(url: &str, source: Option<&youtube_source::Model>) -> Result<ExternalMediaMetadata> {
+async fn extract_youtube_metadata(
+    url: &str,
+    source: Option<&youtube_source::Model>,
+    control_aweme_id: Option<&str>,
+) -> Result<ExternalMediaMetadata> {
     if source.is_some_and(is_douyin_source) || url.contains("douyin.com") {
         let aweme_id = crate::douyin::aweme_id(url).context("抖音作品链接缺少有效作品 ID")?;
-        return crate::douyin::extract_metadata(aweme_id, source).await;
+        return crate::douyin::extract_metadata(aweme_id, source, control_aweme_id).await;
     }
     if url.contains("tiktok.com") {
         // 官方详情接口优先：一次请求就能拿到 playAddr / 图片贴原图；而 yt-dlp 的
@@ -10695,6 +10736,22 @@ pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn douyin_empty_response_uses_control_aweme_from_database() {
+        let source = include_str!("youtube.rs");
+        let prod = source.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(source);
+        assert!(
+            prod.contains("find_douyin_control_aweme_id"),
+            "下载路径应从未删除的同源作品里取对照 ID"
+        );
+        assert!(
+            prod.contains("control_aweme_id.as_deref()"),
+            "对照 ID 应一路传给 download_youtube_media"
+        );
+        assert!(
+            prod.contains("extract_youtube_metadata(&video.url, Some(source), control_aweme_id)"),
+            "对照 ID 应传给元数据解析"
+        );
+    }
     fn clear_youtube_session_check_drops_last_check() {
         super::record_youtube_session_check(super::YoutubeSessionState::Valid, "登录状态有效");
         assert!(super::last_youtube_session_check().is_some());
@@ -11056,7 +11113,7 @@ mod tests {
     async fn tiktok_photo_and_video_split_by_media_kind() {
         let photo_url =
             std::env::var("BILI_SYNC_TEST_TIKTOK_PHOTO_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_PHOTO_URL");
-        let photo = super::extract_youtube_metadata(&photo_url, None)
+        let photo = super::extract_youtube_metadata(&photo_url, None, None)
             .await
             .expect("解析 TikTok 图片贴失败");
         assert!(!photo.images.is_empty(), "图片贴应带原图");
@@ -11064,7 +11121,7 @@ mod tests {
 
         let video_url =
             std::env::var("BILI_SYNC_TEST_TIKTOK_VIDEO_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_VIDEO_URL");
-        let video = super::extract_youtube_metadata(&video_url, None)
+        let video = super::extract_youtube_metadata(&video_url, None, None)
             .await
             .expect("解析 TikTok 普通视频失败");
         assert!(video.images.is_empty(), "普通视频不应带原图");
@@ -11077,7 +11134,7 @@ mod tests {
     #[ignore]
     async fn media_unavailable_tiktok_post_stays_retryable() {
         let url = std::env::var("BILI_SYNC_TEST_TIKTOK_REGION_URL").expect("需要设置 BILI_SYNC_TEST_TIKTOK_REGION_URL");
-        let error = super::extract_youtube_metadata(&url, None)
+        let error = super::extract_youtube_metadata(&url, None, None)
             .await
             .expect_err("媒体取不到的作品应返回错误");
         let text = format!("{error:#}");
