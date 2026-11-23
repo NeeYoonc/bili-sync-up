@@ -13623,10 +13623,12 @@ mod tests {
     #[test]
     fn douyin_expired_notification_only_fires_inside_dedupe_guard() {
         let source = include_str!("youtube.rs");
+        // 只扫生产代码片段：测试模块里的同一字面量不算调用点。
+        let prod = source.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(source);
         let call = "record_external_login_expired(\"抖音\"";
-        assert_eq!(source.matches(call).count(), 1, "抖音登录通知只应有一个调用点");
-        let at = source.find(call).expect("应有抖音通知调用点");
-        let prefix = &source[at.saturating_sub(400)..at];
+        assert_eq!(prod.matches(call).count(), 1, "抖音登录通知只应有一个调用点");
+        let at = prod.find(call).expect("应有抖音通知调用点");
+        let prefix = &prod[at.saturating_sub(400)..at];
         assert!(
             prefix.contains("douyin_expired_should_notify(previous)"),
             "抖音登录通知必须包在去重判断里，否则每 6 小时重复推送"
