@@ -18988,7 +18988,7 @@ fn credential_clear_message(platform: &str, existed: bool) -> String {
 
 /// 凭证库里是否至少存在一个指定 key（用于生成幂等提示语）。
 fn credential_store_has_any(keys: &[&str]) -> bool {
-    keys.iter().any(|key| crate::credential_store::has(*key))
+    keys.iter().any(|key| crate::credential_store::has(key))
 }
 
 /// 删除 YouTube 登录凭证（设置页「删除当前凭证」）。
