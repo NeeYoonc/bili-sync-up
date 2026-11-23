@@ -2540,10 +2540,51 @@ pub async fn fetch_profile(source_url: &str) -> Result<DouyinProfile> {
 /// 获取单个视频作品的原生详情。抖音 Web 详情接口会直接返回各档
 /// MP4 播放地址，后续仍交给项目的统一下载器传输，不让 yt-dlp 接管下载。
 pub(crate) async fn fetch_aweme_detail(aweme_id: &str) -> Result<serde_json::Value> {
+    fetch_aweme_detail_with_control(aweme_id, None).await
+}
+
+/// 同 [`fetch_aweme_detail`]，但支持传入一个「对照作品」ID。
+///
+/// 详情接口 HTTP 200 + 空 body 既可能是作品不可访问（删除/私密），也可能是当前
+/// 出口 IP 被风控 —— 单看这条错误分不开。调用方可以从同源已下载成功的作品里挑一条
+/// 作为对照：对照能正常解析说明网络/账号没问题，只有当前作品不可访问；对照也解析
+/// 不到说明是风控/网络问题，此时保留原始错误继续重试，避免风控期间把一堆正常作品
+/// 误标成「已删除」。
+pub(crate) async fn fetch_aweme_detail_with_control(
+    aweme_id: &str,
+    control_aweme_id: Option<&str>,
+) -> Result<serde_json::Value> {
     ensure_session()?;
     let mut pairs = common_query_pairs();
     pairs.push(("aweme_id", aweme_id.to_string()));
-    let response = signed_get(DOUYIN_DETAIL_API, pairs).await?;
+    let response = match signed_get(DOUYIN_DETAIL_API, pairs).await {
+        Ok(response) => response,
+        Err(error) => {
+            if is_empty_signed_response_error(&format!("{:#}", error)) {
+                let control_available = match control_aweme_id {
+                    Some(control_aweme_id) => Some(probe_aweme_detail_available(control_aweme_id).await),
+                    None => None,
+                };
+                if classify_empty_detail_error(control_available) == EmptyDetailAction::Unavailable {
+                    debug!(
+                        target: "bili_sync_rs::douyin",
+                        aweme_id,
+                        ?control_aweme_id,
+                        "抖音详情接口返回空响应，对照作品可正常解析，按作品不可访问处理"
+                    );
+                    bail!(douyin_detail_empty_error(true));
+                }
+                debug!(
+                    target: "bili_sync_rs::douyin",
+                    aweme_id,
+                    ?control_aweme_id,
+                    ?control_available,
+                    "抖音详情接口返回空响应，无法确认只有本作品不可访问，按原始错误保留重试"
+                );
+            }
+            return Err(error);
+        }
+    };
     let status = response
         .get("status_code")
         .and_then(serde_json::Value::as_i64)
@@ -2567,13 +2608,55 @@ pub(crate) async fn fetch_aweme_detail(aweme_id: &str) -> Result<serde_json::Val
     bail!(douyin_detail_empty_error(login_valid))
 }
 
+/// 签名已通过但 body 为空：可能是作品被删/设私密（不可访问），也可能是当前出口
+/// IP 被风控。单凭这条错误无法区分，调用方需再用对照作品探测才能定性。
+fn is_empty_signed_response_error(message: &str) -> bool {
+    message.contains("返回空响应：签名已通过但未返回数据")
+}
+
+/// 直接探测某个作品详情当前是否可解析（`aweme_detail` 是 object 才算可读）。
+///
+/// 只用于「对照作品」：正常作品在风控期间也可能空响应，所以调用方只在对照可读时
+/// 才敢断言当前作品是被删除/设私密。不递归、不做登录探测。
+pub(crate) async fn probe_aweme_detail_available(aweme_id: &str) -> bool {
+    if ensure_session().is_err() {
+        return false;
+    }
+    let mut pairs = common_query_pairs();
+    pairs.push(("aweme_id", aweme_id.to_string()));
+    match signed_get(DOUYIN_DETAIL_API, pairs).await {
+        Ok(response) => response
+            .get("aweme_detail")
+            .and_then(serde_json::Value::as_object)
+            .is_some(),
+        Err(_) => false,
+    }
+}
+
+/// 详情接口空响应时，如何上报本次失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyDetailAction {
+    /// 对照作品能正常解析：只有当前作品不可访问，按「已删除/私密」上报（可被判为永久失败）。
+    Unavailable,
+    /// 对照作品也解析不到，或没有对照可用：按原始错误返回，保留重试机会。
+    OriginalError,
+}
+
+/// 根据对照作品的探测结果决定空响应如何上报。
+fn classify_empty_detail_error(control_available: Option<bool>) -> EmptyDetailAction {
+    match control_available {
+        Some(true) => EmptyDetailAction::Unavailable,
+        Some(false) | None => EmptyDetailAction::OriginalError,
+    }
+}
+
 /// 详情接口返回空对象时的错误文案。
 ///
 /// 登录状态正常说明不是 Cookie 问题，作品通常已被作者删除或设为私密；
 /// 登录异常或无法判断时才提示重新导入 Cookie。
 fn douyin_detail_empty_error(login_valid: bool) -> String {
     if login_valid {
-        "抖音作品详情为空：登录状态正常，作品可能已被作者删除或设为私密".to_string()
+        "抖音作品详情为空：登录状态正常，作品可能已被作者删除或设为私密（若确认作品仍在，可稍后重置重试）".to_string()
     } else {
         "抖音作品详情为空，请重新导入电脑浏览器刚导出的抖音 Cookie".to_string()
     }
@@ -2594,6 +2677,7 @@ pub(crate) async fn fetch_aweme_detail_for_source(
     source_type: &str,
     source_url: &str,
     aweme_id: &str,
+    control_aweme_id: Option<&str>,
 ) -> Result<serde_json::Value> {
     ensure_session()?;
     let source_result = match source_type.trim().to_ascii_lowercase().as_str() {
@@ -2611,18 +2695,20 @@ pub(crate) async fn fetch_aweme_detail_for_source(
         }
         _ => {
             if source_type == "douyin" {
-                return fetch_douyin_author_detail(source_url, aweme_id).await;
+                return fetch_douyin_author_detail(source_url, aweme_id, control_aweme_id).await;
             }
-            fetch_aweme_detail(aweme_id).await.map(Some)
+            fetch_aweme_detail_with_control(aweme_id, control_aweme_id)
+                .await
+                .map(Some)
         }
     };
 
     match source_result {
         Ok(Some(detail)) => Ok(detail),
-        Ok(None) => fetch_aweme_detail(aweme_id)
+        Ok(None) => fetch_aweme_detail_with_control(aweme_id, control_aweme_id)
             .await
             .with_context(|| format!("来源列表中未找到抖音作品 {aweme_id}，普通详情接口也不可用")),
-        Err(source_error) => fetch_aweme_detail(aweme_id)
+        Err(source_error) => fetch_aweme_detail_with_control(aweme_id, control_aweme_id)
             .await
             .with_context(|| format!("读取抖音来源列表中的作品详情失败：{source_error:#}")),
     }
@@ -2636,8 +2722,12 @@ pub(crate) async fn fetch_aweme_detail_for_source(
 /// 为空（条目本身不下发直链）。这类条目通常在 `share_post_origin_item` 里内嵌
 /// 了带直链的原始投稿，优先用它的 `video` 替换；详情里也没有内嵌媒体时，再拉
 /// 一次「日常」列表，按「时长 + 配乐」匹配同一作品的普通投稿后继续下载。
-async fn fetch_douyin_author_detail(source_url: &str, aweme_id: &str) -> Result<serde_json::Value> {
-    match fetch_aweme_detail(aweme_id).await {
+async fn fetch_douyin_author_detail(
+    source_url: &str,
+    aweme_id: &str,
+    control_aweme_id: Option<&str>,
+) -> Result<serde_json::Value> {
+    match fetch_aweme_detail_with_control(aweme_id, control_aweme_id).await {
         Ok(detail) => {
             let has_images = detail
                 .get("images")
@@ -4210,8 +4300,9 @@ pub(crate) fn aweme_id(url: &str) -> Option<&str> {
 pub(crate) async fn extract_metadata(
     aweme_id: &str,
     source: Option<&youtube_source::Model>,
+    control_aweme_id: Option<&str>,
 ) -> Result<ExternalMediaMetadata> {
-    match extract_metadata_native(aweme_id, source).await {
+    match extract_metadata_native(aweme_id, source, control_aweme_id).await {
         Ok(metadata) => Ok(metadata),
         Err(native_error) => {
             if native_error.to_string().contains("CENC 加密 DASH") {
@@ -4234,10 +4325,11 @@ pub(crate) async fn extract_metadata(
 async fn extract_metadata_native(
     aweme_id: &str,
     source: Option<&youtube_source::Model>,
+    control_aweme_id: Option<&str>,
 ) -> Result<ExternalMediaMetadata> {
     let prefer_original = douyin_original_preference(source);
     let detail = if let Some(source) = source.filter(|source| source.source_type.starts_with("douyin")) {
-        fetch_aweme_detail_for_source(&source.source_type, &source.url, aweme_id).await?
+        fetch_aweme_detail_for_source(&source.source_type, &source.url, aweme_id, control_aweme_id).await?
     } else {
         fetch_aweme_detail(aweme_id).await?
     };
@@ -6326,7 +6418,7 @@ mod tests {
             println!("平台口径 {count} 集，实际枚举 {} 条（允许编号空洞）", posts.len());
         }
 
-        let detail = fetch_aweme_detail_for_source("douyin_mix", &url, &posts[0].id)
+        let detail = fetch_aweme_detail_for_source("douyin_mix", &url, &posts[0].id, None)
             .await
             .expect("合集作品详情应能解析");
         assert!(detail.get("video").is_some(), "详情应包含 video 节点（下载直链来源）");
@@ -7631,5 +7723,72 @@ mod tests {
             .expect("导入函数应存在");
         let clear_at = prod.find(call).expect("导入路径应保留清理调用");
         assert!(clear_at > import_at, "清理调用必须位于用户主动导入路径内");
+    }
+
+    #[test]
+    fn unavailable_work_error_ignores_cookie_and_network_errors() {
+        assert!(!super::is_unavailable_work_error(
+            "抖音 Cookie 已失效或不完整，请在登录抖音的同一浏览器配置中重新传输登录状态"
+        ));
+        assert!(!super::is_unavailable_work_error("访问抖音接口超时"));
+        assert!(!super::is_unavailable_work_error(""));
+    }
+
+    #[test]
+    fn empty_signed_response_error_matches_full_chain() {
+        let error = anyhow::anyhow!("抖音作品详情接口 返回空响应：签名已通过但未返回数据，通常是登录 Cookie 不完整");
+        let chain = format!("抖音原生详情接口失败：{error:#}");
+        assert!(
+            super::is_empty_signed_response_error(&chain),
+            "应命中完整错误链：{chain}"
+        );
+    }
+
+    #[test]
+    fn empty_signed_response_error_ignores_other_errors() {
+        for message in [
+            "抖音作品详情为空：登录状态正常，作品可能已被作者删除或设为私密",
+            "抖音作品详情接口返回错误 403：访问被拒绝",
+            "访问抖音详情接口超时",
+            "",
+        ] {
+            assert!(
+                !super::is_empty_signed_response_error(message),
+                "不应把其它错误当成空响应：{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_detail_classification_needs_available_control() {
+        use super::{classify_empty_detail_error, EmptyDetailAction};
+        assert_eq!(
+            classify_empty_detail_error(Some(true)),
+            EmptyDetailAction::Unavailable,
+            "对照作品可读时应按不可访问上报"
+        );
+        assert_eq!(
+            classify_empty_detail_error(Some(false)),
+            EmptyDetailAction::OriginalError,
+            "对照作品也失败时不能断言作品已删除"
+        );
+        assert_eq!(
+            classify_empty_detail_error(None),
+            EmptyDetailAction::OriginalError,
+            "没有对照作品时保守处理，保留重试"
+        );
+    }
+
+    #[test]
+    fn unavailable_detail_message_keeps_deleted_or_private_phrase() {
+        let message = super::douyin_detail_empty_error(true);
+        assert!(
+            super::is_unavailable_work_error(&message),
+            "永久失败判定短语必须保留：{message}"
+        );
+        assert!(message.contains("稍后重置重试"), "应给出可操作提示：{message}");
+        assert!(!super::is_unavailable_work_error(&super::douyin_detail_empty_error(
+            false
+        )));
     }
 }
