@@ -9772,7 +9772,7 @@ async fn set_youtube_cookies(contents: &str) -> Result<()> {
 /// 只有两个调用方：导入新凭证前清场、导入失败且无可回滚的旧凭证。守护任务不再
 /// 调用它 —— 自动删凭证正是「Cookie 过一会就掉了」的来源。`reason` 会打进日志，
 /// 以后再出现「掉了」可以直接看是谁删的。
-async fn clear_youtube_login_state(reason: &str) {
+pub(crate) async fn clear_youtube_login_state(reason: &str) {
     warn!(reason, "清理 YouTube 登录凭证");
     if crate::credential_store::has(crate::credential_store::keys::YOUTUBE_COOKIES) {
         if let Err(error) = crate::credential_store::delete(crate::credential_store::keys::YOUTUBE_COOKIES).await {
@@ -9915,6 +9915,15 @@ fn last_youtube_session_check() -> Option<YoutubeSessionCheck> {
         .clone()
 }
 
+/// 清空最近一次 YouTube 登录探测结论。
+///
+/// 设置页的登录状态由这份缓存驱动；用户删除凭证后必须归零，否则界面会继续显示
+/// 「已过期/已登录」，直到下一轮守护任务重新探测。
+pub(crate) fn clear_youtube_session_check() {
+    let mut guard = YOUTUBE_SESSION_CHECK.lock().unwrap_or_else(|error| error.into_inner());
+    *guard = None;
+}
+
 /// 抖音登录探测的结论，只用于守护任务内部去重（不对外暴露）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DouyinSessionState {
@@ -9939,6 +9948,12 @@ fn record_douyin_session_check(state: DouyinSessionState, message: &'static str)
 
 fn last_douyin_session_check() -> Option<DouyinSessionCheck> {
     *DOUYIN_SESSION_CHECK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// 清空最近一次抖音登录探测结论（用户删除凭证后调用，界面回到「未导入」）。
+pub(crate) fn clear_douyin_session_check() {
+    let mut guard = DOUYIN_SESSION_CHECK.lock().unwrap_or_else(|error| error.into_inner());
+    *guard = None;
 }
 
 /// 登录守护探测到抖音 `Expired` 时，是否要删除本地凭证。
@@ -10679,6 +10694,17 @@ pub(crate) async fn migrate_legacy_youtube_credentials() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clear_youtube_session_check_drops_last_check() {
+        super::record_youtube_session_check(super::YoutubeSessionState::Valid, "登录状态有效");
+        assert!(super::last_youtube_session_check().is_some());
+        super::clear_youtube_session_check();
+        assert!(
+            super::last_youtube_session_check().is_none(),
+            "删除凭证后应清空最近一次探测结论"
+        );
+    }
+
     #[test]
     #[allow(invalid_from_utf8, reason = "测试故意用 GBK 字节序列验证非 UTF-8 解码路径")]
     fn decodes_gbk_command_error_text() {

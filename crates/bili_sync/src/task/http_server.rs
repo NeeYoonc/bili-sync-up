@@ -72,6 +72,9 @@ use crate::api::handler::{
     clear_ai_rename_cache,
     clear_ai_rename_cache_for_source,
     clear_credential,
+    clear_douyin_credentials,
+    clear_tiktok_credentials,
+    clear_youtube_credentials,
     delete_video,
     delete_video_source,
     download_log_file,
@@ -347,7 +350,10 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/auth/clear-credential", post(clear_credential))
         // YouTube 登录状态导入与来源适配（yt-dlp 只解析来源/直链，媒体走项目统一下载器）
         .route("/api/youtube/status", get(youtube_status))
-        .route("/api/youtube/cookies", post(import_youtube_cookie_file))
+        .route(
+            "/api/youtube/cookies",
+            post(import_youtube_cookie_file).delete(clear_youtube_credentials),
+        )
         .route("/api/youtube/session-check", post(check_youtube_session))
         .route("/api/youtube/search", get(search_youtube))
         .route("/api/youtube/channel-playlists", get(get_youtube_channel_playlists))
@@ -367,7 +373,10 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/youtube/queue-status", get(get_youtube_queue_status))
         // 抖音作者发现/登录；来源 CRUD、下载和视频状态复用上面的外部媒体链路。
         .route("/api/douyin/status", get(douyin_status))
-        .route("/api/douyin/cookies", post(import_douyin_cookie_file))
+        .route(
+            "/api/douyin/cookies",
+            post(import_douyin_cookie_file).delete(clear_douyin_credentials),
+        )
         .route("/api/douyin/search", get(search_douyin))
         .route("/api/douyin/followings", get(get_douyin_followings))
         .route("/api/douyin/catalog", get(get_douyin_catalog))
@@ -382,7 +391,10 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/tiktok/source-videos", get(get_tiktok_source_videos))
         .route("/api/tiktok/playlists", get(get_tiktok_playlists))
         .route("/api/tiktok/followings", get(get_tiktok_followings))
-        .route("/api/tiktok/cookies", post(import_tiktok_cookie_file))
+        .route(
+            "/api/tiktok/cookies",
+            post(import_tiktok_cookie_file).delete(clear_tiktok_credentials),
+        )
         .route("/api/tiktok/secuid", get(tiktok_secuid_status).put(update_tiktok_secuid))
         .route("/api/tiktok/search", get(search_tiktok))
         .route("/api/tiktok/sources", get(get_tiktok_sources).post(create_tiktok_source))

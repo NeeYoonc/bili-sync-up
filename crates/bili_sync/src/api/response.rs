@@ -1438,6 +1438,17 @@ pub struct ConfigMigrationReportResponse {
     pub notes: Vec<String>,
 }
 
+/// 删除外源登录凭证（YouTube / 抖音 / TikTok）的结果。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CredentialClearResponse {
+    /// 平台标识：youtube / douyin / tiktok
+    pub platform: String,
+    /// 删除后是否仍处于登录状态（恒为 false）
+    pub logged_in: bool,
+    /// 面向用户的中文提示
+    pub message: String,
+}
+
 /// 网络代理连通性测试结果。
 #[derive(Serialize, ToSchema)]
 pub struct TestProxyResponse {
