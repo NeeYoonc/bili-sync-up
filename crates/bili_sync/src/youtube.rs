@@ -9508,20 +9508,77 @@ fn ytdlp_install_lock() -> &'static Mutex<()> {
 }
 
 fn current_ytdlp_package() -> Option<YtDlpPackage> {
-    // 自定义镜像可能让 musl 编译的主程序运行在 glibc 层中；允许显式指定
-    // 运行层 libc，避免下载与实际系统加载器不兼容的 yt-dlp 构建。
-    let configured_libc = std::env::var("BILI_SYNC_YTDLP_RUNTIME_LIBC").ok();
-    let target_env = ytdlp_runtime_target_env(configured_libc.as_deref(), cfg!(target_env = "musl"));
+    // 自定义镜像可能让 musl 编译的主程序运行在 glibc 层中；同时 musl 资产依赖
+    // 运行期存在 `/lib/ld-musl-*` 加载器。这里必须按运行期文件系统判断，不能只看
+    // 编译期 `target_env`，否则群晖（glibc）上会下载执行不了的 musl 版 yt-dlp。
+    let compiled_with_musl = cfg!(target_env = "musl");
+    let musl_loader_available = musl_dynamic_loader_available();
+    let configured_libc = std::env::var(YTDLP_RUNTIME_LIBC_ENV).ok();
+    let target_env = ytdlp_runtime_target_env(configured_libc.as_deref(), compiled_with_musl, musl_loader_available);
+    if compiled_with_musl && !musl_loader_available && configured_libc.is_none() {
+        debug!(
+            "当前程序为 musl 构建但系统没有 musl 动态加载器（/lib/ld-musl-*），改下载 glibc 版 yt-dlp；可用 {YTDLP_RUNTIME_LIBC_ENV}=musl 强制指定"
+        );
+    }
     ytdlp_package_for(std::env::consts::OS, std::env::consts::ARCH, target_env)
 }
 
-fn ytdlp_runtime_target_env(configured_libc: Option<&str>, compiled_with_musl: bool) -> &'static str {
+fn ytdlp_runtime_target_env(
+    configured_libc: Option<&str>,
+    compiled_with_musl: bool,
+    musl_loader_available: bool,
+) -> &'static str {
     match configured_libc.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("glibc" | "gnu") => "",
         Some("musl") => "musl",
-        _ if compiled_with_musl => "musl",
+        // 编译期是 musl 还不够：musl 版 yt-dlp 依赖 `/lib/ld-musl-*` 加载器，
+        // 群晖 DSM、Debian 这类 glibc 系统上必须改用 glibc 资产。
+        _ if compiled_with_musl && musl_loader_available => "musl",
         _ => "",
     }
+}
+
+const YTDLP_RUNTIME_LIBC_ENV: &str = "BILI_SYNC_YTDLP_RUNTIME_LIBC";
+
+const YTDLP_LIBC_LOADER_HINT: &str = "当前系统可能缺少该 yt-dlp 构建需要的 libc 加载器；可设置 BILI_SYNC_YTDLP_RUNTIME_LIBC=glibc 或 musl 指定运行层 libc，或把 yt-dlp 手动放到上述路径，或设置 BILI_SYNC_YTDLP_PATH 指向任意可执行文件";
+
+/// 当前系统是否存在 musl 动态加载器（`/lib/ld-musl-*.so.1`）。
+///
+/// 仓库的 Linux 发布二进制用 `*-linux-musl` 静态编译，但运行环境可能是 glibc
+/// （例如群晖 DSM）。yt-dlp 的 musl 资产依赖 `/lib/ld-musl-*.so.1`，没有该加载器
+/// 时执行会报 `No such file or directory`（exit 127），所以只能按运行期判断。
+fn musl_dynamic_loader_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        dir_has_musl_loader(Path::new("/lib"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+fn dir_has_musl_loader(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .any(|entry| entry.file_name().to_string_lossy().starts_with("ld-musl-"))
+        })
+        .unwrap_or(false)
+}
+
+/// 另一套 libc 构建：Linux x86_64 / aarch64 上 musl 与 glibc 资产可以互换。
+/// 其它平台（Windows / macOS / linux-armv7l）只有一套构建，返回 None。
+fn alternate_ytdlp_package(package: YtDlpPackage) -> Option<YtDlpPackage> {
+    let (arch, target_env) = match package.target_key {
+        "linux-x86_64-musl" => ("x86_64", ""),
+        "linux-x86_64" => ("x86_64", "musl"),
+        "linux-aarch64-musl" => ("aarch64", ""),
+        "linux-aarch64" => ("aarch64", "musl"),
+        _ => return None,
+    };
+    ytdlp_package_for("linux", arch, target_env)
 }
 
 fn ytdlp_package_for(os: &str, arch: &str, target_env: &str) -> Option<YtDlpPackage> {
@@ -9581,6 +9638,16 @@ async fn download_and_install_ytdlp(
     package: YtDlpPackage,
     binary_path: &Path,
     old_version: Option<&str>,
+) -> Result<()> {
+    download_and_install_ytdlp_impl(package, binary_path, old_version, true).await
+}
+
+/// `allow_alternate` 为 false 时不再尝试另一套 libc 构建，避免 musl↔glibc 互相递归。
+async fn download_and_install_ytdlp_impl(
+    package: YtDlpPackage,
+    binary_path: &Path,
+    old_version: Option<&str>,
+    allow_alternate: bool,
 ) -> Result<()> {
     let parent = binary_path
         .parent()
@@ -9696,7 +9763,33 @@ async fn download_and_install_ytdlp(
         set_ytdlp_executable_permissions(&temporary).await?;
         if ytdlp_version_at(&temporary).await.is_none() {
             let _ = tokio::fs::remove_file(&temporary).await;
-            bail!("下载的 yt-dlp 无法执行：{}", temporary.display());
+            if allow_alternate {
+                if let Some(alternate) = alternate_ytdlp_package(package) {
+                    warn!(
+                        target = package.target_key,
+                        fallback_target = alternate.target_key,
+                        path = %temporary.display(),
+                        "下载的 yt-dlp 无法执行，改试另一套 libc 构建"
+                    );
+                    return Box::pin(download_and_install_ytdlp_impl(
+                        alternate,
+                        binary_path,
+                        old_version,
+                        false,
+                    ))
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "下载的 yt-dlp 无法执行（已回退 {} 构建仍失败）；{YTDLP_LIBC_LOADER_HINT}",
+                            alternate.target_key
+                        )
+                    });
+                }
+            }
+            bail!(
+                "下载的 yt-dlp 无法执行：{}；{YTDLP_LIBC_LOADER_HINT}",
+                temporary.display()
+            );
         }
         replace_file(&temporary, binary_path)
             .await
@@ -11058,8 +11151,8 @@ mod tests {
     #[cfg(windows)]
     use super::episodic_series_dir;
     use super::{
-        canonical_channel_url, checksum_for_release_asset, collect_external_scan_result,
-        collect_youtube_channel_renderers, current_ytdlp_package, extract_youtube_initial_data,
+        alternate_ytdlp_package, canonical_channel_url, checksum_for_release_asset, collect_external_scan_result,
+        collect_youtube_channel_renderers, current_ytdlp_package, dir_has_musl_loader, extract_youtube_initial_data,
         generate_youtube_person_nfo, has_youtube_session_value, is_jpeg_header, is_netscape_youtube_cookie_file,
         is_partial_download_artifact, is_youtube_url, needs_jpeg_conversion, normalize_source_type,
         normalize_youtube_playlist_url, parse_youtube_live_chat, remove_partial_download_artifacts, resolve_source_url,
@@ -12149,12 +12242,57 @@ mod tests {
 
     #[test]
     fn runtime_can_override_compiled_musl_with_glibc() {
-        assert_eq!(ytdlp_runtime_target_env(Some("glibc"), true), "");
-        assert_eq!(ytdlp_runtime_target_env(Some("GNU"), true), "");
-        assert_eq!(ytdlp_runtime_target_env(Some("musl"), false), "musl");
-        assert_eq!(ytdlp_runtime_target_env(None, true), "musl");
-        assert_eq!(ytdlp_runtime_target_env(None, false), "");
-        assert_eq!(ytdlp_runtime_target_env(Some("invalid"), true), "musl");
+        assert_eq!(ytdlp_runtime_target_env(Some("glibc"), true, true), "");
+        assert_eq!(ytdlp_runtime_target_env(Some("GNU"), true, false), "");
+        assert_eq!(ytdlp_runtime_target_env(Some("musl"), false, false), "musl");
+        assert_eq!(ytdlp_runtime_target_env(Some("invalid"), true, true), "musl");
+    }
+
+    #[test]
+    fn runtime_libc_follows_musl_loader_availability() {
+        // 编译期是 musl，但运行环境没有 musl 加载器（群晖 SPK / glibc 发行版）→ 下载 glibc 资产。
+        assert_eq!(ytdlp_runtime_target_env(None, true, false), "");
+        // 编译期是 musl 且运行期有 musl 加载器（alpine 容器）→ 仍下载 musl 资产。
+        assert_eq!(ytdlp_runtime_target_env(None, true, true), "musl");
+        // 编译期不是 musl 时，即便系统里有 musl 加载器也不下载 musl 资产。
+        assert_eq!(ytdlp_runtime_target_env(None, false, true), "");
+        assert_eq!(ytdlp_runtime_target_env(None, false, false), "");
+    }
+
+    #[test]
+    fn alternate_ytdlp_package_swaps_linux_libc_variant() {
+        let musl_x86_64 = ytdlp_package_for("linux", "x86_64", "musl").unwrap();
+        let gnu_x86_64 = alternate_ytdlp_package(musl_x86_64).unwrap();
+        assert_eq!(gnu_x86_64.target_key, "linux-x86_64");
+        assert_eq!(gnu_x86_64.asset_name, "yt-dlp_linux");
+        assert_eq!(
+            alternate_ytdlp_package(gnu_x86_64).unwrap().target_key,
+            "linux-x86_64-musl"
+        );
+
+        let musl_aarch64 = ytdlp_package_for("linux", "aarch64", "musl").unwrap();
+        assert_eq!(
+            alternate_ytdlp_package(musl_aarch64).unwrap().target_key,
+            "linux-aarch64"
+        );
+
+        // armv7 / macOS / Windows 只有一套构建，不做互换。
+        assert!(alternate_ytdlp_package(ytdlp_package_for("linux", "arm", "musl").unwrap()).is_none());
+        assert!(alternate_ytdlp_package(ytdlp_package_for("macos", "aarch64", "").unwrap()).is_none());
+        assert!(alternate_ytdlp_package(ytdlp_package_for("windows", "x86_64", "").unwrap()).is_none());
+    }
+
+    #[test]
+    fn musl_loader_probe_only_matches_loader_files() {
+        let dir = std::env::temp_dir().join(format!("ytdlp-loader-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!dir_has_musl_loader(&dir));
+        std::fs::write(dir.join("libc.so.6"), b"").unwrap();
+        assert!(!dir_has_musl_loader(&dir));
+        std::fs::write(dir.join("ld-musl-x86_64.so.1"), b"").unwrap();
+        assert!(dir_has_musl_loader(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

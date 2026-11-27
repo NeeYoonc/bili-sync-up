@@ -1,5 +1,11 @@
 # 更新记录
 
+## 未发布
+
+**修复**
+
+- **群晖套件（musl 二进制）自动下载 yt-dlp 失败**：群晖 DSM 是 glibc 系统，但套件里的 Linux 二进制是 musl 静态构建，此前按编译期 libc 一律下载 `yt-dlp_musllinux`，运行时找不到 `/lib/ld-musl-*` 加载器，直接报「下载的 yt-dlp 无法执行」，导致 YouTube / 抖音源整轮扫描都被跳过。现在按**运行期**是否存在 musl 加载器选择构建（alpine 容器仍用 musl 版，群晖等 glibc 系统自动改用 glibc 版）；若下载后仍无法执行，会自动回退另一套 libc 构建重试，并在错误里提示可用 `BILI_SYNC_YTDLP_RUNTIME_LIBC` 强制指定，或手动放置 yt-dlp。
+
 ## v3.1.8.4 (2026-11-23)
 
 **新增**
